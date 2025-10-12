@@ -406,13 +406,37 @@ mod tests {
         let gss_after = gss.normalize();
         let stats_after = gss_after.stats();
 
-        println!("GSS before normalization: {}", gss.to_graph_string(false));
-        println!("GSS after normalization: {}", gss_after.to_graph_string(false));
+        // The number of paths must be conserved.
+        assert_eq!(gss.to_stacks().len(), 11);
+        assert_eq!(gss_after.to_stacks().len(), 11);
 
-        println!("Stats before: {:?}", stats_before);
-        println!("Stats after: {:?}", stats_after);
+        // Normalization should reduce the number of nodes by increasing sharing
+        // and fusing multi-depth slots.
+        assert!(
+            stats_after.total_unique_nodes < stats_before.total_unique_nodes,
+            "total unique nodes did not decrease: {} vs {}",
+            stats_before.total_unique_nodes,
+            stats_after.total_unique_nodes
+        );
 
-        // TODO: assert that normalization has helped.
+        // Specifically, one Lower node should have been eliminated.
+        assert_eq!(stats_before.num_lower_nodes, 3);
+        assert_eq!(stats_after.num_lower_nodes, 2);
+
+        // The multi-depth slot at the root should be fused.
+        assert_eq!(stats_before.num_multi_depth_slots_upper, 1);
+        assert_eq!(stats_after.num_multi_depth_slots_upper, 0);
+
+        // The number of structurally unique nodes should also decrease as the
+        // graph becomes more regular.
+        assert!(
+            stats_after.num_structurally_unique_nodes < stats_before.num_structurally_unique_nodes,
+            "num structurally unique nodes did not decrease: {} vs {}",
+            stats_before.num_structurally_unique_nodes,
+            stats_after.num_structurally_unique_nodes
+        );
+        assert_eq!(stats_before.num_structurally_unique_nodes, 8);
+        assert_eq!(stats_after.num_structurally_unique_nodes, 6);
     }
 }
 
