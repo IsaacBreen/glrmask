@@ -3,6 +3,5 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/external/range-set-blaze" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/python/aug25/models/build/_deps/pybind11-src" vcs="Git" />
   </component>
 </project>
