@@ -1357,6 +1357,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    pub fn inner_ptr_eq(&self, other: &Self) -> bool {
+        match (&*self.inner, &*other.inner) {
+            (Upper::Branch(b1), Upper::Branch(b2)) => Arc::ptr_eq(b1, b2),
+            (Upper::Interface(i1), Upper::Interface(i2)) => Arc::ptr_eq(&i1.inner, &i2.inner) && i1.acc == i2.acc,
+            _ => false,
+        }
+    }
+
     pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
         match (&*self.inner, &*other.inner) {
             (Upper::Branch(b1), Upper::Branch(b2)) => {
