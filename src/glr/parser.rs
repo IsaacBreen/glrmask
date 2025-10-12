@@ -1970,7 +1970,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             None,
             &mut shifted_states_todo,
             &mut accepted_states_todo,
-            |state_id| vec![(Action::Default(&parser.table[&state_id].default_reduce), None)],
+            |state_id| vec![(Action::Default(&parser.table.get(&state_id).expect_else(|| format!("State ID {} not found in parse table during Phase 3", state_id.0)).default_reduce), None)],
             &token_config,
             &mut fuel,
             false,
