@@ -76,6 +76,18 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     }
 }
 
+#[derive(Clone)]
+pub enum PoppedNode<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+    Interface(Arc<Interface<T, A>>),
+    Uppers(Vec<Arc<Upper<T, A>>>),
+}
+
+#[derive(Clone)]
+pub struct PopAndPeekResult<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+    pub value: T,
+    pub popped: PoppedNode<T, A>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2346,6 +2358,54 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn peek(&self) -> HashSet<T> {
         self.inner.children_keys().into_iter().collect()
+    }
+
+    pub fn pop_and_peek(&self) -> Vec<PopAndPeekResult<T, A>>
+    where
+        T: Ord,
+    {
+        match &*self.inner {
+            Upper::Branch(b) => {
+                let mut result = Vec::new();
+                let mut sorted_keys: Vec<_> = b.children.keys().cloned().collect();
+                sorted_keys.sort();
+
+                for value in sorted_keys {
+                    let children_map = b.children.get(&value).unwrap();
+                    let uppers: Vec<Arc<Upper<T, A>>> = children_map.values().cloned().collect();
+                    if !uppers.is_empty() {
+                        result.push(PopAndPeekResult {
+                            value: value.clone(),
+                            popped: PoppedNode::Uppers(uppers),
+                        });
+                    }
+                }
+                result
+            }
+            Upper::Interface(i) => {
+                let mut result = Vec::new();
+                let mut sorted_keys: Vec<_> = i.inner.children.keys().cloned().collect();
+                sorted_keys.sort();
+
+                for value in sorted_keys {
+                    let children_map = i.inner.children.get(&value).unwrap();
+                    let mut lower_nodes = children_map.values();
+                    if let Some(first) = lower_nodes.next() {
+                        let merged_lower =
+                            lower_nodes.fold(first.clone(), |acc, next| merge_lower(&acc, next));
+                        let popped_upper = new_interface(merged_lower, i.acc.clone());
+
+                        if let Upper::Interface(popped_interface) = &*popped_upper {
+                            result.push(PopAndPeekResult {
+                                value: value.clone(),
+                                popped: PoppedNode::Interface(popped_interface.clone()),
+                            });
+                        }
+                    }
+                }
+                result
+            }
+        }
     }
 
     /// Visit each unique accumulator present anywhere in the structure exactly once.
