@@ -3425,39 +3425,6 @@ local_system:
           }
       }
 
-      [cfg(test)]
-      mod normalize_tests {
-          use super::*;
-          use std::sync::Arc;
-
-          // Reuse IntAcc and helpers from the main tests module
-
-          #[test]
-          fn test_normalize_merges_across_accs() {
-              // Two identical stack shapes with different accumulators.
-              let g1 = super::tests::gss_from_str_stacks(&[(&["A", "B", "C"], &[1])]);
-              let g2 = super::tests::gss_from_str_stacks(&[(&["A", "B", "C"], &[2])]);
-
-              let merged = g1.merge(&g2);
-              // Before normalization, we should have two paths (acc {1} and acc {2})
-              let before_stacks = merged.to_stacks();
-              assert_eq!(before_stacks.len(), 2);
-
-              // After normalization, they should merge into a single path with acc {1,2}
-              let normalized = merged.normalize();
-              let stacks = normalized.to_stacks();
-              assert_eq!(stacks.len(), 1);
-              let (path, acc) = &stacks[0];
-              assert_eq!(path, &vec!["A".to_string(), "B".to_string(), "C".to_string()]);
-              assert_eq!(acc, &super::tests::IntAcc::new(&[1, 2]));
-
-              // Sanity: node count should not increase after normalization.
-              let stats_before = merged.stats();
-              let stats_after = normalized.stats();
-              assert!(stats_after.total_unique_nodes <= stats_before.total_unique_nodes);
-          }
-      }
-
       #[cfg(test)]
       mod tests {
           use super::*;
@@ -3721,6 +3688,68 @@ local_system:
               let gss_empty = TestGSS::empty();
               let gss_empty_pruned = gss_empty.prune(|_acc| true);
               assert!(gss_empty.ptr_eq(&gss_empty_pruned));
+          }
+
+          #[test]
+          fn test_normalization_worsens_sharing_factor() {
+              // This test reproduces a scenario where normalization was found to decrease
+              // the structural sharing factor, which is counter-intuitive.
+              // The scenario involves a GSS with a multi-depth child map, which `fuse`
+              // resolves by merging. The resulting structure, after canonicalization,
+              // had a worse sharing factor (structurally_unique / total_unique).
+
+              // GSS 1 represents a structure with max_depth=3.
+              let gss1 = gss_from_str_stacks(&[
+                  (&["A", "B", "T"], &[1]),
+              ]);
+              assert_eq!(gss1.max_depth(), 3);
+
+              // GSS 2 represents a structure with max_depth=4 and some branching.
+              // It shares the terminal "T" with GSS 1.
+              let gss2 = gss_from_str_stacks(&[
+                  (&["A", "C", "D1", "T"], &[2]),
+                  (&["A", "C", "D2", "T"], &[3]),
+              ]);
+              assert_eq!(gss2.max_depth(), 4);
+
+              // Create a GSS with a multi-depth child map.
+              // We push gss1 and gss2 under a new root "X", then merge.
+              // Because gss1 and gss2 have different max_depths, the merge will
+              // create a child map for "X" with two entries: one for depth 3
+              // and one for depth 4.
+              let parent1 = gss1.push("X".to_string());
+              let parent2 = gss2.push("X".to_string());
+              let gss_to_test = parent1.merge(&parent2);
+
+              // Verify the multi-depth structure exists before normalization.
+              if let Upper::Branch(b) = &*gss_to_test.inner {
+                  if let Some(kids) = b.children.get(&"X".to_string()) {
+                      assert_eq!(kids.len(), 2, "Test setup failed: multi-depth map not created.");
+                  } else {
+                      panic!("Test setup failed: child 'X' not found.");
+                  }
+              } else {
+                  panic!("Test setup failed: root is not an UpperBranch.");
+              }
+
+              let stats_before = gss_to_test.stats();
+              let normalized_gss = gss_to_test.normalize();
+              let stats_after = normalized_gss.stats();
+
+              // 1. Normalization should not increase the total number of unique nodes.
+              assert!(
+                  stats_after.total_unique_nodes <= stats_before.total_unique_nodes,
+                  "Total unique nodes increased after normalization: {} -> {}",
+                  stats_before.total_unique_nodes, stats_after.total_unique_nodes
+              );
+
+              // 2. The structural sharing factor should not get worse. This is the assertion
+              // that is expected to fail, reproducing the reported issue.
+              assert!(
+                  stats_after.structural_sharing_factor >= stats_before.structural_sharing_factor,
+                  "Structural sharing factor decreased after normalization: {:.3} -> {:.3}",
+                  stats_before.structural_sharing_factor, stats_after.structural_sharing_factor
+              );
           }
       }
 
@@ -4332,8 +4361,6 @@ local_system:
           // hash -> bucket of (signature, canonical id, canonical node)
           map: StdHashMap<u64, Vec<(LowerSig<T>, usize, Arc<Lower<T>>)>>,
           next_id: usize,
-          // allow reconstruction of canonical Lower node from its canonical id
-          id_to_arc: StdHashMap<usize, Arc<Lower<T>>>,
       }
 
       impl<T: Clone + Eq + Hash> Default for NormalizationLowerInterner<T> {
@@ -4465,11 +4492,6 @@ local_system:
               for (existing_sig, id, arc) in bucket.iter() {
                   if existing_sig == &sig {
                       memo_lower.insert(ptr, (*id, arc.clone()));
-                      // ensure id_to_arc has a mapping for this id
-                      interner_lower
-                          .id_to_arc
-                          .entry(*id)
-                          .or_insert_with(|| arc.clone());
                       return (*id, arc.clone());
                   }
               }
@@ -4501,96 +4523,9 @@ local_system:
               .entry(h)
               .or_default()
               .push((sig, id, new_node.clone()));
-          interner_lower.id_to_arc.insert(id, new_node.clone());
           memo_lower.insert(ptr, (id, new_node.clone()));
           (id, new_node)
       }
-
-      // Acc-agnostic structural signatures for Upper nodes (used for accumulator merging).
-      #[derive(Clone, PartialEq, Eq)]
-      enum AggUpperSig<T: Clone + Eq + Hash> {
-          Branch {
-              terminal: bool, // presence of empty accumulator at this node
-              // Order-independent: label -> sorted, deduplicated list of child canonical upper ids
-              edges: StdHashMap<T, Vec<usize>>,
-          },
-          Interface {
-              // Canonical Lower root id fully captures lower structure including inner.empty.
-              lower_id: usize,
-          },
-      }
-
-      fn agg_upper_sig_hash<T: Clone + Eq + Hash>(sig: &AggUpperSig<T>) -> u64 {
-          use std::hash::{Hash as _, Hasher};
-          match sig {
-              AggUpperSig::Interface { lower_id } => {
-                  let mut h = std::collections::hash_map::DefaultHasher::new();
-                  lower_id.hash(&mut h);
-                  0x1f83_d9ab_fb41_bd6bu64 ^ h.finish()
-              }
-              AggUpperSig::Branch { terminal, edges } => {
-                  let mut seed: u64 = if *terminal {
-                      0x5be0_cd19_137e_2179
-                  } else {
-                      0xa2b0_8fe1_2a6b_7f42
-                  };
-                  seed ^= (edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
-                  let mut xor_acc: u64 = 0;
-                  let mut sum_acc: u64 = 0;
-                  let mut prod_acc: u64 = 0x3c6e_f372_fe94_f82b ^ (edges.len() as u64);
-                  for (k, ids) in edges {
-                      let mut h = std::collections::hash_map::DefaultHasher::new();
-                      k.hash(&mut h);
-                      ids.hash(&mut h);
-                      let e = h.finish();
-                      xor_acc ^= e;
-                      sum_acc = sum_acc.wrapping_add(e);
-                      prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0xa54f_f53a_5f1d_36f1));
-                  }
-                  seed ^ xor_acc ^ sum_acc ^ prod_acc
-              }
-          }
-      }
-
-      struct AggUpperInterner<T: Clone + Eq + Hash> {
-          // hash -> bucket of (signature, canonical id)
-          map: StdHashMap<u64, Vec<(AggUpperSig<T>, usize)>>,
-          next_id: usize,
-          // allow reconstruction from id
-          id_to_sig: StdHashMap<usize, AggUpperSig<T>>,
-      }
-
-      impl<T: Clone + Eq + Hash> Default for AggUpperInterner<T> {
-          fn default() -> Self {
-              Self {
-                  map: StdHashMap::new(),
-                  next_id: 0,
-                  id_to_sig: StdHashMap::new(),
-              }
-          }
-      }
-
-      impl<T: Clone + Eq + Hash> AggUpperInterner<T> {
-          fn intern(&mut self, sig: AggUpperSig<T>) -> usize {
-              let h = agg_upper_sig_hash(&sig);
-              let bucket = self.map.entry(h).or_default();
-              for (existing, id) in bucket.iter() {
-                  if existing == &sig {
-                      return *id;
-                  }
-              }
-              let id = self.next_id;
-              self.next_id += 1;
-              bucket.push((sig.clone(), id));
-              self.id_to_sig.insert(id, sig);
-              id
-          }
-      }
-
-      // --------------------
-      // Public GSS type
-      // --------------------
-
 
       fn normalize_canonicalize_upper<T, A>(
           node: &Arc<Upper<T, A>>,
@@ -5761,185 +5696,27 @@ local_system:
           #[time_it]
           pub fn normalize(&self) -> Self {
               // 1) Fuse all levels to collapse per-value multiplicity across depths.
+              //    This dramatically reduces branching in most real-world cases.
               let fused = self.fuse(None);
 
-              // 2) Two-pass acc-agnostic structural interning with accumulator aggregation.
-              //    Pass A: collect structural signatures (ignoring acc) and aggregate accumulators.
-              //    Pass B: rebuild canonical DAG with merged accumulators and maximal sharing.
-
-              // Lower canonicalization used by Interface signatures
-              let mut memo_lower_collect: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
+              // 2) Hash-cons the resulting DAG bottom-up to maximally share all equal subgraphs.
+              //    We memoize by pointer to avoid repeated work and use interners keyed by
+              //    order-independent structural signatures.
+              let mut memo_upper: StdHashMap<usize, (usize, Arc<Upper<T, A>>)> = StdHashMap::new();
+              let mut memo_lower: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
+              let mut interner_upper: NormalizationUpperInterner<T, A> = Default::default();
               let mut interner_lower: NormalizationLowerInterner<T> = Default::default();
 
-              // Upper signature interning (acc-agnostic)
-              let mut memo_upper_collect: StdHashMap<usize, usize> = StdHashMap::new();
-              let mut interner_upper: AggUpperInterner<T> = Default::default();
-
-              // Accumulator aggregation maps:
-              // - For each Interface structural id, merge all accs (i.acc).
-              let mut iface_acc_agg: StdHashMap<usize, A> = StdHashMap::new();
-              // - For each Branch structural id with terminal=true, merge all empty accs.
-              let mut branch_empty_agg: StdHashMap<usize, A> = StdHashMap::new();
-
-              fn collect_upper_struct<T, A>(
-                  node: &Arc<Upper<T, A>>,
-                  memo_upper: &mut StdHashMap<usize, usize>,
-                  memo_lower: &mut StdHashMap<usize, (usize, Arc<Lower<T>>)>,
-                  interner_upper: &mut AggUpperInterner<T>,
-                  interner_lower: &mut NormalizationLowerInterner<T>,
-                  iface_acc_agg: &mut StdHashMap<usize, A>,
-                  branch_empty_agg: &mut StdHashMap<usize, A>,
-              ) -> usize
-              where
-                  T: Clone + Eq + Hash,
-                  A: Merge + Clone + Eq + Hash,
-              {
-                  let ptr = Arc::as_ptr(node) as usize;
-                  if let Some(id) = memo_upper.get(&ptr) {
-                      return *id;
-                  }
-                  let id = match &**node {
-                      Upper::Interface(i) => {
-                          // Canonicalize the inner lower root, use its canonical id as the interface signature.
-                          let (lower_id, _lower_arc) =
-                              normalize_canonicalize_lower(&i.inner, memo_lower, interner_lower);
-                          let sig = AggUpperSig::Interface { lower_id };
-                          let sid = interner_upper.intern(sig);
-                          // Merge accumulators for this interface structure.
-                          iface_acc_agg
-                              .entry(sid)
-                              .and_modify(|a| *a = a.merge(&i.acc))
-                              .or_insert_with(|| i.acc.clone());
-                          sid
-                      }
-                      Upper::Branch(b) => {
-                          // Recursively collect child upper structural ids.
-                          let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
-                          for (v, kids) in b.children.iter() {
-                              let e = edges.entry(v.clone()).or_default();
-                              for child in kids.values() {
-                                  let cid = collect_upper_struct::<T, A>(
-                                      child,
-                                      memo_upper,
-                                      memo_lower,
-                                      interner_upper,
-                                      interner_lower,
-                                      iface_acc_agg,
-                                      branch_empty_agg,
-                                  );
-                                  e.push(cid);
-                              }
-                          }
-                          // Sort and deduplicate per label for a canonical signature.
-                          for ids in edges.values_mut() {
-                              ids.sort_unstable();
-                              ids.dedup();
-                          }
-                          let sig = AggUpperSig::Branch {
-                              terminal: b.empty.is_some(),
-                              edges,
-                          };
-                          let sid = interner_upper.intern(sig);
-                          if let Some(e) = &b.empty {
-                              branch_empty_agg
-                                  .entry(sid)
-                                  .and_modify(|a| *a = a.merge(e))
-                                  .or_insert_with(|| e.clone());
-                          }
-                          sid
-                      }
-                  };
-                  memo_upper.insert(ptr, id);
-                  id
-              }
-
-              // Run Pass A on the fused root.
-              let root_sig_id = collect_upper_struct::<T, A>(
+              let (_id, inner) = normalize_canonicalize_upper::<T, A>(
                   &fused.inner,
-                  &mut memo_upper_collect,
-                  &mut memo_lower_collect,
+                  &mut memo_upper,
+                  &mut memo_lower,
                   &mut interner_upper,
                   &mut interner_lower,
-                  &mut iface_acc_agg,
-                  &mut branch_empty_agg,
               );
 
-              // Pass B: rebuild canonical DAG from structural ids with aggregated accs.
-              let mut built_upper_by_id: StdHashMap<usize, Arc<Upper<T, A>>> = StdHashMap::new();
-
-              fn rebuild_upper_from_id<T, A>(
-                  id: usize,
-                  interner_upper: &AggUpperInterner<T>,
-                  interner_lower: &NormalizationLowerInterner<T>,
-                  built: &mut StdHashMap<usize, Arc<Upper<T, A>>>,
-                  iface_acc_agg: &StdHashMap<usize, A>,
-                  branch_empty_agg: &StdHashMap<usize, A>,
-              ) -> Arc<Upper<T, A>>
-              where
-                  T: Clone + Eq + Hash,
-                  A: Merge + Clone + Eq + Hash,
-              {
-                  if let Some(existing) = built.get(&id) {
-                      return existing.clone();
-                  }
-                  let sig = interner_upper
-                      .id_to_sig
-                      .get(&id)
-                      .expect("missing upper signature id");
-                  let new_node = match sig {
-                      AggUpperSig::Interface { lower_id } => {
-                          let lower_arc = interner_lower
-                              .id_to_arc
-                              .get(lower_id)
-                              .expect("missing lower arc for id")
-                              .clone();
-                          let acc = iface_acc_agg
-                              .get(&id)
-                              .expect("missing aggregated acc for interface id")
-                              .clone();
-                          new_interface(lower_arc, acc)
-                      }
-                      AggUpperSig::Branch { terminal, edges } => {
-                          let mut children: Children<T, Upper<T, A>> = IHashMap::new();
-                          for (v, ids) in edges.iter() {
-                              let mut ord: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                              for cid in ids {
-                                  let child = rebuild_upper_from_id::<T, A>(
-                                      *cid,
-                                      interner_upper,
-                                      interner_lower,
-                                      built,
-                                      iface_acc_agg,
-                                      branch_empty_agg,
-                                  );
-                                  ord.insert(child.max_depth(), child);
-                              }
-                              if !ord.is_empty() {
-                                  children.insert(v.clone(), ord);
-                              }
-                          }
-                          let empty = if *terminal {
-                              branch_empty_agg.get(&id).cloned()
-                          } else {
-                              None
-                          };
-                          let b = new_branch(children, empty);
-                          try_promote(&b)
-                      }
-                  };
-                  built.insert(id, new_node.clone());
-                  new_node
-              }
-
-              let inner = rebuild_upper_from_id::<T, A>(
-                  root_sig_id,
-                  &interner_upper,
-                  &interner_lower,
-                  &mut built_upper_by_id,
-                  &iface_acc_agg,
-                  &branch_empty_agg,
-              );
-
+              // Typically the inner pointer changes due to canonicalization. We just return the
+              // canonicalized GSS regardless.
               LeveledGSS { inner }
           }
 
@@ -6982,7 +6759,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -10361,8 +10138,64 @@ messages:
       filename: src/datastructures/leveled_gss.rs
   - user: |-
       ```
-      Traversing edges:  72%|████████████████▊ | 2687/3742 [00:21<00:08, 125.30it/s]Stats before normalization: LeveledGSSStats { num_upperbranch_nodes: 1781, num_interface_nodes: 10159, num_lower_nodes: 174, total_unique_nodes: 12114, num_structurally_unique_nodes: 310, upper_edges: 11939, interface_to_lower_edges: 10159, lower_edges: 173, total_edges: 22271, max_upper_depth: 9, max_lower_depth: 4, distinct_values_count: 239, unique_accumulators_count: 10128, total_accumulator_instances: 10159, num_upper_with_empty: 0, num_interfaces_with_empty: 0, num_lower_terminal_nodes: 1, num_interface_implicit_terminals: 0, num_multi_depth_slots_upper: 1269, num_multi_depth_slots_lower: 0, max_multiplicity_per_value_upper: 6, max_multiplicity_per_value_lower: 1, average_in_degree: 1.8386031536365888, max_in_degree: 7036, structural_sharing_factor: 0.025590226184579824, promotable_upper_nodes: 0 }
-      Stats after normalization: LeveledGSSStats { num_upperbranch_nodes: 2026, num_interface_nodes: 10159, num_lower_nodes: 32, total_unique_nodes: 12217, num_structurally_unique_nodes: 283, upper_edges: 12184, interface_to_lower_edges: 9177, lower_edges: 31, total_edges: 21392, max_upper_depth: 9, max_lower_depth: 4, distinct_values_count: 239, unique_accumulators_count: 10128, total_accumulator_instances: 10159, num_upper_with_empty: 0, num_interfaces_with_empty: 982, num_lower_terminal_nodes: 1, num_interface_implicit_terminals: 0, num_multi_depth_slots_upper: 369, num_multi_depth_slots_lower: 0, max_multiplicity_per_value_upper: 4, max_multiplicity_per_value_lower: 1, average_in_degree: 1.751146037982973, max_in_degree: 6615, structural_sharing_factor: 0.023164442989277237, promotable_upper_nodes: 0 }
+      Stack before normalization:--- Root UpperBranch @ 0x9dc6ef970 (MaxDepth: 5) ---
+      ├── Edge 295 (d=3) -> Interface @ 0x341dea410 (MaxDepth: 3) | acc: Acc { numbers: { 54 } }
+      │   └── Edge 569 (d=1) -> Lower @ 0x9cf66b810 (MaxDepth: 1)
+      │       └── Edge 500 (d=0) -> Lower @ 0x9cf66b850 (MaxDepth: 0) [TERMINAL]
+      └── Edge 295 (d=4) -> UpperBranch @ 0x9dc6eda50 (MaxDepth: 4)
+          └── Edge 101 (d=3) -> UpperBranch @ 0x9dc6efcd0 (MaxDepth: 3)
+              ├── Edge 419 (d=2) -> Interface @ 0x341de8690 (MaxDepth: 2) | acc: Acc { numbers: { 38 } }
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+              ├── Edge 437 (d=2) -> Interface @ 0x341deb9d0 (MaxDepth: 2) | acc: Acc { numbers: { 39 } }
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+              ├── Edge 477 (d=2) -> Interface @ 0x341deb250 (MaxDepth: 2) | acc: Acc { numbers: { 44 } }
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+              ├── Edge 531 (d=2) -> Interface @ 0x341de83d0 (MaxDepth: 2) | acc: Acc { numbers: { 45 } }
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+              ├── Edge 541 (d=2) -> Interface @ 0x341de9ad0 (MaxDepth: 2) | acc: Acc { numbers: { 46 } }
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+              ├── Edge 556 (d=2) -> Interface @ 0x341debb90 (MaxDepth: 2) | acc: Acc { numbers: { 47 } }
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+              ├── Edge 558 (d=2) -> Interface @ 0x341de8c10 (MaxDepth: 2) | acc: Acc { numbers: { 48 } }
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+              ├── Edge 560 (d=2) -> Interface @ 0x341de8750 (MaxDepth: 2) | acc: Acc { numbers: { 49 } }
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+              ├── Edge 562 (d=2) -> Interface @ 0x341de9750 (MaxDepth: 2) | acc: Acc { numbers: { 50 } }
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+              └── Edge 66 (d=2) -> Interface @ 0x341de8050 (MaxDepth: 2) | acc: Acc { numbers: { 40 } }
+                  └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
+
+      Stack after normalization:--- Root UpperBranch @ 0x9dc6ed3f0 (MaxDepth: 5) ---
+      └── Edge 295 (d=4) -> UpperBranch @ 0x9dc6efb50 (MaxDepth: 4)
+          ├── Edge 101 (d=3) -> UpperBranch @ 0x9dc6efd30 (MaxDepth: 3)
+          │   ├── Edge 419 (d=2) -> Interface @ 0x341de9f10 (MaxDepth: 2) | acc: Acc { numbers: { 38 } }
+          │   │   └── Edge 500 (d=0) -> Lower @ 0x9969293d0 (MaxDepth: 0) [TERMINAL]
+          │   ├── Edge 437 (d=2) -> Interface @ 0x341de81d0 (MaxDepth: 2) | acc: Acc { numbers: { 39 } }
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+          │   ├── Edge 477 (d=2) -> Interface @ 0x341de93d0 (MaxDepth: 2) | acc: Acc { numbers: { 44 } }
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+          │   ├── Edge 531 (d=2) -> Interface @ 0x341deb4d0 (MaxDepth: 2) | acc: Acc { numbers: { 45 } }
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+          │   ├── Edge 541 (d=2) -> Interface @ 0x341debdd0 (MaxDepth: 2) | acc: Acc { numbers: { 46 } }
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+          │   ├── Edge 556 (d=2) -> Interface @ 0x341deb8d0 (MaxDepth: 2) | acc: Acc { numbers: { 47 } }
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+          │   ├── Edge 558 (d=2) -> Interface @ 0x341de9090 (MaxDepth: 2) | acc: Acc { numbers: { 48 } }
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+          │   ├── Edge 560 (d=2) -> Interface @ 0x341deb290 (MaxDepth: 2) | acc: Acc { numbers: { 49 } }
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+          │   ├── Edge 562 (d=2) -> Interface @ 0x341deb110 (MaxDepth: 2) | acc: Acc { numbers: { 50 } }
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+          │   └── Edge 66 (d=2) -> Interface @ 0x341de8dd0 (MaxDepth: 2) | acc: Acc { numbers: { 40 } }
+          │       └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+          └── Edge 569 (d=2) -> Interface @ 0x341f51dd0 (MaxDepth: 2) | acc: Acc { numbers: { 54 } }
+              └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
+
+
+      thread 'main' (681917) panicked at src/constraint.rs:1803:29:
+      Structural sharing factor increase too low (-11.1% < -10.0%) after normalization at edge Some(TerminalID(70)) with tokens HybridBitset { inner: 1203..=1203 }.
+      Stats before: LeveledGSSStats { num_upperbranch_nodes: 3, num_interface_nodes: 11, num_lower_nodes: 2, total_unique_nodes: 16, num_structurally_unique_nodes: 6, upper_edges: 13, interface_to_lower_edges: 11, lower_edges: 1, total_edges: 25, max_upper_depth: 5, max_lower_depth: 1, distinct_values_count: 14, unique_accumulators_count: 11, total_accumulator_instances: 11, num_upper_with_empty: 0, num_interfaces_with_empty: 0, num_lower_terminal_nodes: 1, num_interface_implicit_terminals: 0, num_multi_depth_slots_upper: 1, num_multi_depth_slots_lower: 0, max_multiplicity_per_value_upper: 2, max_multiplicity_per_value_lower: 1, average_in_degree: 1.6666666666666667, max_in_degree: 11, structural_sharing_factor: 0.375, promotable_upper_nodes: 0 }
+      Stats after: LeveledGSSStats { num_upperbranch_nodes: 3, num_interface_nodes: 11, num_lower_nodes: 1, total_unique_nodes: 15, num_structurally_unique_nodes: 5, upper_edges: 13, interface_to_lower_edges: 11, lower_edges: 0, total_edges: 24, max_upper_depth: 5, max_lower_depth: 0, distinct_values_count: 14, unique_accumulators_count: 11, total_accumulator_instances: 11, num_upper_with_empty: 0, num_interfaces_with_empty: 0, num_lower_terminal_nodes: 1, num_interface_implicit_terminals: 0, num_multi_depth_slots_upper: 0, num_multi_depth_slots_lower: 0, max_multiplicity_per_value_upper: 1, max_multiplicity_per_value_lower: 1, average_in_degree: 1.7142857142857142, max_in_degree: 11, structural_sharing_factor: 0.3333333333333333, promotable_upper_nodes: 0 }
       ```
 
       These are some stats from my program.
@@ -10373,7 +10206,8 @@ messages:
       Conceptually, we can always merge the accs of two structurally-equivalent GSSs.
       But it seems as if that isn't really happening? IDK.
 
-      Fix it. And add a test that reproduces this issue.
+      Add a test that reproduces this issue.
+      Don't try to fix the issue. Just add the test.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -10392,462 +10226,163 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are precise, actionable steps and the corresponding patch to fix normalization so it merges structurally equivalent subgraphs regardless of differing accumulators, and to add a test that reproduces and verifies the fix.
+      Of course. It seems like you've encountered a tricky edge case where `normalize()` isn't behaving as expected, specifically with the structural sharing factor. The core of the issue appears to be how the combination of `fuse()` (which resolves multi-depth child maps) and the subsequent canonicalization affects the ratio of structurally unique nodes to total unique nodes.
 
-      Step-by-step instructions
+      Here are the step-by-step instructions to add a new test case that reproduces this behavior, followed by the corresponding git diff.
 
-      1) Track canonical Lower nodes by id
-      - Update NormalizationLowerInterner to keep an id_to_arc map so we can reconstruct Lower nodes later by canonical id.
-      - In normalize_canonicalize_lower:
-        - When a lower node hits an interner cache hit, ensure id_to_arc is populated.
-        - When creating a new canonical lower node, insert it into id_to_arc.
+      ### Step-by-step Instructions
 
-      2) Add an accumulator-agnostic structural signature for Upper nodes
-      - Introduce AggUpperSig (acc-agnostic) for Upper nodes:
-        - Interface variant identifies structure by the canonical Lower root id (includes inner.empty).
-        - Branch variant identifies structure by:
-          - terminal: whether empty is present (true/false)
-          - edges: per-value sorted unique lists of child Upper sig ids.
-      - Implement an AggUpperInterner with an id_to_sig mapping so we can reconstruct structure from ids.
+      1.  **Open the file** `src/datastructures/leveled_gss.rs`.
+      2.  **Navigate to the end** of the `#[cfg(test)] mod tests { ... }` block, just before the final closing brace `}`.
+      3.  **Insert the new test function** provided below. This test, `test_normalization_worsens_sharing_factor`, is designed to:
+          *   Create two GSSs with different `max_depth` and some shared structure at their leaves.
+          *   Combine them in a way that produces a multi-depth child map, which is the prerequisite for the problematic behavior.
+          *   Calculate statistics before and after calling `normalize()`.
+          *   Assert that the total number of nodes does not increase and that the structural sharing factor does not decrease. The second assertion is expected to fail, thereby reproducing the issue you observed.
 
-      3) Implement a two-pass normalization that merges accs by structure
-      - Replace LeveledGSS::normalize with:
-        - Pass A: fuse(None) (already present) to reduce multi-depth multiplicity.
-        - Pass B: collect structural signatures ignoring accumulators and aggregate accumulators:
-          - For Interface nodes: merge all accs for identical lower structure (via Merge).
-          - For Branch nodes: merge empty accumulators for identical structure where terminal=true.
-        - Pass C: rebuild a canonical DAG using aggregated accumulators:
-          - Use id_to_sig to reconstruct Upper nodes.
-          - Use interner_lower.id_to_arc to reconstruct canonical Lower roots for Interfaces.
-          - Memoize by id to guarantee pointer sharing.
-          - Still run try_promote on Branch rebuilds (for consistency).
-        - This ensures:
-          - Accumulators do not prevent structural merging.
-          - Interfaces differing only in acc are collapsed into one node with merged acc.
-          - The Interface signature now (implicitly) includes inner.empty (because it uses the Lower canonical id).
+      ```rust
+          #[test]
+          fn test_normalization_worsens_sharing_factor() {
+              // This test reproduces a scenario where normalization was found to decrease
+              // the structural sharing factor, which is counter-intuitive.
+              // The scenario involves a GSS with a multi-depth child map, which `fuse`
+              // resolves by merging. The resulting structure, after canonicalization,
+              // had a worse sharing factor (structurally_unique / total_unique).
 
-      4) Add a regression test
-      - Add a test that creates two identical GSS stacks with different accumulators, merges them, and checks:
-        - The merged graph before normalization contains two stacks.
-        - After normalize, it collapses to one stack whose accumulator is the merge of both.
-        - Also assert that total_unique_nodes does not increase after normalization (sanity).
+              // GSS 1 represents a structure with max_depth=3.
+              let gss1 = gss_from_str_stacks(&[
+                  (&["A", "B", "T"], &[1]),
+              ]);
+              assert_eq!(gss1.max_depth(), 3);
 
-      5) Optional but implicit fix: Include lower.empty in Interface signature
-      - By basing the Interface structural identity on the canonical Lower root id, we inherently include lower.empty in the signature, fixing prior accidental interning of interfaces with differing emptiness.
+              // GSS 2 represents a structure with max_depth=4 and some branching.
+              // It shares the terminal "T" with GSS 1.
+              let gss2 = gss_from_str_stacks(&[
+                  (&["A", "C", "D1", "T"], &[2]),
+                  (&["A", "C", "D2", "T"], &[3]),
+              ]);
+              assert_eq!(gss2.max_depth(), 4);
 
-      Patch
+              // Create a GSS with a multi-depth child map.
+              // We push gss1 and gss2 under a new root "X", then merge.
+              // Because gss1 and gss2 have different max_depths, the merge will
+              // create a child map for "X" with two entries: one for depth 3
+              // and one for depth 4.
+              let parent1 = gss1.push("X".to_string());
+              let parent2 = gss2.push("X".to_string());
+              let gss_to_test = parent1.merge(&parent2);
+
+              // Verify the multi-depth structure exists before normalization.
+              if let Upper::Branch(b) = &*gss_to_test.inner {
+                  if let Some(kids) = b.children.get(&"X".to_string()) {
+                      assert_eq!(kids.len(), 2, "Test setup failed: multi-depth map not created.");
+                  } else {
+                      panic!("Test setup failed: child 'X' not found.");
+                  }
+              } else {
+                  panic!("Test setup failed: root is not an UpperBranch.");
+              }
+
+              let stats_before = gss_to_test.stats();
+              let normalized_gss = gss_to_test.normalize();
+              let stats_after = normalized_gss.stats();
+
+              // 1. Normalization should not increase the total number of unique nodes.
+              assert!(
+                  stats_after.total_unique_nodes <= stats_before.total_unique_nodes,
+                  "Total unique nodes increased after normalization: {} -> {}",
+                  stats_before.total_unique_nodes, stats_after.total_unique_nodes
+              );
+
+              // 2. The structural sharing factor should not get worse. This is the assertion
+              // that is expected to fail, reproducing the reported issue.
+              assert!(
+                  stats_after.structural_sharing_factor >= stats_before.structural_sharing_factor,
+                  "Structural sharing factor decreased after normalization: {:.3} -> {:.3}",
+                  stats_before.structural_sharing_factor, stats_after.structural_sharing_factor
+              );
+          }
+      ```
+
+      ### Git Diff
+
+      Here is the git patch to apply the changes:
 
       ```diff
       diff --git a/src/datastructures/leveled_gss.rs b/src/datastructures/leveled_gss.rs
-      index 9f3b2e0..8b6ba4d 100644
+      index 00a718c..c3b533e 100644
       --- a/src/datastructures/leveled_gss.rs
       +++ b/src/datastructures/leveled_gss.rs
-      @@ -167,12 +167,14 @@ enum UpperSig<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
-       }
-       
-       struct NormalizationLowerInterner<T: Clone + Eq + Hash> {
-           // hash -> bucket of (signature, canonical id, canonical node)
-           map: StdHashMap<u64, Vec<(LowerSig<T>, usize, Arc<Lower<T>>)>>,
-           next_id: usize,
-      +    // allow reconstruction of canonical Lower node from its canonical id
-      +    id_to_arc: StdHashMap<usize, Arc<Lower<T>>>,
-       }
-       
-       impl<T: Clone + Eq + Hash> Default for NormalizationLowerInterner<T> {
-           fn default() -> Self {
-               Self {
-                   map: StdHashMap::new(),
-      @@ -180,6 +182,7 @@ impl<T: Clone + Eq + Hash> Default for NormalizationLowerInterner<T> {
-               }
+      @@ -351,6 +351,63 @@
+               let gss_empty_pruned = gss_empty.prune(|_acc| true);
+               assert!(gss_empty.ptr_eq(&gss_empty_pruned));
            }
-       }
-       
-       struct NormalizationUpperInterner<
-           T: Clone + Eq + Hash,
-      @@ -283,11 +286,15 @@ fn normalize_canonicalize_lower<T>(
-           let h = lower_sig_hash(&sig);
-       
-           if let Some(bucket) = interner_lower.map.get_mut(&h) {
-               for (existing_sig, id, arc) in bucket.iter() {
-                   if existing_sig == &sig {
-                       memo_lower.insert(ptr, (*id, arc.clone()));
-      +                // ensure id_to_arc has a mapping for this id
-      +                interner_lower
-      +                    .id_to_arc
-      +                    .entry(*id)
-      +                    .or_insert_with(|| arc.clone());
-                       return (*id, arc.clone());
-                   }
-               }
-           }
-       
-      @@ -315,12 +322,127 @@ fn normalize_canonicalize_lower<T>(
-           interner_lower
-               .map
-               .entry(h)
-               .or_default()
-               .push((sig, id, new_node.clone()));
-      +    interner_lower.id_to_arc.insert(id, new_node.clone());
-           memo_lower.insert(ptr, (id, new_node.clone()));
-           (id, new_node)
-       }
-       
-      +// Acc-agnostic structural signatures for Upper nodes (used for accumulator merging).
-      +#[derive(Clone, PartialEq, Eq)]
-      +enum AggUpperSig<T: Clone + Eq + Hash> {
-      +    Branch {
-      +        terminal: bool, // presence of empty accumulator at this node
-      +        // Order-independent: label -> sorted, deduplicated list of child canonical upper ids
-      +        edges: StdHashMap<T, Vec<usize>>,
-      +    },
-      +    Interface {
-      +        // Canonical Lower root id fully captures lower structure including inner.empty.
-      +        lower_id: usize,
-      +    },
-      +}
-      +
-      +fn agg_upper_sig_hash<T: Clone + Eq + Hash>(sig: &AggUpperSig<T>) -> u64 {
-      +    use std::hash::{Hash as _, Hasher};
-      +    match sig {
-      +        AggUpperSig::Interface { lower_id } => {
-      +            let mut h = std::collections::hash_map::DefaultHasher::new();
-      +            lower_id.hash(&mut h);
-      +            0x1f83_d9ab_fb41_bd6bu64 ^ h.finish()
-      +        }
-      +        AggUpperSig::Branch { terminal, edges } => {
-      +            let mut seed: u64 = if *terminal {
-      +                0x5be0_cd19_137e_2179
-      +            } else {
-      +                0xa2b0_8fe1_2a6b_7f42
-      +            };
-      +            seed ^= (edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
-      +            let mut xor_acc: u64 = 0;
-      +            let mut sum_acc: u64 = 0;
-      +            let mut prod_acc: u64 = 0x3c6e_f372_fe94_f82b ^ (edges.len() as u64);
-      +            for (k, ids) in edges {
-      +                let mut h = std::collections::hash_map::DefaultHasher::new();
-      +                k.hash(&mut h);
-      +                ids.hash(&mut h);
-      +                let e = h.finish();
-      +                xor_acc ^= e;
-      +                sum_acc = sum_acc.wrapping_add(e);
-      +                prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0xa54f_f53a_5f1d_36f1));
-      +            }
-      +            seed ^ xor_acc ^ sum_acc ^ prod_acc
-      +        }
-      +    }
-      +}
-      +
-      +struct AggUpperInterner<T: Clone + Eq + Hash> {
-      +    // hash -> bucket of (signature, canonical id)
-      +    map: StdHashMap<u64, Vec<(AggUpperSig<T>, usize)>>,
-      +    next_id: usize,
-      +    // allow reconstruction from id
-      +    id_to_sig: StdHashMap<usize, AggUpperSig<T>>,
-      +}
-      +
-      +impl<T: Clone + Eq + Hash> Default for AggUpperInterner<T> {
-      +    fn default() -> Self {
-      +        Self {
-      +            map: StdHashMap::new(),
-      +            next_id: 0,
-      +            id_to_sig: StdHashMap::new(),
-      +        }
-      +    }
-      +}
-      +
-      +impl<T: Clone + Eq + Hash> AggUpperInterner<T> {
-      +    fn intern(&mut self, sig: AggUpperSig<T>) -> usize {
-      +        let h = agg_upper_sig_hash(&sig);
-      +        let bucket = self.map.entry(h).or_default();
-      +        for (existing, id) in bucket.iter() {
-      +            if existing == &sig {
-      +                return *id;
-      +            }
-      +        }
-      +        let id = self.next_id;
-      +        self.next_id += 1;
-      +        bucket.push((sig.clone(), id));
-      +        self.id_to_sig.insert(id, sig);
-      +        id
-      +    }
-      +}
-      +
-       // --------------------
-       // Public GSS type
-       // --------------------
-       
-      @@ -1165,39 +1287,174 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-               }
-           }
-       
-      -    #[time_it]
-      -    pub fn normalize(&self) -> Self {
-      -        // 1) Fuse all levels to collapse per-value multiplicity across depths.
-      -        //    This dramatically reduces branching in most real-world cases.
-      -        let fused = self.fuse(None);
-      -
-      -        // 2) Hash-cons the resulting DAG bottom-up to maximally share all equal subgraphs.
-      -        //    We memoize by pointer to avoid repeated work and use interners keyed by
-      -        //    order-independent structural signatures.
-      -        let mut memo_upper: StdHashMap<usize, (usize, Arc<Upper<T, A>>)> = StdHashMap::new();
-      -        let mut memo_lower: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
-      -        let mut interner_upper: NormalizationUpperInterner<T, A> = Default::default();
-      -        let mut interner_lower: NormalizationLowerInterner<T> = Default::default();
-      -
-      -        let (_id, inner) = normalize_canonicalize_upper::<T, A>(
-      -            &fused.inner,
-      -            &mut memo_upper,
-      -            &mut memo_lower,
-      -            &mut interner_upper,
-      -            &mut interner_lower,
-      -        );
-      -
-      -        // Typically the inner pointer changes due to canonicalization. We just return the
-      -        // canonicalized GSS regardless.
-      -        LeveledGSS { inner }
-      -    }
-      +    #[time_it]
-      +    pub fn normalize(&self) -> Self {
-      +        // 1) Fuse all levels to collapse per-value multiplicity across depths.
-      +        let fused = self.fuse(None);
-      +
-      +        // 2) Two-pass acc-agnostic structural interning with accumulator aggregation.
-      +        //    Pass A: collect structural signatures (ignoring acc) and aggregate accumulators.
-      +        //    Pass B: rebuild canonical DAG with merged accumulators and maximal sharing.
-      +
-      +        // Lower canonicalization used by Interface signatures
-      +        let mut memo_lower_collect: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
-      +        let mut interner_lower: NormalizationLowerInterner<T> = Default::default();
-      +
-      +        // Upper signature interning (acc-agnostic)
-      +        let mut memo_upper_collect: StdHashMap<usize, usize> = StdHashMap::new();
-      +        let mut interner_upper: AggUpperInterner<T> = Default::default();
-      +
-      +        // Accumulator aggregation maps:
-      +        // - For each Interface structural id, merge all accs (i.acc).
-      +        let mut iface_acc_agg: StdHashMap<usize, A> = StdHashMap::new();
-      +        // - For each Branch structural id with terminal=true, merge all empty accs.
-      +        let mut branch_empty_agg: StdHashMap<usize, A> = StdHashMap::new();
-      +
-      +        fn collect_upper_struct<T, A>(
-      +            node: &Arc<Upper<T, A>>,
-      +            memo_upper: &mut StdHashMap<usize, usize>,
-      +            memo_lower: &mut StdHashMap<usize, (usize, Arc<Lower<T>>)>,
-      +            interner_upper: &mut AggUpperInterner<T>,
-      +            interner_lower: &mut NormalizationLowerInterner<T>,
-      +            iface_acc_agg: &mut StdHashMap<usize, A>,
-      +            branch_empty_agg: &mut StdHashMap<usize, A>,
-      +        ) -> usize
-      +        where
-      +            T: Clone + Eq + Hash,
-      +            A: Merge + Clone + Eq + Hash,
-      +        {
-      +            let ptr = Arc::as_ptr(node) as usize;
-      +            if let Some(id) = memo_upper.get(&ptr) {
-      +                return *id;
-      +            }
-      +            let id = match &**node {
-      +                Upper::Interface(i) => {
-      +                    // Canonicalize the inner lower root, use its canonical id as the interface signature.
-      +                    let (lower_id, _lower_arc) =
-      +                        normalize_canonicalize_lower(&i.inner, memo_lower, interner_lower);
-      +                    let sig = AggUpperSig::Interface { lower_id };
-      +                    let sid = interner_upper.intern(sig);
-      +                    // Merge accumulators for this interface structure.
-      +                    iface_acc_agg
-      +                        .entry(sid)
-      +                        .and_modify(|a| *a = a.merge(&i.acc))
-      +                        .or_insert_with(|| i.acc.clone());
-      +                    sid
-      +                }
-      +                Upper::Branch(b) => {
-      +                    // Recursively collect child upper structural ids.
-      +                    let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
-      +                    for (v, kids) in b.children.iter() {
-      +                        let e = edges.entry(v.clone()).or_default();
-      +                        for child in kids.values() {
-      +                            let cid = collect_upper_struct::<T, A>(
-      +                                child,
-      +                                memo_upper,
-      +                                memo_lower,
-      +                                interner_upper,
-      +                                interner_lower,
-      +                                iface_acc_agg,
-      +                                branch_empty_agg,
-      +                            );
-      +                            e.push(cid);
-      +                        }
-      +                    }
-      +                    // Sort and deduplicate per label for a canonical signature.
-      +                    for ids in edges.values_mut() {
-      +                        ids.sort_unstable();
-      +                        ids.dedup();
-      +                    }
-      +                    let sig = AggUpperSig::Branch {
-      +                        terminal: b.empty.is_some(),
-      +                        edges,
-      +                    };
-      +                    let sid = interner_upper.intern(sig);
-      +                    if let Some(e) = &b.empty {
-      +                        branch_empty_agg
-      +                            .entry(sid)
-      +                            .and_modify(|a| *a = a.merge(e))
-      +                            .or_insert_with(|| e.clone());
-      +                    }
-      +                    sid
-      +                }
-      +            };
-      +            memo_upper.insert(ptr, id);
-      +            id
-      +        }
-      +
-      +        // Run Pass A on the fused root.
-      +        let root_sig_id = collect_upper_struct::<T, A>(
-      +            &fused.inner,
-      +            &mut memo_upper_collect,
-      +            &mut memo_lower_collect,
-      +            &mut interner_upper,
-      +            &mut interner_lower,
-      +            &mut iface_acc_agg,
-      +            &mut branch_empty_agg,
-      +        );
-      +
-      +        // Pass B: rebuild canonical DAG from structural ids with aggregated accs.
-      +        let mut built_upper_by_id: StdHashMap<usize, Arc<Upper<T, A>>> = StdHashMap::new();
-      +
-      +        fn rebuild_upper_from_id<T, A>(
-      +            id: usize,
-      +            interner_upper: &AggUpperInterner<T>,
-      +            interner_lower: &NormalizationLowerInterner<T>,
-      +            built: &mut StdHashMap<usize, Arc<Upper<T, A>>>,
-      +            iface_acc_agg: &StdHashMap<usize, A>,
-      +            branch_empty_agg: &StdHashMap<usize, A>,
-      +        ) -> Arc<Upper<T, A>>
-      +        where
-      +            T: Clone + Eq + Hash,
-      +            A: Merge + Clone + Eq + Hash,
-      +        {
-      +            if let Some(existing) = built.get(&id) {
-      +                return existing.clone();
-      +            }
-      +            let sig = interner_upper
-      +                .id_to_sig
-      +                .get(&id)
-      +                .expect("missing upper signature id");
-      +            let new_node = match sig {
-      +                AggUpperSig::Interface { lower_id } => {
-      +                    let lower_arc = interner_lower
-      +                        .id_to_arc
-      +                        .get(lower_id)
-      +                        .expect("missing lower arc for id")
-      +                        .clone();
-      +                    let acc = iface_acc_agg
-      +                        .get(&id)
-      +                        .expect("missing aggregated acc for interface id")
-      +                        .clone();
-      +                    new_interface(lower_arc, acc)
-      +                }
-      +                AggUpperSig::Branch { terminal, edges } => {
-      +                    let mut children: Children<T, Upper<T, A>> = IHashMap::new();
-      +                    for (v, ids) in edges.iter() {
-      +                        let mut ord: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-      +                        for cid in ids {
-      +                            let child = rebuild_upper_from_id::<T, A>(
-      +                                *cid,
-      +                                interner_upper,
-      +                                interner_lower,
-      +                                built,
-      +                                iface_acc_agg,
-      +                                branch_empty_agg,
-      +                            );
-      +                            ord.insert(child.max_depth(), child);
-      +                        }
-      +                        if !ord.is_empty() {
-      +                            children.insert(v.clone(), ord);
-      +                        }
-      +                    }
-      +                    let empty = if *terminal {
-      +                        branch_empty_agg.get(&id).cloned()
-      +                    } else {
-      +                        None
-      +                    };
-      +                    let b = new_branch(children, empty);
-      +                    try_promote(&b)
-      +                }
-      +            };
-      +            built.insert(id, new_node.clone());
-      +            new_node
-      +        }
-      +
-      +        let inner = rebuild_upper_from_id::<T, A>(
-      +            root_sig_id,
-      +            &interner_upper,
-      +            &interner_lower,
-      +            &mut built_upper_by_id,
-      +            &iface_acc_agg,
-      +            &branch_empty_agg,
-      +        );
-      +
-      +        LeveledGSS { inner }
-      +    }
-       
-           fn expand_lower_recursive(
-               node: &Arc<Lower<T>>,
-               acc: &A,
-               memo_lower: &mut StdHashMap<(usize, A), Arc<Upper<T, A>>>,
-      @@ -1798,6 +2055,48 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-               }
-           }
-       }
-       
-      +[cfg(test)]
-      +mod normalize_tests {
-      +    use super::*;
-      +    use std::sync::Arc;
-      +
-      +    // Reuse IntAcc and helpers from the main tests module
       +
       +    #[test]
-      +    fn test_normalize_merges_across_accs() {
-      +        // Two identical stack shapes with different accumulators.
-      +        let g1 = super::tests::gss_from_str_stacks(&[(&["A", "B", "C"], &[1])]);
-      +        let g2 = super::tests::gss_from_str_stacks(&[(&["A", "B", "C"], &[2])]);
+      +    fn test_normalization_worsens_sharing_factor() {
+      +        // This test reproduces a scenario where normalization was found to decrease
+      +        // the structural sharing factor, which is counter-intuitive.
+      +        // The scenario involves a GSS with a multi-depth child map, which `fuse`
+      +        // resolves by merging. The resulting structure, after canonicalization,
+      +        // had a worse sharing factor (structurally_unique / total_unique).
       +
-      +        let merged = g1.merge(&g2);
-      +        // Before normalization, we should have two paths (acc {1} and acc {2})
-      +        let before_stacks = merged.to_stacks();
-      +        assert_eq!(before_stacks.len(), 2);
+      +        // GSS 1 represents a structure with max_depth=3.
+      +        let gss1 = gss_from_str_stacks(&[
+      +            (&["A", "B", "T"], &[1]),
+      +        ]);
+      +        assert_eq!(gss1.max_depth(), 3);
       +
-      +        // After normalization, they should merge into a single path with acc {1,2}
-      +        let normalized = merged.normalize();
-      +        let stacks = normalized.to_stacks();
-      +        assert_eq!(stacks.len(), 1);
-      +        let (path, acc) = &stacks[0];
-      +        assert_eq!(path, &vec!["A".to_string(), "B".to_string(), "C".to_string()]);
-      +        assert_eq!(acc, &super::tests::IntAcc::new(&[1, 2]));
+      +        // GSS 2 represents a structure with max_depth=4 and some branching.
+      +        // It shares the terminal "T" with GSS 1.
+      +        let gss2 = gss_from_str_stacks(&[
+      +            (&["A", "C", "D1", "T"], &[2]),
+      +            (&["A", "C", "D2", "T"], &[3]),
+      +        ]);
+      +        assert_eq!(gss2.max_depth(), 4);
       +
-      +        // Sanity: node count should not increase after normalization.
-      +        let stats_before = merged.stats();
-      +        let stats_after = normalized.stats();
-      +        assert!(stats_after.total_unique_nodes <= stats_before.total_unique_nodes);
+      +        // Create a GSS with a multi-depth child map.
+      +        // We push gss1 and gss2 under a new root "X", then merge.
+      +        // Because gss1 and gss2 have different max_depths, the merge will
+      +        // create a child map for "X" with two entries: one for depth 3
+      +        // and one for depth 4.
+      +        let parent1 = gss1.push("X".to_string());
+      +        let parent2 = gss2.push("X".to_string());
+      +        let gss_to_test = parent1.merge(&parent2);
+      +
+      +        // Verify the multi-depth structure exists before normalization.
+      +        if let Upper::Branch(b) = &*gss_to_test.inner {
+      +            if let Some(kids) = b.children.get(&"X".to_string()) {
+      +                assert_eq!(kids.len(), 2, "Test setup failed: multi-depth map not created.");
+      +            } else {
+      +                panic!("Test setup failed: child 'X' not found.");
+      +            }
+      +        } else {
+      +            panic!("Test setup failed: root is not an UpperBranch.");
+      +        }
+      +
+      +        let stats_before = gss_to_test.stats();
+      +        let normalized_gss = gss_to_test.normalize();
+      +        let stats_after = normalized_gss.stats();
+      +
+      +        // 1. Normalization should not increase the total number of unique nodes.
+      +        assert!(
+      +            stats_after.total_unique_nodes <= stats_before.total_unique_nodes,
+      +            "Total unique nodes increased after normalization: {} -> {}",
+      +            stats_before.total_unique_nodes, stats_after.total_unique_nodes
+      +        );
+      +
+      +        // 2. The structural sharing factor should not get worse. This is the assertion
+      +        // that is expected to fail, reproducing the reported issue.
+      +        assert!(
+      +            stats_after.structural_sharing_factor >= stats_before.structural_sharing_factor,
+      +            "Structural sharing factor decreased after normalization: {:.3} -> {:.3}",
+      +            stats_before.structural_sharing_factor, stats_after.structural_sharing_factor
+      +        );
       +    }
-      +}
-      +
-      diff --git a/src/datastructures/leveled_gss.rs b/src/datastructures/leveled_gss.rs
-      index 8b6ba4d..adf7f3a 100644
-      --- a/src/datastructures/leveled_gss.rs
-      +++ b/src/datastructures/leveled_gss.rs
-      @@ -322,6 +322,7 @@ fn normalize_canonicalize_lower<T>(
-           interner_lower
-               .map
-               .entry(h)
-               .or_default()
-               .push((sig, id, new_node.clone()));
-           interner_lower.id_to_arc.insert(id, new_node.clone());
-           memo_lower.insert(ptr, (id, new_node.clone()));
-           (id, new_node)
        }
+       
+       // --------------------
+
       ```
     metadata:
   - user: |
@@ -10859,8 +10394,7 @@ messages:
       Applying patch to 'src/datastructures/leveled_gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/leveled_gss.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Implement two-pass normalization
-      to merge structurally equivalent subgraphs regardless of accumulator differences,
-      and add regression test"'
+  - user: 'Changes committed with message: "Test: Add test case reproducing structural
+      sharing factor decrease on normalization"'
     metadata:
 ...
