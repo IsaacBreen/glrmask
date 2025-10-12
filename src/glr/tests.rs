@@ -815,7 +815,7 @@ fn test_substring_parser_simple() {
     let b = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
     let c = *parser.terminal_map.get_by_left(&regex_name("c")).unwrap();
 
-    let config = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromEverything };
+    let config = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromEverything, current_token: None };
 
     // Test case 1: "c" is a valid sentence.
     let mut state1 = parser.init_glr_substring_parser_with_everything_state(None);

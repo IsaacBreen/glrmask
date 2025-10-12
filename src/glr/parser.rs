@@ -1956,7 +1956,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     dest_god,
                                     &[stored_root.clone().into()],
                                 );
-                                let new_root = PrecomputeNode3Index::new(new_roots[0]);
+                                let new_root = new_roots[0];
                                 // Update local cache with the imported destination
                                 let dest_entry = self.below_bottom_cache.entry(cache_key).or_insert(new_root.clone());
                                 *dest_entry = new_root.clone();
