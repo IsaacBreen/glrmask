@@ -327,7 +327,7 @@ fn merge_nodes_trie1(
     let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
 
     const MAX_ITERS: usize = 40;
-    for _it in 0..MAX_ITERS {
+    for it in 0..MAX_ITERS {
         // Signature: (end_flag, Vec<((edge_key, dest_class), llm_bv_union)>)
         type SigEdgeKey = (Option<GrammarTokenID>, usize);
         type Signature1 = (bool, Vec<(SigEdgeKey, LLMTokenBV)>);
@@ -337,7 +337,12 @@ fn merge_nodes_trie1(
         let mut next_id = 0;
         let mut changes = 0;
 
-        for u in 0..n {
+        #[cfg(not(rustrover))]
+        let its = tqdm!(0..n, desc = format!("Trie1 Merge Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+        #[cfg(rustrover)]
+        let its = 0..n;
+
+        for u in its {
             let mut aggr: BTreeMap<SigEdgeKey, LLMTokenBV> = BTreeMap::new();
             for (ek, llm_bv, v_dense) in &raw_edges[u] {
                 let dest_class = prev_class[*v_dense];
@@ -360,6 +365,7 @@ fn merge_nodes_trie1(
             }
         }
 
+        crate::debug!(3, "Trie1 merge iter {}: classes={}, changes={}", it + 1, next_id, changes);
         prev_class = new_class;
         if changes == 0 { break; }
     }
@@ -402,16 +408,22 @@ fn merge_nodes_trie1(
                     .or_insert(llm_bv);
             }
 
-            let mut w = rep_idx.write(trie1_god).expect("write");
-            *w.children_mut() = new_children;
-            // Optionally, set live_tokens to union of outgoing BVs for diagnostics.
-            let mut union_bv = LLMTokenBV::zeros();
-            for (_ek, dm) in w.children().iter() {
-                for (_dst, bv) in dm.iter() {
-                    union_bv |= bv;
+            let mut new_live_tokens = LLMTokenBV::zeros();
+            for dm in new_children.values() {
+                for bv in dm.values() {
+                    new_live_tokens |= bv;
                 }
             }
-            w.value.live_tokens |= &union_bv;
+
+            for (i, &c) in prev_class.iter().enumerate() {
+                if c == cid {
+                    new_live_tokens |= &old_of[i].read(trie1_god).unwrap().value.live_tokens;
+                }
+            }
+
+            let mut w = rep_idx.write(trie1_god).expect("write");
+            *w.children_mut() = new_children;
+            w.value.live_tokens = new_live_tokens;
         }
     }
 
