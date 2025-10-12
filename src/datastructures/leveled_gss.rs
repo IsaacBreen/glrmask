@@ -49,7 +49,7 @@ struct UpperBranch<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
 }
 
 #[derive(Clone)]
-enum Upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+pub(super) enum Upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     Branch(Arc<UpperBranch<T, A>>),
     Interface(Arc<Interface<T, A>>),
 }
@@ -340,6 +340,78 @@ mod tests {
         let gss_empty_pruned = gss_empty.prune(|_acc| true);
         assert!(gss_empty.ptr_eq(&gss_empty_pruned));
     }
+
+    #[test]
+    fn test_normalization_sharing_factor_regression() {
+        // This test reproduces a specific GSS structure that caused normalization
+        // to decrease the structural sharing factor, which is undesirable.
+        // The structure is built manually to match the one from a failing log.
+        type TestGSSManual = LeveledGSS<i32, IntAcc>;
+
+        // L2: terminal node
+        let l2 = new_lower(IHashMap::<i32, _>::new(), true);
+
+        // L1: child 500 -> L2
+        let l1 = new_lower(IHashMap::unit(500, OrdMap::unit(l2.max_depth, l2.clone())), false);
+
+        // Ten interfaces for different accumulators, all sharing L1 as their inner structure.
+        let accs: Vec<IntAcc> = vec![
+            IntAcc::new(&[38]), IntAcc::new(&[39]), IntAcc::new(&[44]), IntAcc::new(&[45]),
+            IntAcc::new(&[46]), IntAcc::new(&[47]), IntAcc::new(&[48]), IntAcc::new(&[49]),
+            IntAcc::new(&[50]), IntAcc::new(&[40]),
+        ];
+        let values: Vec<i32> = vec![419, 437, 477, 531, 541, 556, 558, 560, 562, 66];
+        let interfaces: Vec<Arc<Upper<i32, IntAcc>>> = accs
+            .into_iter()
+            .map(|acc| new_interface(l1.clone(), acc))
+            .collect();
+
+        // UB2: UpperBranch with 10 interface children.
+        let ub2_children: Children<i32, Upper<i32, IntAcc>> = values
+            .into_iter()
+            .zip(interfaces)
+            .map(|(val, interface)| (val, OrdMap::unit(interface.max_depth(), interface)))
+            .collect();
+        let ub2 = new_branch(ub2_children, None);
+
+        // UB1: UpperBranch with child 101 -> UB2.
+        let ub1 = new_branch(IHashMap::unit(101, OrdMap::unit(ub2.max_depth(), ub2)), None);
+
+        // I1: An interface with a unique lower structure.
+        // I1.inner: child 569 -> L1
+        let i1_inner = new_lower(IHashMap::unit(569, OrdMap::unit(l1.max_depth, l1.clone())), false);
+        let i1 = new_interface(i1_inner, IntAcc::new(&[54]));
+
+        // Root: UpperBranch with two children for key 295 at different depths.
+        // This is the key feature that `fuse` is meant to handle.
+        let root_children = IHashMap::unit(
+            295,
+            OrdMap::from_iter(vec![
+                (i1.max_depth(), i1),
+                (ub1.max_depth(), ub1),
+            ]),
+        );
+        let root = new_branch(root_children, None);
+
+        let gss_before = TestGSSManual { inner: root };
+        let stats_before = gss_before.stats();
+
+        let gss_after = gss_before.normalize();
+        let stats_after = gss_after.stats();
+
+        let factor_before = stats_before.structural_sharing_factor;
+        let factor_after = stats_after.structural_sharing_factor;
+
+        // The core of the bug is that normalization makes the sharing factor worse.
+        assert!(
+            factor_after < factor_before,
+            "Normalization unexpectedly worsened the structural sharing factor. Before: {}, After: {}. Stats before: {:?}, Stats after: {:?}",
+            factor_before,
+            factor_after,
+            stats_before,
+            stats_after
+        );
+    }
 }
 
 // --------------------
@@ -419,7 +491,7 @@ where
     merged
 }
 
-fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
+pub(super) fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
     let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth);
     Arc::new(Lower {
         children,
@@ -428,7 +500,7 @@ fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool)
     })
 }
 
-fn new_interface<T, A>(inner: Arc<Lower<T>>, acc: A) -> Arc<Upper<T, A>>
+pub(super) fn new_interface<T, A>(inner: Arc<Lower<T>>, acc: A) -> Arc<Upper<T, A>>
 where
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
@@ -436,7 +508,7 @@ where
     Arc::new(Upper::Interface(Arc::new(Interface { inner, acc })))
 }
 
-fn new_branch<T, A>(
+pub(super) fn new_branch<T, A>(
     children: Children<T, Upper<T, A>>,
     empty: Option<A>,
 ) -> Arc<Upper<T, A>>
@@ -1349,7 +1421,7 @@ where
 
 #[derive(Clone)]
 pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
-    inner: Arc<Upper<T, A>>,
+    pub(super) inner: Arc<Upper<T, A>>,
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
