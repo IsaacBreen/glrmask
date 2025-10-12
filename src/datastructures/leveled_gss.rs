@@ -88,6 +88,12 @@ pub struct PopAndPeekResult<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> 
     pub popped: PoppedNode<T, A>,
 }
 
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PopAndPeekResult<T, A> {
+    pub fn edge_value(&self) -> &T {
+        &self.value
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
