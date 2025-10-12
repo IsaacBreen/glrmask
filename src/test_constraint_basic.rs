@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
-use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState, Trie3God};
+use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, Trie3God};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
@@ -32,8 +32,8 @@ use rand::seq::SliceRandom;
 use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
-use crate::datastructures::gss::{gather_gss_stats};
 use indoc::indoc;
+use crate::datastructures::gss_leveled_adapter::Acc;
 // For the symbol removal helper
 
 #[test]
@@ -2719,10 +2719,14 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     grammar_token_map.insert(regex_name("C"), TerminalID(2));
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
-    let trie3god = Trie3God::new();
+    let trie3_god = Trie3God::new();
 
     // 2. Initial GLR state
-    let mut glr_state = parser.init_parser_state_combined().with_god(trie3god);
+    let internal_max_llm_token = 2;
+    let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
+    let mut acc = Acc::new_fresh();
+    acc.stored_trie_nodes.insert(trie3_root);
+    let mut glr_state = parser.init_parser_state_combined_with_acc(acc).with_god(trie3_god);
 
     let terminal_a = TerminalID(0);
     let terminal_b = TerminalID(1);

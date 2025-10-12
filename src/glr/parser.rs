@@ -568,6 +568,11 @@ impl GLRParser {
         self.init_glr_parser_from_stack(gss)
     }
 
+    pub fn init_parser_state_combined_with_acc(&self, acc: Acc) -> GLRParserState {
+        let gss = self.get_combined_gss_with_acc(acc);
+        self.init_glr_parser_from_stack(gss)
+    }
+
     pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
         self.init_parse_state_with_acc()
     }
