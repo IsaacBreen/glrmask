@@ -1935,7 +1935,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.combined_start_state_id) {
                     // assert!(gss_arc.inner.pop().inner_ptr_eq(&self.parser.get_combined_gss_with_acc((*acc).clone()).inner), "Expected simple GSS to have the canonical combined GSS as its isolated parent.\n{}\n{}", gss_arc.inner.pop().to_graph_string(false), self.parser.get_combined_gss().inner.to_graph_string(false));
                     let mut new_gss_arc = gss_arc;
-                    let has_sources = !acc.stored_trie_nodes().is_empty();
 
                     // Always perform cache lookup/insertion to prevent infinite loops.
                     let cache_key = BelowBottomCacheKey {
@@ -1952,16 +1951,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // --- CACHE HIT ---
                             crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
                             hit!("GLRParserState::reduce_and_goto::CacheHit");
-                            if has_sources {
-                                let cached_dest = occupied.get().clone();
-                                let edge_key = (0, tokens_all.clone());
-                                let edge_value = StateIDBV::max_ones();
-                                let memo_for_dest = cached_dest_memos.entry(cached_dest.clone()).or_default();
-                                deep_add_precompute_trie_edges(
-                                    &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                    &mut || cached_dest.clone(), memo_for_dest,
-                                );
-                            }
+                            let cached_dest = occupied.get().clone();
+                            let edge_key = (0, tokens_all.clone());
+                            let edge_value = StateIDBV::max_ones();
+                            let memo_for_dest = cached_dest_memos.entry(cached_dest.clone()).or_default();
+                            deep_add_precompute_trie_edges(
+                                &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                &mut || cached_dest.clone(), memo_for_dest,
+                            );
                         }
                         std::collections::hash_map::Entry::Vacant(vacant) => {
                             // --- CACHE MISS ---
@@ -1978,15 +1975,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let mut mapped_gss = stored_gss.clone();
                                     map_trie3_node_ids(&mut mapped_gss, &id_map);
 
-                                    if has_sources {
-                                        let edge_key = (0, tokens_all.clone());
-                                        let edge_value = StateIDBV::max_ones();
-                                        let memo_for_dest = cached_dest_memos.entry(new_root.clone()).or_default();
-                                        deep_add_precompute_trie_edges(
-                                            &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                            &mut || new_root.clone(), memo_for_dest,
-                                        );
-                                    }
+                                    let edge_key = (0, tokens_all.clone());
+                                    let edge_value = StateIDBV::max_ones();
+                                    let memo_for_dest = cached_dest_memos.entry(new_root.clone()).or_default();
+                                    deep_add_precompute_trie_edges(
+                                        &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                        &mut || new_root.clone(), memo_for_dest,
+                                    );
 
                                     final_shifted.push(mapped_gss);
                                     continue;
@@ -1994,20 +1989,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
 
                             // --- PURE MISS ---
-                            crate::debug!(5, "Cache miss for simple GSS to state {}, adding to output (has_sources={}).", state_id.0, has_sources);
+                            crate::debug!(5, "Cache miss for simple GSS to state {}, adding to output.", state_id.0);
                             hit!("GLRParserState::reduce_and_goto::CacheMiss");
                             let new_dest = PrecomputeNode3Index::new(
                                 god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                             );
-                            if has_sources {
-                                let edge_key = (0, tokens_all.clone());
-                                let edge_value = StateIDBV::max_ones();
-                                let memo_for_dest = cached_dest_memos.entry(new_dest.clone()).or_default();
-                                deep_add_precompute_trie_edges(
-                                    &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                    &mut || new_dest.clone(), memo_for_dest,
-                                );
-                            }
+                            let edge_key = (0, tokens_all.clone());
+                            let edge_value = StateIDBV::max_ones();
+                            let memo_for_dest = cached_dest_memos.entry(new_dest.clone()).or_default();
+                            deep_add_precompute_trie_edges(
+                                &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                &mut || new_dest.clone(), memo_for_dest,
+                            );
                             vacant.insert(new_dest);
                             final_out.push(new_gss_arc);
                         }
