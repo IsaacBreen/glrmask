@@ -1514,69 +1514,6 @@ fn test_constraint_expression_cycle() {
 }
 
 #[test]
-fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
-    // This test checks for exponential GSS node growth in the face of ambiguity.
-    // The grammar S -> 'a' S | 'b' S | '' creates 2^n parse trees for a string of length n.
-    // A correct GLR parser with GSS should handle this in polynomial time and space.
-    // We simulate feeding both 'a' and 'b' at each step and merging the results.
-    // If GSS node sharing is working correctly, the number of unique nodes should
-    // grow linearly, not exponentially.
-
-    // 1. Grammar and Parser setup
-    let productions = vec![
-        prod("S", vec![t("A"), nt("S")]),
-        prod("S", vec![t("B"), nt("S")]),
-        prod("S", vec![]),
-    ];
-    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex_name("A"), TerminalID(0));
-    grammar_token_map.insert(regex_name("B"), TerminalID(1));
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
-
-    // 2. Initial GLR state
-    let mut glr_state = parser.init_glr_parser(None);
-    glr_state.process_default_reductions(); // Process the S -> '' production
-
-    let terminal_a = TerminalID(0);
-    let terminal_b = TerminalID(1);
-
-    let mut node_counts = Vec::new();
-    let initial_nodes = glr_state.stats().unique_nodes();
-    node_counts.push(initial_nodes);
-    println!("Initial state: {} nodes", initial_nodes);
-
-    // 3. Loop, feed tokens, merge, and check for explosion
-    for i in 1..=10 {
-        let mut state_a = glr_state.clone();
-        state_a.process_token(terminal_a);
-        state_a.process_default_reductions();
-
-        let mut state_b = glr_state.clone();
-        state_b.process_token(terminal_b);
-        state_b.process_default_reductions();
-
-        state_a.merge_with(state_b);
-        glr_state = state_a;
-
-        let current_nodes = glr_state.stats().unique_nodes();
-        node_counts.push(current_nodes);
-        println!("Step {}: {} nodes", i, current_nodes);
-    }
-
-    // 4. Analyze node growth
-    println!("Node counts per step: {:?}", node_counts);
-    let increases: Vec<usize> = node_counts.windows(2).map(|w| w[1] - w[0]).collect();
-    println!("Node increases per step: {:?}", increases);
-
-    // The growth should be roughly constant (linear). An explosion would show accelerating increases.
-    if let (Some(&increase1), Some(&increase2)) = (increases.get(2), increases.get(increases.len() - 1)) {
-        assert!(increase2 <= increase1, "GSS node growth appears exponential. Increase after 3 steps: {}, Last increase: {}. Full increases: {:?}", increase1, increase2, increases);
-    }
-
-    Ok(())
-}
-#[test]
-#[test]
 fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
@@ -2758,4 +2695,67 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
+}
+
+#[test]
+fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
+    // This test checks for exponential GSS node growth in the face of ambiguity.
+    // The grammar S -> 'a' S | 'b' S | '' creates 2^n parse trees for a string of length n.
+    // A correct GLR parser with GSS should handle this in polynomial time and space.
+    // We simulate feeding both 'a' and 'b' at each step and merging the results.
+    // If GSS node sharing is working correctly, the number of unique nodes should
+    // grow linearly, not exponentially.
+
+    // 1. Grammar and Parser setup
+    let productions = vec![
+        prod("S", vec![t("A"), nt("S")]),
+        prod("S", vec![t("B"), nt("S")]),
+        prod("S", vec![]),
+    ];
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("A"), TerminalID(0));
+    grammar_token_map.insert(regex_name("B"), TerminalID(1));
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+
+    // 2. Initial GLR state
+    let mut glr_state = parser.init_glr_parser(None);
+    glr_state.process_default_reductions(); // Process the S -> '' production
+
+    let terminal_a = TerminalID(0);
+    let terminal_b = TerminalID(1);
+
+    let mut node_counts = Vec::new();
+    let initial_nodes = glr_state.stats().unique_nodes();
+    node_counts.push(initial_nodes);
+    println!("Initial state: {} nodes", initial_nodes);
+
+    // 3. Loop, feed tokens, merge, and check for explosion
+    for i in 1..=10 {
+        let mut state_a = glr_state.clone();
+        state_a.process_token(terminal_a);
+        state_a.process_default_reductions();
+
+        let mut state_b = glr_state.clone();
+        state_b.process_token(terminal_b);
+        state_b.process_default_reductions();
+
+        state_a.merge_with(state_b);
+        glr_state = state_a;
+
+        let current_nodes = glr_state.stats().unique_nodes();
+        node_counts.push(current_nodes);
+        println!("Step {}: {} nodes", i, current_nodes);
+    }
+
+    // 4. Analyze node growth
+    println!("Node counts per step: {:?}", node_counts);
+    let increases: Vec<usize> = node_counts.windows(2).map(|w| w[1] - w[0]).collect();
+    println!("Node increases per step: {:?}", increases);
+
+    // The growth should be roughly constant (linear). An explosion would show accelerating increases.
+    if let (Some(&increase1), Some(&increase2)) = (increases.get(2), increases.get(increases.len() - 1)) {
+        assert!(increase2 <= increase1, "GSS node growth appears exponential. Increase after 3 steps: {}, Last increase: {}. Full increases: {:?}", increase1, increase2, increases);
+    }
+
+    Ok(())
 }
