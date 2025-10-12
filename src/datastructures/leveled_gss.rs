@@ -409,6 +409,9 @@ mod tests {
         println!("GSS before normalization: {}", gss.to_graph_string(false));
         println!("GSS after normalization: {}", gss_after.to_graph_string(false));
 
+        println!("Stats before: {:?}", stats_before);
+        println!("Stats after: {:?}", stats_after);
+
         // TODO: assert that normalization has helped.
     }
 }
