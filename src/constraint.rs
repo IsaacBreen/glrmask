@@ -1745,7 +1745,7 @@ impl GrammarConstraint {
             let mut gss_stack = gss_stack_base.clone();
             gss_stack.inner = gss_stack.inner.apply(|acc| {
                 let mut new_acc = acc.clone();
-                new_acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
+                // new_acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
                 new_acc
             });
             let gss_stack = Arc::new(gss_stack);
@@ -1864,9 +1864,9 @@ impl GrammarConstraint {
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
                 );
 
-                timeit!("Normalize", {
-                    Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
-                });
+                // timeit!("Normalize", {
+                //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
+                // });
 
                 keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
