@@ -1988,6 +1988,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                             }
 
+                            assert!(config.current_token.is_some());
+
                             // --- PURE MISS ---
                             crate::debug!(5, "Cache miss for simple GSS to state {}, adding to output.", state_id.0);
                             hit!("GLRParserState::reduce_and_goto::CacheMiss");
