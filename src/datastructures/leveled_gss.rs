@@ -1295,19 +1295,20 @@ where
             // If promoted, ensure the new inner Lower node is canonical.
             match &*new_node {
                 Upper::Interface(i2) => {
+                    let i2_owned = i2.clone(); // Take ownership of the Arc<Interface<T, A>>
                     // The inner node was just created by try_promote. It's not in any cache.
                     // We need to canonicalize it.
                     let (inner_id, canonical_inner) = normalize_canonicalize_lower(
-                        &i2.inner,
+                        &i2_owned.inner,
                         memo_lower,
                         interner_lower,
                     );
                     // Rebuild the interface with the canonical inner.
-                    new_node = new_interface(canonical_inner, i2.acc.clone());
+                    new_node = new_interface(canonical_inner, i2_owned.acc.clone());
 
                     // Compute interface signature for interning the Upper node.
                     sig = UpperSig::Interface {
-                        acc: i2.acc.clone(),
+                        acc: i2_owned.acc.clone(),
                         inner_id,
                     };
                     h = upper_sig_hash(&sig);
