@@ -1969,14 +1969,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
                                     // --- STORED REUSE on MISS ---
                                     hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
-                                    let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+                                    let (new_roots, _id_map) = PrecomputeNode3::deep_copy_subtrees_into(
                                         &self.parser.stored_trie_god, dest_god, &[stored_root.clone().into()],
                                     );
                                     let new_root = new_roots[0];
                                     vacant.insert(new_root.clone());
-
-                                    let mut mapped_gss = stored_gss.clone();
-                                    map_trie3_node_ids(&mut mapped_gss, &id_map);
 
                                     if has_sources {
                                         let edge_key = (0, tokens_all.clone());
@@ -1987,8 +1984,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             &mut || new_root.clone(), memo_for_dest,
                                         );
                                     }
-
-                                    final_shifted.push(mapped_gss);
                                     continue;
                                 }
                             }
