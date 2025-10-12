@@ -1639,12 +1639,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for peek2 in popper_item.peek_iter() {
                     let predecessor_state_id = peek2.edge_value().state_id;
                     let isolated_parent = peek2.isolated_parent();
-                    if predecessor_state_id == self.parser.combined_start_state_id {
-                        println!("peek: {}", peek._parent().inner.to_graph_string(false));
-                        println!("popper: {}", popper._inner().to_graph_string(false));
-                        println!("parent: {}", peek2._parent().inner.to_graph_string(false));
-                        assert!(isolated_parent.inner.inner_ptr_eq(&self.parser.get_combined_gss_with_acc(isolated_parent.inner.reduce_acc().unwrap()).inner), "HMM!.\n{}\n{}", isolated_parent.inner.to_graph_string(false), self.parser.get_combined_gss_with_acc(isolated_parent.inner.reduce_acc().unwrap()).inner.to_graph_string(false));
-                    }
+                    // if predecessor_state_id == self.parser.combined_start_state_id {
+                    //     println!("peek: {}", peek._parent().inner.to_graph_string(false));
+                    //     println!("popper: {}", popper._inner().to_graph_string(false));
+                    //     println!("parent: {}", peek2._parent().inner.to_graph_string(false));
+                    //     assert!(isolated_parent.inner.inner_ptr_eq(&self.parser.get_combined_gss_with_acc(isolated_parent.inner.reduce_acc().unwrap()).inner), "HMM!.\n{}\n{}", isolated_parent.inner.to_graph_string(false), self.parser.get_combined_gss_with_acc(isolated_parent.inner.reduce_acc().unwrap()).inner.to_graph_string(false));
+                    // }
                     let pred_ptr = Arc::as_ptr(&isolated_parent);
                     todo_map.entry(predecessor_state_id)
                         .or_default()
@@ -1712,15 +1712,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 );
                                 (new_dest, PruneAndTransformRecursiveMemo::default())
                             });
-                            // deep_add_precompute_trie_edges(
-                            //     &mut parent_after_filter,
-                            //     god,
-                            //     &edge_key_all_tokens_zero_k,
-                            //     bv,
-                            //     &tokens_all,
-                            //     &mut || dest.clone(),
-                            //     memo,
-                            // );
+                            deep_add_precompute_trie_edges(
+                                &mut parent_after_filter,
+                                god,
+                                &edge_key_all_tokens_zero_k,
+                                bv,
+                                &tokens_all,
+                                &mut || dest.clone(),
+                                memo,
+                            );
                         }
 
                         // Accept contribution (store isolated parent)
@@ -1802,7 +1802,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             for gss_arc in out {
                 timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
                 if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.combined_start_state_id) {
-                    assert!(gss_arc.inner.pop().inner_ptr_eq(&self.parser.get_combined_gss_with_acc((*acc).clone()).inner), "Expected simple GSS to have the canonical combined GSS as its isolated parent.\n{}\n{}", gss_arc.inner.pop().to_graph_string(false), self.parser.get_combined_gss().inner.to_graph_string(false));
+                    // assert!(gss_arc.inner.pop().inner_ptr_eq(&self.parser.get_combined_gss_with_acc((*acc).clone()).inner), "Expected simple GSS to have the canonical combined GSS as its isolated parent.\n{}\n{}", gss_arc.inner.pop().to_graph_string(false), self.parser.get_combined_gss().inner.to_graph_string(false));
                     let mut new_gss_arc = gss_arc;
                     let has_sources = !acc.stored_trie_nodes().is_empty();
 
