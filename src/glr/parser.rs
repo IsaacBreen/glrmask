@@ -1947,90 +1947,71 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         k: usize::MAX,                             // Dummy value
                     };
 
-                    let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
-                        let entry = self.below_bottom_cache.entry(cache_key.clone());
-                        match entry {
-                            std::collections::hash_map::Entry::Occupied(occupied) => {
-                                (occupied.get().clone(), false)
-                            }
-                            std::collections::hash_map::Entry::Vacant(vacant) => {
-                                let new_dest = PrecomputeNode3Index::new(
-                                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                    match self.below_bottom_cache.entry(cache_key) {
+                        std::collections::hash_map::Entry::Occupied(occupied) => {
+                            // --- CACHE HIT ---
+                            crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
+                            hit!("GLRParserState::reduce_and_goto::CacheHit");
+                            if has_sources {
+                                let cached_dest = occupied.get().clone();
+                                let edge_key = (0, tokens_all.clone());
+                                let edge_value = StateIDBV::max_ones();
+                                let memo_for_dest = cached_dest_memos.entry(cached_dest.clone()).or_default();
+                                deep_add_precompute_trie_edges(
+                                    &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                    &mut || cached_dest.clone(), memo_for_dest,
                                 );
-                                vacant.insert(new_dest.clone());
-                                (new_dest, true)
                             }
                         }
-                    });
-
-                    // If there are source nodes, connect them to the cached destination. This will modify new_gss_arc.
-                    if has_sources {
-                        let edge_key = (0, tokens_all.clone());
-                        let edge_value = StateIDBV::max_ones();
-                        let tokens_for_update = tokens_all.clone();
-
-                        // Memoize deep_add for this particular cached destination to avoid re-walking identical subgraphs.
-                        let memo_for_dest = cached_dest_memos.entry(cached_dest.clone())
-                            .or_insert_with(PruneAndTransformRecursiveMemo::default);
-
-                        deep_add_precompute_trie_edges(
-                            &mut new_gss_arc,
-                            god,
-                            &edge_key,
-                            &edge_value,
-                            &tokens_for_update,
-                            &mut || cached_dest.clone(),
-                            memo_for_dest,
-                        );
-                    }
-
-                    // On a cache miss, optionally import from stored cache keyed by (nt, current token).
-                    if add_to_out {
-                        // Try to reuse a stored precomputation if available and a god is present
-                        if let (Some(cur_tok), Some(dest_god)) = (config.current_token, self.active_state.trie2_god.as_ref()) {
-                            if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
-                                // Deep copy the trie subtree from the parser's stored arena into the local arena
-                                let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
-                                    &self.parser.stored_trie_god,
-                                    dest_god,
-                                    &[stored_root.clone().into()],
-                                );
-                                let new_root = new_roots[0];
-                                // Update local cache with the imported destination
-                                let dest_entry = self.below_bottom_cache.entry(cache_key).or_insert(new_root.clone());
-                                *dest_entry = new_root.clone();
-                                // Map trie node indices within the stored GSS to local arena indices
-                                let mut mapped_gss = stored_gss.clone();
-                                map_trie3_node_ids(&mut mapped_gss, &id_map);
-                                // Link the existing trie nodes to the cached root
-                                let existing_nodes = acc.stored_trie_nodes().clone();
-                                for existing_node in existing_nodes {
-                                    let inserter = EdgeInserter::new(
-                                        dest_god,
-                                        existing_node.as_arc().clone(),
-                                        edge_key_all_tokens_zero_k.clone(),
-                                        StateIDBV::max_ones(),
-                                        |e, n| *e |= n,
-                                        |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
-                                        |_, _| {}, // Unconditional insertion
+                        std::collections::hash_map::Entry::Vacant(vacant) => {
+                            // --- CACHE MISS ---
+                            if let (Some(cur_tok), Some(dest_god)) = (config.current_token, self.active_state.trie2_god.as_ref()) {
+                                if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
+                                    // --- STORED REUSE on MISS ---
+                                    hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
+                                    let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+                                        &self.parser.stored_trie_god, dest_god, &[stored_root.clone().into()],
                                     );
-                                    inserter.try_destination(new_root.clone()).expect("Cycle detected when adding precompute trie edges for cached below-bottom");
+                                    let new_root = new_roots[0];
+                                    vacant.insert(new_root.clone());
+
+                                    let mut mapped_gss = stored_gss.clone();
+                                    map_trie3_node_ids(&mut mapped_gss, &id_map);
+
+                                    if has_sources {
+                                        let edge_key = (0, tokens_all.clone());
+                                        let edge_value = StateIDBV::max_ones();
+                                        let memo_for_dest = cached_dest_memos.entry(new_root.clone()).or_default();
+                                        deep_add_precompute_trie_edges(
+                                            &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                            &mut || new_root.clone(), memo_for_dest,
+                                        );
+                                    }
+
+                                    final_shifted.push(mapped_gss);
+                                    continue;
                                 }
-                                // Add the mapped GSS to the output
-                                final_shifted.push(mapped_gss);
-                                hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
-                                continue;
                             }
+
+                            // --- PURE MISS ---
+                            crate::debug!(5, "Cache miss for simple GSS to state {}, adding to output (has_sources={}).", state_id.0, has_sources);
+                            hit!("GLRParserState::reduce_and_goto::CacheMiss");
+                            let new_dest = PrecomputeNode3Index::new(
+                                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                            );
+                            if has_sources {
+                                let edge_key = (0, tokens_all.clone());
+                                let edge_value = StateIDBV::max_ones();
+                                let memo_for_dest = cached_dest_memos.entry(new_dest.clone()).or_default();
+                                deep_add_precompute_trie_edges(
+                                    &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                    &mut || new_dest.clone(), memo_for_dest,
+                                );
+                            }
+                            vacant.insert(new_dest);
+                            final_out.push(new_gss_arc);
                         }
-                        // Fallback: add the newly created GSS to the output and record a miss
-                        crate::debug!(5, "Cache miss for simple GSS to state {}, adding to output (has_sources={}).", state_id.0, has_sources);
-                        hit!("GLRParserState::reduce_and_goto::CacheMiss");
-                        final_out.push(new_gss_arc);
-                    } else {
-                        crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
-                        hit!("GLRParserState::reduce_and_goto::CacheHit");
                     }
-                    // On a cache hit, the GSS is redundant and is discarded.
                 } else {
                     // Not a simple GSS, keep it for merging.
                     crate::debug!(5, "Non-simple GSS encountered, keeping as-is.");
