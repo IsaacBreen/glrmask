@@ -516,7 +516,7 @@ impl GLRParser {
         }
 
         // Precompute stored cache for all (NT, Terminal) pairs.
-        let mut stored_below_bottom_cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)> = HashMap::new();
+        let mut stored_below_bottom_cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)> = HashMap::new(); // TEMP
         for nt in nt_ids.iter().cloned() {
             let synthetic_sid = *self.synthetic_reduce_state_for_nt.get(&nt).expect("synthetic state for NT missing");
             for tid in term_ids.iter().cloned() {
@@ -538,7 +538,7 @@ impl GLRParser {
                 s.process_token_advanced(tid, &cfg);
                 // Store the result in the stored cache
                 // self.stored_below_bottom_cache.insert((nt, tid), (root, s.active_state.stack.clone()));
-                stored_below_bottom_cache.insert((nt, tid), (root, s.active_state.stack.clone()));
+                stored_below_bottom_cache.insert((nt, tid), (root, s.active_state.stack.clone()));  // TEMP
             }
         }
         self.stored_below_bottom_cache = stored_below_bottom_cache;
