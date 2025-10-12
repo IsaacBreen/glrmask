@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
-use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, Trie3God};
+use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, Trie3God, Trie3GodWrapper};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
@@ -2699,73 +2699,54 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
 
 #[test]
 fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
-    // This test checks for exponential GSS node growth in the face of ambiguity.
-    // The grammar S -> 'a' S | 'b' S | '' creates 2^n parse trees for a string of length n.
-    // A correct GLR parser with GSS should handle this in polynomial time and space.
-    // We simulate feeding both 'a' and 'b' at each step and merging the results.
-    // If GSS node sharing is working correctly, the number of unique nodes should
-    // grow linearly, not exponentially.
+    // This test reproduces a low structural sharing factor, which is a symptom of
+    // GSS explosion. It uses a grammar with many productions that share a common
+    // non-terminal suffix. When parsing from a combined GSS state, processing a token
+    // that can form this non-terminal leads to many structurally similar but
+    // distinct GSS paths, revealing poor node sharing.
 
-    // 1. Grammar and Parser setup
-    let productions = vec![
-        prod("S", vec![t("A"), nt("S")]),
-        prod("S", vec![t("B"), nt("S")]),
-        prod("S", vec![t("C"), nt("S")]),
-        prod("S", vec![]),
-    ];
-    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex_name("A"), TerminalID(0));
-    grammar_token_map.insert(regex_name("B"), TerminalID(1));
-    grammar_token_map.insert(regex_name("C"), TerminalID(2));
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    // 1. Grammar with many productions sharing a common non-terminal `A`.
+    let mut productions_str = "S ::= ".to_string();
+    for i in 1..=30 {
+        productions_str += &format!("'p{:02}' A", i);
+        if i < 30 {
+            productions_str += " | ";
+        }
+    }
+    productions_str += ";\nA ::= 'a';";
+    let ebnf_grammar = productions_str;
 
-    let trie3_god = Trie3God::new();
+    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let parser = compiled_grammar.glr_parser;
+    println!("Parser has {} states", parser.table.len());
 
-    // 2. Initial GLR state
-    let internal_max_llm_token = 2;
-    let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
+    // 2. Replicate the GSS setup from `precompute3`
+    let trie3_god = crate::constraint::Trie3GodWrapper::new();
     let mut acc = Acc::new_fresh();
-    acc.stored_trie_nodes.insert(trie3_root);
-    let mut glr_state = parser.init_parser_state_combined_with_acc(acc).with_god(trie3_god);
+    let gss_stack = parser.get_combined_gss_with_acc(acc);
+    let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
-    let terminal_a = TerminalID(0);
-    let terminal_b = TerminalID(1);
-    let terminal_c = TerminalID(2);
+    // 3. Process the token 'a', which reduces to A, triggering many GOTO lookups.
+    let terminal_a = *parser.terminal_map.get_by_left(&Terminal::literal("a".into())).unwrap();
+    glr_state.process_token_advanced(terminal_a, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
 
-    let mut node_counts = Vec::new();
-    let initial_nodes = glr_state.stats().unique_nodes();
-    node_counts.push(initial_nodes);
-    println!("Initial state: {} nodes", initial_nodes);
+    // 4. Check stats before normalization. A low sharing factor indicates the problem.
+    let stats_before = glr_state.active_state.stack.inner.stats();
+    println!("Stats before normalization: {:?}", stats_before);
 
-    // 3. Loop, feed tokens, merge, and check for explosion
-    for i in 1..=10 {
-        let mut state_a = glr_state.clone();
-        state_a.process_token_advanced(terminal_a, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+    // 5. Normalize the GSS and check stats again. Normalization should fix the issue.
+    let normalized_gss = glr_state.active_state.stack.inner.normalize();
+    let stats_after = normalized_gss.stats();
+    println!("Stats after normalization: {:?}", stats_after);
 
-        let mut state_b = glr_state.clone();
-        state_b.process_token_advanced(terminal_b, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+    // 6. Assertions
+    // The key issue is a low structural sharing factor before normalization.
+    assert!(stats_before.structural_sharing_factor < 0.5, "Expected low structural sharing factor (< 0.5) before normalization, but got {}", stats_before.structural_sharing_factor);
 
-        let mut state_c = glr_state.clone();
-        state_c.process_token_advanced(terminal_c, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
-
-        state_a.merge_with(state_b);
-        state_a.merge_with(state_c);
-        glr_state = state_a;
-
-        let current_nodes = glr_state.stats().unique_nodes();
-        node_counts.push(current_nodes);
-        println!("Step {}: {} nodes", i, current_nodes);
-    }
-
-    // 4. Analyze node growth
-    println!("Node counts per step: {:?}", node_counts);
-    let increases: Vec<isize> = node_counts.windows(2).map(|w| w[1] as isize - w[0] as isize).collect();
-    println!("Node increases per step: {:?}", increases);
-
-    // The growth should be roughly constant (linear). An explosion would show accelerating increases.
-    if let (Some(&increase1), Some(&increase2)) = (increases.get(2), increases.get(increases.len() - 1)) {
-        assert!(increase2 <= increase1, "GSS node growth appears exponential. Increase after 3 steps: {}, Last increase: {}. Full increases: {:?}", increase1, increase2, increases);
-    }
+    // Normalization should significantly reduce the number of total nodes and thus increase the sharing factor.
+    assert!(stats_after.total_unique_nodes < stats_before.total_unique_nodes, "Normalization should reduce the total number of unique nodes. Before: {}, After: {}", stats_before.total_unique_nodes, stats_after.total_unique_nodes);
+    assert!(stats_after.structural_sharing_factor > stats_before.structural_sharing_factor, "Normalization should improve the structural sharing factor. Before: {}, After: {}", stats_before.structural_sharing_factor, stats_after.structural_sharing_factor);
 
     Ok(())
 }
