@@ -2719,7 +2719,6 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
 
     // 2. Initial GLR state
     let mut glr_state = parser.init_glr_parser(None);
-    glr_state.process_default_reductions(); // Process the S -> '' production
 
     let terminal_a = TerminalID(0);
     let terminal_b = TerminalID(1);
