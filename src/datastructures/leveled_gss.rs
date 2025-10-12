@@ -2826,8 +2826,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
             Upper::Interface(i) => {
                 let mut info = format!(
-                    "Interface @ {:#x} (MaxDepth: {}) | acc: {:?}",
+                    "Interface @ {:#x} -> Lower @ {:#x} (MaxDepth: {}) | acc: {:?}",
                     Arc::as_ptr(i) as usize,
+                    Arc::as_ptr(&i.inner) as usize,
                     node.max_depth(),
                     i.acc
                 );
