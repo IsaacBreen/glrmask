@@ -1639,6 +1639,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for peek2 in popper_item.peek_iter() {
                     let predecessor_state_id = peek2.edge_value().state_id;
                     let isolated_parent = peek2.isolated_parent();
+                    if predecessor_state_id == self.parser.combined_start_state_id {
+                        assert!(isolated_parent.inner.inner_ptr_eq(&self.parser.get_combined_gss_with_acc(isolated_parent.inner.reduce_acc().unwrap()).inner), "Expected simple GSS to have the canonical combined GSS as its isolated parent.\n{}\n{}", isolated_parent, self.parser.get_combined_gss_with_acc(isolated_parent.inner.reduce_acc().unwrap()));
+                    }
                     let pred_ptr = Arc::as_ptr(&isolated_parent);
                     todo_map.entry(predecessor_state_id)
                         .or_default()
