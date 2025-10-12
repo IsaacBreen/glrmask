@@ -33,7 +33,7 @@ use crate::glr::analyze::{filter_productions_by_reachability, remove_productions
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
 use indoc::indoc;
-use crate::datastructures::gss_leveled_adapter::Acc;
+use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc, Acc};
 // For the symbol removal helper
 
 #[test]
@@ -2732,6 +2732,8 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
         for (terminal, terminal_id) in &parser.terminal_map {
             let mut glr_state_copy = glr_state.clone();
             glr_state_copy.process_token_advanced(*terminal_id, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+            let edge_bv = HybridBitset::from_iter(vec![i, terminal_id.0]);
+            allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_state_copy.active_state.stack, &edge_bv, &mut HashMap::new(), glr_state_copy.active_state.trie2_god.as_ref().unwrap());
             if glr_state_copy.is_ok() {
                 if let Some(existing) = &mut next_glr_state {
                     existing.merge_with(glr_state_copy);
