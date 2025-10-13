@@ -1789,7 +1789,7 @@ impl GrammarConstraint {
                     println!("Stats before normalization: {:?}", stats);
                     println!("Stats after normalization: {:?}", stats2);
                     // if (!(stats.unique_nodes() < 1000)) {
-                    if stats.structural_sharing_factor < 0.5 && stats.total_unique_nodes > 10 {
+                    if stats.structural_sharing_factor < 0.5 && stats.total_unique_nodes > 1000 {
                         print_summary_flat();
                         print_summary();
                         // Ensure that normalization has the expected effect of increasing the structural sharing factor significantly.
