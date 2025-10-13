@@ -2008,35 +2008,30 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             let res = match &**node {
                 Upper::Branch(b) => {
-                    let all_children: Vec<_> = b
-                        .children
-                        .values()
-                        .flat_map(|kids| kids.values())
-                        .cloned()
-                        .collect();
-                    if all_children.is_empty() {
-                        return empty_upper_inner();
+                    let mut popped = Vec::new();
+                    for kids in b.children.values() {
+                        for child in kids.values() {
+                            popped.push(popn_upper(child, k - 1, memo_upper, memo_lower));
+                        }
                     }
-                    let popped_children: Vec<_> = all_children
-                        .into_iter()
-                        .map(|child| popn_upper::<T, A>(&child, k - 1, memo_upper, memo_lower))
-                        .collect();
-                    let mut it = popped_children.into_iter();
-                    let first = it.next().unwrap();
-                    let merged = it.fold(first, |acc, next| merge_upper(&acc, &next));
-                    try_promote(&merged)
+
+                    if let Some(acc) = &b.empty {
+                        if k == 1 {
+                            let terminal_lower = new_lower(IHashMap::new(), true);
+                            popped.push(new_interface(terminal_lower, acc.clone()));
+                        }
+                    }
+
+                    if popped.is_empty() {
+                        empty_upper_inner()
+                    } else {
+                        let mut it = popped.into_iter();
+                        let first = it.next().unwrap();
+                        let merged = it.fold(first, |acc, next| merge_upper(&acc, &next));
+                        try_promote(&merged)
+                    }
                 }
                 Upper::Interface(i) => {
-                    let all_children: Vec<_> = i
-                        .inner
-                        .children
-                        .values()
-                        .flat_map(|kids| kids.values())
-                        .cloned()
-                        .collect();
-                    if all_children.is_empty() {
-                        return empty_upper_inner();
-                    }
                     let popped_lower = popn_lower::<T, A>(&i.inner, k, memo_lower);
                     if popped_lower.children.is_empty() && !popped_lower.empty {
                         empty_upper_inner()
