@@ -1783,14 +1783,14 @@ impl GrammarConstraint {
                     //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
                     // });
 
-                    timeit!("Normalize", {
-                        Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
-                    });
-                    crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
-                        &mut glr_s.active_state.stack,
-                        &mut HashMap::new(),
-                        glr_s.active_state.trie2_god.as_ref().unwrap(),
-                    );
+                    // timeit!("Normalize", {
+                    //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
+                    // });
+                    // crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
+                    //     &mut glr_s.active_state.stack,
+                    //     &mut HashMap::new(),
+                    //     glr_s.active_state.trie2_god.as_ref().unwrap(),
+                    // );
 
                     let mut glr_s2 = glr_s.clone();
                     Arc::make_mut(&mut glr_s2.active_state.stack).inner = glr_s2.active_state.stack.inner.normalize();
