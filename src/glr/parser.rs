@@ -1650,12 +1650,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     } else if parser.is_combined_state(state_id) {
                         // Prefer concrete actions; no default reductions during Phase 2.
-                        let row = &parser.combined_rows[&state_id];
-                        if let Some(token_actions) = row.shifts_and_reduces.get(&token_id) {
-                            token_actions.iter().map(|(a, bv)| (Action::Normal(a), Some(bv.clone()))).collect()
-                        } else {
-                            vec![(Action::Default(&row.default_reduce), None)]
-                        }
+                        parser
+                            .combined_rows
+                            .get(&state_id)
+                            .and_then(|r| r.shifts_and_reduces.get(&token_id))
+                            .map(|v| {
+                                v.iter()
+                                    .map(|(a, bv)| (Action::Normal(a), Some(bv.clone())))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_else(|| Vec::new())
                     } else {
                         parser.table.get(&state_id).expect_else(|| format!("State ID {} not found in parse table during Phase 2", state_id.0)).shifts_and_reduces_full
                             .get(&token_id)
