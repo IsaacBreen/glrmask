@@ -2944,6 +2944,41 @@ impl GLRParser {
             println!("\nCombined Stored Trie Stats (from {} roots):", all_trie_roots.len());
             println!("  {:?}", trie_stats);
         }
+
+        println!("\n--- Terminal Equivalence Classes ---");
+        let mut nt_ids: Vec<_> = self.non_terminal_map.values().copied().collect();
+        nt_ids.sort();
+
+        let mut term_ids: Vec<_> = self.terminal_map.values().copied().collect();
+        term_ids.sort();
+
+        let mut terminal_signatures: BTreeMap<TerminalID, Vec<Option<&CacheValue>>> = BTreeMap::new();
+
+        for &tid in &term_ids {
+            let signature: Vec<Option<&CacheValue>> = nt_ids
+                .iter()
+                .map(|ntid| self.stored_below_bottom_cache.get(&(ntid.clone(), tid)))
+                .collect();
+            terminal_signatures.insert(tid, signature);
+        }
+
+        let mut signature_to_terminals: HashMap<Vec<Option<&CacheValue>>, Vec<TerminalID>> = HashMap::new();
+        for (tid, signature) in terminal_signatures {
+            signature_to_terminals.entry(signature).or_default().push(tid);
+        }
+
+        let mut found_any = false;
+        for (_signature, terminals) in signature_to_terminals {
+            if terminals.len() > 1 {
+                found_any = true;
+                let mut terminal_names: Vec<String> = terminals.iter().map(|tid| self.terminal_map.get_by_right(tid).unwrap().to_string()).collect();
+                terminal_names.sort();
+                println!("  - Equivalent Terminals: {{{}}}", terminal_names.join(", "));
+            }
+        }
+        if !found_any {
+            println!("  No equivalent terminals found.");
+        }
     }
 }
 
