@@ -1844,7 +1844,7 @@ impl GrammarConstraint {
                         // }).clone();
                         let new_below_bottom_cache = parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap());
                         glr_s_copy.set_below_bottom_cache(new_below_bottom_cache.clone());
-                        glr_s_copy.set_below_bottom_cache(HashMap::new());
+                        // glr_s_copy.set_below_bottom_cache(HashMap::new());
                         glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: false, ..Default::default() });
                         // glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: true, ..Default::default() });
                     }
