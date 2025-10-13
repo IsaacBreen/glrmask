@@ -1571,7 +1571,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             .map(|v| {
                                 // Note: previous panic removed; behavior now mirrors combined state handling.
                                 v.iter()
-                                    .map(|(a, bv)| (Action::Normal(a), None)) // TEMP: make None. Should be Some(bv)
+                                    .map(|(a, bv)| (Action::Normal(a), Some(bv.clone())))
                                     .collect::<Vec<_>>()
                             })
                             .unwrap_or_else(|| Vec::new())
