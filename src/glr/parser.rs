@@ -1995,7 +1995,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                         std::collections::hash_map::Entry::Vacant(vacant) => {
                             // --- CACHE MISS on below_bottom_cache ---
-                            let mut handled = false;
                             if let Some(cur_tok) = config.current_token {
                                 // 1. Check runtime cache.
                                 if let Some((runtime_root, runtime_gss)) = self.runtime_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
@@ -2009,7 +2008,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         &mut || runtime_root.clone(), memo_for_dest,
                                     );
                                     final_shifted.push(runtime_gss);
-                                    handled = true;
+                                    continue;
                                 }
                                 // 2. Check stored cache.
                                 else if let Some(dest_god) = self.active_state.trie2_god.as_ref() {
@@ -2034,13 +2033,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         );
 
                                         final_shifted.push(mapped_gss);
-                                        handled = true;
+                                        continue;
                                     }
                                 }
-                            }
-
-                            if handled {
-                                continue;
                             }
 
                             // --- PURE MISS ---
