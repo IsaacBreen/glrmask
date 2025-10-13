@@ -244,6 +244,7 @@ pub enum ParserPhase {
 pub enum BelowBottomReductionMode {
     ContinueFromAll,
     ContinueFromEverything,
+    ContinueFromHallucinateState,
     Fail,
     #[default]
     Panic,
@@ -304,6 +305,7 @@ pub struct GLRParser {
     pub combined_rows: BTreeMap<StateID, CombinedRow>,
     pub combined_start_state_id: StateID,
     pub combined_gss: Arc<GSSNode>,
+    pub hallucinated_gss: Arc<GSSNode>,
     // New: a dedicated god for stored precomputations and the stored cache itself.
     pub stored_trie_god: Trie3GodWrapper,
     pub stored_below_bottom_cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>,
@@ -366,6 +368,12 @@ impl JSONConvertible for GLRParser {
                     gss
                 };
 
+                let hallucinated_gss = {
+                    let gss_leaf = GSSNode::new(Acc::new_fresh());
+                    let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: hallucinated_state_id }));
+                    gss
+                };
+
                 Ok(GLRParser {
                     table,
                     productions,
@@ -382,6 +390,7 @@ impl JSONConvertible for GLRParser {
                     combined_rows,
                     combined_start_state_id,
                     combined_gss,
+                    hallucinated_gss,
                     // Initialize new runtime fields; they will be populated below.
                     stored_trie_god: Trie3GodWrapper::new(),
                     stored_below_bottom_cache: HashMap::new(),
@@ -473,6 +482,12 @@ impl GLRParser {
             gss
         };
 
+        let hallucinated_gss = {
+            let gss_leaf = GSSNode::new(Acc::new_fresh());
+            let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: hallucinated_state_id }));
+            gss
+        };
+
         Self {
             table,
             productions,
@@ -489,6 +504,7 @@ impl GLRParser {
             combined_rows,
             combined_start_state_id,
             combined_gss,
+            hallucinated_gss,
             stored_trie_god: Trie3GodWrapper::new(),
             stored_below_bottom_cache: HashMap::new(),
             synthetic_reduce_rows: BTreeMap::new(),
@@ -708,6 +724,16 @@ impl GLRParser {
 
     pub fn get_combined_gss_with_acc(&self, acc: Acc) -> Arc<GSSNode> {
         let mut gss = (*self.combined_gss).clone();
+        gss.inner = gss.inner.apply(|_| acc.clone());
+        Arc::new(gss)
+    }
+
+    pub fn get_hallucinated_gss(&self) -> Arc<GSSNode> {
+        self.hallucinated_gss.clone()
+    }
+
+    pub fn get_hallucinated_gss_with_acc(&self, acc: Acc) -> Arc<GSSNode> {
+        let mut gss = (*self.hallucinated_gss).clone();
         gss.inner = gss.inner.apply(|_| acc.clone());
         Arc::new(gss)
     }
@@ -1563,6 +1589,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         per_tok.get(&token_id)
                             .map(|a| vec![(Action::Normal(a), None)])
                             .unwrap_or_else(|| Vec::new())
+                    } else if parser.is_hallucinated_state(state_id) {
+                        parser
+                            .hallucinated_row
+                            .shifts_and_reduces
+                            .get(&token_id)
+                            .map(|v| {
+                                v.iter()
+                                    .map(|(a, bv)| (Action::Normal(a), Some(bv.clone())))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_else(|| Vec::new())
                     } else if parser.is_combined_state(state_id) {
                         parser
                             .combined_rows
@@ -1604,18 +1641,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         per_tok.get(&token_id)
                             .map(|a| vec![(Action::Normal(a), None)])
                             .unwrap_or_else(|| Vec::new())
+                    } else if parser.is_hallucinated_state(state_id) {
+                        let row = &parser.hallucinated_row;
+                        if let Some(token_actions) = row.shifts_and_reduces.get(&token_id) {
+                            token_actions.iter().map(|(a, bv)| (Action::Normal(a), Some(bv.clone()))).collect()
+                        } else {
+                            vec![(Action::Default(&row.default_reduce), None)]
+                        }
                     } else if parser.is_combined_state(state_id) {
                         // Prefer concrete actions; no default reductions during Phase 2.
-                        parser
-                            .combined_rows
-                            .get(&state_id)
-                            .and_then(|r| r.shifts_and_reduces.get(&token_id))
-                            .map(|v| {
-                                v.iter()
-                                    .map(|(a, bv)| (Action::Normal(a), Some(bv.clone())))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_else(|| Vec::new())
+                        let row = &parser.combined_rows[&state_id];
+                        if let Some(token_actions) = row.shifts_and_reduces.get(&token_id) {
+                            token_actions.iter().map(|(a, bv)| (Action::Normal(a), Some(bv.clone()))).collect()
+                        } else {
+                            vec![(Action::Default(&row.default_reduce), None)]
+                        }
                     } else {
                         parser.table.get(&state_id).expect_else(|| format!("State ID {} not found in parse table during Phase 2", state_id.0)).shifts_and_reduces_full
                             .get(&token_id)
@@ -1717,8 +1757,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
             new_acc.stored_trie_nodes_mut().clear();
         }
 
-        let new_gss = self.parser.get_combined_gss_with_acc(new_acc);
-        let new_todo_items = vec![(self.parser.combined_start_state_id, new_gss)];
+        let (new_gss, start_sid) = match _config.below_bottom_mode {
+            BelowBottomReductionMode::ContinueFromHallucinateState => (
+                self.parser.get_hallucinated_gss_with_acc(new_acc),
+                self.parser.hallucinated_state_id,
+            ),
+            _ => (
+                self.parser.get_combined_gss_with_acc(new_acc),
+                self.parser.combined_start_state_id,
+            ),
+        };
+        let new_todo_items = vec![(start_sid, new_gss)];
 
         new_todo_items
     }
@@ -1831,6 +1880,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if self.parser.is_combined_state(predecessor_state_id) {
                         // Fetch all possible gotos for this NT with associated origin filters from combined rows.
                         if let Some(entries) = self.parser.combined_rows.get(&predecessor_state_id).and_then(|r| r.gotos.get(&current_nt)) {
+                            entries.iter().map(|(g, bv)| (*g, Some(bv.clone()))).collect()
+                        } else {
+                            Vec::new()
+                        }
+                    } else if self.parser.is_hallucinated_state(predecessor_state_id) {
+                        if let Some(entries) = self.parser.hallucinated_row.gotos.get(&current_nt) {
                             entries.iter().map(|(g, bv)| (*g, Some(bv.clone()))).collect()
                         } else {
                             Vec::new()
@@ -1962,7 +2017,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
             timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
             for gss_arc in out {
                 timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
-                if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.combined_start_state_id) {
+                let simple_gss_info = is_simple_gss(&gss_arc, self.parser.combined_start_state_id)
+                    .or_else(|| is_simple_gss(&gss_arc, self.parser.hallucinated_state_id));
+                if let Some((state_id, acc)) = simple_gss_info {
                     // assert!(gss_arc.inner.pop().inner_ptr_eq(&self.parser.get_combined_gss_with_acc((*acc).clone()).inner), "Expected simple GSS to have the canonical combined GSS as its isolated parent.\n{}\n{}", gss_arc.inner.pop().to_graph_string(false), self.parser.get_combined_gss().inner.to_graph_string(false));
                     let mut new_gss_arc = gss_arc;
 
@@ -2301,6 +2358,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         per_tok.get(&token_id)
                             .map(|a| vec![(Action::Normal(a), None)])
                             .unwrap_or_else(|| Vec::new())
+                    } else if parser.is_hallucinated_state(state_id) {
+                        parser
+                            .hallucinated_row
+                            .shifts_and_reduces
+                            .get(&token_id)
+                            .map(|v| {
+                                v.iter()
+                                    .map(|(a, bv)| (Action::Normal(a), Some(bv.clone())))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_else(|| Vec::new())
                     } else if parser.is_combined_state(state_id) {
                         parser
                             .combined_rows
@@ -2374,6 +2442,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let has = if self.phase == ParserPhase::ReadyForToken {
                 if let Some(per_tok) = self.parser.synthetic_reduce_rows.get(&sid) {
                     per_tok.get(&token_id).is_some()
+                } else if self.parser.is_combined_state(sid) {
+                    self.parser.combined_rows.get(&sid).and_then(|r| r.shifts_and_reduces.get(&token_id)).is_some()
                 } else if sid == self.parser.hallucinated_state_id {
                     self.parser.hallucinated_row.shifts_and_reduces.get(&token_id).map(|v| !v.is_empty()).unwrap_or(false)
                 } else {
@@ -2382,6 +2452,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
             } else {
                 if let Some(per_tok) = self.parser.synthetic_reduce_rows.get(&sid) {
                     per_tok.get(&token_id).is_some()
+                } else if self.parser.is_combined_state(sid) {
+                    self.parser.combined_rows.get(&sid).and_then(|r| r.shifts_and_reduces.get(&token_id)).is_some()
                 } else if sid == self.parser.hallucinated_state_id {
                     self.parser.hallucinated_row.shifts_and_reduces.get(&token_id).map(|v| !v.is_empty()).unwrap_or(false)
                 } else {
@@ -2690,6 +2762,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
 impl GLRParser {
     pub fn is_combined_state(&self, state_id: StateID) -> bool { self.combined_rows.contains_key(&state_id) }
+    pub fn is_hallucinated_state(&self, state_id: StateID) -> bool { state_id == self.hallucinated_state_id }
 
     pub fn transfer_stored_cache_to_god(
         &self,
