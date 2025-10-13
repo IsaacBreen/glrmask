@@ -1717,8 +1717,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
             new_acc.stored_trie_nodes_mut().clear();
         }
 
-        // let new_leaf = Arc::new(GSSNode::new(new_acc));
-        // let new_gss = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid }));
         let new_gss = self.parser.get_combined_gss_with_acc(new_acc);
         let new_todo_items = vec![(self.parser.combined_start_state_id, new_gss)];
 
