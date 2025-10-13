@@ -2948,6 +2948,26 @@ impl GLRParser {
         self.print_numeric_stats_summary("Max Out-Degree", all_trie_stats.iter().map(|s| s.max_out_degree as f64).collect());
         self.print_numeric_stats_summary("Avg Out-Degree", all_trie_stats.iter().map(|s| s.avg_out_degree).collect());
  
+        let mut all_unique_accs = BTreeSet::new();
+        for stats in &all_gss_stats {
+            for acc in &stats.unique_accumulators {
+                all_unique_accs.insert(acc.clone());
+            }
+        }
+
+        println!("\n--- Unique Accumulators Across All Entries ({} total) ---", all_unique_accs.len());
+        let config = GSSPrintConfig::default();
+        for (i, acc) in all_unique_accs.iter().enumerate() {
+            let acc_str = crate::datastructures::gss_leveled_adapter::format_acc(
+                acc,
+                &self.terminal_map,
+                None,
+                None,
+                &config,
+            );
+            println!("  #{}: {}", i + 1, acc_str);
+        }
+
         // Sort groups by number of keys to show most common ones first.
         grouped_entries.sort_by_key(|(_, keys)| std::cmp::Reverse(keys.len()));
  
@@ -2982,6 +3002,21 @@ impl GLRParser {
             let combined_gss_stats = gather_gss_stats(&[merged_gss_arc.as_ref()]);
             println!("Combined GSS Stats (from merging all {} entries):", all_gss_roots.len());
             println!("  {:?}", combined_gss_stats);
+
+            println!("\n  Unique Accumulators in Combined GSS ({} total):", combined_gss_stats.unique_accumulators.len());
+            let config = GSSPrintConfig::default();
+            let mut sorted_accs: Vec<_> = combined_gss_stats.unique_accumulators.iter().collect();
+            sorted_accs.sort(); // Acc implements Ord
+            for (i, acc) in sorted_accs.iter().enumerate() {
+                let acc_str = crate::datastructures::gss_leveled_adapter::format_acc(
+                    acc,
+                    &self.terminal_map,
+                    None,
+                    None,
+                    &config,
+                );
+                println!("    #{}: {}", i + 1, acc_str);
+            }
         }
  
         // Combined Trie stats
