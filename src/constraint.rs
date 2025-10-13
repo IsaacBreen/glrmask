@@ -1683,9 +1683,9 @@ impl GrammarConstraint {
         crate::debug!(2, "Precomputing Trie 3...");
         const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
         const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
-            BelowBottomReductionMode::ContinueFromEverything
+            BelowBottomReductionMode::ContinueFromHallucinateState
         } else {
-            BelowBottomReductionMode::ContinueFromAll
+            BelowBottomReductionMode::ContinueFromHallucinateState
         };
 
         let mut precomputed3 = BTreeMap::new();
