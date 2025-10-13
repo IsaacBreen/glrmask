@@ -1830,17 +1830,17 @@ impl GrammarConstraint {
                 out = Vec::new();
                 // println!("At node with GLR state: {}", glr_s);
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+                    let mut glr_s_copy = glr_s.clone();
 
                     if let Some(gt) = edge_grammar_token_opt {
                         let new_below_bottom_cache = stored_caches.entry(dst_node_wrapper.clone()).or_insert_with(|| {
-                            parser.transfer_stored_cache_to_god(&glr_s.active_state.trie2_god.clone().unwrap())
+                            parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap())
                         }).clone();
-                        glr_s.set_below_bottom_cache(new_below_bottom_cache);
-                        glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: true, ..Default::default() });
+                        glr_s_copy.set_below_bottom_cache(new_below_bottom_cache);
+                        glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: true, ..Default::default() });
                     }
 
 
-                    let mut glr_s_copy = glr_s.clone();
                     // println!("At edge {:?} with tokens {:?}", edge_grammar_token_opt, edge_bv);
                     // println!("Flat:");
                     // for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
