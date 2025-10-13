@@ -57,6 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Grammar compiled successfully.");
 
+    compiled_grammar.glr_parser.print_stored_cache_stats();
+
     // 2. Load the vocabulary.
     println!("Loading vocabulary from: {:?}", args.vocab);
     let vocab_file = File::open(&args.vocab)?;
