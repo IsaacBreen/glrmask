@@ -30,7 +30,7 @@ use std::sync::Arc;
 use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{is_simple_gss, PruneAndTransformRecursiveMemo};
 use crate::datastructures::leveled_gss::Merge;
-use crate::datastructures::trie::Trie2Index;
+use crate::datastructures::trie::{Trie2Index, TrieStats};
 
 
 // const MAX_MERGE_DEPTH: usize = usize::MAX;
@@ -2784,6 +2784,54 @@ impl GLRParser {
     /// This visualizes the portion of the state machine explored by the parser.
     pub fn gss_to_dot(&self, root: &GSSNode, original_internal_bimap: Option<&BTreeMap<usize, usize>>, llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>) -> String {
         self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
+    }
+
+    pub fn print_stored_cache_stats(&self) {
+        println!("--- Stored Below-Bottom Cache Statistics ---");
+        if self.stored_below_bottom_cache.is_empty() {
+            println!("Cache is empty.");
+            return;
+        }
+
+        let mut all_gss_roots = Vec::new();
+        let mut all_trie_roots = Vec::new();
+
+        println!("\n--- Individual GSS Statistics per Cache Entry ---");
+        let mut sorted_keys: Vec<_> = self.stored_below_bottom_cache.keys().collect();
+        sorted_keys.sort();
+
+        for key in sorted_keys {
+            let (nt_id, tid) = key;
+            let (trie_root, gss_root) = self.stored_below_bottom_cache.get(key).unwrap();
+
+            let nt_name = self.non_terminal_map.get_by_right(nt_id).unwrap();
+            let t_name = self.terminal_map.get_by_right(tid).unwrap();
+
+            let gss_stats = gather_gss_stats(&[gss_root.as_ref()]);
+
+            println!("Entry ({}, {}):", nt_name.0, t_name);
+            println!("  GSS Stats: {:?}", gss_stats);
+
+            all_gss_roots.push(gss_root.clone());
+            all_trie_roots.push(*trie_root);
+        }
+
+        println!("\n--- Combined Statistics ---");
+
+        // Combined GSS stats
+        if !all_gss_roots.is_empty() {
+            let merged_gss_arc = GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, all_gss_roots.clone());
+            let combined_gss_stats = gather_gss_stats(&[merged_gss_arc.as_ref()]);
+            println!("Combined GSS Stats (from merging all {} entries):", all_gss_roots.len());
+            println!("  {:?}", combined_gss_stats);
+        }
+
+        // Combined Trie stats
+        if !all_trie_roots.is_empty() {
+            let trie_stats = PrecomputeNode3::stats(&self.stored_trie_god, &all_trie_roots);
+            println!("\nCombined Stored Trie Stats (from {} roots):", all_trie_roots.len());
+            println!("  {:?}", trie_stats);
+        }
     }
 }
 
