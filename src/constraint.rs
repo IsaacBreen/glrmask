@@ -1848,6 +1848,13 @@ impl GrammarConstraint {
                         glr_s_copy.set_runtime_cache(new_below_bottom_cache.clone());
                         // glr_s_copy.set_below_bottom_cache(HashMap::new());
                         glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: false, ..Default::default() });
+                        let ns = glr_s_copy.active_state.stack.inner.reduce_acc().unwrap().stored_trie_nodes.clone();
+                        let mut all_new_below_bottom_cache_nodes = BTreeSet::new();
+                        for (_, (_, gss)) in &new_below_bottom_cache {
+                            let acc = gss.inner.reduce_acc().unwrap();
+                            all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
+                        }
+                        assert!(ns.is_subset(&all_new_below_bottom_cache_nodes), "After processing token {:?} at edge to node {}, the GLR state's GSS contains trie nodes not present in the below-bottom cache. GLR state trie nodes: {:?}, below-bottom cache trie nodes: {:?}.", gt, dst_node_wrapper, ns, all_new_below_bottom_cache_nodes);
                     }
 
 
