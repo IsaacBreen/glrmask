@@ -1962,26 +1962,32 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 return cached.clone();
             }
 
-            let all_children: Vec<_> = node
-                .children
-                .values()
-                .flat_map(|kids| kids.values())
-                .cloned()
-                .collect();
-            if all_children.is_empty() {
-                let res = new_lower(IHashMap::new(), false);
-                memo_lower.insert(key, res.clone());
-                return res;
+            let mut res = {
+                let all_children: Vec<_> = node
+                    .children
+                    .values()
+                    .flat_map(|kids| kids.values())
+                    .cloned()
+                    .collect();
+                if all_children.is_empty() {
+                    new_lower(IHashMap::new(), false)
+                } else {
+                    let popped_children: Vec<_> = all_children
+                        .into_iter()
+                        .map(|child| popn_lower::<T, A>(&child, k - 1, memo_lower))
+                        .collect();
+
+                    let mut it = popped_children.into_iter();
+                    let first = it.next().unwrap();
+                    it.fold(first, |acc, next| merge_lower(&acc, &next))
+                }
+            };
+
+            if node.empty && k == 1 {
+                let terminal_node = new_lower(IHashMap::new(), true);
+                res = merge_lower(&res, &terminal_node);
             }
 
-            let popped_children: Vec<_> = all_children
-                .into_iter()
-                .map(|child| popn_lower::<T, A>(&child, k - 1, memo_lower))
-                .collect();
-
-            let mut it = popped_children.into_iter();
-            let first = it.next().unwrap();
-            let res = it.fold(first, |acc, next| merge_lower(&acc, &next));
             memo_lower.insert(key, res.clone());
             res
         }
