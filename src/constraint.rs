@@ -1757,11 +1757,11 @@ impl GrammarConstraint {
 
         let trie3_end = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
 
-        let mut stored_caches: HashMap<Trie2Index, HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>> = HashMap::new();
-        let new_below_bottom_cache: HashMap<_, _> = parser.transfer_stored_cache_to_god(&trie3_god);
-        for (_, glr_state) in initial_values_for_map.iter_mut() {
-            glr_state.set_runtime_cache(new_below_bottom_cache.clone());
-        }
+        // let mut stored_caches: HashMap<Trie2Index, HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>> = HashMap::new();
+        // let new_below_bottom_cache: HashMap<_, _> = parser.transfer_stored_cache_to_god(&trie3_god);
+        // for (_, glr_state) in initial_values_for_map.iter_mut() {
+        //     glr_state.set_runtime_cache(new_below_bottom_cache.clone());
+        // }
 
         crate::debug!(2, "Running special_map_grouped for Trie 3 precomputation");
         // TODO: LLM tokens are now redundant; we do LLM token filtering now at the trie node level.
