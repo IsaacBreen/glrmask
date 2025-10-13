@@ -2047,7 +2047,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::process_token_advanced")]
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
-        self.below_bottom_cache.clear();
+        if config.reset_cache {
+            self.below_bottom_cache.clear();
+        }
 
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
@@ -2102,7 +2104,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.active_state.accepted_state = None;
 
         // self.log_gss("Phase1/2-end", token_id, false, false);
-        self.below_bottom_cache.clear();
+        if config.reset_cache {
+            self.below_bottom_cache.clear();
+        }
     }
 
     pub fn process_default_reductions(&mut self) {
