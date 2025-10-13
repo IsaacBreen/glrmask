@@ -1775,7 +1775,9 @@ impl GrammarConstraint {
                 // allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new(), glr_s.active_state.trie2_god.as_ref().unwrap());
 
                 if let Some(gt) = edge_grammar_token_opt {
-                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
+                    let new_below_bottom_cache = parser.transfer_stored_cache_to_god(&glr_s.active_state.trie2_god.clone().unwrap());
+                    glr_s.set_below_bottom_cache(new_below_bottom_cache);
+                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: false, ..Default::default() });
                     let stats = glr_s.stats();
                     crate::debug!(4, "After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes(), stats.total_edges());
 

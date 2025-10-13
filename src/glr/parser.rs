@@ -1100,7 +1100,7 @@ pub struct GLRParserState<'a> { // No longer generic
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct BelowBottomCacheKey {
+pub(crate) struct BelowBottomCacheKey {
     nonterminal_id: NonTerminalID,
     source_state_id: StateID,
     goto_state_id: StateID,
