@@ -1757,6 +1757,8 @@ impl GrammarConstraint {
 
         let trie3_end = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
 
+        let mut stored_caches: HashMap<Trie2Index, _> = HashMap::new();
+
         crate::debug!(2, "Running special_map_grouped for Trie 3 precomputation");
         // TODO: LLM tokens are now redundant; we do LLM token filtering now at the trie node level.
         Trie::special_map_grouped(
@@ -1775,9 +1777,7 @@ impl GrammarConstraint {
                 // allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new(), glr_s.active_state.trie2_god.as_ref().unwrap());
 
                 if let Some(gt) = edge_grammar_token_opt {
-                    let new_below_bottom_cache = parser.transfer_stored_cache_to_god(&glr_s.active_state.trie2_god.clone().unwrap());
-                    glr_s.set_below_bottom_cache(new_below_bottom_cache);
-                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: true, ..Default::default() });
+                    // glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
                     let stats = glr_s.stats();
                     crate::debug!(4, "After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes(), stats.total_edges());
 
@@ -1830,6 +1830,16 @@ impl GrammarConstraint {
                 out = Vec::new();
                 // println!("At node with GLR state: {}", glr_s);
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+
+                    if let Some(gt) = edge_grammar_token_opt {
+                        let new_below_bottom_cache = stored_caches.entry(dst_node_wrapper.clone()).or_insert_with(|| {
+                            parser.transfer_stored_cache_to_god(&glr_s.active_state.trie2_god.clone().unwrap())
+                        }).clone();
+                        glr_s.set_below_bottom_cache(new_below_bottom_cache);
+                        glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: true, ..Default::default() });
+                    }
+
+
                     let mut glr_s_copy = glr_s.clone();
                     // println!("At edge {:?} with tokens {:?}", edge_grammar_token_opt, edge_bv);
                     // println!("Flat:");
