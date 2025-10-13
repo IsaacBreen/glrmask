@@ -2795,20 +2795,69 @@ impl GLRParser {
         self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
     }
 
+    fn print_numeric_stats_summary<T>(
+        &self,
+        label: &str,
+        mut values: Vec<T>,
+    ) where
+        T: Copy + Into<f64> + std::fmt::Display + PartialOrd,
+    {
+        if values.is_empty() {
+            println!("    {:<30}: (no data)", label);
+            return;
+        }
+
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let n = values.len();
+        let n_f64 = n as f64;
+
+        let sum: f64 = values.iter().map(|&v| v.into()).sum();
+        let mean = sum / n_f64;
+
+        let min = values[0];
+        let max = values[n - 1];
+
+        let median = if n % 2 == 1 {
+            values[n / 2].into()
+        } else {
+            (values[n / 2 - 1].into() + values[n / 2].into()) / 2.0
+        };
+
+        // Percentiles
+        let p1_idx = ((1.0 / 100.0) * (n_f64 - 1.0)).round() as usize;
+        let p99_idx = ((99.0 / 100.0) * (n_f64 - 1.0)).round() as usize;
+        let p1 = values[p1_idx];
+        let p99 = values[p99_idx];
+
+        let variance = if n > 1 {
+            values.iter().map(|&v| {
+                let diff = v.into() - mean;
+                diff * diff
+            }).sum::<f64>() / (n_f64 - 1.0) // Sample variance
+        } else {
+            0.0
+        };
+        let stdev = variance.sqrt();
+
+        println!(
+            "    {:<30}: min={:<8} max={:<8} mean={:<8.2} median={:<8.2} stdev={:<8.2} 1%={:<8} 99%={:<8}",
+            label, min, max, mean, median, stdev, p1, p99
+        );
+    }
+
     pub fn print_stored_cache_stats(&self) {
         println!("--- Stored Below-Bottom Cache Statistics ---");
         if self.stored_below_bottom_cache.is_empty() {
             println!("Cache is empty.");
             return;
         }
-
+ 
         // Group cache entries by value (trie_root, gss_root)
-        // Since Arc<GSSNode> is not Hash, we can't use HashMap.
-        // We'll build up a list of unique values and their keys.
         type CacheValue = (PrecomputeNode3Index, Arc<GSSNode>);
         type CacheKey = (NonTerminalID, TerminalID);
         let mut grouped_entries: Vec<(CacheValue, Vec<CacheKey>)> = Vec::new();
-
+ 
         for (key, value) in &self.stored_below_bottom_cache {
             if let Some((_value, keys)) = grouped_entries.iter_mut().find(|(v, _)| v == value) {
                 keys.push(*key);
@@ -2816,35 +2865,69 @@ impl GLRParser {
                 grouped_entries.push((value.clone(), vec![*key]));
             }
         }
-
+ 
         println!("\nFound {} unique cache entries out of {} total.", grouped_entries.len(), self.stored_below_bottom_cache.len());
-
+ 
+        let occurrences: Vec<usize> = grouped_entries.iter().map(|(_, keys)| keys.len()).collect();
+        self.print_numeric_stats_summary("Occurrences per unique entry", occurrences);
+ 
+        // Collect all stats
+        let all_gss_stats: Vec<GSSStats> = grouped_entries.iter().map(|(value, _keys)| {
+            let (_trie_root, gss_root) = value;
+            gather_gss_stats(&[gss_root.as_ref()])
+        }).collect();
+ 
+        let all_trie_stats: Vec<TrieStats> = grouped_entries.iter().map(|(value, _keys)| {
+            let (trie_root, _gss_root) = value;
+            PrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root])
+        }).collect();
+ 
+        println!("\n--- GSS Stats Summary (distribution over unique entries) ---");
+        self.print_numeric_stats_summary("Total Unique Nodes", all_gss_stats.iter().map(|s| s.total_unique_nodes).collect());
+        self.print_numeric_stats_summary("Total Edges", all_gss_stats.iter().map(|s| s.total_edges).collect());
+        self.print_numeric_stats_summary("Max Lower Depth", all_gss_stats.iter().map(|s| s.max_lower_depth).collect());
+        self.print_numeric_stats_summary("Structurally Unique Nodes", all_gss_stats.iter().map(|s| s.num_structurally_unique_nodes).collect());
+        self.print_numeric_stats_summary("Max In-Degree", all_gss_stats.iter().map(|s| s.max_in_degree).collect());
+        self.print_numeric_stats_summary("Average In-Degree", all_gss_stats.iter().map(|s| s.average_in_degree).collect());
+        self.print_numeric_stats_summary("Structural Sharing Factor", all_gss_stats.iter().map(|s| s.structural_sharing_factor).collect());
+ 
+        println!("\n--- Trie Stats Summary (distribution over unique entries) ---");
+        self.print_numeric_stats_summary("Reachable Nodes", all_trie_stats.iter().map(|s| s.num_reachable_nodes).collect());
+        self.print_numeric_stats_summary("Reachable Edges", all_trie_stats.iter().map(|s| s.num_reachable_edges).collect());
+        self.print_numeric_stats_summary("Max Depth", all_trie_stats.iter().map(|s| s.max_depth).collect());
+        self.print_numeric_stats_summary("Num Leaves", all_trie_stats.iter().map(|s| s.num_leaves).collect());
+        self.print_numeric_stats_summary("Max In-Degree", all_trie_stats.iter().map(|s| s.max_in_degree).collect());
+        self.print_numeric_stats_summary("Avg In-Degree", all_trie_stats.iter().map(|s| s.avg_in_degree).collect());
+        self.print_numeric_stats_summary("Max Out-Degree", all_trie_stats.iter().map(|s| s.max_out_degree).collect());
+        self.print_numeric_stats_summary("Avg Out-Degree", all_trie_stats.iter().map(|s| s.avg_out_degree).collect());
+ 
         // Sort groups by number of keys to show most common ones first.
         grouped_entries.sort_by_key(|(_, keys)| std::cmp::Reverse(keys.len()));
-
-        for (i, (value, keys)) in grouped_entries.iter().enumerate() {
+ 
+        println!("\n--- Top 5 Most Frequent Unique Cache Entries ---");
+        for (i, (value, keys)) in grouped_entries.iter().take(5).enumerate() {
             let (trie_root, gss_root) = value;
-
-            println!("\n--- Unique Entry #{} ({} occurrences) ---", i + 1, keys.len());
-
+ 
+            println!("\n#{}: Occurs {} times", i + 1, keys.len());
+ 
             let gss_stats = gather_gss_stats(&[gss_root.as_ref()]);
             println!("  GSS Stats: {:?}", gss_stats);
-
+ 
             let trie_stats = PrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root]);
             println!("  Trie Stats (root {}): {:?}", trie_root.as_usize(), trie_stats);
-
-            println!("  Associated (NonTerminal, Terminal) pairs:");
+ 
+            println!("  Example (NonTerminal, Terminal) pairs (up to 5):");
             let mut sorted_keys = keys.clone();
             sorted_keys.sort(); // Sorts by NonTerminalID then TerminalID
-            for (nt_id, tid) in sorted_keys {
-                let nt_name = self.non_terminal_map.get_by_right(&nt_id).unwrap();
-                let t_name = self.terminal_map.get_by_right(&tid).unwrap();
+            for (nt_id, tid) in sorted_keys.iter().take(5) {
+                let nt_name = self.non_terminal_map.get_by_right(nt_id).unwrap();
+                let t_name = self.terminal_map.get_by_right(tid).unwrap();
                 println!("    - ({}, {})", nt_name.0, t_name);
             }
         }
-
+ 
         println!("\n--- Combined Statistics ---");
-
+ 
         // Combined GSS stats
         if !self.stored_below_bottom_cache.is_empty() {
             let all_gss_roots: Vec<_> = self.stored_below_bottom_cache.values().map(|(_, gss)| gss.clone()).collect();
@@ -2853,7 +2936,7 @@ impl GLRParser {
             println!("Combined GSS Stats (from merging all {} entries):", all_gss_roots.len());
             println!("  {:?}", combined_gss_stats);
         }
-
+ 
         // Combined Trie stats
         if !self.stored_below_bottom_cache.is_empty() {
             let all_trie_roots: Vec<_> = self.stored_below_bottom_cache.values().map(|(tr, _)| *tr).collect();
