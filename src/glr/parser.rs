@@ -2697,35 +2697,50 @@ impl GLRParser {
         &self,
         dest_god: &Trie3GodWrapper,
     ) -> HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)> {
-        let mut new_cache = HashMap::new();
-        // Cache for copied trie subtrees to avoid re-copying the same structure.
-        // Maps old root -> (new root, id map for GSS update)
-        let mut copied_subtrees: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, HashMap<PrecomputeNode3Index, PrecomputeNode3Index>)> = HashMap::new();
+        if self.stored_below_bottom_cache.is_empty() {
+            return HashMap::new();
+        }
 
-        let mut sorted_keys: Vec<_> = self.stored_below_bottom_cache.keys().collect();
-        sorted_keys.sort();
+        // 1. Collect all unique roots from the cache to perform a single bulk copy.
+        let all_roots_set: BTreeSet<PrecomputeNode3Index> = self
+            .stored_below_bottom_cache
+            .values()
+            .map(|(root, _gss)| *root)
+            .collect();
+        let all_roots_vec: Vec<PrecomputeNode3Index> = all_roots_set.into_iter().collect();
+
+        // 2. Perform a single bulk copy of all relevant subtrees.
+        // This is much more efficient as it traverses the shared parts of the trie only once.
+        let (new_roots_vec, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+            &self.stored_trie_god,
+            dest_god,
+            &all_roots_vec,
+        );
+
+        // 3. Create a mapping from old roots to their new counterparts.
+        let old_to_new_root_map: HashMap<PrecomputeNode3Index, PrecomputeNode3Index> = all_roots_vec
+            .into_iter()
+            .zip(new_roots_vec.into_iter())
+            .collect();
+
+        // 4. Iterate through the original cache to build the new cache,
+        //    updating GSS nodes with the global ID map from the bulk copy.
+        let mut new_cache = HashMap::new();
+        let mut sorted_keys: Vec<_> = self.stored_below_bottom_cache.keys().cloned().collect();
+        sorted_keys.sort(); // Keep deterministic iteration for consistency.
 
         for key in sorted_keys {
-            let (stored_root, stored_gss) = self.stored_below_bottom_cache.get(key).unwrap();
+            let (old_root, old_gss) = self.stored_below_bottom_cache.get(&key).unwrap();
 
-            let (new_root, id_map) = if let Some(cached) = copied_subtrees.get(stored_root) {
-                cached.clone()
-            } else {
-                let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
-                    &self.stored_trie_god,
-                    dest_god,
-                    &[(*stored_root).into()],
-                );
-                let new_root = new_roots[0];
-                let entry = (new_root.clone(), id_map.clone());
-                copied_subtrees.insert(*stored_root, entry.clone());
-                entry
-            };
+            // Find the new root corresponding to the old one.
+            let new_root = *old_to_new_root_map.get(old_root)
+                .expect("Copied root not found in map; this should be impossible.");
 
-            let mut new_gss = stored_gss.clone();
+            // Update the GSS with the global id_map.
+            let mut new_gss = old_gss.clone();
             map_trie3_node_ids(&mut new_gss, &id_map);
 
-            new_cache.insert(*key, (new_root, new_gss));
+            new_cache.insert(key, (new_root, new_gss));
         }
 
         new_cache
