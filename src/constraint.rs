@@ -1807,9 +1807,9 @@ impl GrammarConstraint {
                         let diff_pct = diff / stats.structural_sharing_factor;
                         let min_diff_pct = 0.01;
                         if diff_pct < min_diff_pct {
-                            println!("Stack before normalization:{}\n", glr_s.active_state.stack.inner.to_graph_string(false));
-                            println!("Stack after normalization:{}\n", glr_s2.active_state.stack.inner.to_graph_string(false));
-                            panic!("Structural sharing factor increase too low ({:.1}% < {:.1}%) after normalization at edge {:?} with tokens {:?}.\nStats before: {:?}\nStats after: {:?}", diff_pct * 100.0, min_diff_pct * 100.0, edge_grammar_token_opt, edge_bv, stats, stats2);
+                            // println!("Stack before normalization:{}\n", glr_s.active_state.stack.inner.to_graph_string(false));
+                            // println!("Stack after normalization:{}\n", glr_s2.active_state.stack.inner.to_graph_string(false));
+                            // panic!("Structural sharing factor increase too low ({:.1}% < {:.1}%) after normalization at edge {:?} with tokens {:?}.\nStats before: {:?}\nStats after: {:?}", diff_pct * 100.0, min_diff_pct * 100.0, edge_grammar_token_opt, edge_bv, stats, stats2);
                         }
 
                         // if stats2.total_unique_nodes > stats.total_unique_nodes {
