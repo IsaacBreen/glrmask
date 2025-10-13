@@ -12,6 +12,20 @@ use kdam::{tqdm, BarExt};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use profiler_macro::time_it;
 
+/// Represents statistics about a Trie graph reachable from a set of roots.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrieStats {
+    pub num_reachable_nodes: usize,
+    pub num_reachable_edges: usize,
+    pub max_depth: usize,
+    pub num_roots: usize,
+    pub num_leaves: usize,
+    pub max_in_degree: usize,
+    pub avg_in_degree: f64,
+    pub max_out_degree: usize,
+    pub avg_out_degree: f64,
+}
+
 /// Represents a node in a Trie–like structure (allowing shared subtrees and DAGs).
 /// Multiple children can exist for the same edge key. Each edge instance has a value.
 ///
@@ -571,6 +585,75 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         visiting.remove(&u);
         visited.insert(u);
         false
+    }
+
+    /// Computes statistics for the graph reachable from the given roots.
+    pub fn stats(arena: &Arena<Self>, roots: &[Trie2Index]) -> TrieStats {
+        if roots.is_empty() {
+            return TrieStats {
+                num_reachable_nodes: 0,
+                num_reachable_edges: 0,
+                max_depth: 0,
+                num_roots: 0,
+                num_leaves: 0,
+                max_in_degree: 0,
+                avg_in_degree: 0.0,
+                max_out_degree: 0,
+                avg_out_degree: 0.0,
+            };
+        }
+
+        let reachable_nodes = Self::all_nodes(arena, roots);
+        let num_reachable_nodes = reachable_nodes.len();
+
+        let mut num_reachable_edges = 0;
+        let mut max_depth = 0;
+        let mut num_leaves = 0;
+        let mut total_out_degree = 0;
+        let mut max_out_degree = 0;
+        let mut in_degrees: HashMap<usize, usize> = HashMap::new();
+
+        for node_idx in &reachable_nodes {
+            let guard = node_idx
+                .read(arena)
+                .expect("Node not found during stats calculation");
+
+            max_depth = max_depth.max(guard.max_depth);
+
+            let mut out_degree = 0;
+            for children_map in guard.children.values() {
+                for (child_idx, _) in children_map.iter() {
+                    out_degree += 1;
+                    let v = child_idx.as_usize();
+                    *in_degrees.entry(v).or_insert(0) += 1;
+                }
+            }
+
+            if out_degree == 0 {
+                num_leaves += 1;
+            }
+            num_reachable_edges += out_degree;
+            total_out_degree += out_degree;
+            max_out_degree = max_out_degree.max(out_degree);
+        }
+
+        let max_in_degree = in_degrees.values().cloned().max().unwrap_or(0);
+        let total_in_degree: usize = in_degrees.values().sum();
+
+        let avg_in_degree = total_in_degree as f64 / num_reachable_nodes as f64;
+        let avg_out_degree = total_out_degree as f64 / num_reachable_nodes as f64;
+
+        TrieStats {
+            num_reachable_nodes,
+            num_reachable_edges,
+            max_depth,
+            num_roots: roots.len(),
+            num_leaves,
+            max_in_degree,
+            avg_in_degree,
+            max_out_degree,
+            avg_out_degree,
+        }
     }
 }
 
