@@ -1102,6 +1102,7 @@ pub struct GLRParserState<'a> { // No longer generic
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct BelowBottomCacheKey {
     nonterminal_id: NonTerminalID,
+    terminal_id: TerminalID,
     source_state_id: StateID,
     goto_state_id: StateID,
     k: usize,
@@ -1963,6 +1964,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     // Always perform cache lookup/insertion to prevent infinite loops.
                     let cache_key = BelowBottomCacheKey {
                         nonterminal_id: nt,
+                        terminal_id: config.current_token.unwrap(),
                         // nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
                         source_state_id: StateID(usize::MAX),      // Dummy value
                         // goto_state_id: state_id,
@@ -2012,8 +2014,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                             }
 
-                            assert!(config.current_token.is_some());
-
                             // --- PURE MISS ---
                             crate::debug!(5, "Cache miss for simple GSS to state {}, adding to output.", state_id.0);
                             hit!("GLRParserState::reduce_and_goto::CacheMiss");
@@ -2060,6 +2060,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::process_token_advanced")]
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
+        let mut config = config.clone();
+        config.current_token = Some(token_id);
+
         if config.reset_cache {
             self.below_bottom_cache.clear();
         }
@@ -2678,11 +2681,12 @@ impl GLRParser {
         let mut sorted_keys: Vec<_> = self.stored_below_bottom_cache.keys().collect();
         sorted_keys.sort();
 
-        for (nt, _tid) in sorted_keys {
-            let (stored_root, _stored_gss) = self.stored_below_bottom_cache.get(&(*nt, *_tid)).unwrap();
+        for (nt, tid) in sorted_keys {
+            let (stored_root, _stored_gss) = self.stored_below_bottom_cache.get(&(*nt, *tid)).unwrap();
 
             let cache_key = BelowBottomCacheKey {
                 nonterminal_id: *nt,
+                terminal_id: *tid,
                 source_state_id: StateID(usize::MAX),
                 goto_state_id: StateID(usize::MAX),
                 k: usize::MAX,
