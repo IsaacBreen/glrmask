@@ -1787,7 +1787,7 @@ impl GrammarConstraint {
                     Arc::make_mut(&mut glr_s2.active_state.stack).inner = glr_s2.active_state.stack.inner.normalize();
                     let stats2 = glr_s2.stats();
                     // if (!(stats.unique_nodes() < 1000)) {
-                    if stats.structural_sharing_factor < 0.5 && stats.total_unique_nodes > 1000 {
+                    if stats.structural_sharing_factor < 0.5 && stats.total_unique_nodes > 5 {
                         println!("Stats before normalization: {:?}", stats);
                         println!("Stats after normalization: {:?}", stats2);
                         print_summary_flat();
@@ -1796,12 +1796,12 @@ impl GrammarConstraint {
                         // Significantly here means by at least 10 percentage points.
                         let diff = stats2.structural_sharing_factor - stats.structural_sharing_factor;
                         let diff_pct = diff / stats.structural_sharing_factor;
-                        let min_diff_pct = -0.1;
-                        // if diff_pct < min_diff_pct {
-                        //     println!("Stack before normalization:{}\n", glr_s.active_state.stack.inner.to_graph_string(false));
-                        //     println!("Stack after normalization:{}\n", glr_s2.active_state.stack.inner.to_graph_string(false));
-                        //     panic!("Structural sharing factor increase too low ({:.1}% < {:.1}%) after normalization at edge {:?} with tokens {:?}.\nStats before: {:?}\nStats after: {:?}", diff_pct * 100.0, min_diff_pct * 100.0, edge_grammar_token_opt, edge_bv, stats, stats2);
-                        // }
+                        let min_diff_pct = 0.01;
+                        if diff_pct < min_diff_pct {
+                            println!("Stack before normalization:{}\n", glr_s.active_state.stack.inner.to_graph_string(false));
+                            println!("Stack after normalization:{}\n", glr_s2.active_state.stack.inner.to_graph_string(false));
+                            panic!("Structural sharing factor increase too low ({:.1}% < {:.1}%) after normalization at edge {:?} with tokens {:?}.\nStats before: {:?}\nStats after: {:?}", diff_pct * 100.0, min_diff_pct * 100.0, edge_grammar_token_opt, edge_bv, stats, stats2);
+                        }
 
                         if stats2.total_unique_nodes > stats.total_unique_nodes {
                             println!("Stack before normalization:{}\n", glr_s.active_state.stack.inner.to_graph_string(false));
