@@ -1805,6 +1805,8 @@ impl GrammarConstraint {
                     if stats.structural_sharing_factor < 0.5 && stats.total_unique_nodes > 5 {
                         println!("Stats before normalization: {:?}", stats);
                         println!("Stats after normalization: {:?}", stats2);
+                        let acc = glr_s.active_state.stack.inner.reduce_acc().unwrap();
+                        println!("Number of trie nodes stored in accumulators: {}", acc.stored_trie_nodes().len());
                         print_summary_flat();
                         print_summary();
                         // Ensure that normalization has the expected effect of increasing the structural sharing factor significantly.
@@ -1909,11 +1911,11 @@ impl GrammarConstraint {
                     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
                 });
 
-                crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
-                    &mut glr_s.active_state.stack,
-                    &mut HashMap::new(),
-                    glr_s.active_state.trie2_god.as_ref().unwrap(),
-                );
+                // crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
+                //     &mut glr_s.active_state.stack,
+                //     &mut HashMap::new(),
+                //     glr_s.active_state.trie2_god.as_ref().unwrap(),
+                // );
 
                 // timeit!("Normalize", {
                 //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
