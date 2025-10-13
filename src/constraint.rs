@@ -29,8 +29,8 @@ use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{Item, LRMode, LR_MODE};
-use crate::glr::parser::{BelowBottomReductionMode, ExpectElse, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
-use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue};
+use crate::glr::parser::{BelowBottomCacheKey, BelowBottomReductionMode, ExpectElse, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
+use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use crate::glr::table::StateID;
 use crate::interface::CompiledGrammar;
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -1757,6 +1757,12 @@ impl GrammarConstraint {
 
         let trie3_end = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
 
+        let mut stored_caches: HashMap<Trie2Index, HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>> = HashMap::new();
+        let new_below_bottom_cache: HashMap<_, _> = parser.transfer_stored_cache_to_god(&trie3_god);
+        for (_, glr_state) in initial_values_for_map.iter_mut() {
+            glr_state.set_runtime_cache(new_below_bottom_cache.clone());
+        }
+
         crate::debug!(2, "Running special_map_grouped for Trie 3 precomputation");
         // TODO: LLM tokens are now redundant; we do LLM token filtering now at the trie node level.
         Trie::special_map_grouped(
@@ -1775,9 +1781,7 @@ impl GrammarConstraint {
                 // allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new(), glr_s.active_state.trie2_god.as_ref().unwrap());
 
                 if let Some(gt) = edge_grammar_token_opt {
-                    let new_below_bottom_cache = parser.transfer_stored_cache_to_god(&glr_s.active_state.trie2_god.clone().unwrap());
-                    // glr_s.set_below_bottom_cache(new_below_bottom_cache);
-                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: true, ..Default::default() });
+                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
                     let stats = glr_s.stats();
                     crate::debug!(4, "After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes(), stats.total_edges());
 
@@ -1801,6 +1805,8 @@ impl GrammarConstraint {
                     if stats.structural_sharing_factor < 0.5 && stats.total_unique_nodes > 5 {
                         println!("Stats before normalization: {:?}", stats);
                         println!("Stats after normalization: {:?}", stats2);
+                        let acc = glr_s.active_state.stack.inner.reduce_acc().unwrap();
+                        println!("Number of trie nodes stored in accumulators: {}", acc.stored_trie_nodes().len());
                         print_summary_flat();
                         print_summary();
                         // Ensure that normalization has the expected effect of increasing the structural sharing factor significantly.
@@ -1831,13 +1837,43 @@ impl GrammarConstraint {
                 // println!("At node with GLR state: {}", glr_s);
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
+
+                    allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
+
+                    // if let Some(gt) = edge_grammar_token_opt {
+                    //     // let new_below_bottom_cache = stored_caches.entry(dst_node_wrapper.clone()).or_insert_with(|| {
+                    //     //     parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap())
+                    //     // }).clone();
+                    //     // let new_below_bottom_cache = parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap());
+                    //     glr_s_copy.set_runtime_cache(new_below_bottom_cache.clone());
+                    //     // glr_s_copy.set_below_bottom_cache(HashMap::new());
+                    //     glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: false, ..Default::default() });
+                    //     if glr_s_copy.is_ok() {
+                    //         let ns = glr_s_copy.active_state.stack.inner.reduce_acc().unwrap().stored_trie_nodes.clone();
+                    //         let mut all_new_below_bottom_cache_nodes = BTreeSet::new();
+                    //         for (_, (_, gss)) in &new_below_bottom_cache {
+                    //             if let Some(acc) = gss.inner.reduce_acc() {
+                    //                 all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
+                    //             }
+                    //         }
+                    //         // Add start nodes
+                    //         for (_, node) in &precomputed3 {
+                    //             all_new_below_bottom_cache_nodes.insert(*node);
+                    //         }
+                    //         let ns = ns.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
+                    //         let all_new_below_bottom_cache_nodes = all_new_below_bottom_cache_nodes.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
+                    //         println!("ns: {:?}, all_new_below_bottom_cache_nodes: {:?}", ns, all_new_below_bottom_cache_nodes);
+                    //         assert!(ns.is_subset(&all_new_below_bottom_cache_nodes), "After processing token {:?} at edge to node {}, the GLR state's GSS contains trie nodes not present in the below-bottom cache.\nGLR state trie nodes: {:?}\nBelow-bottom cache trie nodes: {:?}\nGLR state: {}", gt, dst_node_wrapper, ns, all_new_below_bottom_cache_nodes, glr_s_copy);
+                    //     }
+                    // }
+
+
                     // println!("At edge {:?} with tokens {:?}", edge_grammar_token_opt, edge_bv);
                     // println!("Flat:");
                     // for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
                         // println!("  {}: {:?}", i, p);
                     // }
                     // allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
-                    allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
                     // println!("After pruning to edge tokens:");
                     // for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
                         // println!("  {}: {:?}", i, p);
@@ -1892,11 +1928,11 @@ impl GrammarConstraint {
                     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
                 });
 
-                crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
-                    &mut glr_s.active_state.stack,
-                    &mut HashMap::new(),
-                    glr_s.active_state.trie2_god.as_ref().unwrap(),
-                );
+                // crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
+                //     &mut glr_s.active_state.stack,
+                //     &mut HashMap::new(),
+                //     glr_s.active_state.trie2_god.as_ref().unwrap(),
+                // );
 
                 // timeit!("Normalize", {
                 //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
