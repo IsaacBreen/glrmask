@@ -1681,12 +1681,8 @@ impl GrammarConstraint {
         stage_vocab: &mut StageVocab,
     ) -> (Precomputed3, Trie3GodWrapper) {
         crate::debug!(2, "Precomputing Trie 3...");
-        const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
-        const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
-            BelowBottomReductionMode::ContinueFromHallucinateState
-        } else {
-            BelowBottomReductionMode::ContinueFromHallucinateState
-        };
+        // const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromEverything;
+        const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromHallucinateState;
 
         let gss_stack = if BELOW_BOTTOM_REDUCE_MODE == BelowBottomReductionMode::ContinueFromEverything {
             parser.unwrap().get_combined_gss()
