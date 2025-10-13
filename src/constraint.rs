@@ -1851,8 +1851,9 @@ impl GrammarConstraint {
                         let ns = glr_s_copy.active_state.stack.inner.reduce_acc().unwrap().stored_trie_nodes.clone();
                         let mut all_new_below_bottom_cache_nodes = BTreeSet::new();
                         for (_, (_, gss)) in &new_below_bottom_cache {
-                            let acc = gss.inner.reduce_acc().unwrap();
-                            all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
+                            if let Some(acc) = gss.inner.reduce_acc() {
+                                all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
+                            }
                         }
                         assert!(ns.is_subset(&all_new_below_bottom_cache_nodes), "After processing token {:?} at edge to node {}, the GLR state's GSS contains trie nodes not present in the below-bottom cache. GLR state trie nodes: {:?}, below-bottom cache trie nodes: {:?}.", gt, dst_node_wrapper, ns, all_new_below_bottom_cache_nodes);
                     }
