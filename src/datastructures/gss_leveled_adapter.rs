@@ -187,9 +187,30 @@ impl Debug for GSSNode {
     }
 }
 
+// A global, thread-safe counter initialized to 0.
+static GSSNODE_EQ_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl PartialEq for GSSNode {
     fn eq(&self, other: &Self) -> bool {
-        println!("Warning: GSSNode PartialEq compares full stacks, which may be expensive.");
+        // 1. Atomically increment the counter.
+        // Ordering::Relaxed is sufficient here; we don't need strict synchronization
+        // guarantees between threads, just a generally increasing counter.
+        // fetch_add returns the previous value, so we add 1 to get the current count.
+        let count = GSSNODE_EQ_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+
+        // 2. Check if 'count' is a power of 2 using a fast bitwise trick.
+        // If x is a power of 2, its binary representation has exactly one '1'.
+        // (x & (x - 1)) will be 0 only if x is a power of 2 (or x is 0).
+        // This will trigger at counts: 1, 2, 4, 8, 16, 32, 64, ...
+        if (count & (count - 1)) == 0 {
+            eprintln!(
+                "PERFORMANCE WARNING: GSSNode::eq performs expensive full stack comparison. \
+                 Total calls: {}",
+                count
+            );
+        }
+
+        // --- Original expensive logic ---
         let mut a_stacks = self.inner.to_stacks();
         let mut b_stacks = other.inner.to_stacks();
         a_stacks.sort();
