@@ -2793,33 +2793,52 @@ impl GLRParser {
             return;
         }
 
-        let mut all_gss_roots = Vec::new();
-        let mut all_trie_roots = Vec::new();
+        // Group cache entries by value (trie_root, gss_root)
+        // Since Arc<GSSNode> is not Hash, we can't use HashMap.
+        // We'll build up a list of unique values and their keys.
+        type CacheValue = (PrecomputeNode3Index, Arc<GSSNode>);
+        type CacheKey = (NonTerminalID, TerminalID);
+        let mut grouped_entries: Vec<(CacheValue, Vec<CacheKey>)> = Vec::new();
 
-        println!("\n--- Individual GSS Statistics per Cache Entry ---");
-        let mut sorted_keys: Vec<_> = self.stored_below_bottom_cache.keys().collect();
-        sorted_keys.sort();
+        for (key, value) in &self.stored_below_bottom_cache {
+            if let Some((_value, keys)) = grouped_entries.iter_mut().find(|(v, _)| v == value) {
+                keys.push(*key);
+            } else {
+                grouped_entries.push((value.clone(), vec![*key]));
+            }
+        }
 
-        for key in sorted_keys {
-            let (nt_id, tid) = key;
-            let (trie_root, gss_root) = self.stored_below_bottom_cache.get(key).unwrap();
+        println!("\nFound {} unique cache entries out of {} total.", grouped_entries.len(), self.stored_below_bottom_cache.len());
 
-            let nt_name = self.non_terminal_map.get_by_right(nt_id).unwrap();
-            let t_name = self.terminal_map.get_by_right(tid).unwrap();
+        // Sort groups by number of keys to show most common ones first.
+        grouped_entries.sort_by_key(|(_, keys)| std::cmp::Reverse(keys.len()));
+
+        for (i, (value, keys)) in grouped_entries.iter().enumerate() {
+            let (trie_root, gss_root) = value;
+
+            println!("\n--- Unique Entry #{} ({} occurrences) ---", i + 1, keys.len());
 
             let gss_stats = gather_gss_stats(&[gss_root.as_ref()]);
-
-            println!("Entry ({}, {}):", nt_name.0, t_name);
             println!("  GSS Stats: {:?}", gss_stats);
 
-            all_gss_roots.push(gss_root.clone());
-            all_trie_roots.push(*trie_root);
+            let trie_stats = PrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root]);
+            println!("  Trie Stats (root {}): {:?}", trie_root.as_usize(), trie_stats);
+
+            println!("  Associated (NonTerminal, Terminal) pairs:");
+            let mut sorted_keys = keys.clone();
+            sorted_keys.sort(); // Sorts by NonTerminalID then TerminalID
+            for (nt_id, tid) in sorted_keys {
+                let nt_name = self.non_terminal_map.get_by_right(&nt_id).unwrap();
+                let t_name = self.terminal_map.get_by_right(&tid).unwrap();
+                println!("    - ({}, {})", nt_name.0, t_name);
+            }
         }
 
         println!("\n--- Combined Statistics ---");
 
         // Combined GSS stats
-        if !all_gss_roots.is_empty() {
+        if !self.stored_below_bottom_cache.is_empty() {
+            let all_gss_roots: Vec<_> = self.stored_below_bottom_cache.values().map(|(_, gss)| gss.clone()).collect();
             let merged_gss_arc = GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, all_gss_roots.clone());
             let combined_gss_stats = gather_gss_stats(&[merged_gss_arc.as_ref()]);
             println!("Combined GSS Stats (from merging all {} entries):", all_gss_roots.len());
@@ -2827,7 +2846,8 @@ impl GLRParser {
         }
 
         // Combined Trie stats
-        if !all_trie_roots.is_empty() {
+        if !self.stored_below_bottom_cache.is_empty() {
+            let all_trie_roots: Vec<_> = self.stored_below_bottom_cache.values().map(|(tr, _)| *tr).collect();
             let trie_stats = PrecomputeNode3::stats(&self.stored_trie_god, &all_trie_roots);
             println!("\nCombined Stored Trie Stats (from {} roots):", all_trie_roots.len());
             println!("  {:?}", trie_stats);
