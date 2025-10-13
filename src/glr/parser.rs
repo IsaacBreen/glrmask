@@ -575,6 +575,7 @@ impl GLRParser {
             active_state: stack,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            runtime_below_bottom_cache: Default::default(),
         }
     }
 
@@ -584,6 +585,7 @@ impl GLRParser {
             active_state: ParseState::new(),
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            runtime_below_bottom_cache: Default::default(),
         }
     }
 
@@ -594,6 +596,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            runtime_below_bottom_cache: Default::default(),
         };
         parser_state
     }
@@ -604,6 +607,7 @@ impl GLRParser {
             active_state: parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            runtime_below_bottom_cache: Default::default(),
         };
         parser_state
     }
@@ -626,6 +630,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            runtime_below_bottom_cache: Default::default(),
         }
     }
 
@@ -652,6 +657,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            runtime_below_bottom_cache: Default::default(),
         }
     }
 
@@ -1097,6 +1103,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     phase: ParserPhase,
     below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index>,
+    runtime_below_bottom_cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1161,8 +1168,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self
     }
 
-    pub fn set_below_bottom_cache(&mut self, cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index>) {
-        self.below_bottom_cache = cache;
+    pub fn populate_runtime_cache(&mut self) {
+        if let Some(god) = &self.active_state.trie2_god {
+            if let Some(god) = &self.active_state.trie2_god {
+                self.runtime_below_bottom_cache = self.parser.transfer_stored_cache_to_god(god);
+            }
+        }
     }
 
     fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>) {
@@ -1987,31 +1998,53 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             );
                         }
                         std::collections::hash_map::Entry::Vacant(vacant) => {
-                            // --- CACHE MISS ---
-                            if let (Some(cur_tok), Some(dest_god)) = (config.current_token, self.active_state.trie2_god.as_ref()) {
-                                if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
-                                    // --- STORED REUSE on MISS ---
-                                    hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
-                                    let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
-                                        &self.parser.stored_trie_god, dest_god, &[stored_root.clone().into()],
-                                    );
-                                    let new_root = new_roots[0];
-                                    vacant.insert(new_root.clone());
-
-                                    let mut mapped_gss = stored_gss.clone();
-                                    map_trie3_node_ids(&mut mapped_gss, &id_map);
-
+                            // --- CACHE MISS on below_bottom_cache ---
+                            let mut handled = false;
+                            if let Some(cur_tok) = config.current_token {
+                                // 1. Check runtime cache.
+                                if let Some((runtime_root, runtime_gss)) = self.runtime_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
+                                    hit!("GLRParserState::reduce_and_goto::RuntimeCacheHit");
+                                    vacant.insert(runtime_root.clone());
                                     let edge_key = (0, tokens_all.clone());
                                     let edge_value = StateIDBV::max_ones();
-                                    let memo_for_dest = cached_dest_memos.entry(new_root.clone()).or_default();
+                                    let memo_for_dest = cached_dest_memos.entry(runtime_root.clone()).or_default();
                                     deep_add_precompute_trie_edges(
                                         &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                        &mut || new_root.clone(), memo_for_dest,
+                                        &mut || runtime_root.clone(), memo_for_dest,
                                     );
-
-                                    final_shifted.push(mapped_gss);
-                                    continue;
+                                    final_shifted.push(runtime_gss);
+                                    handled = true;
                                 }
+                                // 2. Check stored cache.
+                                else if let Some(dest_god) = self.active_state.trie2_god.as_ref() {
+                                    if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
+                                        // --- STORED REUSE on MISS ---
+                                        hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
+                                        let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+                                            &self.parser.stored_trie_god, dest_god, &[stored_root.clone().into()],
+                                        );
+                                        let new_root = new_roots[0];
+                                        vacant.insert(new_root.clone());
+
+                                        let mut mapped_gss = stored_gss.clone();
+                                        map_trie3_node_ids(&mut mapped_gss, &id_map);
+
+                                        let edge_key = (0, tokens_all.clone());
+                                        let edge_value = StateIDBV::max_ones();
+                                        let memo_for_dest = cached_dest_memos.entry(new_root.clone()).or_default();
+                                        deep_add_precompute_trie_edges(
+                                            &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                            &mut || new_root.clone(), memo_for_dest,
+                                        );
+
+                                        final_shifted.push(mapped_gss);
+                                        handled = true;
+                                    }
+                                }
+                            }
+
+                            if handled {
+                                continue;
                             }
 
                             // --- PURE MISS ---
@@ -2672,42 +2705,36 @@ impl GLRParser {
     pub fn transfer_stored_cache_to_god(
         &self,
         dest_god: &Trie3GodWrapper,
-    ) -> HashMap<BelowBottomCacheKey, PrecomputeNode3Index> {
-        let mut new_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index> = HashMap::new();
-        let mut copied_roots: HashMap<PrecomputeNode3Index, PrecomputeNode3Index> = HashMap::new();
+    ) -> HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)> {
+        let mut new_cache = HashMap::new();
+        // Cache for copied trie subtrees to avoid re-copying the same structure.
+        // Maps old root -> (new root, id map for GSS update)
+        let mut copied_subtrees: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, BTreeMap<PrecomputeNode3Index, PrecomputeNode3Index>)> = HashMap::new();
 
-        // Sort keys for deterministic behavior. When multiple (nt, tid) pairs exist for the same nt,
-        // the one with the largest tid will be used.
         let mut sorted_keys: Vec<_> = self.stored_below_bottom_cache.keys().collect();
         sorted_keys.sort();
 
-        for (nt, tid) in sorted_keys {
-            let (stored_root, _stored_gss) = self.stored_below_bottom_cache.get(&(*nt, *tid)).unwrap();
+        for key in sorted_keys {
+            let (stored_root, stored_gss) = self.stored_below_bottom_cache.get(key).unwrap();
 
-            let cache_key = BelowBottomCacheKey {
-                nonterminal_id: *nt,
-                terminal_id: *tid,
-                source_state_id: StateID(usize::MAX),
-                goto_state_id: StateID(usize::MAX),
-                k: usize::MAX,
-            };
-
-            let new_root = if let Some(new_root) = copied_roots.get(stored_root) {
-                // If we've already copied this trie root for another entry, reuse the copy.
-                new_root.clone()
+            let (new_root, id_map) = if let Some(cached) = copied_subtrees.get(stored_root) {
+                cached.clone()
             } else {
-                // Deep copy the trie subtree from stored_trie_god to dest_god
-                let (new_roots, _id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+                let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
                     &self.stored_trie_god,
                     dest_god,
                     &[(*stored_root).into()],
                 );
                 let new_root = new_roots[0];
-                copied_roots.insert(*stored_root, new_root.clone());
-                new_root
+                let entry = (new_root.clone(), id_map.clone());
+                copied_subtrees.insert(*stored_root, entry.clone());
+                entry
             };
 
-            new_cache.insert(cache_key, new_root);
+            let mut new_gss = stored_gss.clone();
+            map_trie3_node_ids(&mut new_gss, &id_map);
+
+            new_cache.insert(*key, (new_root, new_gss));
         }
 
         new_cache
