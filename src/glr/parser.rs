@@ -254,7 +254,6 @@ pub struct ProcessTokenAdvancedConfig {
     // When set (during a token step), allows reuse of stored precomputations
     // for (nonterminal, terminal) pairs.
     pub current_token: Option<TerminalID>,
-    _phantom: (),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -535,7 +534,7 @@ impl GLRParser {
                 let pushed = s.active_state.stack.as_ref().clone().push(ParseStateEdgeContent { state_id: synthetic_sid });
                 s.active_state.stack = Arc::new(pushed);
                 // Run a single token step with the configured current_token (so downstream caching can reference it)
-                let cfg = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll, current_token: Some(tid) };
+                let cfg = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll, current_token: Some(tid), ..Default::default() };
                 s.process_token_advanced(tid, &cfg);
                 // Store the result in the stored cache
                 // self.stored_below_bottom_cache.insert((nt, tid), (root, s.active_state.stack.clone()));
@@ -2049,6 +2048,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let local_cfg = ProcessTokenAdvancedConfig {
             below_bottom_mode: config.below_bottom_mode,
             current_token: Some(token_id),
+            ..Default::default()
         };
 
         self.log_gss("Phase1/2-start", token_id, false, false);
@@ -2117,7 +2117,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut accepted_states_todo: VecDeque<ParseState> = VecDeque::new();
 
         let mut fuel = config.fuel;
-        let token_config = ProcessTokenAdvancedConfig { below_bottom_mode: config.below_bottom_mode, current_token: None };
+        let token_config = ProcessTokenAdvancedConfig { below_bottom_mode: config.below_bottom_mode, current_token: None, ..Default::default() };
 
         let parser = self.parser;
         // Run the generic action-processing loop with a Default-only selector.
@@ -2231,6 +2231,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let cfg = ProcessTokenAdvancedConfig {
             below_bottom_mode: BelowBottomReductionMode::default(),
             current_token: Some(token_id),
+            ..Default::default()
         };
 
         let parser = s.parser;

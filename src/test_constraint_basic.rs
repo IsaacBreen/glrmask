@@ -1618,7 +1618,7 @@ fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>
     let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
     const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromAll;
-    glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None });
+    glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
 
     // 3. Get stats and assert on the structural sharing factor.
     let stats = glr_state.active_state.stack.inner.stats();
@@ -1690,7 +1690,7 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
     let terminal = Terminal::terminal("VALUE");
     let tid = *parser.terminal_map.get_by_left(&terminal).unwrap();
     let mut glr_state = glr_state.clone();
-    glr_state.process_token_advanced(tid, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None });
+    glr_state.process_token_advanced(tid, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
 
     // 3. Get stats and assert on the structural sharing factor.
     let stats = glr_state.active_state.stack.inner.stats();
@@ -1799,7 +1799,7 @@ fn test_gss_structural_sharing_factor3() -> Result<(), Box<dyn std::error::Error
         let tid = tid.0;
         let terminal = TerminalID(tid);
         let mut glr_state = glr_state.clone();
-        glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None });
+        glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
 
         // 3. Get stats and assert on the structural sharing factor.
         let stats = glr_state.active_state.stack.inner.stats();
@@ -2731,7 +2731,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
         let mut next_glr_state: Option<GLRParserState> = None;
         for (terminal, terminal_id) in &parser.terminal_map {
             let mut glr_state_copy = glr_state.clone();
-            glr_state_copy.process_token_advanced(*terminal_id, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll, current_token: None });
+            glr_state_copy.process_token_advanced(*terminal_id, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll, current_token: None, ..Default::default() });
             let edge_bv = HybridBitset::from_iter(vec![i, terminal_id.0]);
             allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_state_copy.active_state.stack, &edge_bv, &mut HashMap::new(), glr_state_copy.active_state.trie2_god.as_ref().unwrap());
             if glr_state_copy.is_ok() {
