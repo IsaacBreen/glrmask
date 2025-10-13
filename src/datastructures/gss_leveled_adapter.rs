@@ -814,8 +814,7 @@ pub(crate) fn merge_stored_trie_nodes(
     let mut all_node_sets = BTreeSet::new();
     root_arc.inner.visit_accs(|acc| {
         if acc.stored_trie_nodes().iter().any(|n| {
-            n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens
-                != acc.llm_tokens_union
+            true
         }) {
             all_node_sets.insert(acc.stored_trie_nodes().clone());
         }
@@ -861,8 +860,7 @@ pub(crate) fn merge_stored_trie_nodes(
     // --- 5. Transform all Accs, adding edges and updating node sets ---
     transform_all(root_arc, |acc| {
         let needs_merging = acc.stored_trie_nodes().iter().any(|n| {
-            n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens
-                != acc.llm_tokens_union
+            true
         });
 
         if !needs_merging {
