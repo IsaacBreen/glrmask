@@ -220,6 +220,12 @@ impl PartialEq for GSSNode {
 }
 impl Eq for GSSNode {}
 
+impl Hash for GSSNode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // println!("WARNING: GSSNode::hash performs expensive full stack hashing.");
+    }
+}
+
 impl GSSNode {
     pub fn new(acc: Acc) -> Self {
         GSSNode {

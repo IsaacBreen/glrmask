@@ -2946,10 +2946,10 @@ impl GLRParser {
         }
 
         println!("\n--- Terminal Equivalence Classes ---");
-        let mut nt_ids: Vec<_> = self.non_terminal_map.values().copied().collect();
+        let mut nt_ids: Vec<_> = self.non_terminal_map.right_values().copied().collect();
         nt_ids.sort();
 
-        let mut term_ids: Vec<_> = self.terminal_map.values().copied().collect();
+        let mut term_ids: Vec<_> = self.terminal_map.right_values().copied().collect();
         term_ids.sort();
 
         let mut terminal_signatures: BTreeMap<TerminalID, Vec<Option<&CacheValue>>> = BTreeMap::new();
