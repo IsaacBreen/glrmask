@@ -1168,12 +1168,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self
     }
 
-    pub fn populate_runtime_cache(&mut self) {
-        if let Some(god) = &self.active_state.trie2_god {
-            if let Some(god) = &self.active_state.trie2_god {
-                self.runtime_below_bottom_cache = self.parser.transfer_stored_cache_to_god(god);
-            }
-        }
+    pub fn set_runtime_cache(&mut self, cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>) {
+        self.runtime_below_bottom_cache = cache;
     }
 
     fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>) {
@@ -2709,7 +2705,7 @@ impl GLRParser {
         let mut new_cache = HashMap::new();
         // Cache for copied trie subtrees to avoid re-copying the same structure.
         // Maps old root -> (new root, id map for GSS update)
-        let mut copied_subtrees: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, BTreeMap<PrecomputeNode3Index, PrecomputeNode3Index>)> = HashMap::new();
+        let mut copied_subtrees: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, HashMap<PrecomputeNode3Index, PrecomputeNode3Index>)> = HashMap::new();
 
         let mut sorted_keys: Vec<_> = self.stored_below_bottom_cache.keys().collect();
         sorted_keys.sort();

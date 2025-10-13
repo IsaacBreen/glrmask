@@ -1758,9 +1758,9 @@ impl GrammarConstraint {
         let trie3_end = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
 
         let mut stored_caches: HashMap<Trie2Index, HashMap<BelowBottomCacheKey, PrecomputeNode3Index>> = HashMap::new();
-        let new_below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index> = parser.transfer_stored_cache_to_god(&trie3_god);
+        let new_below_bottom_cache: HashMap<_, _> = parser.transfer_stored_cache_to_god(&trie3_god);
         for (_, glr_state) in initial_values_for_map.iter_mut() {
-            glr_state.set_below_bottom_cache(new_below_bottom_cache.clone());
+            glr_state.set_runtime_cache(new_below_bottom_cache.clone());
         }
 
         crate::debug!(2, "Running special_map_grouped for Trie 3 precomputation");
@@ -1843,7 +1843,7 @@ impl GrammarConstraint {
                         //     parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap())
                         // }).clone();
                         let new_below_bottom_cache = parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap());
-                        glr_s_copy.set_below_bottom_cache(new_below_bottom_cache.clone());
+                        glr_s_copy.set_runtime_cache(new_below_bottom_cache.clone());
                         // glr_s_copy.set_below_bottom_cache(HashMap::new());
                         glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: false, ..Default::default() });
                         // glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: true, ..Default::default() });
