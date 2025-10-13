@@ -254,6 +254,7 @@ pub struct ProcessTokenAdvancedConfig {
     // When set (during a token step), allows reuse of stored precomputations
     // for (nonterminal, terminal) pairs.
     pub current_token: Option<TerminalID>,
+    _phantom: (),
 }
 
 #[derive(Debug, Clone, Copy)]
