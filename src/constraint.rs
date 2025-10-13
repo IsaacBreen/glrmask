@@ -1781,7 +1781,7 @@ impl GrammarConstraint {
                 // allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new(), glr_s.active_state.trie2_god.as_ref().unwrap());
 
                 if let Some(gt) = edge_grammar_token_opt {
-                    // glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
+                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
                     let stats = glr_s.stats();
                     crate::debug!(4, "After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes(), stats.total_edges());
 
@@ -1838,34 +1838,34 @@ impl GrammarConstraint {
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
 
-                    // allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
+                    allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
 
-                    if let Some(gt) = edge_grammar_token_opt {
-                        // let new_below_bottom_cache = stored_caches.entry(dst_node_wrapper.clone()).or_insert_with(|| {
-                        //     parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap())
-                        // }).clone();
-                        // let new_below_bottom_cache = parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap());
-                        glr_s_copy.set_runtime_cache(new_below_bottom_cache.clone());
-                        // glr_s_copy.set_below_bottom_cache(HashMap::new());
-                        glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: false, ..Default::default() });
-                        if glr_s_copy.is_ok() {
-                            let ns = glr_s_copy.active_state.stack.inner.reduce_acc().unwrap().stored_trie_nodes.clone();
-                            let mut all_new_below_bottom_cache_nodes = BTreeSet::new();
-                            for (_, (_, gss)) in &new_below_bottom_cache {
-                                if let Some(acc) = gss.inner.reduce_acc() {
-                                    all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
-                                }
-                            }
-                            // Add start nodes
-                            for (_, node) in &precomputed3 {
-                                all_new_below_bottom_cache_nodes.insert(*node);
-                            }
-                            let ns = ns.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
-                            let all_new_below_bottom_cache_nodes = all_new_below_bottom_cache_nodes.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
-                            println!("ns: {:?}, all_new_below_bottom_cache_nodes: {:?}", ns, all_new_below_bottom_cache_nodes);
-                            assert!(ns.is_subset(&all_new_below_bottom_cache_nodes), "After processing token {:?} at edge to node {}, the GLR state's GSS contains trie nodes not present in the below-bottom cache.\nGLR state trie nodes: {:?}\nBelow-bottom cache trie nodes: {:?}\nGLR state: {}", gt, dst_node_wrapper, ns, all_new_below_bottom_cache_nodes, glr_s_copy);
-                        }
-                    }
+                    // if let Some(gt) = edge_grammar_token_opt {
+                    //     // let new_below_bottom_cache = stored_caches.entry(dst_node_wrapper.clone()).or_insert_with(|| {
+                    //     //     parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap())
+                    //     // }).clone();
+                    //     // let new_below_bottom_cache = parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap());
+                    //     glr_s_copy.set_runtime_cache(new_below_bottom_cache.clone());
+                    //     // glr_s_copy.set_below_bottom_cache(HashMap::new());
+                    //     glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: false, ..Default::default() });
+                    //     if glr_s_copy.is_ok() {
+                    //         let ns = glr_s_copy.active_state.stack.inner.reduce_acc().unwrap().stored_trie_nodes.clone();
+                    //         let mut all_new_below_bottom_cache_nodes = BTreeSet::new();
+                    //         for (_, (_, gss)) in &new_below_bottom_cache {
+                    //             if let Some(acc) = gss.inner.reduce_acc() {
+                    //                 all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
+                    //             }
+                    //         }
+                    //         // Add start nodes
+                    //         for (_, node) in &precomputed3 {
+                    //             all_new_below_bottom_cache_nodes.insert(*node);
+                    //         }
+                    //         let ns = ns.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
+                    //         let all_new_below_bottom_cache_nodes = all_new_below_bottom_cache_nodes.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
+                    //         println!("ns: {:?}, all_new_below_bottom_cache_nodes: {:?}", ns, all_new_below_bottom_cache_nodes);
+                    //         assert!(ns.is_subset(&all_new_below_bottom_cache_nodes), "After processing token {:?} at edge to node {}, the GLR state's GSS contains trie nodes not present in the below-bottom cache.\nGLR state trie nodes: {:?}\nBelow-bottom cache trie nodes: {:?}\nGLR state: {}", gt, dst_node_wrapper, ns, all_new_below_bottom_cache_nodes, glr_s_copy);
+                    //     }
+                    // }
 
 
                     // println!("At edge {:?} with tokens {:?}", edge_grammar_token_opt, edge_bv);
