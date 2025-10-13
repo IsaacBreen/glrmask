@@ -363,6 +363,11 @@ impl GSSNode {
         }
     }
 
+    pub fn normalize_many(nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Vec<Arc<GSSNode>> {
+        let leveled_gsss: Vec<LeveledGSS<ParseStateEdgeContent, Acc>> = nodes.into_iter().map(|n| n.inner.clone()).collect();
+        LeveledGSS::normalize_many(leveled_gsss).into_iter().map(|inner| Arc::new(GSSNode { inner })).collect()
+    }
+
     pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
         let self_arc = Arc::new(self.clone());
         let mut dummy_memo = HashMap::new();

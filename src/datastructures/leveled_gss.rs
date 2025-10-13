@@ -2346,6 +2346,29 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner }
     }
 
+    pub fn normalize_many(roots: impl IntoIterator<Item = Self>) -> Vec<Self> {
+        let mut memo_upper: StdHashMap<usize, (usize, Arc<Upper<T, A>>)> = StdHashMap::new();
+        let mut memo_lower: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
+        let mut interner_upper: NormalizationUpperInterner<T, A> = Default::default();
+        let mut interner_lower: NormalizationLowerInterner<T> = Default::default();
+
+        let mut canonical_roots = Vec::new();
+        for root in roots.into_iter() {
+            // 1) Fuse first for optimal structure (collapses multi-depth slots)
+            let fused = root.fuse(None);
+            // 2) Canonicalize/Hash-cons
+            let (_id, inner) = normalize_canonicalize_upper::<T, A>(
+                &fused.inner,
+                &mut memo_upper,
+                &mut memo_lower,
+                &mut interner_upper,
+                &mut interner_lower,
+            );
+            canonical_roots.push(LeveledGSS { inner });
+        }
+        canonical_roots
+    }
+
     fn expand_lower_recursive(
         node: &Arc<Lower<T>>,
         acc: &A,

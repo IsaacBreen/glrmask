@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::constraint::{PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, LLMTokenBV};
+use crate::constraint::{PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::gss_leveled_adapter::{GSSNode, map_trie3_node_ids};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::table::{NonTerminalID, TerminalID};
@@ -36,19 +36,35 @@ pub fn optimize_stored_cache(
     if node_to_rep.is_empty() {
         return;
     }
-
-    // 3. Update cache entries using the mapping.
+    
+    // 3. Update cache entries using the Trie mapping.
     for (_key, (trie_root, gss_root)) in cache.iter_mut() {
         // Update Trie Root
         if let Some(rep) = node_to_rep.get(trie_root) {
             *trie_root = *rep;
         }
-
         // Update GSS Root (remap internal trie node indices stored in Accs)
         map_trie3_node_ids(gss_root, &node_to_rep);
     }
 
-    // 4. Final cleanup: GC unreachable nodes.
+    // 4. GSS Normalization and Sharing
+    let gss_roots_vec: Vec<Arc<GSSNode>> = cache.values().map(|(_, gss)| gss.clone()).collect();
+    let canonical_gss_roots = GSSNode::normalize_many(gss_roots_vec.clone());
+
+    let mut gss_ptr_to_canonical: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
+    for (old_arc, new_arc) in gss_roots_vec.iter().zip(canonical_gss_roots.into_iter()) {
+        gss_ptr_to_canonical.insert(Arc::as_ptr(old_arc), new_arc);
+    }
+
+    // Update cache entries with canonical GSS roots
+    for (_key, (_trie_root, gss_root)) in cache.iter_mut() {
+        let old_ptr = Arc::as_ptr(gss_root);
+        if let Some(canonical_arc) = gss_ptr_to_canonical.get(&old_ptr) {
+            *gss_root = canonical_arc.clone();
+        }
+    }
+
+    // 5. Final cleanup: GC unreachable nodes.
     let final_roots: Vec<PrecomputeNode3Index> = cache.values().map(|(r, _)| *r).collect();
     Trie::gc(trie3_god, &final_roots);
     Trie::recompute_all_max_depths(trie3_god, &final_roots);
