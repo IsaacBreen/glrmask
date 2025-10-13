@@ -444,6 +444,67 @@ mod tests {
         assert_eq!(stats_before.num_structurally_unique_nodes, 6);
         assert_eq!(stats_after.num_structurally_unique_nodes, 5);
     }
+
+    #[test]
+    fn test_split_at_depth() {
+        let gss = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),
+            (&["A", "D"], &[2]),
+            (&["E"], &[3]),
+        ]);
+
+        // Split at depth 1
+        let (below1, above1) = gss.split_at_depth(1);
+
+        let expected_below1 = gss_from_str_stacks(&[
+            (&["B", "C"], &[1]),
+            (&["D"], &[2]),
+            (&[], &[3]),
+        ]);
+        let expected_above1 = gss_from_str_stacks(&[
+            (&["A"], &[1, 2]),
+            (&["E"], &[3]),
+        ]);
+
+        assert_eq!(below1.to_stacks().into_iter().collect::<HashSet<_>>(), expected_below1.to_stacks().into_iter().collect::<HashSet<_>>());
+        assert_eq!(above1.to_stacks().into_iter().collect::<HashSet<_>>(), expected_above1.to_stacks().into_iter().collect::<HashSet<_>>());
+
+        // Split at depth 2
+        let (below2, above2) = gss.split_at_depth(2);
+        let expected_below2 = gss_from_str_stacks(&[
+            (&["C"], &[1]),
+            (&[], &[2]),
+        ]);
+        let expected_above2 = gss_from_str_stacks(&[
+            (&["A", "B"], &[1]),
+            (&["A", "D"], &[2]),
+            (&["E"], &[3]),
+        ]);
+        assert_eq!(below2.to_stacks().into_iter().collect::<HashSet<_>>(), expected_below2.to_stacks().into_iter().collect::<HashSet<_>>());
+        assert_eq!(above2.to_stacks().into_iter().collect::<HashSet<_>>(), expected_above2.to_stacks().into_iter().collect::<HashSet<_>>());
+    }
+
+    #[test]
+    fn test_accs_by_depth() {
+        let gss = gss_from_str_stacks(&[
+            (&["A", "B"], &[1]), // len 2
+            (&["C", "D"], &[2]), // len 2
+            (&["E"], &[3]),       // len 1
+            (&[], &[4]),         // len 0
+        ]);
+
+        let accs = gss.accs_by_depth();
+
+        let mut expected = BTreeMap::new();
+        expected.insert(0, IntAcc::new(&[4]));
+        expected.insert(1, IntAcc::new(&[3]));
+        expected.insert(2, IntAcc::new(&[1, 2]));
+
+        assert_eq!(accs.len(), 3);
+        assert_eq!(accs.get(&0), expected.get(&0));
+        assert_eq!(accs.get(&1), expected.get(&1));
+        assert_eq!(accs.get(&2), expected.get(&2));
+    }
 }
 
 // --------------------
@@ -743,6 +804,218 @@ where
 
             let new_inner = new_lower(new_children, keep_empty);
             Some(new_interface(new_inner, i.acc.clone()))
+        }
+    }
+}
+
+fn truncate_lower<T: Clone + Eq + Hash>(
+    node: &Arc<Lower<T>>,
+    current_depth: isize,
+    max_len: isize,
+    memo: &mut StdHashMap<usize, Option<Arc<Lower<T>>>>,
+) -> Option<Arc<Lower<T>>> {
+    let ptr = Arc::as_ptr(node) as usize;
+    if let Some(cached) = memo.get(&ptr) {
+        return cached.clone();
+    }
+
+    if current_depth == max_len {
+        let res = if node.empty || !node.children.is_empty() {
+            Some(new_lower(IHashMap::new(), true))
+        } else {
+            None
+        };
+        memo.insert(ptr, res.clone());
+        return res;
+    }
+
+    let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+    let mut children_identical = true;
+
+    for (v, kids) in node.children.iter() {
+        let mut new_kids_map = OrdMap::new();
+        let mut kids_identical = true;
+        for (depth, child) in kids.iter() {
+            if let Some(new_child) = truncate_lower(child, current_depth + 1, max_len, memo) {
+                if !Arc::ptr_eq(child, &new_child) || *depth != new_child.max_depth {
+                    kids_identical = false;
+                }
+                new_kids_map.insert(new_child.max_depth, new_child);
+            } else {
+                kids_identical = false;
+            }
+        }
+        if !new_kids_map.is_empty() {
+            new_children.insert(v.clone(), new_kids_map);
+        } else {
+            children_identical = false;
+        }
+        children_identical &= kids_identical;
+    }
+
+    if node.empty && children_identical {
+        memo.insert(ptr, Some(node.clone()));
+        return Some(node.clone());
+    }
+
+    let res = if !node.empty && new_children.is_empty() {
+        None
+    } else {
+        Some(new_lower(new_children, node.empty))
+    };
+    memo.insert(ptr, res.clone());
+    res
+}
+
+fn truncate_upper<T, A>(
+    node: &Arc<Upper<T, A>>,
+    current_depth: isize,
+    max_len: isize,
+    memo_upper: &mut StdHashMap<usize, Option<Arc<Upper<T, A>>>>,
+    memo_lower: &mut StdHashMap<usize, Option<Arc<Lower<T>>>>,
+) -> Option<Arc<Upper<T, A>>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    let ptr = Arc::as_ptr(node) as usize;
+    if let Some(cached) = memo_upper.get(&ptr) {
+        return cached.clone();
+    }
+
+    if current_depth == max_len {
+        let sub_gss = LeveledGSS {
+            inner: node.clone(),
+        };
+        let res = if let Some(acc) = sub_gss.reduce_acc() {
+            let terminal_lower = new_lower(IHashMap::new(), true);
+            Some(new_interface(terminal_lower, acc))
+        } else {
+            None
+        };
+        memo_upper.insert(ptr, res.clone());
+        return res;
+    }
+
+    let res = match &**node {
+        Upper::Branch(b) => {
+            let new_empty = b.empty.clone();
+            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+            let mut children_identical = true;
+
+            for (v, kids) in b.children.iter() {
+                let mut new_kids_map = OrdMap::new();
+                let mut kids_identical = true;
+                for (depth, child) in kids.iter() {
+                    if let Some(new_child) =
+                        truncate_upper(child, current_depth + 1, max_len, memo_upper, memo_lower)
+                    {
+                        if !Arc::ptr_eq(child, &new_child) || *depth != new_child.max_depth() {
+                            kids_identical = false;
+                        }
+                        new_kids_map.insert(new_child.max_depth(), new_child);
+                    } else {
+                        kids_identical = false;
+                    }
+                }
+                if !new_kids_map.is_empty() {
+                    new_children.insert(v.clone(), new_kids_map);
+                } else {
+                    children_identical = false;
+                }
+                children_identical &= kids_identical;
+            }
+
+            if new_empty == b.empty && children_identical {
+                memo_upper.insert(ptr, Some(node.clone()));
+                return Some(node.clone());
+            }
+
+            if new_children.is_empty() && new_empty.is_none() {
+                None
+            } else {
+                Some(try_promote(&new_branch(new_children, new_empty)))
+            }
+        }
+        Upper::Interface(i) => {
+            if let Some(new_inner) = truncate_lower(&i.inner, current_depth, max_len, memo_lower) {
+                if Arc::ptr_eq(&i.inner, &new_inner) {
+                    Some(node.clone())
+                } else {
+                    Some(new_interface(new_inner, i.acc.clone()))
+                }
+            } else {
+                None
+            }
+        }
+    };
+
+    memo_upper.insert(ptr, res.clone());
+    res
+}
+
+fn accs_by_depth_lower<T, A>(
+    node: &Arc<Lower<T>>,
+    current_depth: isize,
+    acc: &A,
+    accs: &mut BTreeMap<isize, A>,
+    memo_lower: &mut HashSet<usize>,
+) where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    let ptr = Arc::as_ptr(node) as usize;
+    if !memo_lower.insert(ptr) {
+        return;
+    }
+
+    if node.empty {
+        if let Some(existing) = accs.get_mut(&current_depth) {
+            *existing = existing.merge(acc);
+        } else {
+            accs.insert(current_depth, acc.clone());
+        }
+    }
+
+    for kids in node.children.values() {
+        for child in kids.values() {
+            accs_by_depth_lower(child, current_depth + 1, acc, accs, memo_lower);
+        }
+    }
+}
+
+fn accs_by_depth_upper<T, A>(
+    node: &Arc<Upper<T, A>>,
+    current_depth: isize,
+    accs: &mut BTreeMap<isize, A>,
+    memo_upper: &mut HashSet<usize>,
+) where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    let ptr = Arc::as_ptr(node) as usize;
+    if !memo_upper.insert(ptr) {
+        return;
+    }
+
+    match &**node {
+        Upper::Branch(b) => {
+            if let Some(acc) = &b.empty {
+                if let Some(existing) = accs.get_mut(&current_depth) {
+                    *existing = existing.merge(acc);
+                } else {
+                    accs.insert(current_depth, acc.clone());
+                }
+            }
+            for kids in b.children.values() {
+                for child in kids.values() {
+                    accs_by_depth_upper(child, current_depth + 1, accs, memo_upper);
+                }
+            }
+        }
+        Upper::Interface(i) => {
+            let mut memo_lower = HashSet::new();
+            accs_by_depth_lower(&i.inner, current_depth, &i.acc, accs, &mut memo_lower);
         }
     }
 }
@@ -2482,6 +2755,43 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Some(reduced)
     }
 
+    pub fn truncate(&self, max_len: isize) -> Self {
+        if max_len < 0 {
+            return Self::empty();
+        }
+
+        let mut memo_upper = StdHashMap::new();
+        let mut memo_lower = StdHashMap::new();
+
+        let new_inner = truncate_upper(
+            &self.inner,
+            0,
+            max_len,
+            &mut memo_upper,
+            &mut memo_lower,
+        );
+
+        new_inner.map_or_else(Self::empty, |inner| Self { inner })
+    }
+
+    pub fn split_at_depth(&self, depth: isize) -> (Self, Self) {
+        if depth < 0 {
+            return (self.clone(), Self::empty());
+        }
+        let below = self.popn(depth);
+        let above = self.truncate(depth);
+        (below, above)
+    }
+
+    pub fn accs_by_depth(&self) -> BTreeMap<isize, A>
+    where
+        A: Ord,
+    {
+        let mut accs = BTreeMap::new();
+        let mut memo_upper = HashSet::new();
+        accs_by_depth_upper(&self.inner, 0, &mut accs, &mut memo_upper);
+        accs
+    }
 
     pub fn stats(&self) -> LeveledGSSStats<T, A> {
         let top_values: HashSet<T> = self.inner.children_keys().into_iter().collect();
