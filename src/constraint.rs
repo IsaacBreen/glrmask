@@ -1855,7 +1855,7 @@ impl GrammarConstraint {
                                 all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
                             }
                         }
-                        assert!(ns.is_subset(&all_new_below_bottom_cache_nodes), "After processing token {:?} at edge to node {}, the GLR state's GSS contains trie nodes not present in the below-bottom cache. GLR state trie nodes: {:?}, below-bottom cache trie nodes: {:?}.", gt, dst_node_wrapper, ns, all_new_below_bottom_cache_nodes);
+                        assert!(ns.is_subset(&all_new_below_bottom_cache_nodes), "After processing token {:?} at edge to node {}, the GLR state's GSS contains trie nodes not present in the below-bottom cache.\nGLR state trie nodes: {:?}\nBelow-bottom cache trie nodes: {:?}\nGLR state: {}", gt, dst_node_wrapper, ns, all_new_below_bottom_cache_nodes, glr_s_copy);
                     }
 
 
