@@ -248,12 +248,23 @@ pub enum BelowBottomReductionMode {
     Panic,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ProcessTokenAdvancedConfig {
     pub below_bottom_mode: BelowBottomReductionMode,
     // When set (during a token step), allows reuse of stored precomputations
     // for (nonterminal, terminal) pairs.
     pub current_token: Option<TerminalID>,
+    pub reset_cache: bool,
+}
+
+impl Default for ProcessTokenAdvancedConfig {
+    fn default() -> Self {
+        Self {
+            below_bottom_mode: BelowBottomReductionMode::default(),
+            current_token: None,
+            reset_cache: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -534,7 +545,7 @@ impl GLRParser {
                 let pushed = s.active_state.stack.as_ref().clone().push(ParseStateEdgeContent { state_id: synthetic_sid });
                 s.active_state.stack = Arc::new(pushed);
                 // Run a single token step with the configured current_token (so downstream caching can reference it)
-                let cfg = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll, current_token: Some(tid), ..Default::default() };
+                let cfg = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll, current_token: Some(tid), reset_cache: false, ..Default::default() };
                 s.process_token_advanced(tid, &cfg);
                 // Store the result in the stored cache
                 // self.stored_below_bottom_cache.insert((nt, tid), (root, s.active_state.stack.clone()));
