@@ -1688,6 +1688,14 @@ impl GrammarConstraint {
             BelowBottomReductionMode::ContinueFromHallucinateState
         };
 
+        let gss_stack = if BELOW_BOTTOM_REDUCE_MODE == BelowBottomReductionMode::ContinueFromEverything {
+            parser.unwrap().get_combined_gss()
+        } else if BELOW_BOTTOM_REDUCE_MODE == BelowBottomReductionMode::ContinueFromHallucinateState {
+            parser.unwrap().get_hallucinated_gss()
+        } else {
+            todo!()
+        };
+
         let mut precomputed3 = BTreeMap::new();
         let trie3_god = Trie3GodWrapper::new();
 
@@ -1701,9 +1709,7 @@ impl GrammarConstraint {
                 let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
                 // acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
 
-                let gss_stack = parser.get_combined_gss();
-
-                let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
+                let mut glr_state = parser.init_glr_parser_from_stack(gss_stack.clone()).with_god(trie3_god.clone());
                 glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
                 if glr_state.active_state.stack.inner.stats().structural_sharing_factor < 0.4 {
                     println!("--- Results for token ID {} ---", tid);
@@ -1734,7 +1740,7 @@ impl GrammarConstraint {
         #[cfg(rustrover)]
         let it = trie1_roots_to_tokenizer_states.iter();
 
-        let gss_stack_base = (*parser.get_combined_gss()).clone();
+        let gss_stack_base = (*gss_stack).clone();
 
         for (trie1_root, tokenizer_state_ids) in it {
             let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
