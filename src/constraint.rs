@@ -1832,6 +1832,8 @@ impl GrammarConstraint {
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
 
+                    allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
+
                     if let Some(gt) = edge_grammar_token_opt {
                         let new_below_bottom_cache = stored_caches.entry(dst_node_wrapper.clone()).or_insert_with(|| {
                             parser.transfer_stored_cache_to_god(&glr_s_copy.active_state.trie2_god.clone().unwrap())
@@ -1847,7 +1849,6 @@ impl GrammarConstraint {
                         // println!("  {}: {:?}", i, p);
                     // }
                     // allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
-                    allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
                     // println!("After pruning to edge tokens:");
                     // for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
                         // println!("  {}: {:?}", i, p);
