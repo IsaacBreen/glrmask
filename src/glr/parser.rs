@@ -1246,15 +1246,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                         )
                     };
-                    // deep_add_precompute_trie_edges(
-                    //     &mut constrained.stack,
-                    //     god,
-                    //     &key,
-                    //     bv,
-                    //     &tokens_all,
-                    //     &mut dest_provider,
-                    //     &mut memo,
-                    // );
+                    deep_add_precompute_trie_edges(
+                        &mut constrained.stack,
+                        god,
+                        &key,
+                        bv,
+                        &tokens_all,
+                        &mut dest_provider,
+                        &mut memo,
+                    );
                 }
                 Some(constrained)
             })
@@ -1874,15 +1874,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 );
                                 (new_dest, PruneAndTransformRecursiveMemo::default())
                             });
-                            // deep_add_precompute_trie_edges(
-                            //     &mut parent_after_filter,
-                            //     god,
-                            //     &edge_key_all_tokens_zero_k,
-                            //     bv,
-                            //     &tokens_all,
-                            //     &mut || dest.clone(),
-                            //     memo,
-                            // );
+                            deep_add_precompute_trie_edges(
+                                &mut parent_after_filter,
+                                god,
+                                &edge_key_all_tokens_zero_k,
+                                bv,
+                                &tokens_all,
+                                &mut || dest.clone(),
+                                memo,
+                            );
                         }
 
                         // Accept contribution (store isolated parent)
@@ -1988,10 +1988,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let edge_key = (0, tokens_all.clone());
                             let edge_value = StateIDBV::max_ones();
                             let memo_for_dest = cached_dest_memos.entry(cached_dest.clone()).or_default();
-                            // deep_add_precompute_trie_edges(
-                            //     &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                            //     &mut || cached_dest.clone(), memo_for_dest,
-                            // );
+                            deep_add_precompute_trie_edges(
+                                &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                &mut || cached_dest.clone(), memo_for_dest,
+                            );
                         }
                         std::collections::hash_map::Entry::Vacant(vacant) => {
                             // --- CACHE MISS on below_bottom_cache ---
@@ -2003,10 +2003,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let edge_key = (0, tokens_all.clone());
                                     let edge_value = StateIDBV::max_ones();
                                     let memo_for_dest = cached_dest_memos.entry(runtime_root.clone()).or_default();
-                                    // deep_add_precompute_trie_edges(
-                                    //     &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                    //     &mut || runtime_root.clone(), memo_for_dest,
-                                    // );
+                                    deep_add_precompute_trie_edges(
+                                        &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                        &mut || runtime_root.clone(), memo_for_dest,
+                                    );
                                     final_shifted.push(runtime_gss);
                                     continue;
                                 }
@@ -2027,10 +2027,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         let edge_key = (0, tokens_all.clone());
                                         let edge_value = StateIDBV::max_ones();
                                         let memo_for_dest = cached_dest_memos.entry(new_root.clone()).or_default();
-                                        // deep_add_precompute_trie_edges(
-                                        //     &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                        //     &mut || new_root.clone(), memo_for_dest,
-                                        // );
+                                        deep_add_precompute_trie_edges(
+                                            &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                            &mut || new_root.clone(), memo_for_dest,
+                                        );
 
                                         final_shifted.push(mapped_gss);
                                         continue;
@@ -2047,10 +2047,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let edge_key = (0, tokens_all.clone());
                             let edge_value = StateIDBV::max_ones();
                             let memo_for_dest = cached_dest_memos.entry(new_dest.clone()).or_default();
-                            // deep_add_precompute_trie_edges(
-                            //     &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                            //     &mut || new_dest.clone(), memo_for_dest,
-                            // );
+                            deep_add_precompute_trie_edges(
+                                &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                &mut || new_dest.clone(), memo_for_dest,
+                            );
                             vacant.insert(new_dest);
                             final_out.push(new_gss_arc);
                         }
