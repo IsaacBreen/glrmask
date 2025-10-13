@@ -3060,7 +3060,7 @@ impl GLRParser {
         if !self.stored_below_bottom_cache.is_empty() {
             let all_trie_roots: Vec<_> = self.stored_below_bottom_cache.values().map(|(tr, _)| *tr).collect();
             let trie_stats = PrecomputeNode3::stats(&self.stored_trie_god, &all_trie_roots);
-            println!("\nCombined Stored Trie Stats (from {} roots):", all_trie_roots.len());
+            println!("\nCombined Stored Trie Stats (from {} total cache entries):", all_trie_roots.len());
             println!("  {:?}", trie_stats);
         }
 

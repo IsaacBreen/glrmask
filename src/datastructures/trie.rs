@@ -603,8 +603,25 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             };
         }
 
+        let unique_roots: HashSet<_> = roots.iter().cloned().collect();
+        let num_unique_roots = unique_roots.len();
+
         let reachable_nodes = Self::all_nodes(arena, roots);
         let num_reachable_nodes = reachable_nodes.len();
+
+        if num_reachable_nodes == 0 {
+            return TrieStats {
+                num_reachable_nodes: 0,
+                num_reachable_edges: 0,
+                max_depth: 0,
+                num_roots: num_unique_roots,
+                num_leaves: 0,
+                max_in_degree: 0,
+                avg_in_degree: 0.0,
+                max_out_degree: 0,
+                avg_out_degree: 0.0,
+            };
+        }
 
         let mut num_reachable_edges = 0;
         let mut max_depth = 0;
@@ -647,7 +664,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             num_reachable_nodes,
             num_reachable_edges,
             max_depth,
-            num_roots: roots.len(),
+            num_roots: num_unique_roots,
             num_leaves,
             max_in_degree,
             avg_in_degree,
