@@ -1848,17 +1848,19 @@ impl GrammarConstraint {
                         glr_s_copy.set_runtime_cache(new_below_bottom_cache.clone());
                         // glr_s_copy.set_below_bottom_cache(HashMap::new());
                         glr_s_copy.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, reset_cache: false, ..Default::default() });
-                        let ns = glr_s_copy.active_state.stack.inner.reduce_acc().unwrap().stored_trie_nodes.clone();
-                        let mut all_new_below_bottom_cache_nodes = BTreeSet::new();
-                        for (_, (_, gss)) in &new_below_bottom_cache {
-                            if let Some(acc) = gss.inner.reduce_acc() {
-                                all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
+                        if glr_s_copy.is_ok() {
+                            let ns = glr_s_copy.active_state.stack.inner.reduce_acc().unwrap().stored_trie_nodes.clone();
+                            let mut all_new_below_bottom_cache_nodes = BTreeSet::new();
+                            for (_, (_, gss)) in &new_below_bottom_cache {
+                                if let Some(acc) = gss.inner.reduce_acc() {
+                                    all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
+                                }
                             }
+                            let ns = ns.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
+                            let all_new_below_bottom_cache_nodes = all_new_below_bottom_cache_nodes.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
+                            println!("ns: {:?}, all_new_below_bottom_cache_nodes: {:?}", ns, all_new_below_bottom_cache_nodes);
+                            // assert!(ns.is_subset(&all_new_below_bottom_cache_nodes), "After processing token {:?} at edge to node {}, the GLR state's GSS contains trie nodes not present in the below-bottom cache.\nGLR state trie nodes: {:?}\nBelow-bottom cache trie nodes: {:?}\nGLR state: {}", gt, dst_node_wrapper, ns, all_new_below_bottom_cache_nodes, glr_s_copy);
                         }
-                        let ns = ns.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
-                        let all_new_below_bottom_cache_nodes = all_new_below_bottom_cache_nodes.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
-                        println!("ns: {:?}, all_new_below_bottom_cache_nodes: {:?}", ns, all_new_below_bottom_cache_nodes);
-                        // assert!(ns.is_subset(&all_new_below_bottom_cache_nodes), "After processing token {:?} at edge to node {}, the GLR state's GSS contains trie nodes not present in the below-bottom cache.\nGLR state trie nodes: {:?}\nBelow-bottom cache trie nodes: {:?}\nGLR state: {}", gt, dst_node_wrapper, ns, all_new_below_bottom_cache_nodes, glr_s_copy);
                     }
 
 
