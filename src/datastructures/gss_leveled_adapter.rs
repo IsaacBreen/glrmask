@@ -705,59 +705,41 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
 
     transform_all(root_arc, |acc| {
         let mut final_nodes = BTreeSet::new();
-        let mut changed = false;
 
         for source_node in acc.stored_trie_nodes() {
-            let needs_update = !source_node
-                .as_arc()
-                .read(stored_trie_god)
-                .expect("poison")
-                .value
-                .live_tokens
-                .is_subset(allowed_tokens);
+            let dest_node = source_to_dest_map
+                .entry(source_node.clone())
+                .or_insert_with(|| {
+                    StoredPrecomputeNodeIndex::new(
+                        stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                            crate::constraint::PrecomputedNodeContents::internal(),
+                        )),
+                    )
+                })
+                .clone();
 
-            if needs_update {
-                changed = true;
-                let dest_node = source_to_dest_map
-                    .entry(source_node.clone())
-                    .or_insert_with(|| {
-                        StoredPrecomputeNodeIndex::new(
-                            stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                                crate::constraint::PrecomputedNodeContents::internal(),
-                            )),
-                        )
-                    })
-                    .clone();
+            let edge_key = (0, allowed_tokens.clone());
+            let edge_value = StateIDBV::max_ones();
 
-                let edge_key = (0, allowed_tokens.clone());
-                let edge_value = StateIDBV::max_ones();
+            let inserter = crate::datastructures::trie::EdgeInserter::new(
+                stored_trie_god,
+                source_node.as_arc().clone(),
+                edge_key,
+                edge_value,
+                |e, n| *e |= n,
+                |node_value, _| node_value.live_tokens |= allowed_tokens,
+                |_, _| {},
+            );
+            inserter.try_destination(dest_node.clone()).expect("Cycle detected");
 
-                let inserter = crate::datastructures::trie::EdgeInserter::new(
-                    stored_trie_god,
-                    source_node.as_arc().clone(),
-                    edge_key,
-                    edge_value,
-                    |e, n| *e |= n,
-                    |node_value, _| node_value.live_tokens |= allowed_tokens,
-                    |_, _| {},
-                );
-                inserter.try_destination(dest_node.clone()).expect("Cycle detected");
+            dest_node.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
 
-                dest_node.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
-
-                final_nodes.insert(dest_node);
-            } else {
-                final_nodes.insert(source_node.clone());
-            }
+            final_nodes.insert(dest_node);
         }
 
-        if changed {
-            let mut new_acc = acc.clone();
-            new_acc.stored_trie_nodes = final_nodes;
-            Some(new_acc)
-        } else {
-            Some(acc.clone())
-        }
+        let mut new_acc = acc.clone();
+        new_acc.stored_trie_nodes = final_nodes;
+        Some(new_acc)
     });
 }
 
