@@ -7,6 +7,7 @@ use crate::datastructures::gss_leveled_adapter::map_trie3_node_ids;
 use crate::glr::table::{CombinedRow, Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
 use crate::tokenizer::LLMTokenID;
 use std::any::Any;
+use crate::constraint_stored_cache_utils::optimize_stored_cache;
 use std::cmp::Ordering;
 use std::sync::{Mutex, RwLock};
 // Import LLMTokenInfo
@@ -553,7 +554,15 @@ impl GLRParser {
             }
         }
         self.stored_below_bottom_cache = stored_below_bottom_cache;
+        
+        self.optimize_stored_cache();
+        
         self
+    }
+
+    /// Optimizes the stored cache by merging structurally equivalent trie nodes.
+    pub fn optimize_stored_cache(&mut self) {
+        optimize_stored_cache(&mut self.stored_below_bottom_cache, &self.stored_trie_god, 40);
     }
 
     pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
