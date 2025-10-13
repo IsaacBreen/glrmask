@@ -1160,6 +1160,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self
     }
 
+    pub fn set_below_bottom_cache(&mut self, cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index>) {
+        self.below_bottom_cache = cache;
+    }
+
     fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>) {
         // Peel off the top edges of the GSS in the given state,
         // and group the resulting isolated paths by their (depth, state_id) key.
@@ -2661,6 +2665,49 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
 impl GLRParser {
     pub fn is_combined_state(&self, state_id: StateID) -> bool { self.combined_rows.contains_key(&state_id) }
+
+    pub fn transfer_stored_cache_to_god(
+        &self,
+        dest_god: &Trie3GodWrapper,
+    ) -> HashMap<BelowBottomCacheKey, PrecomputeNode3Index> {
+        let mut new_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index> = HashMap::new();
+        let mut copied_roots: HashMap<PrecomputeNode3Index, PrecomputeNode3Index> = HashMap::new();
+
+        // Sort keys for deterministic behavior. When multiple (nt, tid) pairs exist for the same nt,
+        // the one with the largest tid will be used.
+        let mut sorted_keys: Vec<_> = self.stored_below_bottom_cache.keys().collect();
+        sorted_keys.sort();
+
+        for (nt, _tid) in sorted_keys {
+            let (stored_root, _stored_gss) = self.stored_below_bottom_cache.get(&(*nt, *_tid)).unwrap();
+
+            let cache_key = BelowBottomCacheKey {
+                nonterminal_id: *nt,
+                source_state_id: StateID(usize::MAX),
+                goto_state_id: StateID(usize::MAX),
+                k: usize::MAX,
+            };
+
+            let new_root = if let Some(new_root) = copied_roots.get(stored_root) {
+                // If we've already copied this trie root for another entry, reuse the copy.
+                new_root.clone()
+            } else {
+                // Deep copy the trie subtree from stored_trie_god to dest_god
+                let (new_roots, _id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+                    &self.stored_trie_god,
+                    dest_god,
+                    &[(*stored_root).into()],
+                );
+                let new_root = new_roots[0];
+                copied_roots.insert(*stored_root, new_root.clone());
+                new_root
+            };
+
+            new_cache.insert(cache_key, new_root);
+        }
+
+        new_cache
+    }
 }
 
 impl GLRParser {
