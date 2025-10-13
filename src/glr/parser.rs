@@ -2868,7 +2868,7 @@ impl GLRParser {
  
         println!("\nFound {} unique cache entries out of {} total.", grouped_entries.len(), self.stored_below_bottom_cache.len());
  
-        let occurrences: Vec<usize> = grouped_entries.iter().map(|(_, keys)| keys.len()).collect();
+        let occurrences: Vec<f64> = grouped_entries.iter().map(|(_, keys)| keys.len() as f64).collect();
         self.print_numeric_stats_summary("Occurrences per unique entry", occurrences);
  
         // Collect all stats
@@ -2876,29 +2876,29 @@ impl GLRParser {
             let (_trie_root, gss_root) = value;
             gather_gss_stats(&[gss_root.as_ref()])
         }).collect();
- 
+
         let all_trie_stats: Vec<TrieStats> = grouped_entries.iter().map(|(value, _keys)| {
             let (trie_root, _gss_root) = value;
             PrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root])
         }).collect();
  
         println!("\n--- GSS Stats Summary (distribution over unique entries) ---");
-        self.print_numeric_stats_summary("Total Unique Nodes", all_gss_stats.iter().map(|s| s.total_unique_nodes).collect());
-        self.print_numeric_stats_summary("Total Edges", all_gss_stats.iter().map(|s| s.total_edges).collect());
-        self.print_numeric_stats_summary("Max Lower Depth", all_gss_stats.iter().map(|s| s.max_lower_depth).collect());
-        self.print_numeric_stats_summary("Structurally Unique Nodes", all_gss_stats.iter().map(|s| s.num_structurally_unique_nodes).collect());
-        self.print_numeric_stats_summary("Max In-Degree", all_gss_stats.iter().map(|s| s.max_in_degree).collect());
+        self.print_numeric_stats_summary("Total Unique Nodes", all_gss_stats.iter().map(|s| s.total_unique_nodes as f64).collect());
+        self.print_numeric_stats_summary("Total Edges", all_gss_stats.iter().map(|s| s.total_edges as f64).collect());
+        self.print_numeric_stats_summary("Max Lower Depth", all_gss_stats.iter().map(|s| s.max_lower_depth as f64).collect());
+        self.print_numeric_stats_summary("Structurally Unique Nodes", all_gss_stats.iter().map(|s| s.num_structurally_unique_nodes as f64).collect());
+        self.print_numeric_stats_summary("Max In-Degree", all_gss_stats.iter().map(|s| s.max_in_degree as f64).collect());
         self.print_numeric_stats_summary("Average In-Degree", all_gss_stats.iter().map(|s| s.average_in_degree).collect());
         self.print_numeric_stats_summary("Structural Sharing Factor", all_gss_stats.iter().map(|s| s.structural_sharing_factor).collect());
  
         println!("\n--- Trie Stats Summary (distribution over unique entries) ---");
-        self.print_numeric_stats_summary("Reachable Nodes", all_trie_stats.iter().map(|s| s.num_reachable_nodes).collect());
-        self.print_numeric_stats_summary("Reachable Edges", all_trie_stats.iter().map(|s| s.num_reachable_edges).collect());
-        self.print_numeric_stats_summary("Max Depth", all_trie_stats.iter().map(|s| s.max_depth).collect());
-        self.print_numeric_stats_summary("Num Leaves", all_trie_stats.iter().map(|s| s.num_leaves).collect());
-        self.print_numeric_stats_summary("Max In-Degree", all_trie_stats.iter().map(|s| s.max_in_degree).collect());
+        self.print_numeric_stats_summary("Reachable Nodes", all_trie_stats.iter().map(|s| s.num_reachable_nodes as f64).collect());
+        self.print_numeric_stats_summary("Reachable Edges", all_trie_stats.iter().map(|s| s.num_reachable_edges as f64).collect());
+        self.print_numeric_stats_summary("Max Depth", all_trie_stats.iter().map(|s| s.max_depth as f64).collect());
+        self.print_numeric_stats_summary("Num Leaves", all_trie_stats.iter().map(|s| s.num_leaves as f64).collect());
+        self.print_numeric_stats_summary("Max In-Degree", all_trie_stats.iter().map(|s| s.max_in_degree as f64).collect());
         self.print_numeric_stats_summary("Avg In-Degree", all_trie_stats.iter().map(|s| s.avg_in_degree).collect());
-        self.print_numeric_stats_summary("Max Out-Degree", all_trie_stats.iter().map(|s| s.max_out_degree).collect());
+        self.print_numeric_stats_summary("Max Out-Degree", all_trie_stats.iter().map(|s| s.max_out_degree as f64).collect());
         self.print_numeric_stats_summary("Avg Out-Degree", all_trie_stats.iter().map(|s| s.avg_out_degree).collect());
  
         // Sort groups by number of keys to show most common ones first.
