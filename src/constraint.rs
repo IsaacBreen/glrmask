@@ -1856,6 +1856,10 @@ impl GrammarConstraint {
                                     all_new_below_bottom_cache_nodes.extend(acc.stored_trie_nodes().iter().cloned());
                                 }
                             }
+                            // Add start nodes
+                            for (_, node) in &precomputed3 {
+                                all_new_below_bottom_cache_nodes.insert(*node);
+                            }
                             let ns = ns.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
                             let all_new_below_bottom_cache_nodes = all_new_below_bottom_cache_nodes.into_iter().map(|wr| wr.as_usize()).collect::<BTreeSet<_>>();
                             println!("ns: {:?}, all_new_below_bottom_cache_nodes: {:?}", ns, all_new_below_bottom_cache_nodes);
