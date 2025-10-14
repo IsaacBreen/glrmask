@@ -8,6 +8,22 @@ pub fn eliminate_negative_pops_trie3(
     trie3_god: &Trie3GodWrapper,
     roots: &[PrecomputeNode3Index],
 ) {
+    bubble_up_negative_pops(trie3_god, roots);
+    neutralize_remaining_negative_pops(trie3_god, roots);
+}
+
+
+pub fn bubble_up_negative_pops(
+    trie3_god: &Trie3GodWrapper,
+    roots: &[PrecomputeNode3Index],
+) {
+    todo!()
+}
+
+pub fn neutralize_remaining_negative_pops(
+    trie3_god: &Trie3GodWrapper,
+    roots: &[PrecomputeNode3Index],
+) {
     todo!()
 }
 
