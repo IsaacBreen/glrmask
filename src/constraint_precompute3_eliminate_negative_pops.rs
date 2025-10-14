@@ -72,13 +72,30 @@ mod tests {
         add_edge(&god, root, (1, llm_bv3.clone()), n3, state_bv(&[3]));
         add_edge(&god, root, (-1, llm_bv3.clone()), n3, state_bv(&[4]));
 
-        // 2. ACT: Run the transformation
+        // 2. ASSERT (Before): Verify the initial set of paths is as expected
+        let actual_paths_before = Trie::get_all_paths(&god, &[root]);
+        let expected_paths_before = PathSet::from([
+            // The root path is always present.
+            vec![],
+            // Path to n1
+            vec![(-1, llm_bv1.clone())],
+            // Path to n2
+            vec![(-1, llm_bv1.clone()), (-2, llm_bv2.clone())],
+            // Path to n3 via positive pop
+            vec![(1, llm_bv3.clone())],
+            // Path to n3 via negative pop
+            vec![(-1, llm_bv3.clone())],
+        ]);
+        assert_eq!(actual_paths_before, expected_paths_before);
+
+
+        // 3. ACT: Run the transformation
         eliminate_negative_pops_trie3(&god, &[root]);
 
-        // 3. ASSERT: Verify the set of possible paths is correct
-        let actual_paths = Trie::get_all_paths(&god, &[root]);
+        // 4. ASSERT (After): Verify the set of possible paths is correct after transformation
+        let actual_paths_after = Trie::get_all_paths(&god, &[root]);
 
-        let expected_paths = PathSet::from([
+        let expected_paths_after = PathSet::from([
             // The root path is always present.
             vec![],
             // Path to n1: pop was -1, is now 1.
@@ -89,6 +106,5 @@ mod tests {
             vec![(1, llm_bv3.clone())],
         ]);
 
-        assert_eq!(actual_paths, expected_paths);
+        assert_eq!(actual_paths_after, expected_paths_after);
     }
-}
