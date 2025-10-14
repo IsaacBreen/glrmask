@@ -77,14 +77,17 @@ mod tests {
     }
 
     // Canonicalize a stack of edges:
-    // - Merge consecutive unconditional pops (check == None) by summing their pop values.
+    // - If an unconditional pop is followed by any other pop, they are merged.
     // - Remove unconditional no-ops (pop == 0, check == None).
     fn compress_stack(stack: Vec<TestEK>) -> Vec<TestEK> {
         let mut out: Vec<TestEK> = Vec::new();
         for ek in stack {
             if let Some(last) = out.last_mut() {
-                if last.check.is_none() && ek.check.is_none() {
+                if last.check.is_none() {
+                    // If the last operation is an unconditional pop, we can merge it
+                    // with the next operation.
                     last.pop += ek.pop;
+                    last.check = ek.check;
                     continue;
                 }
             }
@@ -242,12 +245,11 @@ mod tests {
             TestEK::new(4, None),
             TestEK::new(-1, None),
         ];
-        // Only unconditional neighbors are merged; checks break merging.
+        // Unconditional pops are merged with subsequent pops.
         let expected = vec![
             TestEK::new(1, Some(2)),
-            TestEK::new(2, None),
-            TestEK::new(3, Some(0)),
-            TestEK::new(3, None),
+            TestEK::new(5, Some(0)), // (2, None) + (3, Some(0))
+            TestEK::new(3, None),    // (4, None) + (-1, None)
         ];
         let got = compress_stack(input);
         assert_eq!(got, expected);
