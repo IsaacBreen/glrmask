@@ -27,6 +27,7 @@ pub trait EntryApi<K, V> {
     /// - and_modify(|v| { ... })
     /// - or_insert(default_value)
     /// - or_insert_with(|| default_value)
+    /// - or_default()
     fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a>;
 }
 
@@ -77,6 +78,15 @@ where
         }
         self.map.insert(self.key.clone(), f());
         self.map.get_mut(&self.key).unwrap()
+    }
+
+    /// Inserts the default value for the value type if the key is absent,
+    /// then returns a mutable reference to the value for the key (existing or newly inserted).
+    pub fn or_default(self) -> &'a mut V
+    where
+        V: Default,
+    {
+        self.or_insert_with(V::default)
     }
 }
 
