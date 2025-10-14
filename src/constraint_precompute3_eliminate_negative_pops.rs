@@ -379,15 +379,7 @@ mod tests {
             god,
             roots,
             |ek| ek.pop,
-            // If new_pop == old ek.pop, treat as the "third" step -> unconditional.
-            // Otherwise, keep the original check from the template ek.
-            |ek, new_pop| {
-                if new_pop == ek.pop {
-                    TestEK::new(new_pop, None)
-                } else {
-                    TestEK::new(new_pop, ek.check)
-                }
-            },
+            |ek, new_pop| TestEK::new(new_pop, ek.check),
             |ev1, _ev2| *ev1 = (),
         );
         let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
