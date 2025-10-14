@@ -184,9 +184,6 @@ pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
     FGet: FnMut(&EK) -> isize,
 {
     let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
-    println!("roots: {:?}", roots);
-    println!("god: {:?}", god);
-    println!("stacks: {:?}", stacks);
     assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
 }
 
