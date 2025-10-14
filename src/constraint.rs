@@ -1769,7 +1769,7 @@ impl GrammarConstraint {
         }
 
         // Post-order processing
-        let mut new_children = OrderedHashMap::new();
+        let mut new_children = BTreeMap::new();
         let mut guard = node_idx.write(god).unwrap();
         let old_children = std::mem::take(guard.children_mut());
 
