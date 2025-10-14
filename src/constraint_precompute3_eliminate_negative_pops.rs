@@ -18,15 +18,16 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
     FNeutral: FnMut() -> EK,
     FMerge: FnMut(&mut EV, EV),
 {
-    bubble_up_negative_pops(god, roots, &mut get_pop, &mut replace_pop, &mut merge_ev);
-    neutralize_remaining_negative_pops(god, roots, &mut get_pop, &mut neutral_key);
+    bubble_up_negative_pops(god, roots, &mut get_pop, &mut replace_pop, &mut neutral_key, &mut merge_ev);
+    neutralize_remaining_negative_pops(god, roots, &mut get_pop, &mut replace_pop, &mut neutral_key, &mut merge_ev);
 }
 
-pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FMerge>(
+pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
     mut get_pop: FGet,
     mut replace_pop: FReplace,
+    mut neutral_key: FNeutral,
     mut merge_ev: FMerge,
 ) where
     EK: Ord + Clone,
@@ -34,6 +35,7 @@ pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FMerge>(
     T: Clone,
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
+    FNeutral: FnMut() -> EK,
     FMerge: FnMut(&mut EV, EV),
 {
     // 1) Gather all reachable nodes
@@ -176,17 +178,21 @@ pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FMerge>(
     }
 }
 
-pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FNeutral>(
+pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FNeutral, FReplace, FMerge>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
     mut get_pop: FGet,
+    mut replace_pop: FReplace,
     mut neutral_key: FNeutral,
+    mut merge_ev: FMerge,
 ) where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
     FGet: FnMut(&EK) -> isize,
+    FReplace: FnMut(&EK, isize) -> EK,
     FNeutral: FnMut() -> EK,
+    FMerge: FnMut(&mut EV, EV),
 {
     let reachable = Trie::<EK, EV, T>::all_nodes(god, roots);
     if reachable.is_empty() {
@@ -383,6 +389,7 @@ mod tests {
             roots,
             |ek| ek.pop,
             |ek, new_pop| TestEK::new(new_pop, ek.check), // replace_pop
+            || TestEK::new(0, None),                      // neutral_key
             |ev1, _ev2| *ev1 = (),
         );
         let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
@@ -398,7 +405,9 @@ mod tests {
             god,
             roots,
             |ek| ek.pop,
-            || TestEK::new(0, None), // neutral_key
+            |ek, new_pop| TestEK::new(new_pop, ek.check), // replace_pop
+            || TestEK::new(0, None),                      // neutral_key
+            |ev1, _ev2| *ev1 = (),
         );
         let neutralized_trie_flattened = flatten_trie_to_stacks(god, roots);
         assert_eq!(
