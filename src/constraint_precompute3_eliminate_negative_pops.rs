@@ -38,38 +38,211 @@ pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
     FNeutral: FnMut() -> EK,
     FMerge: FnMut(&mut EV, EV),
 {
-    // Conservative no-op pass:
-    // - Traverse the reachable subgraph.
-    // - Exercise the provided closures to avoid unused warnings.
-    // - Do not mutate the graph here. The neutralization pass will handle end-of-path negatives.
+    // Single-pass "bubble" transform over a snapshot of the reachable subgraph.
+    // For each edge U --(A)--> V where V has some negative-pop edge(s) B,
+    // we rewrite only the U->V context:
+    //   [A, B]  ==>  [A+B (check of B), -B (check of A), B (check None)]
+    // without disturbing other parents of V.
+    // Implementation:
+    //  - Remove U --(A)--> V
+    //  - Add:
+    //      U --(A)--> V_nonneg (clone of V containing only non-negative children), if any
+    //      For each negative child V --(B)-> W:
+    //         let A = get_pop(A), B = get_pop(B) (B < 0)
+    //         ek1 = replace_pop(&B_key, A + B)        // takes B's "check"
+    //         ek2 = replace_pop(&A_key, -B)           // takes A's "check"
+    //         ek3 = replace_pop(&neutral_key(), B)    // takes neutral "check" (= None), pop negative
+    //         Create V' and N, then:
+    //            U --(ek1)--> V'
+    //            V' --(ek2)--> N
+    //            N --(ek3)--> W
+    //  - Edge values (EV):
+    //      U->V_nonneg uses original EV (U->V).
+    //      U->V' uses original EV (U->V).
+    //      V'->N uses original EV (U->V).
+    //      N->W uses EV from (V->W).
     //
-    // Rationale:
-    // A full "bubble" transform on a graph (with shared subtrees and DAG structure) requires careful
-    // node/edge rewrites, new intermediate nodes, and EV merge semantics. The graph-level tests for
-    // this operation are currently ignored. We provide a safe, compilable implementation that leaves
-    // structure and semantics unchanged, while ensuring the code paths are exercised and ready for
-    // a future, more involved algorithm.
+    // Note: We collect all transformations first, then apply them. We avoid holding any Arena
+    // lock across other Arena operations to prevent deadlocks (RwLock is not re-entrant).
 
-    // Touch the closures to avoid "unused variable" warnings.
-    let _ = (&mut replace_pop, &mut neutral_key, &mut merge_ev);
-
-    let reachable = Trie::<EK, EV, T>::all_nodes(god, roots);
-    if reachable.is_empty() {
-        return;
+    // Helper structs to carry a plan we can apply after scanning
+    struct NegEdge<EK, EV> {
+        ek_b: EK,
+        b: isize,
+        child: Trie2Index,
+        ev_bc: EV,
+    }
+    struct Task<EK, EV> {
+        u: Trie2Index,
+        ek_a: EK,
+        v: Trie2Index,
+        ev_ab: EV,
+        a: isize,
+        negs: Vec<NegEdge<EK, EV>>,
+        nonneg: Vec<(EK, Vec<(Trie2Index, EV)>)>,
     }
 
-    // Scan edges and evaluate pops to exercise get_pop; no mutations performed.
+    // 1) Snapshot of all tasks
+    let reachable = Trie::<EK, EV, T>::all_nodes(god, roots);
+    let mut tasks: Vec<Task<EK, EV>> = Vec::new();
+
     for &u_idx in &reachable {
-        let ug = u_idx
-            .read(god)
-            .expect("Arena read poisoned while scanning in bubble_up_negative_pops");
-        for (ek_a, dests) in ug.children() {
-            let _ = get_pop(ek_a);
-            for (v_idx, _ev_ab) in dests.iter() {
-                if let Some(vg) = v_idx.read(god) {
-                    for (ek_b, _dests_b) in vg.children() {
-                        let _ = get_pop(ek_b);
+        if let Some(ug) = u_idx.read(god) {
+            for (ek_a, dest_map_a) in ug.children() {
+                let a = get_pop(ek_a);
+                for (v_idx, ev_ab) in dest_map_a.iter() {
+                    if let Some(vg) = v_idx.read(god) {
+                        let mut negs: Vec<NegEdge<EK, EV>> = Vec::new();
+                        let mut nonneg: Vec<(EK, Vec<(Trie2Index, EV)>)> = Vec::new();
+
+                        for (ek_b, dest_map_b) in vg.children() {
+                            let b = get_pop(ek_b);
+                            if b < 0 {
+                                for (w_idx, ev_bc) in dest_map_b.iter() {
+                                    negs.push(NegEdge {
+                                        ek_b: ek_b.clone(),
+                                        b,
+                                        child: *w_idx,
+                                        ev_bc: ev_bc.clone(),
+                                    });
+                                }
+                            } else {
+                                let dests: Vec<(Trie2Index, EV)> = dest_map_b
+                                    .iter()
+                                    .map(|(ci, e)| (*ci, e.clone()))
+                                    .collect();
+                                if !dests.is_empty() {
+                                    nonneg.push((ek_b.clone(), dests));
+                                }
+                            }
+                        }
+
+                        if !negs.is_empty() {
+                            tasks.push(Task {
+                                u: u_idx,
+                                ek_a: ek_a.clone(),
+                                v: *v_idx,
+                                ev_ab: ev_ab.clone(),
+                                a,
+                                negs,
+                                nonneg,
+                            });
+                        }
                     }
+                }
+            }
+        }
+    }
+
+    // 2) Apply tasks
+    for task in tasks {
+        // Read V's value once (no locks held during later writes to U/new nodes)
+        let v_value = {
+            let vg = task
+                .v
+                .read(god)
+                .expect("Arena read poisoned while cloning V's value for bubble");
+            vg.value.clone()
+        };
+
+        // Prepare a clone that keeps only non-negative children (if any)
+        let mut nonneg_clone_idx: Option<Trie2Index> = None;
+        if !task.nonneg.is_empty() {
+            let idx = Trie2Index::new(god.insert(Trie::new(v_value.clone())));
+            {
+                let mut w = idx
+                    .write(god)
+                    .expect("Arena write poisoned while populating V_nonneg clone");
+                for (ek_k, dests) in &task.nonneg {
+                    let dm = w.children_mut().entry(ek_k.clone()).or_default();
+                    for (child, ev) in dests {
+                        dm.insert(*child, ev.clone());
+                    }
+                }
+            }
+            nonneg_clone_idx = Some(idx);
+        }
+
+        // For each negative child, create a dedicated bubbled path
+        let mut neg_insertions: Vec<(EK, Trie2Index)> = Vec::new(); // (ek1, v_prime)
+        for neg in &task.negs {
+            // ek1 takes B's "check"; ek2 takes A's "check"; ek3 uses neutral "check" (None) with pop B
+            let ek1 = replace_pop(&neg.ek_b, task.a + neg.b);
+            let ek2 = replace_pop(&task.ek_a, -neg.b);
+            let ek3 = {
+                let base = neutral_key();
+                replace_pop(&base, neg.b)
+            };
+
+            // Create V' and intermediate N
+            let v_prime_idx = Trie2Index::new(god.insert(Trie::new(v_value.clone())));
+            let n_idx = Trie2Index::new(god.insert(Trie::new(v_value.clone())));
+
+            // V' --(ek2)--> N with EV from U->V (ev_ab)
+            {
+                let mut vprime_w = v_prime_idx
+                    .write(god)
+                    .expect("Arena write poisoned while wiring V' in bubble");
+                vprime_w
+                    .children_mut()
+                    .entry(ek2)
+                    .or_default()
+                    .insert(n_idx, task.ev_ab.clone());
+            }
+
+            // N --(ek3)--> W with EV from V->W (ev_bc)
+            {
+                let mut n_w = n_idx
+                    .write(god)
+                    .expect("Arena write poisoned while wiring intermediate N in bubble");
+                n_w
+                    .children_mut()
+                    .entry(ek3)
+                    .or_default()
+                    .insert(neg.child, neg.ev_bc.clone());
+            }
+
+            // Later we will add U --(ek1)--> V'
+            neg_insertions.push((ek1, v_prime_idx));
+        }
+
+        // Update U: remove (ek_a -> V), then insert:
+        //   U --(ek_a)--> V_nonneg (if any)
+        //   U --(ek1)--> V' for each negative child
+        {
+            let mut uw = task
+                .u
+                .write(god)
+                .expect("Arena write poisoned while updating parent U in bubble");
+
+            // Remove (ek_a -> V), remembering its EV
+            let mut ev_ab_to_use = task.ev_ab.clone();
+            if let Some(dm) = uw.children_mut().get_mut(&task.ek_a) {
+                if let Some(ev_removed) = dm.remove(&task.v) {
+                    ev_ab_to_use = ev_removed;
+                }
+                if dm.is_empty() {
+                    uw.children_mut().remove(&task.ek_a);
+                }
+            }
+
+            // Insert non-negative-preserving branch
+            if let Some(v_nonneg_idx) = nonneg_clone_idx {
+                let dm = uw.children_mut().entry(task.ek_a.clone()).or_default();
+                if let Some(existing_ev) = dm.get_mut(&v_nonneg_idx) {
+                    merge_ev(existing_ev, ev_ab_to_use.clone());
+                } else {
+                    dm.insert(v_nonneg_idx, ev_ab_to_use.clone());
+                }
+            }
+
+            // Insert bubbled branches for each negative child
+            for (ek1, v_prime_idx) in neg_insertions {
+                let dm = uw.children_mut().entry(ek1).or_default();
+                if let Some(existing_ev) = dm.get_mut(&v_prime_idx) {
+                    merge_ev(existing_ev, ev_ab_to_use.clone());
+                } else {
+                    dm.insert(v_prime_idx, ev_ab_to_use.clone());
                 }
             }
         }
