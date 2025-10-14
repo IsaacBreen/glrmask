@@ -1682,7 +1682,7 @@ impl GrammarConstraint {
             }
 
             if gss_node_arc.max_depth() <= 1 { // Base case: hallucinated state
-                let result = gss_node_arc.acc().stored_trie_nodes().clone();
+                let result = gss_node_arc.inner.reduce_acc().unwrap().stored_trie_nodes().clone();
                 memo.insert(gss_node_ptr, result.clone());
                 return result;
             }
