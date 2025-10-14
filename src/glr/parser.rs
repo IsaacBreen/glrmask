@@ -1725,7 +1725,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for (k, acc) in below {
             // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
             let tokens_all = LLMTokenBV::max_ones();
-            let key = (k, tokens_all.clone());
+            let key = (k as isize, tokens_all.clone());
             let all_states = StateIDBV::max_ones();
 
             if !acc.stored_trie_nodes().is_empty() {
@@ -1807,7 +1807,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Shared constants and caches for this call
         let tokens_all = LLMTokenBV::max_ones();
-        let edge_key_all_tokens_zero_k = (0usize, tokens_all.clone());
+        let edge_key_all_tokens_zero_k = (0isize, tokens_all.clone());
 
         // Memoize deep_add across identical filters and reuse a single destination per filter for this call.
         // This drastically reduces trie insertions and GSS rewrites.

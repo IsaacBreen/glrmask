@@ -774,7 +774,7 @@ impl GSSNode {
 pub(crate) fn deep_add_precompute_trie_edges(
     root_arc: &mut Arc<GSSNode>,
     god: &StoredTrieGodWrapper,
-    edge_key: &(usize, LLMTokenBV),
+    edge_key: &(isize, LLMTokenBV),
     edge_value: &StateIDBV,
     tokens_for_update: &LLMTokenBV,
     destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,

@@ -105,7 +105,7 @@ impl JSONConvertible for TerminalAllowanceCheckMode {
 pub type PrecomputeNode0 = Trie<Option<(GrammarTokenID, Option<TokenizerStateID>)>, LLMTokenBV, PrecomputedNodeContents0>;
 pub type PrecomputeNode1 = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
-pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
+pub type PrecomputeNode3 = Trie<(isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 
 // Indices
 pub type PrecomputeNode0Index = Trie2Index;
@@ -2684,7 +2684,7 @@ pub(crate) mod constraint_precompute3_utils {
             let old_ptr = old_arc;
             let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
 
-            let children_snapshot: Vec<( (usize, LLMTokenBV), Vec<(PrecomputeNode3Index, crate::constraint::StateIDBV)> )> = {
+            let children_snapshot: Vec<( (isize, LLMTokenBV), Vec<(PrecomputeNode3Index, crate::constraint::StateIDBV)> )> = {
                 let g = old_arc.read(trie3_god).expect("poison");
                 g.children()
                     .iter()
@@ -2739,8 +2739,8 @@ pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, Precompu
 pub type Trie1God = God<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
 pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
-pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
+pub type Trie3GodWrapper = GodWrapper<(isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
+pub type Trie3God = God<(isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
@@ -3563,7 +3563,7 @@ impl<'a> GrammarConstraintState<'a> {
             // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
             |glr_s, (pop, llm_token_bv_from_edge), dest_map| {
                 crate::debug!(10, "  - STEP: gss_ptr={:p}, edge=(pop={}, llm_bv={})", glr_s.active_state.stack, pop, format_bv(llm_token_bv_from_edge));
-                let popped = glr_s.active_state.stack.popn(*pop);
+                let popped = glr_s.active_state.stack.popn(*pop as usize);
                 let num_peeks: usize = popped.iter().map(|p| p.peek_iter().count()).sum();
                 if num_peeks > 0 {
                     crate::debug!(10, "      - Popped GSS has {} peeks", num_peeks);

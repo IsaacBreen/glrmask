@@ -74,7 +74,7 @@ pub(crate) fn merge_stored_trie_nodes(
 pub(crate) fn deep_add_precompute_trie_edges(
     root_arc: &mut Arc<GSSNode>,
     god: &StoredTrieGodWrapper,
-    edge_key: &(usize, LLMTokenBV),
+    edge_key: &(isize, LLMTokenBV),
     edge_value: &StateIDBV,
     tokens_for_update: &LLMTokenBV,
     destination_provider: &mut impl FnMut() -> PrecomputeNode3Index,
@@ -100,7 +100,7 @@ pub(crate) fn deep_add_precompute_trie_edges(
 fn deep_add_precompute_trie_edges_recursive(
     node_arc: &Arc<GSSNode>,
     god: &StoredTrieGodWrapper,
-    edge_key: &(usize, LLMTokenBV),
+    edge_key: &(isize, LLMTokenBV),
     edge_value: &StateIDBV,
     tokens_for_update: &LLMTokenBV,
     destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,

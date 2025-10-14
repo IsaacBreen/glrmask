@@ -90,7 +90,7 @@ fn merge_trie3_nodes_and_get_map_internal(
     }
 
     let mut ends: Vec<bool> = vec![false; n];
-    type RawEdge3 = (usize, LLMTokenBV, usize, StateIDBV);
+    type RawEdge3 = (isize, LLMTokenBV, usize, StateIDBV);
     let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
 
     for (u_dense, u_idx) in old_of.iter().enumerate() {
@@ -111,7 +111,7 @@ fn merge_trie3_nodes_and_get_map_internal(
     for it in 0..max_iters {
         // Signature: (end_flag, sorted_list_of_aggregated_edges)
         // Aggregated edge: ((pop, LLMTokenBV, dest_class), StateIDBV)
-        type AggregatedEdge3 = ((usize, LLMTokenBV, usize), StateIDBV);
+        type AggregatedEdge3 = ((isize, LLMTokenBV, usize), StateIDBV);
         type Signature3 = (bool, Vec<AggregatedEdge3>);
 
         let mut sig_to_id: HashMap<Signature3, usize> = HashMap::new();
@@ -124,7 +124,7 @@ fn merge_trie3_nodes_and_get_map_internal(
         #[cfg(rustrover)]
         let its = 0..n;
         for u in its {
-            let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
             for (p, bv_key, v_dense, sids) in &raw_edges[u] {
                 let dest_class = prev_class[*v_dense];
                 let key = (*p, bv_key.clone(), dest_class);
@@ -172,7 +172,7 @@ fn merge_trie3_nodes_and_get_map_internal(
             let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
 
             // Aggregate edges based on final partition
-            let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
             for (p, bv_key, v_dense, sids) in &raw_edges[u_dense] {
                 let dest_class = final_partition[*v_dense];
                 aggr.entry((*p, bv_key.clone(), dest_class)).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());

@@ -535,7 +535,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
 
         // Remap edge keys (pop, LLMTokenBV)
         let old_children = std::mem::take(w.children_mut());
-        let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
+        let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
         for ((pop, llm_bv), dm) in old_children {
             let mapped_key_bv = if llm_bv.is_empty() {
                 LLMTokenBV::zeros()
@@ -740,7 +740,7 @@ fn simplify_llm_token_bvs_trie3(
         let dead_u = &universe - &live_u;
 
         let old_children = std::mem::take(w.children_mut());
-        let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
+        let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
 
         for ((pop, l), dm) in old_children {
             let mut l_new = l.clone();
@@ -822,7 +822,7 @@ fn prune_nodes_not_reaching_end_trie3(
     // Remove any edge to a non-productive destination
     for n in &all_nodes {
         let mut w = n.write(trie3_god).expect("write");
-        let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+        let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
         for (ek, dm) in w.children().clone() {
             let mut new_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
             for (dst, bv) in dm {
@@ -865,7 +865,7 @@ fn factor_common_destinations_trie3(
     let mut incoming_map: HashMap<
         PrecomputeNode3Index,
         HashMap<
-            (usize, LLMTokenBV),
+            (isize, LLMTokenBV),
             HashMap<StateIDBV, Vec<PrecomputeNode3Index>>,
         >,
     > = HashMap::new();
@@ -978,7 +978,7 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
     let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
     if all_nodes.is_empty() { return; }
 
-    let mut predecessors: HashMap<PrecomputeNode3Index, Vec<(PrecomputeNode3Index, (usize, LLMTokenBV))>> = HashMap::new();
+    let mut predecessors: HashMap<PrecomputeNode3Index, Vec<(PrecomputeNode3Index, (isize, LLMTokenBV))>> = HashMap::new();
     let mut worklist = VecDeque::new();
     let mut live: HashMap<PrecomputeNode3Index, LLMTokenBV> = HashMap::new();
 
@@ -1046,7 +1046,7 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
     // 3. Prune the graph based on the computed live sets.
     for node_arc in &all_nodes {
         let mut guard = node_arc.write(trie3_god).unwrap();
-        let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+        let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
 
         for (edge_key, dest_map) in guard.children() {
             for (child_wrapper, edge_value_sids) in dest_map {
@@ -1099,7 +1099,7 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
     let n = all_nodes.len();
 
     let mut ends: Vec<bool> = vec![false; n];
-    type RawEdge3 = (usize, LLMTokenBV, usize, StateIDBV);
+    type RawEdge3 = (isize, LLMTokenBV, usize, StateIDBV);
     let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
 
     for (u_dense, u_idx) in old_of.iter().enumerate() {
@@ -1117,7 +1117,7 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
     let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
 
     for it in 0..max_iters {
-        type AggregatedEdge3 = ((usize, LLMTokenBV, usize), StateIDBV);
+        type AggregatedEdge3 = ((isize, LLMTokenBV, usize), StateIDBV);
         type Signature3 = (bool, Vec<AggregatedEdge3>);
 
         let mut sig_to_id: HashMap<Signature3, usize> = HashMap::new();
@@ -1130,7 +1130,7 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
         #[cfg(rustrover)]
         let its = 0..n;
         for u in its {
-            let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
             for (p, bv_key, v_dense, sids) in &raw_edges[u] {
                 let dest_class = prev_class[*v_dense];
                 let key = (*p, bv_key.clone(), dest_class);
@@ -1176,7 +1176,7 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
         if let Some(rep_idx) = representatives[class_id] {
             let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
 
-            let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
             for (p, bv_key, v_dense, sids) in &raw_edges[u_dense] {
                 let dest_class = final_partition[*v_dense];
                 aggr.entry((*p, bv_key.clone(), dest_class)).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
@@ -1227,7 +1227,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
     let n = all_nodes.len();
 
     let mut ends: Vec<bool> = vec![false; n];
-    type RawEdge3 = (usize, LLMTokenBV, usize, StateIDBV);
+    type RawEdge3 = (isize, LLMTokenBV, usize, StateIDBV);
     let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
 
     for (u_dense, u_idx) in old_of.iter().enumerate() {
@@ -1250,7 +1250,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
         // This is more aggressive than using a BTreeSet of SIDs, as it allows merging
         // nodes that have different SID distributions as long as the total set of states
         // required to reach a destination class is the same.
-        type SignatureStructural3 = (bool, BTreeMap<(usize, usize), StateIDBV>);
+        type SignatureStructural3 = (bool, BTreeMap<(isize, usize), StateIDBV>);
 
         let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
         let mut new_class = vec![0; n];
@@ -1262,7 +1262,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
         #[cfg(rustrover)]
         let its = 0..n;
         for u in its {
-            let mut aggr: BTreeMap<(usize, usize), StateIDBV> = BTreeMap::new();
+            let mut aggr: BTreeMap<(isize, usize), StateIDBV> = BTreeMap::new();
             for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
                 // _bv_key (LLM tokens) is IGNORED for structural equivalence.
                 let dest_class = prev_class[*v_dense];
@@ -1313,7 +1313,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
                 .map(|(i, _)| old_of[i])
                 .collect();
 
-            let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+            let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
             let mut new_live_tokens = LLMTokenBV::zeros();
 
             // Merge all edges from all nodes in the class into the representative.
@@ -1325,7 +1325,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
                     for (dest_idx, sids) in dest_map {
                         // Remap destination to its representative
                         let dest_rep_idx = *node_to_rep.get(dest_idx).unwrap();
-                        
+
                         // Insert into new_children.
                         // Note: This may create parallel edges (same pop/dest_rep/sids, different llm_bv)
                         // if the original nodes had them. Subsequent edge compression will fix this.
@@ -1667,7 +1667,7 @@ pub fn merge_nodes_trie3_ultrafast(
     for rep_dense in it {
         let rep_idx = old_of[*rep_dense as usize];
         let mut w = rep_idx.write(trie3_god).expect("write");
-        let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+        let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
 
         // Build new children by remapping destinations to their representatives
         for (ek, dm) in w.children().clone() {
@@ -1738,12 +1738,12 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
             // Snapshot current children
             let old_children = {
                 let g = node_idx.read(trie3_god).expect("read");
-                g.children().clone() // BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>
+                g.children().clone() // BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>
             };
             if old_children.is_empty() { continue; }
 
             // Aggregate per (pop, child, sids): union LLM-token BVs
-            let mut by_pop: HashMap<usize, Vec<(Trie2Index, StateIDBV, LLMTokenBV)>> = HashMap::new();
+            let mut by_pop: HashMap<isize, Vec<(Trie2Index, StateIDBV, LLMTokenBV)>> = HashMap::new();
             for ((pop, llm_bv), dest_map) in &old_children {
                 for (child_idx, sids) in dest_map.iter() {
                     let items = by_pop.entry(*pop).or_default();
@@ -1762,7 +1762,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
             }
 
             // Rebuild children from aggregates
-            let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+            let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
             for (pop, vec_items) in by_pop {
                 for (child, sids, llm_union) in vec_items {
                     if llm_union.is_empty() || sids.is_empty() {
@@ -1799,7 +1799,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         let mut changed_any = false;
 
         // 1. Identify all single-exit nodes.
-        let mut single_exit_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+        let mut single_exit_info: HashMap<Trie2Index, (isize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
         for n in &nodes {
             let g = n.read(trie3_god).expect("read");
             if g.value.end { continue; }
