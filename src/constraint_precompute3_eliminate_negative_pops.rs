@@ -785,6 +785,74 @@ mod tests {
         let bubbled = bubble_up_negative_pops_stack(original.clone());
         assert_eq!(realized_actions(&original), realized_actions(&bubbled));
     }
+
+    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
+    #[test]
+    fn test_graph_from_complex_stack_trace() {
+        let god = TestGod::new();
+        // Nodes from the provided stack trace
+        let n16 = new_node(&god); // root
+        let n18 = new_node(&god); // end
+        let n19 = new_node(&god);
+        let n20 = new_node(&god);
+        let n21 = new_node(&god);
+        let n22 = new_node(&god);
+        let n23 = new_node(&god);
+        let n24 = new_node(&god);
+        let n25 = new_node(&god);
+        let n26 = new_node(&god);
+        let n27 = new_node(&god);
+        let n28 = new_node(&god);
+        let n29 = new_node(&god);
+        let n30 = new_node(&god);
+        let n31 = new_node(&god);
+        let n32 = new_node(&god);
+        let n33 = new_node(&god);
+        let n34 = new_node(&god);
+        let n35 = new_node(&god);
+        let n36 = new_node(&god);
+        let n37 = new_node(&god);
+        let n38 = new_node(&god);
+
+        // --- Build graph from stack trace ---
+
+        // Branch 1 (from root -> n19)
+        add_edge(&god, n16, n19, TestEK::new(0, None));
+        add_edge(&god, n19, n20, TestEK::new(0, None));
+        
+        // Path through n21 (with negative pop)
+        add_edge(&god, n20, n21, TestEK::new(0, Some(0)));
+        add_edge(&god, n21, n23, TestEK::new(0, None));
+        add_edge(&god, n23, n25, TestEK::new(-1, Some(1)));
+        add_edge(&god, n25, n27, TestEK::new(0, None));
+        add_edge(&god, n27, n28, TestEK::new(0, None));
+        add_edge(&god, n28, n18, TestEK::new(0, None));
+
+        // Path through n22
+        add_edge(&god, n20, n22, TestEK::new(0, Some(2)));
+        add_edge(&god, n22, n24, TestEK::new(2, None));
+        add_edge(&god, n24, n26, TestEK::new(0, Some(0))); // Leaf
+
+        // Branch 2 (from root -> n29)
+        add_edge(&god, n16, n29, TestEK::new(0, None));
+        add_edge(&god, n29, n30, TestEK::new(0, None));
+
+        // Path through n31 (with negative pop)
+        add_edge(&god, n30, n31, TestEK::new(0, Some(1)));
+        add_edge(&god, n31, n33, TestEK::new(0, None));
+        add_edge(&god, n33, n35, TestEK::new(-1, Some(2)));
+        add_edge(&god, n35, n37, TestEK::new(0, None));
+        add_edge(&god, n37, n38, TestEK::new(0, None));
+        add_edge(&god, n38, n18, TestEK::new(0, None));
+
+        // Path through n32
+        add_edge(&god, n30, n32, TestEK::new(0, Some(2)));
+        add_edge(&god, n32, n34, TestEK::new(2, None));
+        add_edge(&god, n34, n36, TestEK::new(0, Some(0))); // Leaf
+
+        let roots = vec![n16];
+        run_test(&god, &roots);
+    }
 }
 
 

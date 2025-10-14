@@ -2158,6 +2158,45 @@ local_system:
           }
       }
 
+      pub fn assert_negative_pops_follow_property_for_stacks<EK, FGet>(
+          stacks: &std::collections::BTreeSet<Vec<EK>>,
+          mut get_pop: FGet,
+      ) where
+          EK: Ord + Clone + std::fmt::Debug,
+          FGet: FnMut(&EK) -> isize,
+      {
+          for stack in stacks {
+              let mut seen_negative = false;
+              for ek in stack {
+                  if seen_negative {
+                      assert!(
+                          get_pop(ek) <= 0,
+                          "Found a positive pop after a negative pop: {:?}",
+                          stack
+                      );
+                  }
+                  if get_pop(ek) < 0 {
+                      seen_negative = true;
+                  }
+              }
+          }
+      }
+
+      pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
+          god: &GodWrapper<EK, EV, T>,
+          roots: &[Trie2Index],
+          get_pop: FGet,
+      ) where
+          EK: Ord + Clone + std::fmt::Debug,
+          EV: PartialEq + Clone,
+          T: PartialEq,
+          FGet: FnMut(&EK) -> isize,
+      {
+          let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
+          println!("stacks: {:?}", stacks);
+          assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
+      }
+
       #[cfg(test)]
       mod tests {
           use super::*;
@@ -2295,24 +2334,6 @@ local_system:
               stacks.iter().map(|s| f(s.clone())).collect()
           }
 
-          fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
-              for stack in stacks {
-                  let mut seen_negative = false;
-                  for ek in stack {
-                      if seen_negative {
-                          assert!(
-                              ek.pop <= 0,
-                              "Found a positive pop after a negative pop: {:?}",
-                              stack
-                          );
-                      }
-                      if ek.pop < 0 {
-                          seen_negative = true;
-                      }
-                  }
-              }
-          }
-
           // Keep this around for future integration tests; mark as ignored for now
           // because the graph versions are not implemented yet.
           fn run_test(god: &TestGod, roots: &[Trie2Index]) {
@@ -2329,8 +2350,8 @@ local_system:
                   |ev1, _ev2| *ev1 = (),
               );
               let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-              assert_negative_pops_at_end_only(&bubbled_stacks);
-              assert_negative_pops_at_end_only(&bubbled_trie_flattened);
+              assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
+              assert_negative_pops_follow_property_for_stacks(&bubbled_trie_flattened, |ek| ek.pop);
               assert_eq!(
                   map_to_stacks(compress_stack, &bubbled_stacks),
                   map_to_stacks(compress_stack, &bubbled_trie_flattened)
@@ -4963,6 +4984,9 @@ local_system:
           FGet: FnMut(&EK) -> isize,
       {
           let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
+          println!("roots: {:?}", roots);
+          println!("god: {:?}", god);
+          println!("stacks: {:?}", stacks);
           assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
       }
 
@@ -5560,6 +5584,74 @@ local_system:
               ];
               let bubbled = bubble_up_negative_pops_stack(original.clone());
               assert_eq!(realized_actions(&original), realized_actions(&bubbled));
+          }
+
+          #[ignore = "Graph-level negative-pop elimination not implemented yet"]
+          #[test]
+          fn test_graph_from_complex_stack_trace() {
+              let god = TestGod::new();
+              // Nodes from the provided stack trace
+              let n16 = new_node(&god); // root
+              let n18 = new_node(&god); // end
+              let n19 = new_node(&god);
+              let n20 = new_node(&god);
+              let n21 = new_node(&god);
+              let n22 = new_node(&god);
+              let n23 = new_node(&god);
+              let n24 = new_node(&god);
+              let n25 = new_node(&god);
+              let n26 = new_node(&god);
+              let n27 = new_node(&god);
+              let n28 = new_node(&god);
+              let n29 = new_node(&god);
+              let n30 = new_node(&god);
+              let n31 = new_node(&god);
+              let n32 = new_node(&god);
+              let n33 = new_node(&god);
+              let n34 = new_node(&god);
+              let n35 = new_node(&god);
+              let n36 = new_node(&god);
+              let n37 = new_node(&god);
+              let n38 = new_node(&god);
+
+              // --- Build graph from stack trace ---
+
+              // Branch 1 (from root -> n19)
+              add_edge(&god, n16, n19, TestEK::new(0, None));
+              add_edge(&god, n19, n20, TestEK::new(0, None));
+              
+              // Path through n21 (with negative pop)
+              add_edge(&god, n20, n21, TestEK::new(0, Some(0)));
+              add_edge(&god, n21, n23, TestEK::new(0, None));
+              add_edge(&god, n23, n25, TestEK::new(-1, Some(1)));
+              add_edge(&god, n25, n27, TestEK::new(0, None));
+              add_edge(&god, n27, n28, TestEK::new(0, None));
+              add_edge(&god, n28, n18, TestEK::new(0, None));
+
+              // Path through n22
+              add_edge(&god, n20, n22, TestEK::new(0, Some(2)));
+              add_edge(&god, n22, n24, TestEK::new(2, None));
+              add_edge(&god, n24, n26, TestEK::new(0, Some(0))); // Leaf
+
+              // Branch 2 (from root -> n29)
+              add_edge(&god, n16, n29, TestEK::new(0, None));
+              add_edge(&god, n29, n30, TestEK::new(0, None));
+
+              // Path through n31 (with negative pop)
+              add_edge(&god, n30, n31, TestEK::new(0, Some(1)));
+              add_edge(&god, n31, n33, TestEK::new(0, None));
+              add_edge(&god, n33, n35, TestEK::new(-1, Some(2)));
+              add_edge(&god, n35, n37, TestEK::new(0, None));
+              add_edge(&god, n37, n38, TestEK::new(0, None));
+              add_edge(&god, n38, n18, TestEK::new(0, None));
+
+              // Path through n32
+              add_edge(&god, n30, n32, TestEK::new(0, Some(2)));
+              add_edge(&god, n32, n34, TestEK::new(2, None));
+              add_edge(&god, n34, n36, TestEK::new(0, Some(0))); // Leaf
+
+              let roots = vec![n16];
+              run_test(&god, &roots);
           }
       }
 
@@ -7764,6 +7856,45 @@ messages:
           }
       }
 
+      pub fn assert_negative_pops_follow_property_for_stacks<EK, FGet>(
+          stacks: &std::collections::BTreeSet<Vec<EK>>,
+          mut get_pop: FGet,
+      ) where
+          EK: Ord + Clone + std::fmt::Debug,
+          FGet: FnMut(&EK) -> isize,
+      {
+          for stack in stacks {
+              let mut seen_negative = false;
+              for ek in stack {
+                  if seen_negative {
+                      assert!(
+                          get_pop(ek) <= 0,
+                          "Found a positive pop after a negative pop: {:?}",
+                          stack
+                      );
+                  }
+                  if get_pop(ek) < 0 {
+                      seen_negative = true;
+                  }
+              }
+          }
+      }
+
+      pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
+          god: &GodWrapper<EK, EV, T>,
+          roots: &[Trie2Index],
+          get_pop: FGet,
+      ) where
+          EK: Ord + Clone + std::fmt::Debug,
+          EV: PartialEq + Clone,
+          T: PartialEq,
+          FGet: FnMut(&EK) -> isize,
+      {
+          let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
+          println!("stacks: {:?}", stacks);
+          assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
+      }
+
       #[cfg(test)]
       mod tests {
           use super::*;
@@ -7901,24 +8032,6 @@ messages:
               stacks.iter().map(|s| f(s.clone())).collect()
           }
 
-          fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
-              for stack in stacks {
-                  let mut seen_negative = false;
-                  for ek in stack {
-                      if seen_negative {
-                          assert!(
-                              ek.pop <= 0,
-                              "Found a positive pop after a negative pop: {:?}",
-                              stack
-                          );
-                      }
-                      if ek.pop < 0 {
-                          seen_negative = true;
-                      }
-                  }
-              }
-          }
-
           // Keep this around for future integration tests; mark as ignored for now
           // because the graph versions are not implemented yet.
           fn run_test(god: &TestGod, roots: &[Trie2Index]) {
@@ -7935,8 +8048,8 @@ messages:
                   |ev1, _ev2| *ev1 = (),
               );
               let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-              assert_negative_pops_at_end_only(&bubbled_stacks);
-              assert_negative_pops_at_end_only(&bubbled_trie_flattened);
+              assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
+              assert_negative_pops_follow_property_for_stacks(&bubbled_trie_flattened, |ek| ek.pop);
               assert_eq!(
                   map_to_stacks(compress_stack, &bubbled_stacks),
                   map_to_stacks(compress_stack, &bubbled_trie_flattened)
@@ -8384,9 +8497,35 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_eliminate_negative_pops.rs
-  - user: Move `assert_negative_pops_at_end_only` out of the tests mod. Rename it
-      maybe. Add a version of it that acts on the trie itself. That version should
-      convert to stacks and call the other one. Make it public.
+  - user: |-
+      Create a test based on this stack
+      ```
+      Root Node Trie2Index(16)
+      ├── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(19)
+      │  └── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(20) (MaxDepth: 0)
+      │     ├── Edge (pop: 0): states [0] -> Node Trie2Index(21) (MaxDepth: 1)
+      │     │  └── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(23) (MaxDepth: 2)
+      │     │     └── Edge (pop: -1, tokens: [0..=1] (e.g., ["$", "a"])): states [1] -> Node Trie2Index(25) (MaxDepth: 3)
+      │     │        └── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(27) (MaxDepth: 4)
+      │     │           └── Edge (pop: 0, tokens: [1] (e.g., ["a"])): -> Node Trie2Index(28)
+      │     │              └── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(18) [END]
+      │     └── Edge (pop: 0): states [2] -> Node Trie2Index(22) (MaxDepth: 1)
+      │        └── Edge (pop: 2): -> Node Trie2Index(24) (MaxDepth: 2)
+      │           └── Edge (pop: 0): states [0] -> Node Trie2Index(26) (MaxDepth: 3)
+      └── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(29)
+         └── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(30) (MaxDepth: 0)
+            ├── Edge (pop: 0): states [1] -> Node Trie2Index(31) (MaxDepth: 1)
+            │  └── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(33) (MaxDepth: 2)
+            │     └── Edge (pop: -1, tokens: [0..=1] (e.g., ["$", "a"])): states [2] -> Node Trie2Index(35) (MaxDepth: 3)
+            │        └── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(37) (MaxDepth: 4)
+            │           └── Edge (pop: 0, tokens: [0] (e.g., ["$"])): -> Node Trie2Index(38)
+            │              └── Edge (pop: 0, tokens: [0..=1] (e.g., ["$", "a"])): -> Node Trie2Index(18) [END]
+            └── Edge (pop: 0): states [2] -> Node Trie2Index(32) (MaxDepth: 1)
+               └── Edge (pop: 2): -> Node Trie2Index(34) (MaxDepth: 2)
+                  └── Edge (pop: 0): states [0] -> Node Trie2Index(36) (MaxDepth: 3)
+      ```
+      edge keys should be states. Where you don't see states, assume it's ALL of them in the set.
+      Ignore the "tokens: ..."
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8405,162 +8544,172 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to refactor the assertion function, followed by the corresponding git diff.
+      Based on the provided trie structure, I will add a new graph-level test case. This test will construct the specified graph, which includes branching, shared nodes, and negative pop values, and then run it through the existing `run_test` helper.
+
+      Here are the step-by-step instructions to add the new test:
 
       ### Step-by-step Instructions
 
-      #### File: `src/constraint_precompute3_eliminate_negative_pops.rs`
+      1.  **Open the file `src/constraint_precompute3_eliminate_negative_pops.rs`**.
 
-      1.  **Add New Public Helper Functions:**
-          Place the following two new public functions, `assert_negative_pops_follow_property_for_stacks` and `assert_negative_pops_follow_property_for_trie`, just above the `#[cfg(test)]` attribute line.
+      2.  **Navigate to the end of the `mod tests` block**.
+
+      3.  **Insert the following new test function** just before the final closing brace `}` of the `mod tests` block.
 
           ```rust
-          pub fn assert_negative_pops_follow_property_for_stacks<EK, FGet>(
-              stacks: &std::collections::BTreeSet<Vec<EK>>,
-              mut get_pop: FGet,
-          ) where
-              EK: Ord + Clone + std::fmt::Debug,
-              FGet: FnMut(&EK) -> isize,
-          {
-              for stack in stacks {
-                  let mut seen_negative = false;
-                  for ek in stack {
-                      if seen_negative {
-                          assert!(
-                              get_pop(ek) <= 0,
-                              "Found a positive pop after a negative pop: {:?}",
-                              stack
-                          );
-                      }
-                      if get_pop(ek) < 0 {
-                          seen_negative = true;
-                      }
-                  }
-              }
-          }
-          
-          pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
-              god: &GodWrapper<EK, EV, T>,
-              roots: &[Trie2Index],
-              get_pop: FGet,
-          ) where
-              EK: Ord + Clone + std::fmt::Debug,
-              EV: PartialEq + Clone,
-              T: PartialEq,
-              FGet: FnMut(&EK) -> isize,
-          {
-              let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
-              assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
+          #[ignore = "Graph-level negative-pop elimination not implemented yet"]
+          #[test]
+          fn test_graph_from_complex_stack_trace() {
+              let god = TestGod::new();
+              // Nodes from the provided stack trace
+              let n16 = new_node(&god); // root
+              let n18 = new_node(&god); // end
+              let n19 = new_node(&god);
+              let n20 = new_node(&god);
+              let n21 = new_node(&god);
+              let n22 = new_node(&god);
+              let n23 = new_node(&god);
+              let n24 = new_node(&god);
+              let n25 = new_node(&god);
+              let n26 = new_node(&god);
+              let n27 = new_node(&god);
+              let n28 = new_node(&god);
+              let n29 = new_node(&god);
+              let n30 = new_node(&god);
+              let n31 = new_node(&god);
+              let n32 = new_node(&god);
+              let n33 = new_node(&god);
+              let n34 = new_node(&god);
+              let n35 = new_node(&god);
+              let n36 = new_node(&god);
+              let n37 = new_node(&god);
+              let n38 = new_node(&god);
+
+              // --- Build graph from stack trace ---
+
+              // Branch 1 (from root -> n19)
+              add_edge(&god, n16, n19, TestEK::new(0, None));
+              add_edge(&god, n19, n20, TestEK::new(0, None));
+              
+              // Path through n21 (with negative pop)
+              add_edge(&god, n20, n21, TestEK::new(0, Some(0)));
+              add_edge(&god, n21, n23, TestEK::new(0, None));
+              add_edge(&god, n23, n25, TestEK::new(-1, Some(1)));
+              add_edge(&god, n25, n27, TestEK::new(0, None));
+              add_edge(&god, n27, n28, TestEK::new(0, None));
+              add_edge(&god, n28, n18, TestEK::new(0, None));
+
+              // Path through n22
+              add_edge(&god, n20, n22, TestEK::new(0, Some(2)));
+              add_edge(&god, n22, n24, TestEK::new(2, None));
+              add_edge(&god, n24, n26, TestEK::new(0, Some(0))); // Leaf
+
+              // Branch 2 (from root -> n29)
+              add_edge(&god, n16, n29, TestEK::new(0, None));
+              add_edge(&god, n29, n30, TestEK::new(0, None));
+
+              // Path through n31 (with negative pop)
+              add_edge(&god, n30, n31, TestEK::new(0, Some(1)));
+              add_edge(&god, n31, n33, TestEK::new(0, None));
+              add_edge(&god, n33, n35, TestEK::new(-1, Some(2)));
+              add_edge(&god, n35, n37, TestEK::new(0, None));
+              add_edge(&god, n37, n38, TestEK::new(0, None));
+              add_edge(&god, n38, n18, TestEK::new(0, None));
+
+              // Path through n32
+              add_edge(&god, n30, n32, TestEK::new(0, Some(2)));
+              add_edge(&god, n32, n34, TestEK::new(2, None));
+              add_edge(&god, n34, n36, TestEK::new(0, Some(0))); // Leaf
+
+              let roots = vec![n16];
+              run_test(&god, &roots);
           }
           ```
 
-      2.  **Remove the Old Test Helper:**
-          Inside the `mod tests` block, locate and delete the `assert_negative_pops_at_end_only` function definition.
-
-      3.  **Update Test Code:**
-          In the `run_test` function within `mod tests`, modify the two calls to the old assertion helper to use the new `assert_negative_pops_follow_property_for_stacks` function, providing a closure to access the `pop` field.
-
-          *   **From:**
-              ```rust
-              assert_negative_pops_at_end_only(&bubbled_stacks);
-              assert_negative_pops_at_end_only(&bubbled_trie_flattened);
-              ```
-          *   **To:**
-              ```rust
-              assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
-              assert_negative_pops_follow_property_for_stacks(&bubbled_trie_flattened, |ek| ek.pop);
-              ```
-
       ### Git Diff
 
-      Here is the git patch that applies the changes described above.
+      Here is the git diff for the changes:
 
       ```diff
       diff --git a/src/constraint_precompute3_eliminate_negative_pops.rs b/src/constraint_precompute3_eliminate_negative_pops.rs
-      index 630650e..d387040 100644
+      index 7a09849..0837562 100644
       --- a/src/constraint_precompute3_eliminate_negative_pops.rs
       +++ b/src/constraint_precompute3_eliminate_negative_pops.rs
-      @@ -124,6 +124,42 @@
+      @@ -628,6 +628,61 @@
+               let bubbled = bubble_up_negative_pops_stack(original.clone());
+               assert_eq!(realized_actions(&original), realized_actions(&bubbled));
            }
+      +
+      +    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
+      +    #[test]
+      +    fn test_graph_from_complex_stack_trace() {
+      +        let god = TestGod::new();
+      +        // Nodes from the provided stack trace
+      +        let n16 = new_node(&god); // root
+      +        let n18 = new_node(&god); // end
+      +        let n19 = new_node(&god);
+      +        let n20 = new_node(&god);
+      +        let n21 = new_node(&god);
+      +        let n22 = new_node(&god);
+      +        let n23 = new_node(&god);
+      +        let n24 = new_node(&god);
+      +        let n25 = new_node(&god);
+      +        let n26 = new_node(&god);
+      +        let n27 = new_node(&god);
+      +        let n28 = new_node(&god);
+      +        let n29 = new_node(&god);
+      +        let n30 = new_node(&god);
+      +        let n31 = new_node(&god);
+      +        let n32 = new_node(&god);
+      +        let n33 = new_node(&god);
+      +        let n34 = new_node(&god);
+      +        let n35 = new_node(&god);
+      +        let n36 = new_node(&god);
+      +        let n37 = new_node(&god);
+      +        let n38 = new_node(&god);
+      +
+      +        // --- Build graph from stack trace ---
+      +
+      +        // Branch 1 (from root -> n19)
+      +        add_edge(&god, n16, n19, TestEK::new(0, None));
+      +        add_edge(&god, n19, n20, TestEK::new(0, None));
+      +        
+      +        // Path through n21 (with negative pop)
+      +        add_edge(&god, n20, n21, TestEK::new(0, Some(0)));
+      +        add_edge(&god, n21, n23, TestEK::new(0, None));
+      +        add_edge(&god, n23, n25, TestEK::new(-1, Some(1)));
+      +        add_edge(&god, n25, n27, TestEK::new(0, None));
+      +        add_edge(&god, n27, n28, TestEK::new(0, None));
+      +        add_edge(&god, n28, n18, TestEK::new(0, None));
+      +
+      +        // Path through n22
+      +        add_edge(&god, n20, n22, TestEK::new(0, Some(2)));
+      +        add_edge(&god, n22, n24, TestEK::new(2, None));
+      +        add_edge(&god, n24, n26, TestEK::new(0, Some(0))); // Leaf
+      +
+      +        // Branch 2 (from root -> n29)
+      +        add_edge(&god, n16, n29, TestEK::new(0, None));
+      +        add_edge(&god, n29, n30, TestEK::new(0, None));
+      +
+      +        // Path through n31 (with negative pop)
+      +        add_edge(&god, n30, n31, TestEK::new(0, Some(1)));
+      +        add_edge(&god, n31, n33, TestEK::new(0, None));
+      +        add_edge(&god, n33, n35, TestEK::new(-1, Some(2)));
+      +        add_edge(&god, n35, n37, TestEK::new(0, None));
+      +        add_edge(&god, n37, n38, TestEK::new(0, None));
+      +        add_edge(&god, n38, n18, TestEK::new(0, None));
+      +
+      +        // Path through n32
+      +        add_edge(&god, n30, n32, TestEK::new(0, Some(2)));
+      +        add_edge(&god, n32, n34, TestEK::new(2, None));
+      +        add_edge(&god, n34, n36, TestEK::new(0, Some(0))); // Leaf
+      +
+      +        let roots = vec![n16];
+      +        run_test(&god, &roots);
+      +    }
        }
        
-      +pub fn assert_negative_pops_follow_property_for_stacks<EK, FGet>(
-      +    stacks: &std::collections::BTreeSet<Vec<EK>>,
-      +    mut get_pop: FGet,
-      +) where
-      +    EK: Ord + Clone + std::fmt::Debug,
-      +    FGet: FnMut(&EK) -> isize,
-      +{
-      +    for stack in stacks {
-      +        let mut seen_negative = false;
-      +        for ek in stack {
-      +            if seen_negative {
-      +                assert!(
-      +                    get_pop(ek) <= 0,
-      +                    "Found a positive pop after a negative pop: {:?}",
-      +                    stack
-      +                );
-      +            }
-      +            if get_pop(ek) < 0 {
-      +                seen_negative = true;
-      +            }
-      +        }
-      +    }
-      +}
-      +
-      +pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
-      +    god: &GodWrapper<EK, EV, T>,
-      +    roots: &[Trie2Index],
-      +    get_pop: FGet,
-      +) where
-      +    EK: Ord + Clone + std::fmt::Debug,
-      +    EV: PartialEq + Clone,
-      +    T: PartialEq,
-      +    FGet: FnMut(&EK) -> isize,
-      +{
-      +    let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
-      +    assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
-      +}
-      +
-       #[cfg(test)]
-       mod tests {
-           use super::*;
-      @@ -253,24 +289,6 @@
-               stacks.iter().map(|s| f(s.clone())).collect()
-           }
        
-      -    fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
-      -        for stack in stacks {
-      -            let mut seen_negative = false;
-      -            for ek in stack {
-      -                if seen_negative {
-      -                    assert!(
-      -                        ek.pop <= 0,
-      -                        "Found a positive pop after a negative pop: {:?}",
-      -                        stack
-      -                    );
-      -                }
-      -                if ek.pop < 0 {
-      -                    seen_negative = true;
-      -                }
-      -            }
-      -        }
-      -    }
-      -
-           // Keep this around for future integration tests; mark as ignored for now
-           // because the graph versions are not implemented yet.
-           fn run_test(god: &TestGod, roots: &[Trie2Index]) {
-      @@ -285,8 +303,8 @@
-                   |ev1, _ev2| *ev1 = (),
-               );
-               let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-      -        assert_negative_pops_at_end_only(&bubbled_stacks);
-      -        assert_negative_pops_at_end_only(&bubbled_trie_flattened);
-      +        assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
-      +        assert_negative_pops_follow_property_for_stacks(&bubbled_trie_flattened, |ek| ek.pop);
-               assert_eq!(
-                   map_to_stacks(compress_stack, &bubbled_stacks),
-                   map_to_stacks(compress_stack, &bubbled_trie_flattened)
 
       ```
     metadata:
@@ -8573,7 +8722,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_eliminate_negative_pops.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_eliminate_negative_pops.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Extract and expose negative
-      pop property assertion logic"'
+  - user: 'Changes committed with message: "Add graph test case based on complex stack
+      trace structure"'
     metadata:
 ...
