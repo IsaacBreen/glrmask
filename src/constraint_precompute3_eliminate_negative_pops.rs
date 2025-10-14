@@ -66,7 +66,7 @@ mod tests {
     // --- Tests ---
 
     #[test]
-    fn test_eliminate_negative_pops_path_based() {
+    fn test_bubble_up_negative_pops_simple() {
         // 1. ARRANGE: Set up the graph and test data
         let god = Trie3GodWrapper::new();
 
@@ -103,7 +103,7 @@ mod tests {
 
 
         // 3. ACT: Run the transformation
-        eliminate_negative_pops_trie3(&god, &[root]);
+        bubble_up_negative_pops(&god, &[root]);
 
         // 4. ASSERT (After): Verify the set of possible paths is correct after transformation
         let actual_paths_after = Trie::get_all_paths(&god, &[root]);
