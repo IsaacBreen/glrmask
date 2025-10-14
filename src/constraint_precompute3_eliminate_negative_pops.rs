@@ -91,8 +91,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     // --- Test Helpers ---
-    type TestEK = isize;
-    type TestEV = usize;
+    type TestEK = (isize, usize);
+    type TestEV = ();
     type TestT = PrecomputedNodeContents;
     type TestGod = GodWrapper<TestEK, TestEV, TestT>;
 
