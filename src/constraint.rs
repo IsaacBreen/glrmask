@@ -1806,58 +1806,7 @@ impl GrammarConstraint {
         trie3_god: &Trie3GodWrapper,
         roots: &[PrecomputeNode3Index],
     ) {
-        use std::collections::VecDeque;
-        let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
-        let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::from_iter(roots.iter().cloned());
-
-        while let Some(node_idx) = q.pop_front() {
-            if !visited.insert(node_idx) { continue; }
-
-            // Snapshot children
-            let children_snapshot: Vec<((isize, LLMTokenBV), Vec<(PrecomputeNode3Index, StateIDBV)>)> = {
-                let guard = node_idx.read(trie3_god).unwrap();
-                guard.children().iter()
-                    .map(|(ek, dest_map)| {
-                        let entries = dest_map.iter().map(|(dst, ev)| (dst.clone(), ev.clone())).collect::<Vec<_>>();
-                        (ek.clone(), entries)
-                    })
-                    .collect()
-            };
-
-            // Enqueue children for traversal
-            for (_ek, entries) in &children_snapshot {
-                for (child_idx, _ev) in entries {
-                    q.push_back(child_idx.clone());
-                }
-            }
-
-            // Rewrite negative pops
-            let mut to_rewrite: Vec<((isize, LLMTokenBV), Vec<(PrecomputeNode3Index, StateIDBV)>)> = Vec::new();
-            for (ek, entries) in &children_snapshot {
-                if ek.0 < 0 {
-                    to_rewrite.push((ek.clone(), entries.clone()));
-                }
-            }
-
-            if to_rewrite.is_empty() {
-                continue;
-            }
-
-            // Apply rewrites
-            {
-                let mut guard = node_idx.write(trie3_god).unwrap();
-                for (old_key, entries) in to_rewrite {
-                    // Remove old key
-                    guard.children_mut().remove(&old_key);
-                    // Insert new with absolute pop
-                    let new_key = (old_key.0.abs(), old_key.1.clone());
-                    let dest_map = guard.children_mut().entry(new_key).or_default();
-                    for (dst, ev) in entries {
-                        dest_map.entry(dst).or_insert_with(StateIDBV::zeros).bitor_assign(&ev);
-                    }
-                }
-            }
-        }
+        todo!()
     }
 
     pub fn precompute3(
@@ -2027,7 +1976,7 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+        // optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
         (precomputed3, trie3_god)
     }
 
