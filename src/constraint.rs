@@ -1804,13 +1804,12 @@ impl GrammarConstraint {
 
         let mut glr_state = parser.init_parser_state_combined_with_acc(acc)
                                   .with_god(trie3_god.clone());
-
-        glr_state.process_token(terminal_id);
-        glr_state.process_default_reductions();
+        
+        glr_state.process_token_advanced(terminal_id, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromHallucinateState, ..Default::default() });
 
         let mut gss_to_trie: HashMap<*const GSSNode, BTreeSet<PrecomputeNode3Index>> = HashMap::new();
         gss_to_trie.insert(
-            Arc::as_ptr(&glr_state.active_state.stack),
+            Arc::as_ptr(&glr_state.active_state.stack), 
             glr_state.active_state.stack.inner.reduce_acc().unwrap().stored_trie_nodes().clone()
         );
 
@@ -1862,7 +1861,7 @@ impl GrammarConstraint {
 
         let final_sources = gss_to_trie.get(&leaf_ptr.expect("GSS leaf not found")).unwrap();
         let end_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
-
+        
         for source in final_sources {
             let edge_key = (0, LLMTokenBV::max_ones());
             let edge_value = StateIDBV::max_ones();
