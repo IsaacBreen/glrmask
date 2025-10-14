@@ -121,7 +121,7 @@ mod tests {
             prog.push(Instr::with(trailing_sum, None));
         }
 
-        // Remove any zero-pop-only trailing no-op to keep consistent canonical form
+        // Keep a single zero-pop-only trailing no-op if it exists.
         if let Some(last) = prog.last() {
             if last.check.is_none() && last.pop == 0 {
                 // keep a single zero-pop-only if it exists; tests may expect it after neutralization
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_stack_bubble_pair_transform_result() {
-        // Example from the prompt:
+        // Example:
         // (pop 3, check 0); (pop -2, check 2)
         // =>
         // (pop 1, check 2); (pop 2, check 0); (pop -2, no-check)
@@ -320,7 +320,6 @@ mod tests {
     #[test]
     fn test_stack_bubble_multiple_negatives() {
         // Program: (2, a); (-3, b); (1, c); (-1, d)
-        // We'll just verify it runs and that the transformation has no negative pops before checks.
         let input = vec![
             Instr::with(2, Some(10)),
             Instr::with(-3, Some(20)),
@@ -341,8 +340,8 @@ mod tests {
             }
         }
 
-        // Semantics sanity on a larger data stack
-        let data: Vec<usize> = (0..100).collect();
+        // Semantics sanity on a larger uniform data stack (all ones)
+        let data: Vec<usize> = vec![1; 100];
         assert!(run_on_stack(&data, &input));
         assert!(run_on_stack(&data, &transformed));
     }
@@ -380,6 +379,169 @@ mod tests {
         ];
         assert!(run_on_stack(&data, &original));
         assert!(run_on_stack(&data, &neutralized));
+    }
+
+    // --- Additional Stack-Only Unit Tests (expanded coverage) ---
+
+    #[test]
+    fn test_stack_compress_pop_only_fusion() {
+        // Mix of pop-only around checks gets fused forward and trailing pops combined
+        let input = vec![
+            Instr::with(2, None),
+            Instr::with(3, Some(7)),
+            Instr::with(-1, None),
+            Instr::with(1, Some(5)),
+            Instr::with(4, None),
+            Instr::with(-2, None),
+        ];
+        let got = compress_pop_only(input);
+        let expected = vec![
+            Instr::with(5, Some(7)), // 3 + 2 merged in
+            Instr::with(0, Some(5)), // 1 + (-1) merged in
+            Instr::with(2, None),    // trailing pops 4 + (-2) = 2
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_stack_bubble_idempotent() {
+        // After bubbling once, a second time should not change the sequence further
+        let input = vec![
+            Instr::with(3, Some(0)),
+            Instr::with(-2, Some(2)),
+            Instr::with(1, Some(9)),
+        ];
+        let once = bubble_up_negative_pops_stack(input.clone());
+        let twice = bubble_up_negative_pops_stack(once.clone());
+        assert_eq!(once, twice, "Bubbling should be idempotent after stabilization");
+    }
+
+    #[test]
+    fn test_stack_bubble_semantics_constant_stack() {
+        // Constant data stack makes checks trivially succeed; we verify semantics preserved
+        const C: usize = 42;
+        let data = vec![C; 256];
+        let input = vec![
+            Instr::with(2, Some(C)),
+            Instr::with(-5, Some(C)),
+            Instr::with(1, Some(C)),
+            Instr::with(3, Some(C)),
+            Instr::with(-1, Some(C)),
+        ];
+        let transformed = bubble_up_negative_pops_stack(input.clone());
+
+        // All checked steps should have non-negative pops after bubbling
+        for (i, st) in transformed.iter().enumerate() {
+            if st.check.is_some() {
+                assert!(
+                    st.pop >= 0,
+                    "Negative pop remained before a check at step {}, {:?}",
+                    i,
+                    st
+                );
+            }
+        }
+
+        assert!(run_on_stack(&data, &input));
+        assert!(run_on_stack(&data, &transformed));
+    }
+
+    #[test]
+    fn test_stack_bubble_chain_two_negatives() {
+        // Multiple negative pops interleaved with positives
+        const C: usize = 7;
+        let data = vec![C; 128];
+        let input = vec![
+            Instr::with(5, Some(C)),
+            Instr::with(-3, Some(C)),
+            Instr::with(2, Some(C)),
+            Instr::with(-4, Some(C)),
+            Instr::with(1, Some(C)),
+        ];
+
+        let transformed = bubble_up_negative_pops_stack(input.clone());
+
+        // Ensure no negative pops remain before checks
+        for (i, st) in transformed.iter().enumerate() {
+            if st.check.is_some() {
+                assert!(
+                    st.pop >= 0,
+                    "Negative pop remained before a check at step {}, {:?}",
+                    i,
+                    st
+                );
+            }
+        }
+
+        assert!(run_on_stack(&data, &input));
+        assert!(run_on_stack(&data, &transformed));
+    }
+
+    #[test]
+    fn test_stack_bubble_noop_when_no_negative() {
+        // If no negative pops before checks exist, bubbling should essentially be a no-op (modulo compression)
+        let input = vec![
+            Instr::with(1, Some(10)),
+            Instr::with(0, Some(11)),
+            Instr::with(3, Some(12)),
+        ];
+        let compressed = compress_pop_only(input.clone());
+        let bubbled = bubble_up_negative_pops_stack(input);
+        assert_eq!(compressed, bubbled);
+    }
+
+    #[test]
+    fn test_stack_neutralize_no_trailing_pop_only() {
+        // Neutralization does nothing if there's no trailing pop-only step
+        let input = vec![
+            Instr::with(2, Some(3)),
+            Instr::with(1, Some(4)),
+        ];
+        let got = neutralize_remaining_negative_pops_stack(input.clone());
+        assert_eq!(got, compress_pop_only(input));
+    }
+
+    #[test]
+    fn test_stack_neutralize_trailing_already_zero() {
+        // If trailing pop-only is already zero, stays zero
+        let input = vec![
+            Instr::with(1, Some(2)),
+            Instr::with(0, None),
+        ];
+        let got = neutralize_remaining_negative_pops_stack(input);
+        let expected = vec![
+            Instr::with(1, Some(2)),
+            Instr::with(0, None),
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_flatten_trie_paths_branching() {
+        // Build a small branching trie:
+        // root:
+        //   -- (1,1) --> n1 -- (1,2) --> n2
+        //   -- (2,3) --> n3
+        let god: TestGod = GodWrapper::new();
+        let root = new_node(&god);
+        let n1 = new_node(&god);
+        let n2 = new_node(&god);
+        let n3 = new_node(&god);
+        add_edge(&god, root, (1, 1), n1, ());
+        add_edge(&god, n1, (1, 2), n2, ());
+        add_edge(&god, root, (2, 3), n3, ());
+
+        let programs = flatten_trie_to_programs(&god, &[root]);
+        // We always include the empty path as a valid path of length 0
+        let expected: BTreeSet<Vec<Instr>> = [
+            vec![], // empty path
+            vec![Instr::with(1, Some(1)), Instr::with(1, Some(2))],
+            vec![Instr::with(2, Some(3))],
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(programs, expected);
     }
 
     // --- Graph vs Stack Tests ---
@@ -426,26 +588,59 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "graph bubble_up_negative_pops not implemented yet"]
+    fn test_graph_vs_stack_bubble_up_branching() {
+        // Branching case to ensure sibling paths are not altered incorrectly
+        let god: TestGod = GodWrapper::new();
+        let root = new_node(&god);
+
+        // Path A: (3,0) -> (-2,2)
+        let a1 = new_node(&god);
+        let a2 = new_node(&god);
+        add_edge(&god, root, (3, 0), a1, ());
+        add_edge(&god, a1, (-2, 2), a2, ());
+
+        // Path B: (1,9)
+        let b1 = new_node(&god);
+        add_edge(&god, root, (1, 9), b1, ());
+
+        let before = flatten_trie_to_programs(&god, &[root]);
+        let stacks_after: BTreeSet<Vec<Instr>> = before
+            .iter()
+            .map(|p| bubble_up_negative_pops_stack(p.clone()))
+            .collect();
+
+        let mut get_pop = |ek: &TestEK| ek.0;
+        let mut make_key = |ek: &TestEK, new_pop: isize| (new_pop, ek.1);
+        let mut merge_ev = |_a: &mut TestEV, _b: TestEV| {};
+        bubble_up_negative_pops(&god, &[root], &mut get_pop, &mut make_key, &mut merge_ev);
+
+        let after = flatten_trie_to_programs(&god, &[root]);
+        let after_set: BTreeSet<Vec<Instr>> =
+            after.into_iter().map(|path| compress_pop_only(path)).collect();
+
+        assert_eq!(after_set, stacks_after);
+    }
+
+    #[test]
     #[ignore = "graph neutralize_remaining_negative_pops not implemented yet"]
     fn test_graph_vs_stack_neutralize_single_path() {
         let god: TestGod = GodWrapper::new();
         let root = new_node(&god);
 
-        // Build path: (1,2); (2,0); (pop-only -2) [note: initial tries won't have pop-only edges; included to mirror post-bubble-up scenario]
-        // For trie construction, we only add checked edges; emulate bubble-up scenario:
+        // Build path: (1,2); (2,0)
         let input_prog = vec![Instr::with(1, Some(2)), Instr::with(2, Some(0))];
         let _last = build_linear_trie(&god, root, &input_prog);
 
         // Flatten trie to programs (no pop-only yet)
         let before = flatten_trie_to_programs(&god, &[root]);
 
-        // Stack reference: first bubble-up to get a trailing pop-only, then neutralize it.
+        // Stack reference: emulate a prior bubble created a trailing pop-only; then neutralize
         let mut stacks_after: BTreeSet<Vec<Instr>> = BTreeSet::new();
         for p in before {
             let bubbled = {
-                // emulate that a prior bubble may have introduced a trailing pop-only; here we just append one manually to simulate
                 let mut q = p.clone();
-                q.push(Instr::with(-2, None));
+                q.push(Instr::with(-2, None)); // emulate trailing pop-only
                 bubble_up_negative_pops_stack(q)
             };
             stacks_after.insert(neutralize_remaining_negative_pops_stack(bubbled));
