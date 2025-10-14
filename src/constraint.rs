@@ -1688,10 +1688,6 @@ impl GrammarConstraint {
                 reset_cache: true,
             };
             state.process_token_advanced(tid, &config);
-            state.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig {
-                below_bottom_mode: BelowBottomReductionMode::ContinueFromHallucinateState,
-                ..Default::default()
-            });
 
             let final_acc = state.active_state.stack.inner.reduce_acc().unwrap();
             let end_nodes = final_acc.stored_trie_nodes();
@@ -1826,7 +1822,7 @@ impl GrammarConstraint {
                     let all_states = StateIDBV::max_ones();
                     let edge_key = (0, all_tokens);
 
-                    for src_node in nodes {
+                    for src_node in &*nodes {
                         let mut guard = src_node.write(&trie3_god).unwrap();
                         guard.children_mut()
                             .entry(edge_key.clone())
