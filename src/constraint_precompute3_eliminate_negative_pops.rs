@@ -516,7 +516,6 @@ mod tests {
 
     // --- Graph-level expectations (ignored until the TODOs are implemented) ---
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_example() {
         let god = TestGod::new();
@@ -529,7 +528,6 @@ mod tests {
         run_test(&god, &roots)
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_branching_from_source_single_negative_pair() {
         // A --(5, c0)--> B --(-2, c2)--> C
@@ -552,7 +550,6 @@ mod tests {
         run_test(&god, &roots);
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_multiple_parents_into_b_single_negative_pair() {
         // A1 --(4, c10)--> B --(-3, c2)--> C
@@ -573,7 +570,6 @@ mod tests {
         run_test(&god, &roots);
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_branching_after_b_also_has_positive_branch() {
         // A --(5, c0)--> B --(-2, c2)--> C
@@ -595,7 +591,6 @@ mod tests {
         run_test(&god, &roots);
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_no_negative_edges_noop() {
         // A --(2, c0)--> B --(1, c1)--> C
@@ -612,7 +607,6 @@ mod tests {
         run_test(&god, &roots);
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_trailing_unconditional_negative_neutralized() {
         // A --(3, c0)--> B --(-2, c2)--> C --(0, None)--> terminal
@@ -634,7 +628,6 @@ mod tests {
 
     // --- New graph-level tests (non-ignored) that include terminal edges to allow merging ---
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_example_with_terminal() {
         // A --(3,c0)--> B --(-2,c2)--> C --(0,None)--> T
@@ -652,7 +645,6 @@ mod tests {
         run_test(&god, &roots);
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_branching_from_source_single_negative_pair_with_terminal_new() {
         // A --(5, c0)--> B --(-2, c2)--> C --(0, None)--> T
@@ -672,7 +664,6 @@ mod tests {
         run_test(&god, &roots);
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_multiple_parents_into_b_single_negative_pair_with_terminal_new() {
         // A1 --(4, c10)--> B --(-3, c2)--> C --(0, None)--> T
@@ -693,7 +684,6 @@ mod tests {
         run_test(&god, &roots);
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_branching_after_b_also_has_positive_branch_with_terminal_new() {
         // A --(5, c0)--> B --(-2, c2)--> C --(0, None)--> T
@@ -717,7 +707,6 @@ mod tests {
         run_test(&god, &roots);
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_no_negative_edges_noop_new() {
         // A --(2, c0)--> B --(1, c1)--> C --(0, None)--> T
@@ -783,7 +772,6 @@ mod tests {
         assert_eq!(realized_actions(&original), realized_actions(&bubbled));
     }
 
-    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_graph_from_complex_stack_trace() {
         let god = TestGod::new();
