@@ -149,6 +149,44 @@ pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FNeutral, FReplace, F
     }
 }
 
+pub fn assert_negative_pops_follow_property_for_stacks<EK, FGet>(
+    stacks: &std::collections::BTreeSet<Vec<EK>>,
+    mut get_pop: FGet,
+) where
+    EK: Ord + Clone + std::fmt::Debug,
+    FGet: FnMut(&EK) -> isize,
+{
+    for stack in stacks {
+        let mut seen_negative = false;
+        for ek in stack {
+            if seen_negative {
+                assert!(
+                    get_pop(ek) <= 0,
+                    "Found a positive pop after a negative pop: {:?}",
+                    stack
+                );
+            }
+            if get_pop(ek) < 0 {
+                seen_negative = true;
+            }
+        }
+    }
+}
+
+pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
+    god: &GodWrapper<EK, EV, T>,
+    roots: &[Trie2Index],
+    get_pop: FGet,
+) where
+    EK: Ord + Clone + std::fmt::Debug,
+    EV: PartialEq + Clone,
+    T: PartialEq,
+    FGet: FnMut(&EK) -> isize,
+{
+    let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
+    assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,24 +324,6 @@ mod tests {
         stacks.iter().map(|s| f(s.clone())).collect()
     }
 
-    fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
-        for stack in stacks {
-            let mut seen_negative = false;
-            for ek in stack {
-                if seen_negative {
-                    assert!(
-                        ek.pop <= 0,
-                        "Found a positive pop after a negative pop: {:?}",
-                        stack
-                    );
-                }
-                if ek.pop < 0 {
-                    seen_negative = true;
-                }
-            }
-        }
-    }
-
     // Keep this around for future integration tests; mark as ignored for now
     // because the graph versions are not implemented yet.
     fn run_test(god: &TestGod, roots: &[Trie2Index]) {
@@ -320,8 +340,8 @@ mod tests {
             |ev1, _ev2| *ev1 = (),
         );
         let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-        assert_negative_pops_at_end_only(&bubbled_stacks);
-        assert_negative_pops_at_end_only(&bubbled_trie_flattened);
+        assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
+        assert_negative_pops_follow_property_for_stacks(&bubbled_trie_flattened, |ek| ek.pop);
         assert_eq!(
             map_to_stacks(compress_stack, &bubbled_stacks),
             map_to_stacks(compress_stack, &bubbled_trie_flattened)

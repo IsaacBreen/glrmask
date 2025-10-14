@@ -2295,8 +2295,22 @@ local_system:
               stacks.iter().map(|s| f(s.clone())).collect()
           }
 
-          fn assert_negative_pops_at_end_only(...) -> ... {
-
+          fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
+              for stack in stacks {
+                  let mut seen_negative = false;
+                  for ek in stack {
+                      if seen_negative {
+                          assert!(
+                              ek.pop <= 0,
+                              "Found a positive pop after a negative pop: {:?}",
+                              stack
+                          );
+                      }
+                      if ek.pop < 0 {
+                          seen_negative = true;
+                      }
+                  }
+              }
           }
 
           // Keep this around for future integration tests; mark as ignored for now
@@ -2315,7 +2329,8 @@ local_system:
                   |ev1, _ev2| *ev1 = (),
               );
               let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-              // do assert_negative_pops_at_end_only for both (flat) stacks
+              assert_negative_pops_at_end_only(&bubbled_stacks);
+              assert_negative_pops_at_end_only(&bubbled_trie_flattened);
               assert_eq!(
                   map_to_stacks(compress_stack, &bubbled_stacks),
                   map_to_stacks(compress_stack, &bubbled_trie_flattened)
@@ -4913,6 +4928,44 @@ local_system:
           }
       }
 
+      pub fn assert_negative_pops_follow_property_for_stacks<EK, FGet>(
+          stacks: &std::collections::BTreeSet<Vec<EK>>,
+          mut get_pop: FGet,
+      ) where
+          EK: Ord + Clone + std::fmt::Debug,
+          FGet: FnMut(&EK) -> isize,
+      {
+          for stack in stacks {
+              let mut seen_negative = false;
+              for ek in stack {
+                  if seen_negative {
+                      assert!(
+                          get_pop(ek) <= 0,
+                          "Found a positive pop after a negative pop: {:?}",
+                          stack
+                      );
+                  }
+                  if get_pop(ek) < 0 {
+                      seen_negative = true;
+                  }
+              }
+          }
+      }
+
+      pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
+          god: &GodWrapper<EK, EV, T>,
+          roots: &[Trie2Index],
+          get_pop: FGet,
+      ) where
+          EK: Ord + Clone + std::fmt::Debug,
+          EV: PartialEq + Clone,
+          T: PartialEq,
+          FGet: FnMut(&EK) -> isize,
+      {
+          let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
+          assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
+      }
+
       #[cfg(test)]
       mod tests {
           use super::*;
@@ -5050,24 +5103,6 @@ local_system:
               stacks.iter().map(|s| f(s.clone())).collect()
           }
 
-          fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
-              for stack in stacks {
-                  let mut seen_negative = false;
-                  for ek in stack {
-                      if seen_negative {
-                          assert!(
-                              ek.pop <= 0,
-                              "Found a positive pop after a negative pop: {:?}",
-                              stack
-                          );
-                      }
-                      if ek.pop < 0 {
-                          seen_negative = true;
-                      }
-                  }
-              }
-          }
-
           // Keep this around for future integration tests; mark as ignored for now
           // because the graph versions are not implemented yet.
           fn run_test(god: &TestGod, roots: &[Trie2Index]) {
@@ -5084,8 +5119,8 @@ local_system:
                   |ev1, _ev2| *ev1 = (),
               );
               let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-              assert_negative_pops_at_end_only(&bubbled_stacks);
-              assert_negative_pops_at_end_only(&bubbled_trie_flattened);
+              assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
+              assert_negative_pops_follow_property_for_stacks(&bubbled_trie_flattened, |ek| ek.pop);
               assert_eq!(
                   map_to_stacks(compress_stack, &bubbled_stacks),
                   map_to_stacks(compress_stack, &bubbled_trie_flattened)
@@ -7866,8 +7901,22 @@ messages:
               stacks.iter().map(|s| f(s.clone())).collect()
           }
 
-          fn assert_negative_pops_at_end_only(...) -> ... {
-
+          fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
+              for stack in stacks {
+                  let mut seen_negative = false;
+                  for ek in stack {
+                      if seen_negative {
+                          assert!(
+                              ek.pop <= 0,
+                              "Found a positive pop after a negative pop: {:?}",
+                              stack
+                          );
+                      }
+                      if ek.pop < 0 {
+                          seen_negative = true;
+                      }
+                  }
+              }
           }
 
           // Keep this around for future integration tests; mark as ignored for now
@@ -7886,7 +7935,8 @@ messages:
                   |ev1, _ev2| *ev1 = (),
               );
               let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-              // do assert_negative_pops_at_end_only for both (flat) stacks
+              assert_negative_pops_at_end_only(&bubbled_stacks);
+              assert_negative_pops_at_end_only(&bubbled_trie_flattened);
               assert_eq!(
                   map_to_stacks(compress_stack, &bubbled_stacks),
                   map_to_stacks(compress_stack, &bubbled_trie_flattened)
@@ -8334,7 +8384,9 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_eliminate_negative_pops.rs
-  - user: Implement `assert_negative_pops_at_end_only`
+  - user: Move `assert_negative_pops_at_end_only` out of the tests mod. Rename it
+      maybe. Add a version of it that acts on the trie itself. That version should
+      convert to stacks and call the other one. Make it public.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8353,98 +8405,159 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement `assert_negative_pops_at_end_only` and use it in your tests, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to refactor the assertion function, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Implement `assert_negative_pops_at_end_only` function:**
+      #### File: `src/constraint_precompute3_eliminate_negative_pops.rs`
 
-          In the file `src/constraint_precompute3_eliminate_negative_pops.rs`, locate the placeholder function `assert_negative_pops_at_end_only`. It currently looks like this:
-
-          ```rust
-          fn assert_negative_pops_at_end_only(...) -> ... {
-
-          }
-          ```
-
-          Replace this placeholder with the following implementation. This function will iterate through a set of stacks and assert that for each stack, once an element with a negative `pop` value is encountered, no element with a positive `pop` value appears later in that stack.
+      1.  **Add New Public Helper Functions:**
+          Place the following two new public functions, `assert_negative_pops_follow_property_for_stacks` and `assert_negative_pops_follow_property_for_trie`, just above the `#[cfg(test)]` attribute line.
 
           ```rust
-          fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
+          pub fn assert_negative_pops_follow_property_for_stacks<EK, FGet>(
+              stacks: &std::collections::BTreeSet<Vec<EK>>,
+              mut get_pop: FGet,
+          ) where
+              EK: Ord + Clone + std::fmt::Debug,
+              FGet: FnMut(&EK) -> isize,
+          {
               for stack in stacks {
                   let mut seen_negative = false;
                   for ek in stack {
                       if seen_negative {
                           assert!(
-                              ek.pop <= 0,
+                              get_pop(ek) <= 0,
                               "Found a positive pop after a negative pop: {:?}",
                               stack
                           );
                       }
-                      if ek.pop < 0 {
+                      if get_pop(ek) < 0 {
                           seen_negative = true;
                       }
                   }
               }
           }
+          
+          pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
+              god: &GodWrapper<EK, EV, T>,
+              roots: &[Trie2Index],
+              get_pop: FGet,
+          ) where
+              EK: Ord + Clone + std::fmt::Debug,
+              EV: PartialEq + Clone,
+              T: PartialEq,
+              FGet: FnMut(&EK) -> isize,
+          {
+              let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
+              assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
+          }
           ```
 
-      2.  **Use the assertion in `run_test`:**
+      2.  **Remove the Old Test Helper:**
+          Inside the `mod tests` block, locate and delete the `assert_negative_pops_at_end_only` function definition.
 
-          In the same file (`src/constraint_precompute3_eliminate_negative_pops.rs`), find the `run_test` function. Inside this function, there is a comment indicating where to add the assertion:
+      3.  **Update Test Code:**
+          In the `run_test` function within `mod tests`, modify the two calls to the old assertion helper to use the new `assert_negative_pops_follow_property_for_stacks` function, providing a closure to access the `pop` field.
 
-          ```rust
-          // do assert_negative_pops_at_end_only for both (flat) stacks
-          ```
-
-          Replace this comment with two calls to the function you just implemented. This will verify the desired property on both the stack-transformed and trie-transformed data within your test logic.
-
-          ```rust
-          assert_negative_pops_at_end_only(&bubbled_stacks);
-          assert_negative_pops_at_end_only(&bubbled_trie_flattened);
-          ```
+          *   **From:**
+              ```rust
+              assert_negative_pops_at_end_only(&bubbled_stacks);
+              assert_negative_pops_at_end_only(&bubbled_trie_flattened);
+              ```
+          *   **To:**
+              ```rust
+              assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
+              assert_negative_pops_follow_property_for_stacks(&bubbled_trie_flattened, |ek| ek.pop);
+              ```
 
       ### Git Diff
 
-      Here is the git diff to apply these changes directly:
+      Here is the git patch that applies the changes described above.
 
       ```diff
       diff --git a/src/constraint_precompute3_eliminate_negative_pops.rs b/src/constraint_precompute3_eliminate_negative_pops.rs
-      index 81b6191..28564f3 100644
+      index 630650e..d387040 100644
       --- a/src/constraint_precompute3_eliminate_negative_pops.rs
       +++ b/src/constraint_precompute3_eliminate_negative_pops.rs
-      @@ -200,9 +200,22 @@
+      @@ -124,6 +124,42 @@
+           }
+       }
+       
+      +pub fn assert_negative_pops_follow_property_for_stacks<EK, FGet>(
+      +    stacks: &std::collections::BTreeSet<Vec<EK>>,
+      +    mut get_pop: FGet,
+      +) where
+      +    EK: Ord + Clone + std::fmt::Debug,
+      +    FGet: FnMut(&EK) -> isize,
+      +{
+      +    for stack in stacks {
+      +        let mut seen_negative = false;
+      +        for ek in stack {
+      +            if seen_negative {
+      +                assert!(
+      +                    get_pop(ek) <= 0,
+      +                    "Found a positive pop after a negative pop: {:?}",
+      +                    stack
+      +                );
+      +            }
+      +            if get_pop(ek) < 0 {
+      +                seen_negative = true;
+      +            }
+      +        }
+      +    }
+      +}
+      +
+      +pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
+      +    god: &GodWrapper<EK, EV, T>,
+      +    roots: &[Trie2Index],
+      +    get_pop: FGet,
+      +) where
+      +    EK: Ord + Clone + std::fmt::Debug,
+      +    EV: PartialEq + Clone,
+      +    T: PartialEq,
+      +    FGet: FnMut(&EK) -> isize,
+      +{
+      +    let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
+      +    assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
+      +}
+      +
+       #[cfg(test)]
+       mod tests {
+           use super::*;
+      @@ -253,24 +289,6 @@
                stacks.iter().map(|s| f(s.clone())).collect()
            }
        
-      -    fn assert_negative_pops_at_end_only(...) -> ... {
+      -    fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
+      -        for stack in stacks {
+      -            let mut seen_negative = false;
+      -            for ek in stack {
+      -                if seen_negative {
+      -                    assert!(
+      -                        ek.pop <= 0,
+      -                        "Found a positive pop after a negative pop: {:?}",
+      -                        stack
+      -                    );
+      -                }
+      -                if ek.pop < 0 {
+      -                    seen_negative = true;
+      -                }
+      -            }
+      -        }
+      -    }
       -
-      +    fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
-      +        for stack in stacks {
-      +            let mut seen_negative = false;
-      +            for ek in stack {
-      +                if seen_negative {
-      +                    assert!(
-      +                        ek.pop <= 0,
-      +                        "Found a positive pop after a negative pop: {:?}",
-      +                        stack
-      +                    );
-      +                }
-      +                if ek.pop < 0 {
-      +                    seen_negative = true;
-      +                }
-      +            }
-      +        }
-           }
-       
            // Keep this around for future integration tests; mark as ignored for now
-      @@ -219,7 +232,8 @@
+           // because the graph versions are not implemented yet.
+           fn run_test(god: &TestGod, roots: &[Trie2Index]) {
+      @@ -285,8 +303,8 @@
                    |ev1, _ev2| *ev1 = (),
                );
                let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-      -        // do assert_negative_pops_at_end_only for both (flat) stacks
-      +        assert_negative_pops_at_end_only(&bubbled_stacks);
-      +        assert_negative_pops_at_end_only(&bubbled_trie_flattened);
+      -        assert_negative_pops_at_end_only(&bubbled_stacks);
+      -        assert_negative_pops_at_end_only(&bubbled_trie_flattened);
+      +        assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
+      +        assert_negative_pops_follow_property_for_stacks(&bubbled_trie_flattened, |ek| ek.pop);
                assert_eq!(
                    map_to_stacks(compress_stack, &bubbled_stacks),
                    map_to_stacks(compress_stack, &bubbled_trie_flattened)
@@ -8460,7 +8573,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_eliminate_negative_pops.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_eliminate_negative_pops.rs.
     metadata:
-  - user: 'Changes committed with message: "Test: Add assert_negative_pops_at_end_only
-      to verify negative pops are at the end after bubbling"'
+  - user: 'Changes committed with message: "Refactor: Extract and expose negative
+      pop property assertion logic"'
     metadata:
 ...
