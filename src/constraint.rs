@@ -1665,162 +1665,6 @@ impl GrammarConstraint {
         (BTreeMap::new(), Trie2GodWrapper::new())
     }
 
-    fn reduce_gss_to_trie(
-        gss_root: &Arc<GSSNode>,
-        trie3_god: &Trie3GodWrapper,
-        internal_max_llm_token: usize,
-    ) -> PrecomputeNode3Index {
-        fn dfs(
-            gss_node_arc: &Arc<GSSNode>,
-            memo: &mut HashMap<*const GSSNode, BTreeSet<PrecomputeNode3Index>>,
-            trie3_god: &Trie3GodWrapper,
-            internal_max_llm_token: usize,
-        ) -> BTreeSet<PrecomputeNode3Index> {
-            let gss_node_ptr = Arc::as_ptr(gss_node_arc);
-            if let Some(cached) = memo.get(&gss_node_ptr) {
-                return cached.clone();
-            }
-
-            if gss_node_arc.max_depth() <= 1 { // Base case: hallucinated state
-                let result = gss_node_arc.inner.reduce_acc().unwrap().stored_trie_nodes().clone();
-                memo.insert(gss_node_ptr, result.clone());
-                return result;
-            }
-
-            let mut current_trie_nodes = BTreeSet::new();
-            for peek in gss_node_arc.peek_iter() {
-                let parent_gss_arc = peek.isolated_parent();
-                let parent_trie_nodes = dfs(&parent_gss_arc, memo, trie3_god, internal_max_llm_token);
-
-                let dest_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
-
-                let mut state_bv = StateIDBV::zeros();
-                state_bv.insert(peek.edge_value().state_id.0);
-                let llm_bv = LLMTokenBV::ones(internal_max_llm_token + 1);
-                let edge_key = (-1, llm_bv);
-
-                for src_node in parent_trie_nodes {
-                    let inserter = EdgeInserter::new(trie3_god, src_node.as_arc().clone(), edge_key.clone(), state_bv.clone(), |e, n| *e |= n, |_,_|{}, |_,_|{});
-                    inserter.try_destination(dest_node.clone()).unwrap();
-                }
-                current_trie_nodes.insert(dest_node);
-            }
-
-            memo.insert(gss_node_ptr, current_trie_nodes.clone());
-            current_trie_nodes
-        }
-
-        let mut memo = HashMap::new();
-        let final_set = dfs(gss_root, &mut memo, trie3_god, internal_max_llm_token);
-
-        let end_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
-        let edge_key = (0, LLMTokenBV::ones(internal_max_llm_token + 1));
-        let edge_value = StateIDBV::max_ones();
-        for src_node in final_set {
-            let inserter = EdgeInserter::new(trie3_god, src_node.as_arc().clone(), edge_key.clone(), edge_value.clone(), |e, n| *e |= n, |_,_|{}, |_,_|{});
-            inserter.try_destination(end_node.clone()).unwrap();
-        }
-        end_node
-    }
-
-    fn get_terminal_precomputation(
-        parser: &GLRParser,
-        terminal_id: TerminalID,
-        trie3_god: &Trie3GodWrapper,
-        internal_max_llm_token: usize
-    ) -> (PrecomputeNode3Index, PrecomputeNode3Index) {
-        let start_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
-
-        let mut acc = Acc::new_fresh();
-        acc.stored_trie_nodes_mut().insert(start_node.clone());
-
-        let gss = parser.get_hallucinated_gss_with_acc(acc);
-        let mut s = parser.init_glr_parser_from_stack(gss).with_god(trie3_god.clone());
-
-        let cfg = ProcessTokenAdvancedConfig {
-            below_bottom_mode: BelowBottomReductionMode::ContinueFromHallucinateState,
-            current_token: Some(terminal_id),
-            reset_cache: true,
-            ..Default::default()
-        };
-        s.process_token_advanced(terminal_id, &cfg);
-
-        let end_node = Self::reduce_gss_to_trie(&s.active_state.stack, trie3_god, internal_max_llm_token);
-
-        (start_node, end_node)
-    }
-
-    fn eliminate_negative_pops_recursive(
-        node_idx: PrecomputeNode3Index,
-        god: &Trie3GodWrapper,
-        visited: &mut HashSet<PrecomputeNode3Index>,
-    ) {
-        if !visited.insert(node_idx) {
-            return;
-        }
-
-        let children_to_visit = {
-            let guard = node_idx.read(god).unwrap();
-            guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect::<Vec<_>>()
-        };
-
-        for child_idx in children_to_visit {
-            Self::eliminate_negative_pops_recursive(child_idx, god, visited);
-        }
-
-        // Post-order processing
-        let mut new_children = BTreeMap::new();
-        let mut guard = node_idx.write(god).unwrap();
-        let old_children = std::mem::take(guard.children_mut());
-
-        for (key, dest_map) in old_children {
-            let (pop, llm_bv) = key;
-            if pop >= 0 {
-                new_children.insert((pop, llm_bv), dest_map);
-                continue;
-            }
-
-            // Negative pop `m = pop`.
-            let m = pop;
-            for (dest_node, state_bv_y) in dest_map {
-                let dest_guard = dest_node.read(god).unwrap();
-                if dest_guard.children().is_empty() {
-                     // This is a leaf. Negative pop cannot be resolved further.
-                     // Replace with pop 0 and unconditional.
-                    let new_key = (0, LLMTokenBV::max_ones());
-                    let new_val = StateIDBV::max_ones();
-                    new_children.entry(new_key).or_default().insert(dest_node, new_val);
-                    continue;
-                }
-
-                for (child_key, child_dest_map) in dest_guard.children() {
-                    let (child_pop_n, child_llm_bv) = child_key;
-                    let new_pop = m + child_pop_n;
-                    let new_llm_bv = llm_bv.clone() & child_llm_bv;
-
-                    if new_llm_bv.is_empty() { continue; }
-
-                    for (child_dest, child_state_bv_x) in child_dest_map {
-                        // Add edge from current_node --(m+n, check_x)--> child_dest
-                        new_children.entry((new_pop, new_llm_bv.clone())).or_default().insert(child_dest.clone(), child_state_bv_x.clone());
-                    }
-                }
-            }
-        }
-        *guard.children_mut() = new_children;
-    }
-
-    fn eliminate_negative_pops(
-        precomputed3: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-        trie3_god: &Trie3GodWrapper,
-    ) {
-        let roots: Vec<_> = precomputed3.values().cloned().collect();
-        let mut visited = HashSet::new();
-        for root in roots {
-            Self::eliminate_negative_pops_recursive(root, trie3_god, &mut visited);
-        }
-    }
-
     pub fn precompute3(
         precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
         trie1_god: &Trie1GodWrapper,
@@ -1836,96 +1680,113 @@ impl GrammarConstraint {
         config: &Trie3Config,
         stage_vocab: &mut StageVocab,
     ) -> (Precomputed3, Trie3GodWrapper) {
-        let trie3_god = Trie3GodWrapper::new();
-        let parser = parser.unwrap();
+        crate::debug!(2, "Precomputing Trie 3...");
+        // const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromEverything;
+        const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromHallucinateState;
 
-        // 1. Precompute terminal subtrees
-        let terminal_precomputation: BTreeMap<TerminalID, (PrecomputeNode3Index, PrecomputeNode3Index)> =
-            parser.terminal_map.right_values().map(|&tid| {
-                let (start, end) = Self::get_terminal_precomputation(parser, tid, &trie3_god, internal_max_llm_token);
-                (tid, (start, end))
-            }).collect();
+        let gss_stack = if BELOW_BOTTOM_REDUCE_MODE == BelowBottomReductionMode::ContinueFromEverything {
+            parser.unwrap().get_combined_gss()
+        } else if BELOW_BOTTOM_REDUCE_MODE == BelowBottomReductionMode::ContinueFromHallucinateState {
+            parser.unwrap().get_hallucinated_gss()
+        } else {
+            todo!()
+        };
 
-        // 2. Setup initial state for special_map_grouped
         let mut precomputed3 = BTreeMap::new();
-        let mut initial_values_for_map: Vec<(PrecomputeNode1Index, BTreeSet<PrecomputeNode3Index>)> = Vec::new();
+        let trie3_god = Trie3GodWrapper::new();
 
+        let parser = parser.unwrap();
+        let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState)> = Vec::new();
+
+        // Group tokenizer states by their shared Trie1 root to avoid redundant work.
         let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
         for (tokenizer_state_id, trie1_root) in precomputed1.iter() {
             trie1_roots_to_tokenizer_states.entry(trie1_root.clone()).or_default().push(*tokenizer_state_id);
         }
 
-        for (trie1_root, tokenizer_state_ids) in trie1_roots_to_tokenizer_states {
+        #[cfg(not(rustrover))]
+        let it = tqdm!(trie1_roots_to_tokenizer_states.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=true);
+        #[cfg(rustrover)]
+        let it = trie1_roots_to_tokenizer_states.iter();
+
+        let gss_stack_base = (*gss_stack).clone();
+
+        for (trie1_root, tokenizer_state_ids) in it {
             let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
-            for &tokenizer_state_id in &tokenizer_state_ids {
-                precomputed3.insert(tokenizer_state_id, trie3_root.clone());
+            for tokenizer_state_id in tokenizer_state_ids {
+                precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
             }
-            initial_values_for_map.push((trie1_root.clone(), BTreeSet::from([trie3_root])));
+
+            let mut gss_stack = gss_stack_base.clone();
+            gss_stack.inner = gss_stack.inner.apply(|acc| {
+                let mut new_acc = acc.clone();
+                new_acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
+                new_acc
+            });
+            let gss_stack = Arc::new(gss_stack);
+
+            let glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
+
+            initial_values_for_map.push((trie1_root.clone(), glr_state));
         }
 
         let trie3_end = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
 
-        // 3. Run special_map_grouped
+        crate::debug!(2, "Running special_map_grouped for Trie 3 precomputation");
+        // TODO: LLM tokens are now redundant; we do LLM token filtering now at the trie node level.
         Trie::special_map_grouped(
             &trie1_god,
             initial_values_for_map,
-            // step_fn
-            |current_nodes: &BTreeSet<PrecomputeNode3Index>, edge_grammar_token_opt, destinations_map| {
-                let merged_current_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
-                let edge_key = (0, LLMTokenBV::ones(internal_max_llm_token + 1));
-                let edge_value = StateIDBV::max_ones();
-                for src_node in current_nodes {
-                    let inserter = EdgeInserter::new(&trie3_god, src_node.as_arc().clone(), edge_key.clone(), edge_value.clone(), |e, n| *e |= n, |_,_|{}, |_,_|{});
-                    inserter.try_destination(merged_current_node.clone()).unwrap();
+            |current_glr_state, edge_grammar_token_opt, destinations_map| {
+                reset();
+                let mut glr_s = current_glr_state.clone();
+
+                if let Some(gt) = edge_grammar_token_opt {
+                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE, current_token: None, ..Default::default() });
+                    Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
                 }
 
                 let mut out = Vec::new();
-                if let Some(gt) = edge_grammar_token_opt {
-                    let (term_start, term_end) = &terminal_precomputation[&gt];
-                    let (term_start_copy, id_map) = clone_trie3_graph(term_start, &trie3_god);
-                    let term_end_copy = id_map.get(term_end).unwrap().clone();
-
-                    // Connect merged_current_node to the copied subtree
-                    let inserter = EdgeInserter::new(&trie3_god, merged_current_node.as_arc().clone(), edge_key.clone(), edge_value.clone(), |e, n| *e |= n, |_,_|{}, |_,_|{});
-                    inserter.try_destination(term_start_copy).unwrap();
-
-                    for (dst_node_1, edge_bv_1) in destinations_map.iter() {
-                        let new_dest = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
-                        let edge_key_3 = (0, edge_bv_1.clone());
-                        let inserter = EdgeInserter::new(&trie3_god, term_end_copy.as_arc().clone(), edge_key_3, edge_value.clone(), |e, n| *e |= n, |_,_|{}, |_,_|{});
-                        inserter.try_destination(new_dest.clone()).unwrap();
-                        out.push((dst_node_1.clone(), BTreeSet::from([new_dest])));
-                    }
-                } else {
-                    // Epsilon edge in Trie1, just pass through
-                    for (dst_node_1, _edge_bv_1) in destinations_map.iter() {
-                        out.push((dst_node_1.clone(), BTreeSet::from([merged_current_node.clone()])));
+                for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+                    let mut glr_s_copy = glr_s.clone();
+                    allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
+                    if glr_s_copy.is_ok() {
+                        out.push((dst_node_wrapper.clone(), glr_s_copy));
                     }
                 }
                 out
             },
-            // merge_fn
-            |nodes1, nodes2| {
-                nodes1.extend(nodes2);
+            |glr_s1, glr_s2| {
+                glr_s1.merge_with(glr_s2);
             },
-            // process_fn
-            |precomputed_node_data, nodes| {
+            |precomputed_node_data, glr_s| {
+                Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
+
+                let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
-                    let edge_key = (0, LLMTokenBV::ones(internal_max_llm_token + 1));
-                    let edge_value = StateIDBV::max_ones();
-                    for src_node in &*nodes {
-                        let inserter = EdgeInserter::new(&trie3_god, src_node.as_arc().clone(), edge_key.clone(), edge_value.clone(), |e, n| *e |= n, |_,_|{}, |_,_|{});
-                        inserter.try_destination(trie3_end.clone()).unwrap();
+                    let stored_trie_nodes = glr_s.active_state.stack.stored_trie_nodes();
+                    for src_wr in stored_trie_nodes {
+                        let src_arc = src_wr.as_arc().clone();
+                        let edge_key = (0, LLMTokenBV::ones(internal_max_llm_token + 1)); // edge key is unused in trie3
+                        let edge_value = StateIDBV::max_ones();
+
+                        let inserter = EdgeInserter::new(
+                            glr_s.active_state.trie2_god.as_ref().unwrap(),
+                            src_arc.clone(),
+                            edge_key,
+                            edge_value,
+                            |e, n| *e |= n,
+                            |node_value, _edge_value| {},
+                            |_, _| {},
+                        );
+                        inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge");
                     }
                 }
-                !nodes.is_empty()
+                keep_going
             },
         );
 
-        // 4. Eliminate negative pops
-        Self::eliminate_negative_pops(&mut precomputed3, &trie3_god);
-
-        // 5. Optimize
+        crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
         optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
 
