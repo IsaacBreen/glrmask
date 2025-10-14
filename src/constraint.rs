@@ -1673,17 +1673,17 @@ impl GrammarConstraint {
     /// The subgraph between (start_node,end_node) encodes the stack checks derived from
     /// running the GLR state in hallucinated mode and flattening stacks via to_stacks().
     pub fn build_terminal_trie3_templates(
-        &self,
+        parser: &GLRParser,
         trie3_god: &Trie3GodWrapper,
         internal_max_llm_token: usize,
     ) -> BTreeMap<TerminalID, (PrecomputeNode3Index, PrecomputeNode3Index)> {
         let mut out = BTreeMap::new();
         // Iterate terminals deterministically by ID
-        let mut term_ids: Vec<TerminalID> = self.parser.terminal_map.iter().map(|(_l, r)| *r).collect();
+        let mut term_ids: Vec<TerminalID> = parser.terminal_map.iter().map(|(_l, r)| *r).collect();
         term_ids.sort_by_key(|t| t.0);
 
         for tid in term_ids {
-            let (start, end) = self.build_trie3_template_for_terminal(trie3_god, tid, internal_max_llm_token);
+            let (start, end) = Self::build_trie3_template_for_terminal(parser, trie3_god, tid, internal_max_llm_token);
             out.insert(tid, (start, end));
         }
         out
@@ -1695,7 +1695,7 @@ impl GrammarConstraint {
     /// 3) Flatten stacks to sequences and convert them into a Trie3 path using (-1)-pop edges
     ///    for state checks. Finally, converge all sequences into a single shared `end` node.
     fn build_trie3_template_for_terminal(
-        &self,
+        parser: &GLRParser,
         trie3_god: &Trie3GodWrapper,
         tid: TerminalID,
         internal_max_llm_token: usize,
@@ -1706,7 +1706,7 @@ impl GrammarConstraint {
         // Seed hallucinated GLR state with this start node in Acc
         let mut acc = Acc::new_fresh();
         acc.stored_trie_nodes_mut().insert(start.clone());
-        let mut s = self.parser.init_parser_state_hallucinated_with_acc(acc).with_god(trie3_god.clone());
+        let mut s = parser.init_parser_state_hallucinated_with_acc(acc).with_god(trie3_god.clone());
         let cfg = ProcessTokenAdvancedConfig {
             below_bottom_mode: BelowBottomReductionMode::ContinueFromHallucinateState,
             current_token: Some(tid),
@@ -1716,7 +1716,7 @@ impl GrammarConstraint {
 
         // Flatten the active GSS into explicit stacks. Each is (Vec<ParseStateEdgeContent>, Acc).
         let stacks = s.active_state.stack.inner.to_stacks();
-        let end = self.reduce_gss_stacks_to_trie3_from_start(trie3_god, &stacks, internal_max_llm_token);
+        let end = Self::reduce_gss_stacks_to_trie3_from_start(trie3_god, &stacks, internal_max_llm_token);
         (start, end)
     }
 
@@ -1729,7 +1729,6 @@ impl GrammarConstraint {
     ///   - Accumulate the final nodes across stacks
     /// - Converge all final nodes into a single shared `end` node by unconditional edges.
     fn reduce_gss_stacks_to_trie3_from_start(
-        &self,
         trie3_god: &Trie3GodWrapper,
         stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
         internal_max_llm_token: usize,
@@ -1804,7 +1803,6 @@ impl GrammarConstraint {
     /// Remove all negative-pop edges by converting them to positive pops with identical tokens/state BVs.
     /// This keeps the Trie3 compatible with get_mask3, which uses popn(*pop as usize).
     fn eliminate_negative_pops_trie3(
-        &self,
         trie3_god: &Trie3GodWrapper,
         roots: &[PrecomputeNode3Index],
     ) {
@@ -1882,7 +1880,7 @@ impl GrammarConstraint {
         let trie3_god = Trie3GodWrapper::new();
 
         // Build per-terminal template subgraphs once in this arena.
-        let terminal_templates = self.build_terminal_trie3_templates(&trie3_god, internal_max_llm_token);
+        let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &trie3_god, internal_max_llm_token);
 
         // Group tokenizer states by shared Trie1 root
         let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
@@ -2025,10 +2023,10 @@ impl GrammarConstraint {
 
         // Normalize negative pops produced by templates
         let roots: Vec<_> = precomputed3.values().cloned().collect();
-        self.eliminate_negative_pops_trie3(&trie3_god, &roots);
+        Self::eliminate_negative_pops_trie3(&trie3_god, &roots);
 
         crate::debug!(2, "Finished precomputing Trie 3.");
-        let max_state_id = self.parser.table.keys().map(|s| s.0).max().unwrap_or(0);
+        let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
         optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
         (precomputed3, trie3_god)
     }
