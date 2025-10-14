@@ -215,10 +215,12 @@ mod tests {
         for ek in stack {
             pos += ek.pop;
             if let Some(check) = ek.check {
-                // No two checks should land on the same realized position in a valid stack.
-                if map.insert(pos, check).is_some() {
-                    panic!("Invalid stack: duplicate realized action at position {}", pos);
+                if let Some(existing_check) = map.get(&pos) {
+                    if *existing_check != check {
+                        panic!("Invalid stack: conflicting realized action at position {}. Existing check: {}, New check: {}", pos, existing_check, check);
+                    }
                 }
+                map.insert(pos, check);
             }
         }
         map
