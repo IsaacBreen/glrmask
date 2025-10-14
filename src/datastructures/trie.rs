@@ -791,6 +791,54 @@ where
 
         true
     }
+
+    /// TEST UTILITY: Traverses the graph from the given roots and returns the set of all
+    /// possible paths of edge keys.
+    ///
+    /// A "path" is a `Vec<EK>` from a root to any reachable node. The path to a root
+    /// itself is an empty `Vec`. This function correctly handles DAGs and cycles.
+    pub fn get_all_paths(
+        arena: &Arena<Self>,
+        roots: &[Trie2Index],
+    ) -> std::collections::BTreeSet<Vec<EK>> {
+        let mut all_paths = std::collections::BTreeSet::new();
+        // The roots themselves represent a valid path of length 0.
+        if !roots.is_empty() {
+            all_paths.insert(vec![]);
+        }
+
+        for &root in roots {
+            let mut visiting = std::collections::BTreeSet::new();
+            Self::get_all_paths_recursive(arena, root, vec![], &mut all_paths, &mut visiting);
+        }
+        all_paths
+    }
+
+    fn get_all_paths_recursive(
+        arena: &Arena<Self>,
+        node_idx: Trie2Index,
+        current_path: Vec<EK>,
+        all_paths: &mut std::collections::BTreeSet<Vec<EK>>,
+        visiting: &mut std::collections::BTreeSet<Trie2Index>,
+    ) {
+        if !visiting.insert(node_idx) {
+            // Cycle detected, stop this path.
+            return;
+        }
+
+        if let Some(guard) = node_idx.read(arena) {
+            for (edge_key, dest_map) in guard.children() {
+                for child_idx in dest_map.keys() {
+                    let mut new_path = current_path.clone();
+                    new_path.push(edge_key.clone());
+                    all_paths.insert(new_path.clone());
+                    Self::get_all_paths_recursive(arena, *child_idx, new_path, all_paths, visiting);
+                }
+            }
+        }
+
+        visiting.remove(&node_idx);
+    }
 }
 
 // Implementation block for special_map and related functionality
