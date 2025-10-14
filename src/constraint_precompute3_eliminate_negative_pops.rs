@@ -286,8 +286,22 @@ mod tests {
         stacks.iter().map(|s| f(s.clone())).collect()
     }
 
-    fn assert_negative_pops_at_end_only(...) -> ... {
-
+    fn assert_negative_pops_at_end_only(stacks: &BTreeSet<Vec<TestEK>>) {
+        for stack in stacks {
+            let mut seen_negative = false;
+            for ek in stack {
+                if seen_negative {
+                    assert!(
+                        ek.pop <= 0,
+                        "Found a positive pop after a negative pop: {:?}",
+                        stack
+                    );
+                }
+                if ek.pop < 0 {
+                    seen_negative = true;
+                }
+            }
+        }
     }
 
     // Keep this around for future integration tests; mark as ignored for now
@@ -306,7 +320,8 @@ mod tests {
             |ev1, _ev2| *ev1 = (),
         );
         let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-        // do assert_negative_pops_at_end_only for both (flat) stacks
+        assert_negative_pops_at_end_only(&bubbled_stacks);
+        assert_negative_pops_at_end_only(&bubbled_trie_flattened);
         assert_eq!(
             map_to_stacks(compress_stack, &bubbled_stacks),
             map_to_stacks(compress_stack, &bubbled_trie_flattened)
