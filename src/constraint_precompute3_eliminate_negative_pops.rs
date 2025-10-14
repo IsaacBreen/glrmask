@@ -35,37 +35,7 @@ pub fn bubble_up_negative_pops<EK, EV, T, FGet, FMake, FMerge>(
     FMake: FnMut(&EK, isize) -> EK,
     FMerge: FnMut(&mut EV, EV),
 {
-    let all_nodes = Trie::all_nodes(god, roots);
-    for node_idx in all_nodes {
-        let mut edges_to_modify = Vec::new();
-        {
-            let node_r = node_idx.read(god).unwrap();
-            for edge_key in node_r.children().keys() {
-                if get_pop(edge_key) < 0 {
-                    edges_to_modify.push(edge_key.clone());
-                }
-            }
-        } // read lock dropped
-
-        if !edges_to_modify.is_empty() {
-            let mut node_w = node_idx.write(god).unwrap();
-            for old_key in edges_to_modify {
-                if let Some(dest_map) = node_w.children_mut().remove(&old_key) {
-                    let old_pop = get_pop(&old_key);
-                    let new_pop = -old_pop;
-                    let new_key = make_key(&old_key, new_pop);
-
-                    let target_dest_map = node_w.children_mut().entry(new_key).or_default();
-                    for (dest_idx, edge_val) in dest_map {
-                        target_dest_map
-                            .entry(dest_idx)
-                            .and_modify(|existing_val| merge_ev(existing_val, edge_val.clone()))
-                            .or_insert(edge_val);
-                    }
-                }
-            }
-        }
-    }
+    todo!()
 }
 
 pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FMake>(
@@ -80,7 +50,7 @@ pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FMake>(
     FGet: FnMut(&EK) -> isize,
     FMake: FnMut(&EK, isize) -> EK,
 {
-    // No-op for now, as bubble_up handles all cases.
+    todo!()
 }
 
 #[cfg(test)]
@@ -100,15 +70,13 @@ mod tests {
         Trie2Index::new(god.insert(Trie::new(PrecomputedNodeContents::internal())))
     }
 
-    fn add_edge(
-        god: &TestGod,
-        from: Trie2Index,
-        key: TestEK,
-        to: Trie2Index,
-        val: TestEV,
-    ) {
+    fn add_edge(god: &TestGod, from: Trie2Index, key: TestEK, to: Trie2Index, val: TestEV) {
         let mut from_w = from.write(god).unwrap();
-        from_w.children_mut().entry(key).or_default().insert(to, val);
+        from_w
+            .children_mut()
+            .entry(key)
+            .or_default()
+            .insert(to, val);
     }
 
     // --- Type Aliases for Readability ---
@@ -116,5 +84,4 @@ mod tests {
     type PathSet = BTreeSet<Path>;
 
     // --- Tests ---
-
 }
