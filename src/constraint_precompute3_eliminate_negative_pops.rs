@@ -39,10 +39,10 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
 pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
-    mut get_pop: &mut FGet,
-    mut replace_pop: &mut FReplace,
-    mut neutral_key: &mut FNeutral,
-    mut merge_ev: &mut FMerge,
+    mut get_pop: FGet,
+    mut replace_pop: FReplace,
+    mut neutral_key: FNeutral,
+    mut merge_ev: FMerge,
 ) where
     EK: Ord + Clone,
     EV: Clone,
@@ -394,10 +394,10 @@ mod tests {
         bubble_up_negative_pops(
             god,
             roots,
-            |ek| ek.pop,
-            |ek, new_pop| TestEK::new(new_pop, ek.check), // replace_pop
+            |ek: &TestEK| ek.pop,
+            |ek: &TestEK, new_pop: isize| TestEK::new(new_pop, ek.check), // replace_pop
             || TestEK::new(0, None),                      // neutral_key
-            |ev1, _ev2| *ev1 = (),
+            |ev1: &mut (), _ev2: ()| *ev1 = (),
         );
         let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
         assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
