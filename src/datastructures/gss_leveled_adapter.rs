@@ -368,10 +368,10 @@ impl GSSNode {
         popper
     }
 
-    pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
-        let keys: Vec<_> = parent_arc.inner.peek().into_iter().collect();
+    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
+        let keys: Vec<_> = self.inner.peek().into_iter().collect();
         GSSPeekIter {
-            parent: &parent_arc.inner,
+            parent: &self.inner,
             keys,
             idx: 0,
         }
