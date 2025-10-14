@@ -1688,7 +1688,7 @@ impl GrammarConstraint {
         // 1. Pre-calculate terminal parse subgraphs
         let mut terminal_parse_trees = BTreeMap::new();
         let terminals: Vec<_> = parser.terminal_map.right_values().copied().collect();
-        for terminal_id in tqdm!(terminals, desc="Precomputing terminal trees", disable=!PROGRESS_BAR_ENABLED) {
+        for terminal_id in tqdm!(terminals.into_iter(), desc="Precomputing terminal trees", disable=!PROGRESS_BAR_ENABLED) {
             if Some(terminal_id) == ignore_terminal_id { continue; }
             let (start, end) = Self::precompute_terminal_parse_tree(parser, terminal_id, &trie3_god);
             terminal_parse_trees.insert(terminal_id, (start, end));
@@ -1704,7 +1704,7 @@ impl GrammarConstraint {
         for (trie1_root, tokenizer_state_ids) in trie1_roots_to_tokenizer_states {
             let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
             for tokenizer_state_id in tokenizer_state_ids {
-                precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
+                precomputed3.insert(tokenizer_state_id, trie3_root.clone());
             }
             let initial_set = BTreeSet::from([trie3_root]);
             initial_values_for_map.push((trie1_root.clone(), initial_set));
@@ -1757,7 +1757,7 @@ impl GrammarConstraint {
             |set1, set2| set1.extend(set2),
             |precomputed_node_data, nodes| {
                 if precomputed_node_data.value.end {
-                    for node in nodes {
+                    for node in &*nodes {
                         let inserter = EdgeInserter::new(&trie3_god, node.as_arc().clone(), (0, LLMTokenBV::max_ones()), StateIDBV::max_ones(), |e,n|*e|=n, |_,_|{},|_,_|{});
                         inserter.try_destination(trie3_end.clone()).unwrap();
                     }
