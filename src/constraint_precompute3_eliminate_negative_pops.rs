@@ -80,7 +80,7 @@ mod tests {
         todo!()
     }
 
-    fn bubble_up_negative_pops_stack(mut stack: Vec<TestEK>) -> Vec<TestEK> {
+    fn bubble_up_negative_pops_stack(stack: Vec<TestEK>) -> Vec<TestEK> {
         todo!()
     }
 
@@ -102,11 +102,15 @@ mod tests {
         todo!()
     }
 
+    fn map_to_stacks(f: impl Fn(Vec<TestEK>) -> Vec<TestEK>, stacks: &BTreeSet<Vec<TestEK>>) -> BTreeSet<Vec<TestEK>> {
+        stacks.iter().map(|s| f(s.clone())).collect()
+    }
+
     fn run_test(god: &TestGod, roots: &[Trie2Index]) {
         let stacks = flatten_trie_to_stacks(god, roots);
 
         // bubble
-        let bubbled_stacks = stacks.iter().map(|s| bubble_up_negative_pops_stack(s.clone())).collect::<BTreeSet<_>>();
+        let bubbled_stacks = map_to_stacks(bubble_up_negative_pops_stack, &stacks);
         bubble_up_negative_pops(
             god,
             roots,
@@ -115,10 +119,10 @@ mod tests {
             |ev1, ev2| {}
         );
         let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-        assert_eq!(bubbled_stacks, bubbled_trie_flattened);
+        assert_eq!(map_to_stacks(compress_stack, &bubbled_stacks), map_to_stacks(compress_stack, &bubbled_trie_flattened));
 
         // neutralize
-        let neutralized_stacks = bubbled_stacks.iter().map(|s| neutralize_remaining_negative_pops_stack(s.clone())).collect::<BTreeSet<_>>();
+        let neutralized_stacks = map_to_stacks(neutralize_remaining_negative_pops_stack, &bubbled_stacks);
         neutralize_remaining_negative_pops(
             god,
             roots,
@@ -126,7 +130,7 @@ mod tests {
             |ek, new_pop| TestEK::new(new_pop, ek.check),
         );
         let neutralized_trie_flattened = flatten_trie_to_stacks(god, roots);
-        assert_eq!(neutralized_stacks, neutralized_trie_flattened);
+        assert_eq!(map_to_stacks(compress_stack, &neutralized_stacks), map_to_stacks(compress_stack, &neutralized_trie_flattened));
 
         // final check
         let final_stacks = neutralized_trie_flattened;
@@ -139,7 +143,6 @@ mod tests {
 
     #[test]
     fn test_example() {
-        // let input = vec![TestEK::new(3, Some(0)), TestEK::new(-2, Some(2))];
         let god = TestGod::new();
         let A = new_node(&god);
         let B = new_node(&god);
