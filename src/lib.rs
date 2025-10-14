@@ -21,3 +21,4 @@ mod constraint_precompute3_utils;
 mod constraint_precompute1_utils;
 mod constraint_precompute0_utils;
 mod constraint_stored_cache_utils;
+mod constraint_precompute3_eliminate_negative_pops;

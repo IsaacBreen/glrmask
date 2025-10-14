@@ -57,15 +57,13 @@ pub use crate::constraint_precompute1_utils::Trie1Config;
 pub use crate::constraint_precompute2_utils::Trie2Config;
 pub use crate::constraint_precompute3_utils::Trie3Config;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
-use crate::constraint::constraint_precompute3_eliminate_negative_pops::eliminate_negative_pops_trie3;
+use crate::constraint_precompute3_eliminate_negative_pops::eliminate_negative_pops_trie3;
 use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::EntryApi;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use std::iter::FromIterator;
-
-mod constraint_precompute3_eliminate_negative_pops;
 
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;

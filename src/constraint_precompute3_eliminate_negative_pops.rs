@@ -2,6 +2,7 @@
 use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
 use crate::datastructures::trie::Trie;
 use std::collections::BTreeMap;
+use crate::datastructures::EntryApi;
 
 /// Traverses the Trie3 graph and replaces all edges with negative pop values
 /// with their absolute value counterparts. If both `(k, ...)` and `(-k, ...)` edges
