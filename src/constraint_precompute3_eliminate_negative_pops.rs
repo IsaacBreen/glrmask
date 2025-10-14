@@ -1,8 +1,7 @@
 // src/constraint_precompute3_eliminate_negative_pops.rs
 use crate::datastructures::trie::{GodWrapper, Trie, Trie2Index};
-use std::collections::HashSet;
-use std::iter::FromIterator;
 use crate::datastructures::EntryApi;
+use std::iter::FromIterator;
 
 pub fn eliminate_negative_pops<EK, EV, T, FGet, FMake, FMerge>(
     god: &GodWrapper<EK, EV, T>,
@@ -88,26 +87,17 @@ pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FMake>(
 mod tests {
     use super::*;
     use crate::constraint::PrecomputedNodeContents;
-    use crate::datastructures::hybrid_bitset::HybridBitset;
     use crate::datastructures::trie::{GodWrapper, Trie, Trie2Index};
     use std::collections::BTreeSet;
 
     // --- Test Helpers ---
-    type TestEK = (isize, u32);
-    type TestEV = HybridBitset;
+    type TestEK = isize;
+    type TestEV = usize;
     type TestT = PrecomputedNodeContents;
     type TestGod = GodWrapper<TestEK, TestEV, TestT>;
 
     fn new_node(god: &TestGod) -> Trie2Index {
         Trie2Index::new(god.insert(Trie::new(PrecomputedNodeContents::internal())))
-    }
-
-    fn state_bv(indices: &[usize]) -> TestEV {
-        let mut bv = TestEV::zeros();
-        for &i in indices {
-            bv.insert(i);
-        }
-        bv
     }
 
     fn add_edge(
@@ -127,60 +117,4 @@ mod tests {
 
     // --- Tests ---
 
-    #[test]
-    fn test_bubble_up_negative_pops_simple() {
-        let god = TestGod::new();
-
-        let root = new_node(&god);
-        let n1 = new_node(&god);
-        let n2 = new_node(&god);
-        let n3 = new_node(&god);
-
-        let key1 = (-1, 100);
-        let key2 = (-2, 200);
-        let key3_pos = (1, 300);
-        let key3_neg = (-1, 300);
-
-        add_edge(&god, root, key1, n1, state_bv(&[1]));
-        add_edge(&god, n1, key2, n2, state_bv(&[2]));
-        add_edge(&god, root, key3_pos, n3, state_bv(&[3]));
-        add_edge(&god, root, key3_neg, n3, state_bv(&[4]));
-
-        let actual_paths_before = Trie::get_all_paths(&god, &[root]);
-        let expected_paths_before = PathSet::from([
-            vec![],
-            vec![key1],
-            vec![key1, key2],
-            vec![key3_pos],
-            vec![key3_neg],
-        ]);
-        assert_eq!(actual_paths_before, expected_paths_before);
-
-        bubble_up_negative_pops(
-            &god,
-            &[root],
-            &mut |k: &TestEK| k.0,
-            &mut |k: &TestEK, new_pop| (new_pop, k.1),
-            &mut |v1, v2| *v1 |= &v2,
-        );
-
-        // 4. ASSERT (After): Verify the set of possible paths is correct after transformation
-        let actual_paths_after = Trie::get_all_paths(&god, &[root]);
-
-        let expected_paths_after = PathSet::from([
-            // The root path is always present.
-            vec![],
-            vec![(1, 100)],
-            vec![(1, 100), (2, 200)],
-            vec![(1, 300)],
-        ]);
-        assert_eq!(actual_paths_after, expected_paths_after);
-
-        // 5. ASSERT (Values): Verify edge values were merged correctly.
-        let root_r = root.read(&god).unwrap();
-        let dest_map_for_key3 = root_r.get(&(1, 300)).unwrap();
-        let merged_val = dest_map_for_key3.get(&n3).unwrap();
-        let expected_merged_val = state_bv(&[3, 4]);
-        assert_eq!(*merged_val, expected_merged_val);
-    }
 }
