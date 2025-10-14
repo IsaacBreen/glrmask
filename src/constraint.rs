@@ -1967,8 +1967,9 @@ impl GrammarConstraint {
         eliminate_negative_pops(
             &trie3_god,
             &roots,
-            |(pop, _)| *pop,
-            |key, n| { (n, key.1.clone()) },
+            |(n, _)| *n,
+            |(_, llm_bv), n| (n, llm_bv.clone()),
+            || (0isize, LLMTokenBV::ones(internal_max_llm_token + 1)),
             |e, n| *e |= n
         );
 
