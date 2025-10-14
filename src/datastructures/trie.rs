@@ -793,19 +793,16 @@ where
     }
 
     /// TEST UTILITY: Traverses the graph from the given roots and returns the set of all
-    /// possible paths of edge keys.
+    /// possible paths of edge keys that end in a leaf node.
     ///
-    /// A "path" is a `Vec<EK>` from a root to any reachable node. The path to a root
-    /// itself is an empty `Vec`. This function correctly handles DAGs and cycles.
+    /// A "path" is a `Vec<EK>` from a root to any reachable leaf node. If a root is
+    /// itself a leaf, the path is an empty `Vec`. This function correctly handles
+    /// DAGs and cycles.
     pub fn get_all_paths(
         arena: &Arena<Self>,
         roots: &[Trie2Index],
     ) -> std::collections::BTreeSet<Vec<EK>> {
         let mut all_paths = std::collections::BTreeSet::new();
-        // The roots themselves represent a valid path of length 0.
-        if !roots.is_empty() {
-            all_paths.insert(vec![]);
-        }
 
         for &root in roots {
             let mut visiting = std::collections::BTreeSet::new();
@@ -827,12 +824,15 @@ where
         }
 
         if let Some(guard) = node_idx.read(arena) {
-            for (edge_key, dest_map) in guard.children() {
-                for child_idx in dest_map.keys() {
-                    let mut new_path = current_path.clone();
-                    new_path.push(edge_key.clone());
-                    all_paths.insert(new_path.clone());
-                    Self::get_all_paths_recursive(arena, *child_idx, new_path, all_paths, visiting);
+            if guard.is_leaf() {
+                all_paths.insert(current_path);
+            } else {
+                for (edge_key, dest_map) in guard.children() {
+                    for child_idx in dest_map.keys() {
+                        let mut new_path = current_path.clone();
+                        new_path.push(edge_key.clone());
+                        Self::get_all_paths_recursive(arena, *child_idx, new_path, all_paths, visiting);
+                    }
                 }
             }
         }
