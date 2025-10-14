@@ -71,7 +71,7 @@ mod tests {
     type TestT = PrecomputedNodeContents;
     type TestGod = GodWrapper<TestEK, TestEV, TestT>;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct Instr {
         pop: isize,
         check: Option<usize>, // None means "unconditional pop-only"
