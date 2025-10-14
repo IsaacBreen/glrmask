@@ -702,7 +702,7 @@ mod tests {
             TestEK::new(-1, Some(3)),
             TestEK::new(0, None),
             TestEK::new(-2, Some(5)),
-            TestEK::new(3, Some(7)),
+            TestEK::new(3, Some(1)),
         ];
         let bubbled = bubble_up_negative_pops_stack(original.clone());
         assert_eq!(realized_actions(&original), realized_actions(&bubbled));
