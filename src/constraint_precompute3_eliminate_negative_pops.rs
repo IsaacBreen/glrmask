@@ -2,6 +2,7 @@
 use crate::datastructures::trie::{GodWrapper, Trie, Trie2Index};
 use std::collections::HashSet;
 use std::iter::FromIterator;
+use crate::datastructures::EntryApi;
 
 pub fn eliminate_negative_pops<EK, EV, T, FGet, FMake, FMerge>(
     god: &GodWrapper<EK, EV, T>,

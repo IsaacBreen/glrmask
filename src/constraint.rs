@@ -57,7 +57,7 @@ pub use crate::constraint_precompute1_utils::Trie1Config;
 pub use crate::constraint_precompute2_utils::Trie2Config;
 pub use crate::constraint_precompute3_utils::Trie3Config;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
-use crate::constraint_precompute3_eliminate_negative_pops::eliminate_negative_pops_trie3;
+use crate::constraint_precompute3_eliminate_negative_pops::eliminate_negative_pops;
 use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::EntryApi;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
@@ -1964,7 +1964,13 @@ impl GrammarConstraint {
 
         // Normalize negative pops produced by templates
         let roots: Vec<_> = precomputed3.values().cloned().collect();
-        eliminate_negative_pops_trie3(&trie3_god, &roots);
+        eliminate_negative_pops(
+            &trie3_god,
+            &roots,
+            |(pop, _)| *pop,
+            |key, n| { (n, key.1.clone()) },
+            |e, n| *e |= n
+        );
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
