@@ -18,17 +18,31 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
     FNeutral: FnMut() -> EK,
     FMerge: FnMut(&mut EV, EV),
 {
-    bubble_up_negative_pops(god, roots, &mut get_pop, &mut replace_pop, &mut neutral_key, &mut merge_ev);
-    neutralize_remaining_negative_pops(god, roots, &mut get_pop, &mut replace_pop, &mut neutral_key, &mut merge_ev);
+    bubble_up_negative_pops(
+        god,
+        roots,
+        &mut get_pop,
+        &mut replace_pop,
+        &mut neutral_key,
+        &mut merge_ev,
+    );
+    neutralize_remaining_negative_pops(
+        god,
+        roots,
+        &mut get_pop,
+        &mut replace_pop,
+        &mut neutral_key,
+        &mut merge_ev,
+    );
 }
 
 pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
-    mut get_pop: FGet,
-    mut replace_pop: FReplace,
-    mut neutral_key: FNeutral,
-    mut merge_ev: FMerge,
+    mut get_pop: &mut FGet,
+    mut replace_pop: &mut FReplace,
+    mut neutral_key: &mut FNeutral,
+    mut merge_ev: &mut FMerge,
 ) where
     EK: Ord + Clone,
     EV: Clone,
@@ -38,40 +52,87 @@ pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
     FNeutral: FnMut() -> EK,
     FMerge: FnMut(&mut EV, EV),
 {
-    // Conservative no-op pass:
-    // - Traverse the reachable subgraph.
-    // - Exercise the provided closures to avoid unused warnings.
-    // - Do not mutate the graph here. The neutralization pass will handle end-of-path negatives.
-    //
-    // Rationale:
-    // A full "bubble" transform on a graph (with shared subtrees and DAG structure) requires careful
-    // node/edge rewrites, new intermediate nodes, and EV merge semantics. The graph-level tests for
-    // this operation are currently ignored. We provide a safe, compilable implementation that leaves
-    // structure and semantics unchanged, while ensuring the code paths are exercised and ready for
-    // a future, more involved algorithm.
+    loop {
+        let mut changed = false;
+        let all_nodes = Trie::<EK, EV, T>::all_nodes(god, roots);
+        let mut modifications = Vec::new();
 
-    // Touch the closures to avoid "unused variable" warnings.
-    let _ = (&mut replace_pop, &mut neutral_key, &mut merge_ev);
-
-    let reachable = Trie::<EK, EV, T>::all_nodes(god, roots);
-    if reachable.is_empty() {
-        return;
-    }
-
-    // Scan edges and evaluate pops to exercise get_pop; no mutations performed.
-    for &u_idx in &reachable {
-        let ug = u_idx
-            .read(god)
-            .expect("Arena read poisoned while scanning in bubble_up_negative_pops");
-        for (ek_a, dests) in ug.children() {
-            let _ = get_pop(ek_a);
-            for (v_idx, _ev_ab) in dests.iter() {
-                if let Some(vg) = v_idx.read(god) {
-                    for (ek_b, _dests_b) in vg.children() {
-                        let _ = get_pop(ek_b);
+        let mut parents: HashMap<Trie2Index, Vec<(Trie2Index, EK, EV)>> = HashMap::new();
+        for &u_idx in &all_nodes {
+            if let Some(u_guard) = u_idx.read(god) {
+                for (ek, dest_map) in u_guard.children() {
+                    for (v_idx, ev) in dest_map {
+                        parents
+                            .entry(*v_idx)
+                            .or_default()
+                            .push((u_idx, ek.clone(), ev.clone()));
                     }
                 }
             }
+        }
+
+        for v_idx in all_nodes {
+            let v_guard = v_idx.read(god).unwrap();
+            let v_parents = if let Some(p) = parents.get(&v_idx) {
+                p
+            } else {
+                continue;
+            };
+
+            for (ek_vw, dest_map_w) in v_guard.children() {
+                if get_pop(ek_vw) >= 0 {
+                    continue;
+                }
+                for (w_idx, ev_vw) in dest_map_w {
+                    for (u_idx, ek_uv, ev_uv) in v_parents {
+                        if get_pop(ek_uv) >= 0 {
+                            modifications.push((
+                                *u_idx,
+                                v_idx,
+                                *w_idx,
+                                ek_uv.clone(),
+                                ek_vw.clone(),
+                                ev_uv.clone(),
+                                ev_vw.clone(),
+                            ));
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+
+        for (u_idx, v_idx, w_idx, ek_uv, ek_vw, ev_uv, ev_vw) in modifications {
+            let mut u_w = u_idx.write(god).unwrap();
+            if let Some(dest_map) = u_w.children_mut().get_mut(&ek_uv) {
+                dest_map.remove(&v_idx);
+            }
+
+            let pop_a = get_pop(&ek_uv);
+            let pop_b = get_pop(&ek_vw);
+
+            let ek_a_prime = replace_pop(&ek_vw, pop_a + pop_b);
+            let ek_b_prime = replace_pop(&ek_uv, -pop_b);
+            let neutral = neutral_key();
+            let ek_c_prime = replace_pop(&neutral, pop_b);
+
+            let v_val = v_idx.read(god).unwrap().value.clone();
+            let n1 = Trie2Index::new(god.insert(Trie::new(v_val.clone())));
+            let n2 = Trie2Index::new(god.insert(Trie::new(v_val)));
+
+            u_w.force_insert_to_node(ek_a_prime, ev_uv, n1);
+            drop(u_w);
+
+            let mut n1_w = n1.write(god).unwrap();
+            n1_w.force_insert_to_node(ek_b_prime, ev_vw.clone(), n2);
+            drop(n1_w);
+
+            let mut n2_w = n2.write(god).unwrap();
+            n2_w.force_insert_to_node(ek_c_prime, ev_vw, w_idx);
         }
     }
 }
@@ -234,36 +295,35 @@ mod tests {
             .collect()
     }
 
-    fn bubble_up_negative_pops_stack(stack: Vec<TestEK>) -> Vec<TestEK> {
-        // Single-pass bubbling:
-        // For each pair (A, B) where B.pop < 0, rewrite [A, B] as:
-        //   [(A.pop + B.pop, B.check), (-B.pop, A.check), (B.pop, None)]
-        // This preserves realized actions while moving the negative to the end of the local pair.
-        let mut out: Vec<TestEK> = Vec::with_capacity(stack.len() * 2 + 3);
-        for cur in stack.into_iter() {
-            if let Some(prev) = out.pop() {
-                if cur.pop < 0 {
-                    let a = prev.pop;
-                    let b = cur.pop; // b < 0
-                    // (a + b, check of B)
-                    out.push(TestEK::new(a + b, cur.check));
-                    // (-b, check of A)
-                    out.push(TestEK::new(-b, prev.check));
-                    // (b, None) -- the residual negative to the pair's end
-                    out.push(TestEK::new(b, None));
-                } else {
-                    // No bubbling; restore prev and append cur
-                    out.push(prev);
-                    out.push(cur);
+    fn bubble_up_negative_pops_stack(mut stack: Vec<TestEK>) -> Vec<TestEK> {
+        if stack.len() < 2 {
+            return stack;
+        }
+        loop {
+            let mut changed = false;
+            let mut i = 0;
+            while i <= stack.len() - 2 {
+                let a = stack[i];
+                let b = stack[i + 1];
+                if b.pop < 0 && a.pop >= 0 {
+                    let pop_a = a.pop;
+                    let pop_b = b.pop;
+
+                    let new_a = TestEK::new(pop_a + pop_b, b.check);
+                    let new_b = TestEK::new(-pop_b, a.check);
+                    let new_c = TestEK::new(pop_b, None);
+
+                    stack.splice(i..=i + 1, [new_a, new_b, new_c]);
+                    changed = true;
+                    break;
                 }
-            } else {
-                // Nothing to bubble against yet.
-                out.push(cur);
+                i += 1;
+            }
+            if !changed {
+                break;
             }
         }
-        // Note: This is intentionally a single-pass transform. Any residual trailing negatives
-        // can be neutralized by the neutralize_remaining_negative_pops stage in the pipeline.
-        out
+        stack
     }
 
     // Neutralize any remaining trailing unconditional pops by setting them to pop 0.
