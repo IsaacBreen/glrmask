@@ -1913,7 +1913,7 @@ impl GrammarConstraint {
                 if precomputed_node_data.value.end {
                     let edge_key = (0, LLMTokenBV::ones(internal_max_llm_token + 1));
                     let edge_value = StateIDBV::max_ones();
-                    for src_node in nodes {
+                    for src_node in &*nodes {
                         let inserter = EdgeInserter::new(&trie3_god, src_node.as_arc().clone(), edge_key.clone(), edge_value.clone(), |e, n| *e |= n, |_,_|{}, |_,_|{});
                         inserter.try_destination(trie3_end.clone()).unwrap();
                     }
