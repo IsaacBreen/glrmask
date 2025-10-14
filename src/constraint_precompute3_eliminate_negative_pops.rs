@@ -2,36 +2,38 @@
 use crate::datastructures::trie::{GodWrapper, Trie, Trie2Index};
 use std::collections::{HashMap, VecDeque};
 
-pub fn eliminate_negative_pops<EK, EV, T, FGet, FMake, FMerge>(
+pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
     mut get_pop: FGet,
-    mut make_key: FMake,
+    mut replace_pop: FReplace,
+    mut neutral_key: FNeutral,
     mut merge_ev: FMerge,
 ) where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
     FGet: FnMut(&EK) -> isize,
-    FMake: FnMut(&EK, isize) -> EK,
+    FReplace: FnMut(&EK, isize) -> EK,
+    FNeutral: FnMut() -> EK,
     FMerge: FnMut(&mut EV, EV),
 {
-    bubble_up_negative_pops(god, roots, &mut get_pop, &mut make_key, &mut merge_ev);
-    neutralize_remaining_negative_pops(god, roots, &mut get_pop, &mut make_key);
+    bubble_up_negative_pops(god, roots, &mut get_pop, &mut replace_pop, &mut merge_ev);
+    neutralize_remaining_negative_pops(god, roots, &mut get_pop, &mut neutral_key);
 }
 
-pub fn bubble_up_negative_pops<EK, EV, T, FGet, FMake, FMerge>(
+pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FMerge>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
     mut get_pop: FGet,
-    mut make_key: FMake,
+    mut replace_pop: FReplace,
     mut merge_ev: FMerge,
 ) where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
     FGet: FnMut(&EK) -> isize,
-    FMake: FnMut(&EK, isize) -> EK,
+    FReplace: FnMut(&EK, isize) -> EK,
     FMerge: FnMut(&mut EV, EV),
 {
     // 1) Gather all reachable nodes
@@ -139,18 +141,18 @@ pub fn bubble_up_negative_pops<EK, EV, T, FGet, FMake, FMerge>(
             let d_idx = Trie2Index::new(god.insert(Trie::new(b_value.clone())));
 
             // P --(pop n+m, check from ek2)--> E
-            let ek_pe = make_key(&edge.ek2, n + m);
+            let ek_pe = replace_pop(&edge.ek2, n + m);
             insert_or_merge(p_idx, ek_pe, e_idx, ev1.clone());
 
             // E --(pop -m, check from ek1)--> D
-            let ek_ed = make_key(&ek1, -m);
+            let ek_ed = replace_pop(&ek1, -m);
             insert_or_merge(e_idx, ek_ed, d_idx, edge.ev2.clone());
 
             // Fold trailing "pop m" into C's outgoing edges:
             // For each C --(ekC: pop p)--> child, add D --(pop p+m, check ekC's)--> child
             for (ek_c, dests) in &c_outgoing {
                 let p = get_pop(ek_c);
-                let new_ek = make_key(ek_c, p + m);
+                let new_ek = replace_pop(ek_c, p + m);
                 for (child_idx, ev_c) in dests {
                     insert_or_merge(d_idx, new_ek.clone(), *child_idx, ev_c.clone());
                 }
@@ -174,17 +176,17 @@ pub fn bubble_up_negative_pops<EK, EV, T, FGet, FMake, FMerge>(
     }
 }
 
-pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FMake>(
+pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FNeutral>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
     mut get_pop: FGet,
-    mut make_key: FMake,
+    mut neutral_key: FNeutral,
 ) where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
     FGet: FnMut(&EK) -> isize,
-    FMake: FnMut(&EK, isize) -> EK,
+    FNeutral: FnMut() -> EK,
 {
     let reachable = Trie::<EK, EV, T>::all_nodes(god, roots);
     if reachable.is_empty() {
@@ -207,7 +209,7 @@ pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FMake>(
                         vg.is_leaf()
                     };
                     if is_leaf {
-                        let new_ek = make_key(ek, 0);
+                        let new_ek = neutral_key();
                         moves.push((u_idx, ek.clone(), *v_idx, ev.clone(), new_ek));
                     }
                 }
@@ -334,10 +336,11 @@ mod tests {
     // Neutralize any remaining trailing unconditional pops by setting them to pop 0.
     // This mirrors the "make them unconditional pop 0" instruction at the end of paths.
     fn neutralize_remaining_negative_pops_stack(mut stack: Vec<TestEK>) -> Vec<TestEK> {
-        // If the tail consists of unconditional pops, neutralize them to a single pop 0 None.
+        // If the tail is a negative pop, neutralize it to pop 0, check None.
         if let Some(last) = stack.last_mut() {
-            if last.check.is_none() && last.pop != 0 {
+            if last.pop < 0 {
                 last.pop = 0;
+                last.check = None;
             }
         }
         stack
@@ -379,7 +382,7 @@ mod tests {
             god,
             roots,
             |ek| ek.pop,
-            |ek, new_pop| TestEK::new(new_pop, ek.check),
+            |ek, new_pop| TestEK::new(new_pop, ek.check), // replace_pop
             |ev1, _ev2| *ev1 = (),
         );
         let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
@@ -395,7 +398,7 @@ mod tests {
             god,
             roots,
             |ek| ek.pop,
-            |ek, new_pop| TestEK::new(new_pop, ek.check),
+            || TestEK::new(0, None), // neutral_key
         );
         let neutralized_trie_flattened = flatten_trie_to_stacks(god, roots);
         assert_eq!(
@@ -495,12 +498,15 @@ mod tests {
     }
 
     #[test]
-    fn test_neutralize_does_nothing_if_trailing_is_not_unconditional() {
+    fn test_neutralize_handles_conditional_negative_pop_at_end() {
         let input = vec![
             TestEK::new(1, Some(2)),
             TestEK::new(-2, Some(3)),
         ];
-        let expected = input.clone();
+        let expected = vec![
+            TestEK::new(1, Some(2)),
+            TestEK::new(0, None),
+        ];
         let got = neutralize_remaining_negative_pops_stack(input);
         assert_eq!(got, expected);
     }
