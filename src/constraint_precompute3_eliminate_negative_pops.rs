@@ -286,6 +286,10 @@ mod tests {
         stacks.iter().map(|s| f(s.clone())).collect()
     }
 
+    fn assert_negative_pops_at_end_only(...) -> ... {
+
+    }
+
     // Keep this around for future integration tests; mark as ignored for now
     // because the graph versions are not implemented yet.
     fn run_test(god: &TestGod, roots: &[Trie2Index]) {
@@ -302,6 +306,7 @@ mod tests {
             |ev1, _ev2| *ev1 = (),
         );
         let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
+        // do assert_negative_pops_at_end_only for both (flat) stacks
         assert_eq!(
             map_to_stacks(compress_stack, &bubbled_stacks),
             map_to_stacks(compress_stack, &bubbled_trie_flattened)
