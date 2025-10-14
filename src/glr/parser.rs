@@ -692,6 +692,16 @@ impl GLRParser {
         }
     }
 
+    pub fn init_parser_state_hallucinated(&self) -> GLRParserState {
+        let gss = self.get_hallucinated_gss();
+        self.init_glr_parser_from_stack(gss)
+    }
+
+    pub fn init_parser_state_hallucinated_with_acc(&self, acc: Acc) -> GLRParserState {
+        let gss = self.get_hallucinated_gss_with_acc(acc);
+        self.init_glr_parser_from_stack(gss)
+    }
+
     pub fn init_parser_state_combined(&self) -> GLRParserState {
         let gss = self.get_combined_gss();
         self.init_glr_parser_from_stack(gss)
