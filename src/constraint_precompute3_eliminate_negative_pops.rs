@@ -4,9 +4,6 @@ use crate::datastructures::trie::Trie;
 use std::collections::BTreeMap;
 use crate::datastructures::EntryApi;
 
-/// Traverses the Trie3 graph and replaces all edges with negative pop values
-/// with their absolute value counterparts. If both `(k, ...)` and `(-k, ...)` edges
-/// exist from the same source node, their destinations and state bitvectors are merged.
 pub fn eliminate_negative_pops_trie3(
     trie3_god: &Trie3GodWrapper,
     roots: &[PrecomputeNode3Index],
@@ -108,3 +105,4 @@ mod tests {
 
         assert_eq!(actual_paths_after, expected_paths_after);
     }
+}
