@@ -57,7 +57,7 @@ pub use crate::constraint_precompute1_utils::Trie1Config;
 pub use crate::constraint_precompute2_utils::Trie2Config;
 pub use crate::constraint_precompute3_utils::Trie3Config;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
-use crate::constraint_precompute3_eliminate_negative_pops::eliminate_negative_pops;
+use crate::constraint_precompute3_eliminate_negative_pops::{assert_negative_pops_follow_property_for_trie, eliminate_negative_pops};
 use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::EntryApi;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
@@ -1972,6 +1972,7 @@ impl GrammarConstraint {
             || (0isize, LLMTokenBV::ones(internal_max_llm_token + 1)),
             |e, n| *e |= n
         );
+        assert_negative_pops_follow_property_for_trie(&trie3_god, &roots, |(n, _)| *n);
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
