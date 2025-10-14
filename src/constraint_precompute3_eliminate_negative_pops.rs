@@ -273,6 +273,17 @@ mod tests {
     }
 
     #[test]
+    fn test_bubble_up_negative_pops_stack_when_second_non_negative_no_change() {
+        let input = vec![
+            TestEK::new(2, Some(1)),
+            TestEK::new(3, Some(2)),
+        ];
+        let expected = input.clone();
+        let got = bubble_up_negative_pops_stack(input);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
     fn test_neutralize_remaining_negative_pops_stack_simple() {
         let input = vec![
             TestEK::new(1, Some(2)),
@@ -289,6 +300,64 @@ mod tests {
         assert_eq!(got, expected);
     }
 
+    #[test]
+    fn test_neutralize_does_nothing_if_trailing_is_not_unconditional() {
+        let input = vec![
+            TestEK::new(1, Some(2)),
+            TestEK::new(-2, Some(3)),
+        ];
+        let expected = input.clone();
+        let got = neutralize_remaining_negative_pops_stack(input);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_compress_chain_of_unconditional_pops() {
+        let input = vec![
+            TestEK::new(3, None),
+            TestEK::new(-2, None),
+            TestEK::new(1, None),
+            TestEK::new(0, None),
+        ];
+        let expected = vec![TestEK::new(2, None)];
+        let got = compress_stack(input);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_bubble_with_unconditional_first_allows_negative_first() {
+        // This documents the current single-pass behavior:
+        // A = (0, None), B = (-2, Some(3))
+        // => [(-2, Some(3)), (2, None), (-2, None)]
+        let input = vec![
+            TestEK::new(0, None),
+            TestEK::new(-2, Some(3)),
+        ];
+        let expected = vec![
+            TestEK::new(-2, Some(3)),
+            TestEK::new(2, None),
+            TestEK::new(-2, None),
+        ];
+        let got = bubble_up_negative_pops_stack(input);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_stack_pipeline_simple_pair_yields_non_negative_after_neutralize() {
+        let input = vec![
+            TestEK::new(3, Some(0)),
+            TestEK::new(-2, Some(2)),
+        ];
+        let bubbled = bubble_up_negative_pops_stack(input);
+        let neutralized = neutralize_remaining_negative_pops_stack(bubbled);
+        // Expect the last to be neutralized and all non-negative pops.
+        for ek in neutralized {
+            assert!(ek.pop >= 0);
+        }
+    }
+
+    // --- Graph-level expectations (ignored until the TODOs are implemented) ---
+
     #[ignore = "Graph-level negative-pop elimination not implemented yet"]
     #[test]
     fn test_example() {
@@ -300,5 +369,108 @@ mod tests {
         add_edge(&god, b, c, TestEK::new(-2, Some(2)));
         let roots = vec![a];
         run_test(&god, &roots)
+    }
+
+    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
+    #[test]
+    fn test_graph_branching_from_source_single_negative_pair() {
+        // A --(5, c0)--> B --(-2, c2)--> C
+        // A --(3, c1)--> B
+        //
+        // Two distinct paths share the middle node B.
+        // The transformation must not mutate B's semantics for other incoming edges.
+        let god = TestGod::new();
+        let a = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+
+        // Branching edges into B from A
+        add_edge(&god, a, b, TestEK::new(5, Some(0)));
+        add_edge(&god, a, b, TestEK::new(3, Some(1)));
+        // Negative second in the pair
+        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
+
+        let roots = vec![a];
+        run_test(&god, &roots);
+    }
+
+    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
+    #[test]
+    fn test_graph_multiple_parents_into_b_single_negative_pair() {
+        // A1 --(4, c10)--> B --(-3, c2)--> C
+        // A2 --(6, c11)--> B
+        //
+        // Roots are A1 and A2; ensure transformations for one incoming edge don't break the other.
+        let god = TestGod::new();
+        let a1 = new_node(&god);
+        let a2 = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+
+        add_edge(&god, a1, b, TestEK::new(4, Some(10)));
+        add_edge(&god, a2, b, TestEK::new(6, Some(11)));
+        add_edge(&god, b, c, TestEK::new(-3, Some(2)));
+
+        let roots = vec![a1, a2];
+        run_test(&god, &roots);
+    }
+
+    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
+    #[test]
+    fn test_graph_branching_after_b_also_has_positive_branch() {
+        // A --(5, c0)--> B --(-2, c2)--> C
+        // A --(4, c1)--> B --(1, c7)--> D
+        //
+        // Verifies that non-negative branches out of B remain unaffected while negative pairs get transformed.
+        let god = TestGod::new();
+        let a = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+        let d = new_node(&god);
+
+        add_edge(&god, a, b, TestEK::new(5, Some(0)));
+        add_edge(&god, a, b, TestEK::new(4, Some(1)));
+        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
+        add_edge(&god, b, d, TestEK::new(1, Some(7)));
+
+        let roots = vec![a];
+        run_test(&god, &roots);
+    }
+
+    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
+    #[test]
+    fn test_graph_no_negative_edges_noop() {
+        // A --(2, c0)--> B --(1, c1)--> C
+        // No negative pops; transformation should be a no-op (up to compression).
+        let god = TestGod::new();
+        let a = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+
+        add_edge(&god, a, b, TestEK::new(2, Some(0)));
+        add_edge(&god, b, c, TestEK::new(1, Some(1)));
+
+        let roots = vec![a];
+        run_test(&god, &roots);
+    }
+
+    #[ignore = "Graph-level negative-pop elimination not implemented yet"]
+    #[test]
+    fn test_graph_trailing_unconditional_negative_neutralized() {
+        // A --(3, c0)--> B --(-2, c2)--> C --(0, None)--> terminal
+        // The bubble will make the negative trailing and unconditional; neutralization should set it to zero.
+        let god = TestGod::new();
+        let a = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+        let t = new_node(&god);
+
+        add_edge(&god, a, b, TestEK::new(3, Some(0)));
+        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
+        // This edge doesn't change the "negative-trailing" property, but is included to model a terminal no-op branch.
+        add_edge(&god, c, t, TestEK::new(0, None));
+
+        let roots = vec![a];
+        run_test(&god, &roots);
     }
 }
