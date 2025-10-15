@@ -841,6 +841,89 @@ where
     }
 }
 
+// Add this impl block for pretty-printing functionality
+impl<EK, EV, T> Trie<EK, EV, T>
+where
+    EK: Ord + Clone + Debug,
+    EV: Clone + Debug,
+    T: Debug,
+{
+    /// Pretty-prints the trie structure starting from the given roots into a String.
+    /// Handles shared subtrees and cycles to avoid infinite loops and redundant output.
+    pub fn pretty_print(arena: &Arena<Self>, roots: &[Trie2Index]) -> String {
+        let mut output = String::new();
+        let mut printed_nodes = HashSet::new();
+
+        for (i, &root) in roots.iter().enumerate() {
+            if i > 0 {
+                output.push_str("\n");
+            }
+            output.push_str(&format!("[Root {}]\n", i));
+            let mut visiting = HashSet::new();
+            Self::pretty_print_recursive(root, arena, "", true, &mut visiting, &mut printed_nodes, &mut output);
+        }
+        output
+    }
+
+    fn pretty_print_recursive(
+        node_idx: Trie2Index,
+        arena: &Arena<Self>,
+        prefix: &str,
+        is_last: bool,
+        visiting: &mut HashSet<usize>,
+        printed_nodes: &mut HashSet<usize>,
+        output: &mut String,
+    ) {
+        let node_guard = match node_idx.read(arena) {
+            Some(guard) => guard,
+            None => {
+                let connector = if is_last { "└── " } else { "├── " };
+                output.push_str(&format!("{}{}[Invalid Node Index: {}]\n", prefix, connector, node_idx.as_usize()));
+                return;
+            }
+        };
+
+        let connector = if is_last { "└── " } else { "├── " };
+        output.push_str(&format!(
+            "{}{}[Node {}] (max_depth: {}, value: {:?})",
+            prefix,
+            connector,
+            node_idx.as_usize(),
+            node_guard.max_depth,
+            &node_guard.value
+        ));
+
+        if visiting.contains(&node_idx.as_usize()) {
+            output.push_str(" (Cycle detected)\n");
+            return;
+        }
+
+        if printed_nodes.contains(&node_idx.as_usize()) {
+            output.push_str(" (Shared, already shown)\n");
+            return;
+        }
+        output.push_str("\n");
+
+        visiting.insert(node_idx.as_usize());
+        printed_nodes.insert(node_idx.as_usize());
+
+        let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+
+        let children_edges: Vec<_> = node_guard.children.iter().flat_map(|(ek, dest_map)| dest_map.iter().map(move |(child_idx, ev)| (ek, ev, *child_idx))).collect();
+
+        let num_children = children_edges.len();
+        for (i, (ek, ev, child_idx)) in children_edges.iter().enumerate() {
+            let is_last_child = i == num_children - 1;
+            let child_connector = if is_last_child { "└── " } else { "├── " };
+            output.push_str(&format!("{}{}Edge: {:?} (value: {:?})\n", &new_prefix, child_connector, ek, ev));
+            let recursive_prefix = format!("{}{}", &new_prefix, if is_last_child { "    " } else { "│   " });
+            Self::pretty_print_recursive(*child_idx, arena, &recursive_prefix, true, visiting, printed_nodes, output);
+        }
+
+        visiting.remove(&node_idx.as_usize());
+    }
+}
+
 // Implementation block for special_map and related functionality
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
