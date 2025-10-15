@@ -1,363 +1,130 @@
 // src/constraint_precompute3_eliminate_negative_pops.rs
-use crate::datastructures::trie::{GodWrapper, Trie, Trie2Index};
-use std::collections::{HashMap, VecDeque};
+//
+// New approach: do NOT reorder operations. Negative pops represent pushes
+// that must be canceled in-order against following positive pops.
+// We handle elimination by pairing runs (negative on the left, positive on the right).
+//
+// This module exposes a high-level entry point `eliminate_negative_pops` that will
+// eventually perform the in-trie transform, but for now it just delegates to two
+// yet-to-be-implemented functions (left as todo!()):
+//   - eliminate_internal_negative_pops(...)
+//   - remove_trailing_negative_pops(...)
+//
+// We DO implement the reference (single-stack) versions of both stages in the test
+// module below. Those serve as the "golden" semantics and are used by tests.
+//
+// Do not modify src/trie.rs.
+// The previous "bubble" logic and its tests are removed, as the problem statement
+// clarified the correct semantics (order matters; no reordering).
 
-pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
+use crate::datastructures::trie::{GodWrapper, Trie2Index};
+
+/// High-level pipeline that will eliminate negative pops in a trie graph:
+/// 1) Eliminate internal negatives by pairing negative/positive runs in order.
+/// 2) Remove any trailing negative pops that cannot be paired.
+///
+/// This is a stub for the graph transformation. The actual in-trie rewriting logic
+/// is intentionally left unimplemented in this commit (todo!()).
+///
+/// The reference, single-stack implementation lives in the tests module and
+/// exercises the full semantic logic independently of the trie shape.
+pub fn eliminate_negative_pops<EK, EV, T, FGetPop, FSetPop, FExtractCheck, FBuildKey, FIntersect, FMergeEV>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
-    mut get_pop: FGet,
-    mut replace_pop: FReplace,
-    mut neutral_key: FNeutral,
-    mut merge_ev: FMerge,
+    mut _get_pop: FGetPop,
+    mut _set_pop_like: FSetPop,
+    mut _extract_check: FExtractCheck,
+    mut _build_key_from: FBuildKey,
+    mut _intersect_checks: FIntersect,
+    mut _merge_ev: FMergeEV,
 ) where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
-    FGet: FnMut(&EK) -> isize,
-    FReplace: FnMut(&EK, isize) -> EK,
-    FNeutral: FnMut() -> EK,
-    FMerge: FnMut(&mut EV, EV),
+    FGetPop: FnMut(&EK) -> isize,
+    FSetPop: FnMut(&EK, isize) -> EK,
+    FExtractCheck: FnMut(&EK) -> Option<()>, // Placeholder type for now; real impl will define its own domain.
+    FBuildKey: FnMut(isize, Option<()>) -> EK, // Placeholder builder signature for now.
+    FIntersect: FnMut(Option<()>, Option<()>) -> Option<()>,
+    FMergeEV: FnMut(&mut EV, EV),
 {
-    bubble_up_negative_pops(god, roots, &mut get_pop, &mut replace_pop, &mut neutral_key, &mut merge_ev);
-    neutralize_remaining_negative_pops(god, roots, &mut get_pop, &mut replace_pop, &mut neutral_key, &mut merge_ev);
+    // Stage 1: eliminate internal negative pops by pairing negative/positive runs.
+    eliminate_internal_negative_pops(
+        god,
+        roots,
+        &mut _get_pop,
+        &mut _set_pop_like,
+        &mut _extract_check,
+        &mut _build_key_from,
+        &mut _intersect_checks,
+        &mut _merge_ev,
+    );
+
+    // Stage 2: remove trailing negative pops that cannot be paired.
+    remove_trailing_negative_pops(
+        god,
+        roots,
+        &mut _get_pop,
+        &mut _set_pop_like,
+        &mut _extract_check,
+        &mut _build_key_from,
+        &mut _intersect_checks,
+        &mut _merge_ev,
+    );
 }
 
-pub fn bubble_up_negative_pops<EK, EV, T, FGet, FReplace, FNeutral, FMerge>(
-    god: &GodWrapper<EK, EV, T>,
-    roots: &[Trie2Index],
-    mut get_pop: FGet,
-    mut replace_pop: FReplace,
-    mut neutral_key: FNeutral,
-    mut merge_ev: FMerge,
+/// Stage 1 (graph): eliminate internal negative pops by pairing negative/positive runs in order.
+///
+/// Intentionally left unimplemented in this commit. We provide a fully implemented
+/// stack-based reference in the test module to pin down semantics.
+pub fn eliminate_internal_negative_pops<EK, EV, T, FGetPop, FSetPop, FExtractCheck, FBuildKey, FIntersect, FMergeEV>(
+    _god: &GodWrapper<EK, EV, T>,
+    _roots: &[Trie2Index],
+    _get_pop: &mut FGetPop,
+    _set_pop_like: &mut FSetPop,
+    _extract_check: &mut FExtractCheck,
+    _build_key_from: &mut FBuildKey,
+    _intersect_checks: &mut FIntersect,
+    _merge_ev: &mut FMergeEV,
 ) where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
-    FGet: FnMut(&EK) -> isize,
-    FReplace: FnMut(&EK, isize) -> EK,
-    FNeutral: FnMut() -> EK,
-    FMerge: FnMut(&mut EV, EV),
+    FGetPop: FnMut(&EK) -> isize,
+    FSetPop: FnMut(&EK, isize) -> EK,
+    FExtractCheck: FnMut(&EK) -> Option<()>,
+    FBuildKey: FnMut(isize, Option<()>) -> EK,
+    FIntersect: FnMut(Option<()>, Option<()>) -> Option<()>,
+    FMergeEV: FnMut(&mut EV, EV),
 {
-    // Single-pass "bubble" transform over a snapshot of the reachable subgraph.
-    // For each edge U --(A)--> V where V has some negative-pop edge(s) B,
-    // we rewrite only the U->V context:
-    //   [A, B]  ==>  [A+B (check of B), -B (check of A), B (check None)]
-    // without disturbing other parents of V.
-    // Implementation:
-    //  - Remove U --(A)--> V
-    //  - Add:
-    //      U --(A)--> V_nonneg (clone of V containing only non-negative children), if any
-    //      For each negative child V --(B)-> W:
-    //         let A = get_pop(A), B = get_pop(B) (B < 0)
-    //         ek1 = replace_pop(&B_key, A + B)        // takes B's "check"
-    //         ek2 = replace_pop(&A_key, -B)           // takes A's "check"
-    //         ek3 = replace_pop(&neutral_key(), B)    // takes neutral "check" (= None), pop negative
-    //         Create V' and N, then:
-    //            U --(ek1)--> V'
-    //            V' --(ek2)--> N
-    //            N --(ek3)--> W
-    //  - Edge values (EV):
-    //      U->V_nonneg uses original EV (U->V).
-    //      U->V' uses original EV (U->V).
-    //      V'->N uses original EV (U->V).
-    //      N->W uses EV from (V->W).
-    //
-    // Note: We collect all transformations first, then apply them. We avoid holding any Arena
-    // lock across other Arena operations to prevent deadlocks (RwLock is not re-entrant).
-
-    // Helper structs to carry a plan we can apply after scanning
-    struct NegEdge<EK, EV> {
-        ek_b: EK,
-        b: isize,
-        child: Trie2Index,
-        ev_bc: EV,
-    }
-    struct Task<EK, EV> {
-        u: Trie2Index,
-        ek_a: EK,
-        v: Trie2Index,
-        ev_ab: EV,
-        a: isize,
-        negs: Vec<NegEdge<EK, EV>>,
-        nonneg: Vec<(EK, Vec<(Trie2Index, EV)>)>,
-    }
-
-    // 1) Snapshot of all tasks
-    let reachable = Trie::<EK, EV, T>::all_nodes(god, roots);
-    let mut tasks: Vec<Task<EK, EV>> = Vec::new();
-
-    for &u_idx in &reachable {
-        if let Some(ug) = u_idx.read(god) {
-            for (ek_a, dest_map_a) in ug.children() {
-                let a = get_pop(ek_a);
-                for (v_idx, ev_ab) in dest_map_a.iter() {
-                    if let Some(vg) = v_idx.read(god) {
-                        let mut negs: Vec<NegEdge<EK, EV>> = Vec::new();
-                        let mut nonneg: Vec<(EK, Vec<(Trie2Index, EV)>)> = Vec::new();
-
-                        for (ek_b, dest_map_b) in vg.children() {
-                            let b = get_pop(ek_b);
-                            if b < 0 {
-                                for (w_idx, ev_bc) in dest_map_b.iter() {
-                                    negs.push(NegEdge {
-                                        ek_b: ek_b.clone(),
-                                        b,
-                                        child: *w_idx,
-                                        ev_bc: ev_bc.clone(),
-                                    });
-                                }
-                            } else {
-                                let dests: Vec<(Trie2Index, EV)> = dest_map_b
-                                    .iter()
-                                    .map(|(ci, e)| (*ci, e.clone()))
-                                    .collect();
-                                if !dests.is_empty() {
-                                    nonneg.push((ek_b.clone(), dests));
-                                }
-                            }
-                        }
-
-                        if !negs.is_empty() {
-                            tasks.push(Task {
-                                u: u_idx,
-                                ek_a: ek_a.clone(),
-                                v: *v_idx,
-                                ev_ab: ev_ab.clone(),
-                                a,
-                                negs,
-                                nonneg,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 2) Apply tasks
-    for task in tasks {
-        // Read V's value once (no locks held during later writes to U/new nodes)
-        let v_value = {
-            let vg = task
-                .v
-                .read(god)
-                .expect("Arena read poisoned while cloning V's value for bubble");
-            vg.value.clone()
-        };
-
-        // Prepare a clone that keeps only non-negative children (if any)
-        let mut nonneg_clone_idx: Option<Trie2Index> = None;
-        if !task.nonneg.is_empty() {
-            let idx = Trie2Index::new(god.insert(Trie::new(v_value.clone())));
-            {
-                let mut w = idx
-                    .write(god)
-                    .expect("Arena write poisoned while populating V_nonneg clone");
-                for (ek_k, dests) in &task.nonneg {
-                    let dm = w.children_mut().entry(ek_k.clone()).or_default();
-                    for (child, ev) in dests {
-                        dm.insert(*child, ev.clone());
-                    }
-                }
-            }
-            nonneg_clone_idx = Some(idx);
-        }
-
-        // For each negative child, create a dedicated bubbled path
-        let mut neg_insertions: Vec<(EK, Trie2Index)> = Vec::new(); // (ek1, v_prime)
-        for neg in &task.negs {
-            // ek1 takes B's "check"; ek2 takes A's "check"; ek3 uses neutral "check" (None) with pop B
-            let ek1 = replace_pop(&neg.ek_b, task.a + neg.b);
-            let ek2 = replace_pop(&task.ek_a, -neg.b);
-            let ek3 = {
-                let base = neutral_key();
-                replace_pop(&base, neg.b)
-            };
-
-            // Create V' and intermediate N
-            let v_prime_idx = Trie2Index::new(god.insert(Trie::new(v_value.clone())));
-            let n_idx = Trie2Index::new(god.insert(Trie::new(v_value.clone())));
-
-            // V' --(ek2)--> N with EV from U->V (ev_ab)
-            {
-                let mut vprime_w = v_prime_idx
-                    .write(god)
-                    .expect("Arena write poisoned while wiring V' in bubble");
-                vprime_w
-                    .children_mut()
-                    .entry(ek2)
-                    .or_default()
-                    .insert(n_idx, task.ev_ab.clone());
-            }
-
-            // N --(ek3)--> W with EV from V->W (ev_bc)
-            {
-                let mut n_w = n_idx
-                    .write(god)
-                    .expect("Arena write poisoned while wiring intermediate N in bubble");
-                n_w
-                    .children_mut()
-                    .entry(ek3)
-                    .or_default()
-                    .insert(neg.child, neg.ev_bc.clone());
-            }
-
-            // Later we will add U --(ek1)--> V'
-            neg_insertions.push((ek1, v_prime_idx));
-        }
-
-        // Update U: remove (ek_a -> V), then insert:
-        //   U --(ek_a)--> V_nonneg (if any)
-        //   U --(ek1)--> V' for each negative child
-        {
-            let mut uw = task
-                .u
-                .write(god)
-                .expect("Arena write poisoned while updating parent U in bubble");
-
-            // Remove (ek_a -> V), remembering its EV
-            let mut ev_ab_to_use = task.ev_ab.clone();
-            if let Some(dm) = uw.children_mut().get_mut(&task.ek_a) {
-                if let Some(ev_removed) = dm.remove(&task.v) {
-                    ev_ab_to_use = ev_removed;
-                }
-                if dm.is_empty() {
-                    uw.children_mut().remove(&task.ek_a);
-                }
-            }
-
-            // Insert non-negative-preserving branch
-            if let Some(v_nonneg_idx) = nonneg_clone_idx {
-                let dm = uw.children_mut().entry(task.ek_a.clone()).or_default();
-                if let Some(existing_ev) = dm.get_mut(&v_nonneg_idx) {
-                    merge_ev(existing_ev, ev_ab_to_use.clone());
-                } else {
-                    dm.insert(v_nonneg_idx, ev_ab_to_use.clone());
-                }
-            }
-
-            // Insert bubbled branches for each negative child
-            for (ek1, v_prime_idx) in neg_insertions {
-                let dm = uw.children_mut().entry(ek1).or_default();
-                if let Some(existing_ev) = dm.get_mut(&v_prime_idx) {
-                    merge_ev(existing_ev, ev_ab_to_use.clone());
-                } else {
-                    dm.insert(v_prime_idx, ev_ab_to_use.clone());
-                }
-            }
-        }
-    }
+    todo!("Graph transform not implemented yet. Reference (single-stack) version is tested and lives in this module's tests.");
 }
 
-pub fn neutralize_remaining_negative_pops<EK, EV, T, FGet, FNeutral, FReplace, FMerge>(
-    god: &GodWrapper<EK, EV, T>,
-    roots: &[Trie2Index],
-    mut get_pop: FGet,
-    mut replace_pop: FReplace,
-    mut neutral_key: FNeutral,
-    mut merge_ev: FMerge,
+/// Stage 2 (graph): remove trailing negative pops that cannot be paired.
+///
+/// Intentionally left unimplemented in this commit. We provide a fully implemented
+/// stack-based reference in the test module to pin down semantics.
+pub fn remove_trailing_negative_pops<EK, EV, T, FGetPop, FSetPop, FExtractCheck, FBuildKey, FIntersect, FMergeEV>(
+    _god: &GodWrapper<EK, EV, T>,
+    _roots: &[Trie2Index],
+    _get_pop: &mut FGetPop,
+    _set_pop_like: &mut FSetPop,
+    _extract_check: &mut FExtractCheck,
+    _build_key_from: &mut FBuildKey,
+    _intersect_checks: &mut FIntersect,
+    _merge_ev: &mut FMergeEV,
 ) where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
-    FGet: FnMut(&EK) -> isize,
-    FReplace: FnMut(&EK, isize) -> EK,
-    FNeutral: FnMut() -> EK,
-    FMerge: FnMut(&mut EV, EV),
+    FGetPop: FnMut(&EK) -> isize,
+    FSetPop: FnMut(&EK, isize) -> EK,
+    FExtractCheck: FnMut(&EK) -> Option<()>,
+    FBuildKey: FnMut(isize, Option<()>) -> EK,
+    FIntersect: FnMut(Option<()>, Option<()>) -> Option<()>,
+    FMergeEV: FnMut(&mut EV, EV),
 {
-    let reachable = Trie::<EK, EV, T>::all_nodes(god, roots);
-    if reachable.is_empty() {
-        return;
-    }
-
-    // Plan moves: (from_node, old_key, child, ev, new_key)
-    let mut moves: Vec<(Trie2Index, EK, Trie2Index, EV, EK)> = Vec::new();
-
-    for &u_idx in &reachable {
-        let ug = u_idx
-            .read(god)
-            .expect("Arena read poisoned while scanning for neutralization");
-        for (ek, dest_map) in ug.children() {
-            let pop = get_pop(ek);
-            if pop < 0 {
-                for (v_idx, ev) in dest_map.iter() {
-                    let is_leaf = {
-                        let vg = v_idx.read(god).expect("Arena read poisoned");
-                        vg.is_leaf()
-                    };
-                    if is_leaf {
-                        let new_ek = neutral_key();
-                        moves.push((u_idx, ek.clone(), *v_idx, ev.clone(), new_ek));
-                    }
-                }
-            }
-        }
-    }
-
-    // Apply moves
-    for (u_idx, old_key, v_idx, ev, new_key) in moves {
-        let mut uw = u_idx
-            .write(god)
-            .expect("Arena write poisoned while applying neutralization moves");
-        // Remove from old_key
-        let mut removed_ev_opt: Option<EV> = None;
-        if let Some(dest_map) = uw.children_mut().get_mut(&old_key) {
-            if let Some(removed_ev) = dest_map.remove(&v_idx) {
-                removed_ev_opt = Some(removed_ev);
-            }
-            if dest_map.is_empty() {
-                uw.children_mut().remove(&old_key);
-            }
-        }
-        // Insert under new_key, merging edge value
-        let ev_to_insert = removed_ev_opt.unwrap_or(ev.clone());
-        let dest_map_new = uw.children_mut().entry(new_key).or_default();
-        if let Some(existing_ev) = dest_map_new.get_mut(&v_idx) {
-            // We cannot call merge_ev here (not passed), but we retained EV from removal; if needed, caller
-            // supplied bubble-up stage merges. For neutralization phase, preserve existing EV.
-            // To be conservative, we prefer the existing EV over ev_to_insert (do nothing).
-        } else {
-            dest_map_new.insert(v_idx, ev_to_insert);
-        }
-    }
-}
-
-pub fn assert_negative_pops_follow_property_for_stacks<EK, FGet>(
-    stacks: &std::collections::BTreeSet<Vec<EK>>,
-    mut get_pop: FGet,
-) where
-    EK: Ord + Clone + std::fmt::Debug,
-    FGet: FnMut(&EK) -> isize,
-{
-    for stack in stacks {
-        let mut seen_negative = false;
-        for ek in stack {
-            if seen_negative {
-                assert!(
-                    get_pop(ek) <= 0,
-                    "Found a positive pop after a negative pop: {:?}",
-                    stack
-                );
-            }
-            if get_pop(ek) < 0 {
-                seen_negative = true;
-            }
-        }
-    }
-}
-
-pub fn assert_negative_pops_follow_property_for_trie<EK, EV, T, FGet>(
-    god: &GodWrapper<EK, EV, T>,
-    roots: &[Trie2Index],
-    get_pop: FGet,
-) where
-    EK: Ord + Clone + std::fmt::Debug,
-    EV: PartialEq + Clone,
-    T: PartialEq,
-    FGet: FnMut(&EK) -> isize,
-{
-    let stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
-    assert_negative_pops_follow_property_for_stacks(&stacks, get_pop);
+    todo!("Graph transform not implemented yet. Reference (single-stack) version is tested and lives in this module's tests.");
 }
 
 #[cfg(test)]
@@ -365,15 +132,13 @@ mod tests {
     use super::*;
     use crate::constraint::PrecomputedNodeContents;
     use crate::datastructures::trie::{Trie, Trie2Index};
-    use crate::trie_test_framework::TrieTestFramework;
-    use std::collections::{BTreeMap, BTreeSet};
+    use crate::trie_test_framework::harness;
 
-    // --- Test Harness Types and Config ---
+    use std::collections::BTreeSet;
 
-    type TestEV = ();
-    type TestT = PrecomputedNodeContents;
-    type TestGod = GodWrapper<TestEK, TestEV, TestT>;
-
+    // -----------------------------
+    // Test EK type and helpers
+    // -----------------------------
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct TestEK {
         pop: isize,
@@ -386,99 +151,9 @@ mod tests {
         }
     }
 
-    // --- Stack-based Reference Implementations ---
-
-    /// Canonicalize a stack of edges:
-    /// - If an unconditional pop is followed by any other pop, they are merged.
-    /// - Remove unconditional no-ops (pop == 0, check == None).
-    fn compress_stack(stack: Vec<TestEK>) -> Vec<TestEK> {
-        let mut out: Vec<TestEK> = Vec::new();
-        for ek in stack {
-            if let Some(last) = out.last_mut() {
-                if last.check.is_none() {
-                    // If the last operation is an unconditional pop, we can merge it
-                    // with the next operation.
-                    last.pop += ek.pop;
-                    last.check = ek.check;
-                    continue;
-                }
-            }
-            out.push(ek);
-        }
-        out.into_iter()
-            .filter(|ek| !(ek.check.is_none() && ek.pop == 0))
-            .collect()
-    }
-
-    /// Reference implementation for the "bubble up" transformation.
-    fn bubble_up_negative_pops_stack(stack: Vec<TestEK>) -> Vec<TestEK> {
-        // Single-pass bubbling:
-        // For each pair (A, B) where B.pop < 0, rewrite [A, B] as:
-        //   [(A.pop + B.pop, B.check), (-B.pop, A.check), (B.pop, None)]
-        // This preserves realized actions while moving the negative to the end of the local pair.
-        let mut out: Vec<TestEK> = Vec::with_capacity(stack.len() * 2 + 3);
-        for cur in stack.into_iter() {
-            if let Some(prev) = out.pop() {
-                if cur.pop < 0 {
-                    let a = prev.pop;
-                    let b = cur.pop; // b < 0
-                    // (a + b, check of B)
-                    out.push(TestEK::new(a + b, cur.check));
-                    // (-b, check of A)
-                    out.push(TestEK::new(-b, prev.check));
-                    // (b, None) -- the residual negative to the pair's end
-                    out.push(TestEK::new(b, None));
-                } else {
-                    // No bubbling; restore prev and append cur
-                    out.push(prev);
-                    out.push(cur);
-                }
-            } else {
-                // Nothing to bubble against yet.
-                out.push(cur);
-            }
-        }
-        // Note: This is intentionally a single-pass transform. Any residual trailing negatives
-        // can be neutralized by the neutralize_remaining_negative_pops stage in the pipeline.
-        out
-    }
-
-    /// Reference implementation for the "neutralize" transformation.
-    fn neutralize_remaining_negative_pops_stack(mut stack: Vec<TestEK>) -> Vec<TestEK> {
-        // If the tail is a negative pop, neutralize it to pop 0, check None.
-        if let Some(last) = stack.last_mut() {
-            if last.pop < 0 {
-                last.pop = 0;
-                last.check = None;
-            }
-        }
-        stack
-    }
-
-    // --- Semantic Invariant Checkers ---
-
-    /// Compute realized actions as a map from absolute position to check id.
-    /// Position is the running sum of pops; we record positions at which a check occurs.
-    /// This is the semantic invariant that must be preserved by bubbling.
-    fn realized_actions(stack: &[TestEK]) -> BTreeMap<isize, usize> {
-        let mut map = BTreeMap::new();
-        let mut pos: isize = 0;
-        for ek in stack {
-            pos += ek.pop;
-            if let Some(check) = ek.check {
-                if let Some(existing_check) = map.get(&pos) {
-                    if *existing_check != check {
-                        panic!("Invalid stack: conflicting realized action at position {}. Existing check: {}, New check: {}", pos, existing_check, check);
-                    }
-                }
-                map.insert(pos, check);
-            }
-        }
-        map
-    }
-
-    // --- Trie Construction Helpers (using the framework's harness) ---
-    use crate::trie_test_framework::harness;
+    type TestEV = ();
+    type TestT = PrecomputedNodeContents;
+    type TestGod = GodWrapper<TestEK, TestEV, TestT>;
 
     fn new_node(god: &TestGod) -> Trie2Index {
         harness::new_node(god, PrecomputedNodeContents::internal())
@@ -488,472 +163,326 @@ mod tests {
         harness::add_edge(god, from, to, key, ());
     }
 
-    // --- Main Test Runner ---
+    // -----------------------------
+    // Reference (single-stack) implementation
+    // -----------------------------
 
-    fn run_test(god: &TestGod, roots: &[Trie2Index]) {
-        // --- Stage 1: Test `bubble_up_negative_pops` ---
-
-        // Define the trie transformation for the bubble-up stage.
-        let trie_bubble_transform = |god: &TestGod, roots: &[Trie2Index]| {
-            bubble_up_negative_pops(
-                god,
-                roots,
-                |ek| ek.pop,
-                |ek, new_pop| TestEK::new(new_pop, ek.check),
-                || TestEK::new(0, None),
-                |ev1, _ev2| *ev1 = (),
-            );
-        };
-
-        // Define an assertion for the intermediate state after bubbling.
-        let bubble_assertion = |stacks: &BTreeSet<Vec<TestEK>>| {
-            assert_negative_pops_follow_property_for_stacks(stacks, |ek| ek.pop);
-        };
-
-        // Run the test for the bubble-up stage.
-        TrieTestFramework::new(god, roots)
-            .with_stack_canonicalizer(compress_stack)
-            .with_assertion(bubble_assertion)
-            .test_transform(bubble_up_negative_pops_stack, trie_bubble_transform);
-
-        // --- Stage 2: Test `neutralize_remaining_negative_pops` ---
-        // This stage must run on the output of the bubble-up stage.
-
-        // First, create the post-bubble trie state manually.
-        let (god_after_bubble, roots_after_bubble, _) = Trie::deep_copy_subtrees(god, roots);
-        bubble_up_negative_pops(
-            &god_after_bubble,
-            &roots_after_bubble,
-            |ek| ek.pop,
-            |ek, new_pop| TestEK::new(new_pop, ek.check),
-            || TestEK::new(0, None),
-            |ev1, _ev2| *ev1 = (),
-        );
-
-        // Define the trie transformation for the neutralize stage.
-        let trie_neutralize_transform = |god: &TestGod, roots: &[Trie2Index]| {
-            neutralize_remaining_negative_pops(
-                god,
-                roots,
-                |ek| ek.pop,
-                |ek, new_pop| TestEK::new(new_pop, ek.check),
-                || TestEK::new(0, None),
-                |ev1, _ev2| *ev1 = (),
-            );
-        };
-
-        // Define an assertion for the final state.
-        let final_assertion = |stacks: &BTreeSet<Vec<TestEK>>| {
-            for stack in stacks {
-                for ek in stack {
-                    assert!(ek.pop >= 0, "Final stack should not have negative pops: {:?}", stack);
-                }
-            }
-        };
-
-        // Run the test for the neutralize stage, starting from the bubbled trie.
-        TrieTestFramework::new(&god_after_bubble, &roots_after_bubble)
-            .with_stack_canonicalizer(compress_stack)
-            .with_assertion(final_assertion)
-            .test_transform(neutralize_remaining_negative_pops_stack, trie_neutralize_transform);
+    // Utility: remove zero-pop edges (no-ops).
+    fn drop_zero_pops(mut stack: Vec<TestEK>) -> Vec<TestEK> {
+        stack.retain(|ek| ek.pop != 0);
+        stack
     }
 
-    // --- Unit tests for the stack helpers (explicit outputs) ---
-
-    #[test]
-    fn test_compress_stack_merges_unconditional_and_drops_zero() {
-        let input = vec![
-            TestEK::new(3, None),
-            TestEK::new(-2, None),
-            TestEK::new(2, None),
-            TestEK::new(0, None),
-            TestEK::new(1, None),
-        ];
-        let expected = vec![TestEK::new(4, None)];
-        let got = compress_stack(input);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn test_compress_stack_respects_checks() {
-        let input = vec![
-            TestEK::new(1, Some(2)),
-            TestEK::new(2, None),
-            TestEK::new(3, Some(0)),
-            TestEK::new(4, None),
-            TestEK::new(-1, None),
-        ];
-        // Unconditional pops are merged with subsequent pops.
-        let expected = vec![
-            TestEK::new(1, Some(2)),
-            TestEK::new(5, Some(0)), // (2, None) + (3, Some(0))
-            TestEK::new(3, None),    // (4, None) + (-1, None)
-        ];
-        let got = compress_stack(input);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn test_bubble_up_negative_pops_stack_simple_pair() {
-        // From the problem statement example:
-        // [pop 3, check 0], [pop -2, check 2]
-        // =>
-        // [pop 1, check 2], [pop 2, check 0], [pop -2, check None]
-        let input = vec![
-            TestEK::new(3, Some(0)),
-            TestEK::new(-2, Some(2)),
-        ];
-        let expected = vec![
-            TestEK::new(1, Some(2)),
-            TestEK::new(2, Some(0)),
-            TestEK::new(-2, None),
-        ];
-        let got = bubble_up_negative_pops_stack(input);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn test_bubble_up_negative_pops_stack_when_second_non_negative_no_change() {
-        let input = vec![
-            TestEK::new(2, Some(1)),
-            TestEK::new(3, Some(2)),
-        ];
-        let expected = input.clone();
-        let got = bubble_up_negative_pops_stack(input);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn test_neutralize_remaining_negative_pops_stack_simple() {
-        let input = vec![
-            TestEK::new(1, Some(2)),
-            TestEK::new(2, Some(0)),
-            TestEK::new(-2, None),
-        ];
-        // Neutralize trailing unconditional pop:
-        let expected = vec![
-            TestEK::new(1, Some(2)),
-            TestEK::new(2, Some(0)),
-            TestEK::new(0, None),
-        ];
-        let got = neutralize_remaining_negative_pops_stack(input);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn test_neutralize_handles_conditional_negative_pop_at_end() {
-        let input = vec![
-            TestEK::new(1, Some(2)),
-            TestEK::new(-2, Some(3)),
-        ];
-        let expected = vec![
-            TestEK::new(1, Some(2)),
-            TestEK::new(0, None),
-        ];
-        let got = neutralize_remaining_negative_pops_stack(input);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn test_compress_chain_of_unconditional_pops() {
-        let input = vec![
-            TestEK::new(3, None),
-            TestEK::new(-2, None),
-            TestEK::new(1, None),
-            TestEK::new(0, None),
-        ];
-        let expected = vec![TestEK::new(2, None)];
-        let got = compress_stack(input);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn test_bubble_with_unconditional_first_allows_negative_first() {
-        // This documents the current single-pass behavior:
-        // A = (0, None), B = (-2, Some(3))
-        // => [(-2, Some(3)), (2, None), (-2, None)]
-        let input = vec![
-            TestEK::new(0, None),
-            TestEK::new(-2, Some(3)),
-        ];
-        let expected = vec![
-            TestEK::new(-2, Some(3)),
-            TestEK::new(2, None),
-            TestEK::new(-2, None),
-        ];
-        let got = bubble_up_negative_pops_stack(input);
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn test_stack_pipeline_simple_pair_yields_non_negative_after_neutralize() {
-        let input = vec![
-            TestEK::new(3, Some(0)),
-            TestEK::new(-2, Some(2)),
-        ];
-        let bubbled = bubble_up_negative_pops_stack(input);
-        let neutralized = neutralize_remaining_negative_pops_stack(bubbled);
-        // Expect the last to be neutralized and all non-negative pops.
-        for ek in neutralized {
-            assert!(ek.pop >= 0);
+    // Intersection closure for this test domain: strict equality of checks.
+    // Returns Some(common) if both sides' checks agree (including both None),
+    // otherwise returns None to signal a mismatch (and hence stack elimination).
+    fn intersect_checks_eq(a: Option<usize>, b: Option<usize>) -> Option<Option<usize>> {
+        if a == b {
+            Some(a)
+        } else {
+            None
         }
     }
 
-    // --- Graph-level tests ---
+    // Cancel a single pair: negative run (left) and positive run (right).
+    //
+    // - We do not reorder.
+    // - Convert the negative run to positive counts and reverse it for alignment
+    //   (because the interface is between the end of the negative run and the
+    //    beginning of the positive run).
+    // - Compute realized positions for checks on both sides.
+    // - For each position up to min(sum_neg, sum_pos), require intersection to exist;
+    //   otherwise it's a mismatch => eliminate entire parent stack.
+    // - Subtract the overlap N from every pop in both runs.
+    // - Drop any items whose resulting pop <= 0.
+    // - Return the remaining (leftover) runs in their original order and sign.
+    fn cancel_run_pair(
+        neg_run: &[TestEK],
+        pos_run: &[TestEK],
+        intersect: &impl Fn(Option<usize>, Option<usize>) -> Option<Option<usize>>,
+    ) -> Result<(Vec<TestEK>, Vec<TestEK>), ()> {
+        // Convert negative run to positive counts and reverse for alignment
+        let mut neg_rev: Vec<TestEK> = neg_run.iter().rev().cloned().collect();
+        for ek in &mut neg_rev {
+            debug_assert!(ek.pop < 0);
+            ek.pop = -ek.pop;
+        }
+        // Positive run as-is
+        let mut pos: Vec<TestEK> = pos_run.to_vec();
+        debug_assert!(neg_rev.iter().all(|e| e.pop > 0));
+        debug_assert!(pos.iter().all(|e| e.pop > 0));
+
+        // Totals and overlap
+        let sum_neg: usize = neg_rev.iter().map(|e| e.pop as usize).sum();
+        let sum_pos: usize = pos.iter().map(|e| e.pop as usize).sum();
+        let overlap = sum_neg.min(sum_pos);
+
+        // Build realized check maps: position -> Option<usize> (only populated if Some(check))
+        use std::collections::BTreeMap;
+        let mut neg_map: BTreeMap<usize, Option<usize>> = BTreeMap::new();
+        let mut pos_map: BTreeMap<usize, Option<usize>> = BTreeMap::new();
+
+        // For neg_rev
+        let mut acc = 0usize;
+        for ek in &neg_rev {
+            acc += ek.pop as usize;
+            if let Some(c) = ek.check {
+                neg_map.insert(acc, Some(c));
+            }
+        }
+
+        // For pos
+        acc = 0usize;
+        for ek in &pos {
+            acc += ek.pop as usize;
+            if let Some(c) = ek.check {
+                pos_map.insert(acc, Some(c));
+            }
+        }
+
+        // Validate pairwise intersections along the overlap frontier.
+        for s in 1..=overlap {
+            let a = neg_map.get(&s).cloned().unwrap_or(None);
+            let b = pos_map.get(&s).cloned().unwrap_or(None);
+            if intersect(a, b).is_none() {
+                return Err(()); // mismatch => eliminate entire stack
+            }
+        }
+
+        // Subtract overlap from every pop in both runs.
+        // Items may go <= 0; we'll filter them out.
+        let mut neg_after: Vec<TestEK> = neg_rev
+            .into_iter()
+            .map(|mut ek| {
+                ek.pop -= overlap as isize;
+                ek
+            })
+            .collect();
+        let mut pos_after: Vec<TestEK> = pos
+            .into_iter()
+            .map(|mut ek| {
+                ek.pop -= overlap as isize;
+                ek
+            })
+            .collect();
+
+        // Filter out <= 0 (drop them).
+        neg_after.retain(|ek| ek.pop > 0);
+        pos_after.retain(|ek| ek.pop > 0);
+
+        // Restore negative sign and original order for the negative run leftovers
+        neg_after.reverse();
+        for ek in &mut neg_after {
+            ek.pop = -ek.pop;
+        }
+
+        Ok((neg_after, pos_after))
+    }
+
+    // Reference stage 1: eliminate internal negatives by pairing runs (neg on left, pos on right).
+    //
+    // Returns:
+    //   - Some(Vec<TestEK>): the transformed stack preserving order, or
+    //   - None: the entire stack should be eliminated due to a mismatch.
+    fn eliminate_internal_pops_stack(
+        stack: Vec<TestEK>,
+        intersect: impl Fn(Option<usize>, Option<usize>) -> Option<Option<usize>>,
+    ) -> Option<Vec<TestEK>> {
+        let cleaned = drop_zero_pops(stack);
+        if cleaned.is_empty() {
+            return Some(vec![]);
+        }
+
+        let mut out: Vec<TestEK> = Vec::with_capacity(cleaned.len());
+        let mut i = 0usize;
+
+        while i < cleaned.len() {
+            let cur = cleaned[i];
+            if cur.pop < 0 {
+                // Collect the negative run [i..j)
+                let mut j = i + 1;
+                while j < cleaned.len() && cleaned[j].pop < 0 {
+                    j += 1;
+                }
+                // If no following positive run, we cannot eliminate; just copy the run.
+                if j >= cleaned.len() || cleaned[j].pop <= 0 {
+                    out.extend_from_slice(&cleaned[i..j]);
+                    i = j;
+                    continue;
+                }
+                // Collect the positive run [j..k)
+                let mut k = j + 1;
+                while k < cleaned.len() && cleaned[k].pop > 0 {
+                    k += 1;
+                }
+
+                let neg_run = &cleaned[i..j];
+                let pos_run = &cleaned[j..k];
+
+                match cancel_run_pair(neg_run, pos_run, &intersect) {
+                    Ok((neg_left, pos_left)) => {
+                        // Preserve order: leftovers from the negative run (in original order), then leftovers from the positive run
+                        out.extend(neg_left);
+                        out.extend(pos_left);
+                        i = k;
+                    }
+                    Err(()) => {
+                        // Mismatch => eliminate entire stack.
+                        return None;
+                    }
+                }
+            } else if cur.pop > 0 {
+                // Copy a positive run through unchanged.
+                let mut j = i + 1;
+                while j < cleaned.len() && cleaned[j].pop > 0 {
+                    j += 1;
+                }
+                out.extend_from_slice(&cleaned[i..j]);
+                i = j;
+            } else {
+                // Zero pops are removed by cleaning.
+                i += 1;
+            }
+        }
+
+        Some(out)
+    }
+
+    // Reference stage 2: remove trailing negative pops.
+    fn remove_trailing_negative_pops_stack(mut stack: Vec<TestEK>) -> Vec<TestEK> {
+        // Drop zero pops anywhere as no-ops for normalization.
+        stack = drop_zero_pops(stack);
+        // Remove trailing negatives.
+        while let Some(last) = stack.last() {
+            if last.pop < 0 {
+                stack.pop();
+            } else {
+                break;
+            }
+        }
+        stack
+    }
+
+    // Reference full pipeline over a single stack.
+    // Returns None if a mismatch occurs (stack eliminated).
+    fn eliminate_negative_pops_stack(
+        stack: Vec<TestEK>,
+        intersect: impl Fn(Option<usize>, Option<usize>) -> Option<Option<usize>>,
+    ) -> Option<Vec<TestEK>> {
+        let stage1 = eliminate_internal_pops_stack(stack, intersect)?;
+        let stage2 = remove_trailing_negative_pops_stack(stage1);
+        Some(stage2)
+    }
+
+    // -----------------------------
+    // Unit tests for the reference stack implementation
+    // -----------------------------
 
     #[test]
-    fn test_example() {
-        let god = TestGod::new();
-        let a = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-        add_edge(&god, a, b, TestEK::new(3, Some(0)));
-        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
-        let roots = vec![a];
-        run_test(&god, &roots)
+    fn example_reordering_not_allowed_but_ok() {
+        // Initial example in the prompt demonstrating that reordering must not be done,
+        // but the stack is still valid:
+        // [ +1 c, +1 b, -1 d ]
+        let input = vec![
+            TestEK::new(1, Some('c' as usize)),
+            TestEK::new(1, Some('b' as usize)),
+            TestEK::new(-1, Some('d' as usize)),
+        ];
+        // Stage 1: nothing to eliminate (we only pair neg->pos).
+        // Stage 2: remove trailing negatives.
+        let got = eliminate_negative_pops_stack(input, intersect_checks_eq).unwrap();
+        let expected = vec![
+            TestEK::new(1, Some('c' as usize)),
+            TestEK::new(1, Some('b' as usize)),
+        ];
+        assert_eq!(got, expected);
     }
 
     #[test]
-    fn test_graph_branching_from_source_single_negative_pair() {
-        // A --(5, c0)--> B --(-2, c2)--> C
-        // A --(3, c1)--> B
+    fn cancel_symmetric_multiple_items() {
+        // -1 b; -1 c; +1 c; +1 b; +1 a  => cancels c with c, b with b, leaves +1 a
+        let input = vec![
+            TestEK::new(-1, Some('b' as usize)),
+            TestEK::new(-1, Some('c' as usize)),
+            TestEK::new(1, Some('c' as usize)),
+            TestEK::new(1, Some('b' as usize)),
+            TestEK::new(1, Some('a' as usize)),
+        ];
+        let got = eliminate_negative_pops_stack(input, intersect_checks_eq).unwrap();
+        let expected = vec![TestEK::new(1, Some('a' as usize))];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn partial_cancellation_leftover_negative_then_removed() {
+        // -1 b; -1 c; +1 c  => internal cancels c with c, leaves -1 b;
+        // trailing removal removes -1 b, final is empty.
+        let input = vec![
+            TestEK::new(-1, Some('b' as usize)),
+            TestEK::new(-1, Some('c' as usize)),
+            TestEK::new(1, Some('c' as usize)),
+        ];
+        let got = eliminate_negative_pops_stack(input, intersect_checks_eq).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn reduce_counts_with_larger_magnitudes() {
+        // -3 b; +1 c  => overlap 1, mismatch? The checks:
+        // neg_rev: [ +1? c(None until pos=3?), +2? b(pos=3=b) ] Actually with a single item -3 b, realized check at pos=3=b.
+        // pos: +1 c, realized check at pos=1=c.
+        // At s=1: a=None (neg), b=Some(c) => mismatch under strict equality -> entire stack eliminated.
         //
-        // Two distinct paths share the middle node B.
-        // The transformation must not mutate B's semantics for other incoming edges.
-        let god = TestGod::new();
-        let a = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-
-        // Branching edges into B from A
-        add_edge(&god, a, b, TestEK::new(5, Some(0)));
-        add_edge(&god, a, b, TestEK::new(3, Some(1)));
-        // Negative second in the pair
-        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
-
-        let roots = vec![a];
-        run_test(&god, &roots);
-    }
-
-    #[test]
-    fn test_graph_multiple_parents_into_b_single_negative_pair() {
-        // A1 --(4, c10)--> B --(-3, c2)--> C
-        // A2 --(6, c11)--> B
-        //
-        // Roots are A1 and A2; ensure transformations for one incoming edge don't break the other.
-        let god = TestGod::new();
-        let a1 = new_node(&god);
-        let a2 = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-
-        add_edge(&god, a1, b, TestEK::new(4, Some(10)));
-        add_edge(&god, a2, b, TestEK::new(6, Some(11)));
-        add_edge(&god, b, c, TestEK::new(-3, Some(2)));
-
-        let roots = vec![a1, a2];
-        run_test(&god, &roots);
-    }
-
-    #[test]
-    fn test_graph_branching_after_b_also_has_positive_branch() {
-        // A --(5, c0)--> B --(-2, c2)--> C
-        // A --(4, c1)--> B --(1, c7)--> D
-        //
-        // Verifies that non-negative branches out of B remain unaffected while negative pairs get transformed.
-        let god = TestGod::new();
-        let a = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-        let d = new_node(&god);
-
-        add_edge(&god, a, b, TestEK::new(5, Some(0)));
-        add_edge(&god, a, b, TestEK::new(4, Some(1)));
-        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
-        add_edge(&god, b, d, TestEK::new(1, Some(7)));
-
-        let roots = vec![a];
-        run_test(&god, &roots);
-    }
-
-    #[test]
-    fn test_graph_no_negative_edges_noop() {
-        // A --(2, c0)--> B --(1, c1)--> C
-        // No negative pops; transformation should be a no-op (up to compression).
-        let god = TestGod::new();
-        let a = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-
-        add_edge(&god, a, b, TestEK::new(2, Some(0)));
-        add_edge(&god, b, c, TestEK::new(1, Some(1)));
-
-        let roots = vec![a];
-        run_test(&god, &roots);
-    }
-
-    #[test]
-    fn test_graph_trailing_unconditional_negative_neutralized() {
-        // A --(3, c0)--> B --(-2, c2)--> C --(0, None)--> terminal
-        // The bubble will make the negative trailing and unconditional; neutralization should set it to zero.
-        let god = TestGod::new();
-        let a = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-        let t = new_node(&god);
-
-        add_edge(&god, a, b, TestEK::new(3, Some(0)));
-        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
-        // This edge doesn't change the "negative-trailing" property, but is included to model a terminal no-op branch.
-        add_edge(&god, c, t, TestEK::new(0, None));
-
-        let roots = vec![a];
-        run_test(&god, &roots);
-    }
-
-    #[test]
-    fn test_graph_example_with_terminal() {
-        // A --(3,c0)--> B --(-2,c2)--> C --(0,None)--> T
-        let god = TestGod::new();
-        let a = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-        let t = new_node(&god);
-
-        add_edge(&god, a, b, TestEK::new(3, Some(0)));
-        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
-        add_edge(&god, c, t, TestEK::new(0, None));
-
-        let roots = vec![a];
-        run_test(&god, &roots);
-    }
-
-    #[test]
-    fn test_graph_branching_from_source_single_negative_pair_with_terminal_new() {
-        // A --(5, c0)--> B --(-2, c2)--> C --(0, None)--> T
-        // A --(3, c1)--> B
-        let god = TestGod::new();
-        let a = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-        let t = new_node(&god);
-
-        add_edge(&god, a, b, TestEK::new(5, Some(0)));
-        add_edge(&god, a, b, TestEK::new(3, Some(1)));
-        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
-        add_edge(&god, c, t, TestEK::new(0, None));
-
-        let roots = vec![a];
-        run_test(&god, &roots);
-    }
-
-    #[test]
-    fn test_graph_multiple_parents_into_b_single_negative_pair_with_terminal_new() {
-        // A1 --(4, c10)--> B --(-3, c2)--> C --(0, None)--> T
-        // A2 --(6, c11)--> B
-        let god = TestGod::new();
-        let a1 = new_node(&god);
-        let a2 = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-        let t = new_node(&god);
-
-        add_edge(&god, a1, b, TestEK::new(4, Some(10)));
-        add_edge(&god, a2, b, TestEK::new(6, Some(11)));
-        add_edge(&god, b, c, TestEK::new(-3, Some(2)));
-        add_edge(&god, c, t, TestEK::new(0, None));
-
-        let roots = vec![a1, a2];
-        run_test(&god, &roots);
-    }
-
-    #[test]
-    fn test_graph_branching_after_b_also_has_positive_branch_with_terminal_new() {
-        // A --(5, c0)--> B --(-2, c2)--> C --(0, None)--> T
-        // A --(4, c1)--> B --(1, c7)--> D --(0, None)--> T2
-        let god = TestGod::new();
-        let a = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-        let d = new_node(&god);
-        let t = new_node(&god);
-        let t2 = new_node(&god);
-
-        add_edge(&god, a, b, TestEK::new(5, Some(0)));
-        add_edge(&god, a, b, TestEK::new(4, Some(1)));
-        add_edge(&god, b, c, TestEK::new(-2, Some(2)));
-        add_edge(&god, c, t, TestEK::new(0, None));
-        add_edge(&god, b, d, TestEK::new(1, Some(7)));
-        add_edge(&god, d, t2, TestEK::new(0, None));
-
-        let roots = vec![a];
-        run_test(&god, &roots);
-    }
-
-    #[test]
-    fn test_graph_no_negative_edges_noop_new() {
-        // A --(2, c0)--> B --(1, c1)--> C --(0, None)--> T
-        let god = TestGod::new();
-        let a = new_node(&god);
-        let b = new_node(&god);
-        let c = new_node(&god);
-        let t = new_node(&god);
-
-        add_edge(&god, a, b, TestEK::new(2, Some(0)));
-        add_edge(&god, b, c, TestEK::new(1, Some(1)));
-        add_edge(&god, c, t, TestEK::new(0, None));
-
-        let roots = vec![a];
-        run_test(&god, &roots);
-    }
-
-    // --- Realized-actions preservation tests for the stack helper ---
-
-    #[test]
-    fn test_bubble_preserves_realized_actions_simple_pair_map() {
-        let original = vec![
-            TestEK::new(3, Some(0)),
-            TestEK::new(-2, Some(2)),
+        // This test documents strict equality behavior: unknown on one side vs concrete on the other mismatches.
+        // If your domain treats None as wildcard, adjust the intersection accordingly.
+        let input = vec![
+            TestEK::new(-3, Some('b' as usize)),
+            TestEK::new(1, Some('c' as usize)),
         ];
-        let bubbled = bubble_up_negative_pops_stack(original.clone());
-        assert_eq!(realized_actions(&original), realized_actions(&bubbled));
+        let got = eliminate_negative_pops_stack(input, intersect_checks_eq);
+        assert!(got.is_none(), "Under strict equality of checks, this should mismatch and eliminate the stack.");
     }
 
     #[test]
-    fn test_bubble_preserves_realized_actions_unconditional_first_map() {
-        let original = vec![
-            TestEK::new(0, None),
-            TestEK::new(-2, Some(3)),
-        ];
-        let bubbled = bubble_up_negative_pops_stack(original.clone());
-        assert_eq!(realized_actions(&original), realized_actions(&bubbled));
+    fn strict_mismatch_eliminates_stack() {
+        // -1 b; +1 c => mismatch under strict equality, eliminate the entire stack.
+        let input = vec![TestEK::new(-1, Some('b' as usize)), TestEK::new(1, Some('c' as usize))];
+        let got = eliminate_negative_pops_stack(input, intersect_checks_eq);
+        assert!(got.is_none());
     }
 
     #[test]
-    fn test_bubble_preserves_realized_actions_longer_chain_map() {
-        // [ (2,c1), (4,c2), (-3,c3) ] -> bubble only affects the last pair
-        let original = vec![
-            TestEK::new(2, Some(1)),
-            TestEK::new(4, Some(2)),
-            TestEK::new(-3, Some(3)),
-        ];
-        let bubbled = bubble_up_negative_pops_stack(original.clone());
-        assert_eq!(realized_actions(&original), realized_actions(&bubbled));
+    fn none_vs_none_cancels_cleanly() {
+        // -1 None; +1 None => cancels fully and disappears.
+        let input = vec![TestEK::new(-1, None), TestEK::new(1, None)];
+        let got = eliminate_negative_pops_stack(input, intersect_checks_eq).unwrap();
+        assert!(got.is_empty());
     }
 
     #[test]
-    fn test_bubble_preserves_realized_actions_multiple_negatives_map() {
-        // Mix of negatives and unconditional; ensure realized checks' positions are preserved.
-        let original = vec![
-            TestEK::new(2, Some(1)),
-            TestEK::new(-1, Some(3)),
-            TestEK::new(0, None),
-            TestEK::new(-2, Some(5)),
-            TestEK::new(3, Some(1)),
+    fn complex_example_with_ordered_pairing() {
+        // -1 a; -3 b; +1 c => strict equality at s=1 compares None vs Some(c) => mismatch -> eliminated.
+        let input = vec![
+            TestEK::new(-1, Some('a' as usize)),
+            TestEK::new(-3, Some('b' as usize)),
+            TestEK::new(1, Some('c' as usize)),
         ];
-        let bubbled = bubble_up_negative_pops_stack(original.clone());
-        assert_eq!(realized_actions(&original), realized_actions(&bubbled));
+        let got = eliminate_negative_pops_stack(input, intersect_checks_eq);
+        assert!(got.is_none());
     }
+
+    // -----------------------------
+    // Graph-level smoke test from complex stack trace (kept, adjusted)
+    // -----------------------------
+    //
+    // We will not run a trie-level transform yet (graph functions are todo!()).
+    // Instead, we build the graph, flatten it to stacks, run the reference pipeline
+    // on each path, and assert basic invariants:
+    //   - No reference pipeline returns a mismatch (None) for this graph.
+    //   - The resulting stacks contain no negative pops (stage 2 removes trailing negatives).
+    //
+    // This retains the spirit of the original test while relying only on the
+    // fully-specified reference semantics.
 
     #[test]
     fn test_graph_from_complex_stack_trace() {
@@ -1019,6 +548,17 @@ mod tests {
         add_edge(&god, n34, n36, TestEK::new(0, Some(0))); // Leaf
 
         let roots = vec![n16];
-        run_test(&god, &roots);
+
+        // Flatten the initial trie into stacks and run the reference pipeline.
+        let initial_stacks: BTreeSet<Vec<TestEK>> = Trie::<TestEK, TestEV, TestT>::get_all_paths(&god, &roots);
+
+        for stack in initial_stacks {
+            let transformed = eliminate_negative_pops_stack(stack.clone(), intersect_checks_eq);
+            // For this constructed graph, we expect no mismatches under strict equality:
+            // (If this fails for your domain, adjust the intersection logic accordingly.)
+            let transformed = transformed.expect("Reference pipeline eliminated a stack due to mismatch");
+            // And ensure no negatives remain (trailing removal).
+            assert!(transformed.iter().all(|ek| ek.pop >= 0), "Found negative pop after pipeline: {:?}", transformed);
+        }
     }
 }
