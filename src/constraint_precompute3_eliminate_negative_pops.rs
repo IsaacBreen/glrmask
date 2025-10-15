@@ -1095,6 +1095,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_user_structure_as_stacks() {
+        // This test models the stacks from `test_graph_from_user_structure` to validate
+        // the stack-level logic for that specific graph topology.
+
+        // Path 1A: Designed to mismatch and be eliminated.
+        let path1a = vec![
+            ek(1, None, None),
+            ek(1, None, None),
+            ek(1, Some(&[0]), None),
+            ek(1, None, None),
+            ek(-1, Some(&[1]), None),
+            ek(1, Some(&[0]), None),
+            ek(1, None, None),
+            ek(1, None, None),
+        ];
+        let got1a = stack_eliminate_internal_negative_pops(
+            path1a,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        );
+        assert!(got1a.is_none(), "Path 1A should be eliminated by mismatch");
+
+        // Path 1B: All positive pops, should survive.
+        let path1b = vec![
+            ek(1, None, None),
+            ek(1, None, None),
+            ek(1, Some(&[2]), None),
+            ek(2, None, None),
+            ek(1, Some(&[0]), None),
+        ];
+        let got1b = stack_eliminate_internal_negative_pops(
+            path1b.clone(),
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("Path 1B should survive");
+        assert_eq!(got1b, path1b);
+
+        // Path 2A: Designed to mismatch and be eliminated.
+        let path2a = vec![
+            ek(1, None, None),
+            ek(1, None, None),
+            ek(1, Some(&[1]), None),
+            ek(1, None, None),
+            ek(-1, Some(&[2]), None),
+            ek(1, Some(&[0]), None),
+            ek(1, None, None),
+            ek(1, None, None),
+        ];
+        let got2a = stack_eliminate_internal_negative_pops(
+            path2a,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        );
+        assert!(got2a.is_none(), "Path 2A should be eliminated by mismatch");
+
+        // Path 2B: All positive pops, should survive.
+        let path2b = vec![
+            ek(1, None, None),
+            ek(1, None, None),
+            ek(1, Some(&[2]), None),
+            ek(2, None, None),
+            ek(1, Some(&[0]), None),
+        ];
+        let got2b = stack_eliminate_internal_negative_pops(
+            path2b.clone(),
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("Path 2B should survive");
+        assert_eq!(got2b, path2b);
+    }
+
     // --- Graph-level scenario (stack-only validation) ---
 
     fn new_node(god: &TestGod) -> Trie2Index {
