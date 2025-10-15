@@ -353,7 +353,7 @@ where
         let mut neg_rev: Vec<EK> = Vec::with_capacity(neg_buf.len());
         for ek in neg_buf.iter().rev() {
             let p = get_pop(ek);
-            debug_assert!(p < 0);
+            debug_assert!(p <= 0);
             neg_rev.push(replace_pop(ek, -p));
         }
 
@@ -362,38 +362,41 @@ where
         // Positions are cumulative sums; we only record positions where an item carries a check.
         // Intersections are checked for overlapping positions (if any); failures eliminate the stack.
         use std::collections::BTreeMap;
-        let mut neg_map: BTreeMap<usize, &EK> = BTreeMap::new();
-        let mut pos_map: BTreeMap<usize, &EK> = BTreeMap::new();
+        let mut neg_map: BTreeMap<usize, Vec<&EK>> = BTreeMap::new();
+        let mut pos_map: BTreeMap<usize, Vec<&EK>> = BTreeMap::new();
 
         let mut cum = 0usize;
         for ek in &neg_rev {
             let p = get_pop(ek);
-            debug_assert!(p > 0);
+            debug_assert!(p >= 0);
             cum += p as usize;
             // Record at boundary
-            neg_map.insert(cum, ek);
+            neg_map.entry(cum).or_default().push(ek);
         }
         cum = 0;
         for ek in &pos_buf {
             let p = get_pop(ek);
             debug_assert!(p > 0);
             cum += p as usize;
-            pos_map.insert(cum, ek);
+            pos_map.entry(cum).or_default().push(ek);
         }
 
         // Check pairwise compatibility via intersection on overlapping positions.
         let mut neg_it = neg_map.iter().peekable();
         let mut pos_it = pos_map.iter().peekable();
-        while let (Some((npos, nek)), Some((ppos, pek))) = (neg_it.peek(), pos_it.peek()) {
-            if npos == ppos {
-                // Overlapping boundary: must be compatible
-                let ok = intersect_checks(nek, pek);
-                if !ok {
-                    return None;
+        while let (Some((npos, neks)), Some((ppos, peks))) = (neg_it.peek(), pos_it.peek()) {
+            if *npos == *ppos {
+                // Overlapping boundary: must be compatible. All pairs must intersect.
+                for nek in neks.iter() {
+                    for pek in peks.iter() {
+                        if !intersect_checks(nek, pek) {
+                            return None;
+                        }
+                    }
                 }
                 neg_it.next();
                 pos_it.next();
-            } else if npos < ppos {
+            } else if *npos < *ppos {
                 neg_it.next();
             } else {
                 pos_it.next();
