@@ -1973,6 +1973,7 @@ impl GrammarConstraint {
             |(_, llm_bv), new_pop| (new_pop, llm_bv.clone()),
             // FIntersect: intersect_checks: FnMut(&EK, &EK) -> bool. EK is (isize, LLMTokenBV)
             |ek1, ek2| ek1.1.intersects(&ek2.1),
+            |_ek, _ev| true,
         );
 
         crate::debug!(2, "Finished precomputing Trie 3.");

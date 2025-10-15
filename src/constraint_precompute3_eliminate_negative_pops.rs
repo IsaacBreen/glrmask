@@ -42,7 +42,7 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect, FCanRemove
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
-    FCanRemove: FnMut(&EK) -> bool,
+    FCanRemove: FnMut(&EK, &EV) -> bool,
 {
     // Stage 1: eliminate internal negative pops (graph-level)
     eliminate_internal_negative_pops_on_trie(
@@ -55,7 +55,7 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect, FCanRemove
     );
 
     // Stage 2: eliminate trailing negatives (graph-level)
-    eliminate_trailing_negative_pops_on_trie(god, roots, &mut get_pop);
+    eliminate_trailing_negative_pops_on_trie(god, roots, &mut get_pop, &mut can_remove);
 }
 
 /// Graph-level transform: eliminate internal negative pops by pairwise cancellation
@@ -77,7 +77,7 @@ pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FInte
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
-    FCanRemove: FnMut(&EK) -> bool,
+    FCanRemove: FnMut(&EK, &EV) -> bool,
 {
     todo!()
 }
@@ -930,7 +930,7 @@ mod tests {
             get_pop,
             replace_pop,
             checks_intersect,
-            can_remove,
+            |ek, _ev| can_remove(ek),
         );
 
         let actual_stacks = Trie::get_all_paths(&god_clone, &roots_clone);
