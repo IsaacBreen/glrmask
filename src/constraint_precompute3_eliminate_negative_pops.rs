@@ -28,12 +28,13 @@ use crate::datastructures::trie::{GodWrapper, Trie, Trie2Index};
 /// - First eliminate internal negative pops by canceling negative/positive run pairs.
 /// - Then eliminate trailing negative pops at the end of stacks.
 /// This orchestrator delegates to the two trie-level transforms (currently todo!).
-pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect>(
+pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect, FCanRemove>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
     mut get_pop: FGet,
     mut replace_pop: FReplace,
     mut intersect_checks: FIntersect,
+    mut can_remove: FCanRemove,
 ) where
     EK: Ord + Clone,
     EV: Clone,
@@ -41,6 +42,7 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect>(
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
+    FCanRemove: FnMut(&EK) -> bool,
 {
     // Stage 1: eliminate internal negative pops (graph-level)
     eliminate_internal_negative_pops_on_trie(
@@ -49,6 +51,7 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect>(
         &mut get_pop,
         &mut replace_pop,
         &mut intersect_checks,
+        &mut can_remove,
     );
 
     // Stage 2: eliminate trailing negatives (graph-level)
@@ -60,12 +63,13 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect>(
 /// the provided closures to read/modify pop and test check compatibility.
 ///
 /// Not implemented yet.
-pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FIntersect>(
+pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FIntersect, FCanRemove>(
     _god: &GodWrapper<EK, EV, T>,
     _roots: &[Trie2Index],
     _get_pop: &mut FGet,
     _replace_pop: &mut FReplace,
     _intersect_checks: &mut FIntersect,
+    _can_remove: &mut FCanRemove,
 ) where
     EK: Ord + Clone,
     EV: Clone,
@@ -73,16 +77,18 @@ pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FInte
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
+    FCanRemove: FnMut(&EK) -> bool,
 {
     todo!()
 }
 
 /// Graph-level transform: remove trailing negative pops at the ends of stacks.
 /// Not implemented yet.
-pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet>(
+pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet, FCanRemove>(
     _god: &GodWrapper<EK, EV, T>,
     _roots: &[Trie2Index],
     _get_pop: &mut FGet,
+    _can_remove: &mut FCanRemove,
 ) where
     EK: Ord + Clone,
     EV: Clone,
@@ -97,22 +103,24 @@ pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet>(
 /// Returns:
 /// - Some(new_stack) if no mismatches were found.
 /// - None if any run pair exhibited a mismatch (entire stack eliminated).
-pub fn stack_eliminate_internal_negative_pops<EK, FGet, FReplace, FIntersect>(
+pub fn stack_eliminate_internal_negative_pops<EK, FGet, FReplace, FIntersect, FCanRemove>(
     stack: Vec<EK>,
     mut get_pop: FGet,
     mut replace_pop: FReplace,
     mut intersect_checks: FIntersect,
+    mut can_remove: FCanRemove,
 ) -> Option<Vec<EK>>
 where
     EK: Clone,
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
+    FCanRemove: FnMut(&EK) -> bool,
 {
-    // Remove zero-pop items eagerly: they are no-ops and don't influence run pairing.
+    // Remove zero-pop items that can be removed.
     let mut cleaned: Vec<EK> = Vec::with_capacity(stack.len());
     for ek in stack {
-        if get_pop(&ek) != 0 {
+        if get_pop(&ek) != 0 || !can_remove(&ek) {
             cleaned.push(ek);
         }
     }
@@ -124,18 +132,20 @@ where
     let mut in_pos = false;
 
     // Helper: process a completed neg/pos pair, returning (leftover_neg, leftover_pos).
-    fn process_pair<EK, FGet, FReplace, FIntersect>(
+    fn process_pair<EK, FGet, FReplace, FIntersect, FCanRemove>(
         mut neg_buf: Vec<EK>,
         mut pos_buf: Vec<EK>,
         get_pop: &mut FGet,
         replace_pop: &mut FReplace,
         intersect_checks: &mut FIntersect,
+        can_remove: &mut FCanRemove,
     ) -> Option<(Vec<EK>, Vec<EK>)>
     where
         EK: Clone,
         FGet: FnMut(&EK) -> isize,
         FReplace: FnMut(&EK, isize) -> EK,
         FIntersect: FnMut(&EK, &EK) -> bool,
+        FCanRemove: FnMut(&EK) -> bool,
     {
         // Create a positive-pop reversed copy of the negative run.
         let mut neg_rev: Vec<EK> = Vec::with_capacity(neg_buf.len());
@@ -194,16 +204,18 @@ where
         let mut cancel_amt = sum_neg.min(sum_pos);
 
         // Subtract cancel_amt from the fronts of both lists.
-        fn subtract_from_front<EK, FGet, FReplace>(
+        fn subtract_from_front<EK, FGet, FReplace, FCanRemove>(
             mut seq: Vec<EK>,
             mut amt: usize,
             get_pop: &mut FGet,
             replace_pop: &mut FReplace,
+            can_remove: &mut FCanRemove,
         ) -> Vec<EK>
         where
             EK: Clone,
             FGet: FnMut(&EK) -> isize,
             FReplace: FnMut(&EK, isize) -> EK,
+            FCanRemove: FnMut(&EK) -> bool,
         {
             if amt == 0 || seq.is_empty() {
                 // No changes
@@ -222,19 +234,25 @@ where
                     let new_p = (pu - amt) as isize;
                     out.push(replace_pop(&ek, new_p));
                     amt = 0;
-                } else if pu == amt {
-                    // Entire element consumed; drop it.
-                    amt = 0;
                 } else {
-                    // Consume and drop this element entirely.
-                    amt -= pu;
+                    // Element is fully consumed.
+                    if !can_remove(&ek) {
+                        out.push(replace_pop(&ek, 0));
+                    }
+                    if pu == amt {
+                        amt = 0;
+                    } else {
+                        // pu < amt
+                        amt -= pu;
+                    }
                 }
             }
             out
         }
 
-        let neg_rev_left = subtract_from_front(neg_rev, cancel_amt, get_pop, replace_pop);
-        let pos_left = subtract_from_front(pos_buf, cancel_amt, get_pop, replace_pop);
+        let neg_rev_left =
+            subtract_from_front(neg_rev, cancel_amt, get_pop, replace_pop, can_remove);
+        let pos_left = subtract_from_front(pos_buf, cancel_amt, get_pop, replace_pop, can_remove);
 
         // Convert neg_rev_left back to original order with negative pops.
         let mut leftover_neg: Vec<EK> = Vec::with_capacity(neg_rev_left.len());
@@ -255,7 +273,14 @@ where
                 neg_buf.push(ek);
             } else {
                 // We just finished a positive run; process neg/pos pair.
-                let pair = process_pair(neg_buf, pos_buf, &mut get_pop, &mut replace_pop, &mut intersect_checks)?;
+                let pair = process_pair(
+                    neg_buf,
+                    pos_buf,
+                    &mut get_pop,
+                    &mut replace_pop,
+                    &mut intersect_checks,
+                    &mut can_remove,
+                )?;
                 let (leftover_neg, leftover_pos) = pair;
                 out.extend(leftover_pos);
                 neg_buf = leftover_neg;
@@ -275,13 +300,35 @@ where
                 pos_buf.push(ek);
             }
         } else {
-            // Zero: skip (already removed) - here for completeness.
+            // Zero-pop item acts as a separator. Process any pending pair.
+            if in_pos {
+                let pair = process_pair(
+                    neg_buf,
+                    pos_buf,
+                    &mut get_pop,
+                    &mut replace_pop,
+                    &mut intersect_checks,
+                    &mut can_remove,
+                )?;
+                let (leftover_neg, leftover_pos) = pair;
+                out.extend(leftover_pos);
+                neg_buf = leftover_neg;
+                pos_buf = Vec::new();
+                in_pos = false;
+            }
+            // Emit any remaining negative buffer.
+            out.extend(neg_buf.into_iter());
+            neg_buf = Vec::new();
+
+            // Emit the zero-pop item itself.
+            out.push(ek);
         }
     }
 
     // If we ended in a positive run, resolve the tailing pair.
     if in_pos {
-        let pair = process_pair(neg_buf, pos_buf, &mut get_pop, &mut replace_pop, &mut intersect_checks)?;
+        let pair =
+            process_pair(neg_buf, pos_buf, &mut get_pop, &mut replace_pop, &mut intersect_checks, &mut can_remove)?;
         let (leftover_neg, leftover_pos) = pair;
         out.extend(leftover_pos);
         neg_buf = leftover_neg;
@@ -290,10 +337,10 @@ where
     // Append any trailing negatives; these remain to be eliminated by the trailing stage.
     out.extend(neg_buf.into_iter());
 
-    // Remove any zeros that might have resurfaced (defensive; shouldn't happen).
+    // Remove any zeros that might have resurfaced.
     let mut final_out: Vec<EK> = Vec::with_capacity(out.len());
     for ek in out.into_iter() {
-        if get_pop(&ek) != 0 {
+        if get_pop(&ek) != 0 || !can_remove(&ek) {
             final_out.push(ek);
         }
     }
@@ -304,18 +351,20 @@ where
 /// Reference stack function: remove trailing negative pops and zero-pop items.
 /// This does not attempt to cancel anything; it simply trims the tail where pop < 0,
 /// and removes any zero-pop elements anywhere.
-pub fn stack_eliminate_trailing_negative_pops<EK, FGet>(
+pub fn stack_eliminate_trailing_negative_pops<EK, FGet, FCanRemove>(
     stack: Vec<EK>,
     mut get_pop: FGet,
+    mut can_remove: FCanRemove,
 ) -> Vec<EK>
 where
     EK: Clone,
     FGet: FnMut(&EK) -> isize,
+    FCanRemove: FnMut(&EK) -> bool,
 {
-    // First, remove zero-pop items anywhere.
+    // First, remove zero-pop items that can be removed.
     let mut cleaned: Vec<EK> = Vec::with_capacity(stack.len());
     for ek in stack {
-        if get_pop(&ek) != 0 {
+        if get_pop(&ek) != 0 || !can_remove(&ek) {
             cleaned.push(ek);
         }
     }
@@ -347,12 +396,13 @@ mod tests {
         pop: isize,
         // None == "unconstrained" (universal)
         check: Option<BTreeSet<usize>>,
+        ev: Option<usize>,
     }
 
     impl TestEK {
-        fn new(pop: isize, check_ids: Option<&[usize]>) -> Self {
+        fn new(pop: isize, check_ids: Option<&[usize]>, ev: Option<usize>) -> Self {
             let check = check_ids.map(|ids| ids.iter().cloned().collect());
-            Self { pop, check }
+            Self { pop, check, ev }
         }
     }
 
@@ -365,6 +415,7 @@ mod tests {
         TestEK {
             pop: new_pop,
             check: ek.check.clone(),
+            ev: ek.ev,
         }
     }
 
@@ -379,109 +430,267 @@ mod tests {
         }
     }
 
+    fn can_remove(ek: &TestEK) -> bool {
+        // An EK can be removed if it has no important EV.
+        // For tests, non-zero pops are also considered removable if they become zero.
+        ek.ev.is_none()
+    }
+
     // Convenience to build an EK
-    fn ek(pop: isize, ids: Option<&[usize]>) -> TestEK {
-        TestEK::new(pop, ids)
+    fn ek(pop: isize, ids: Option<&[usize]>, ev: Option<usize>) -> TestEK {
+        TestEK::new(pop, ids, ev)
     }
 
     // -- Unit tests for stack elimination behavior --
 
     #[test]
+    fn zero_pop_and_cancellation_with_ev() {
+        // --- Zero-pop handling ---
+        // 0-pop with no EV should be removed by initial cleaning.
+        let input1 = vec![ek(1, None, None), ek(0, None, None), ek(2, None, None)];
+        let got1 = stack_eliminate_internal_negative_pops(
+            input1,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .unwrap();
+        assert_eq!(got1, vec![ek(1, None, None), ek(2, None, None)]);
+
+        // 0-pop with EV should be preserved and act as a separator.
+        let input2 = vec![ek(-1, None, None), ek(0, None, Some(123)), ek(1, None, None)];
+        let got2 = stack_eliminate_internal_negative_pops(
+            input2.clone(),
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .unwrap();
+        assert_eq!(got2, input2, "0-pop with EV should prevent cancellation");
+
+        // --- Cancellation producing zero-pops ---
+        // -1 with EV, +1 without. After cancellation, the -1 should remain as a 0-pop.
+        let input3 = vec![ek(-1, None, Some(1)), ek(1, None, None)];
+        let got3 = stack_eliminate_internal_negative_pops(
+            input3,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .unwrap();
+        assert_eq!(got3, vec![ek(0, None, Some(1))]);
+
+        // Both have EV. Both should remain. Note: leftover positive part is emitted before
+        // the leftover negative part is appended at the end, causing reordering.
+        let input4 = vec![ek(-1, None, Some(1)), ek(1, None, Some(2))];
+        let got4 = stack_eliminate_internal_negative_pops(
+            input4,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .unwrap();
+        assert_eq!(got4, vec![ek(0, None, Some(2)), ek(0, None, Some(1))]);
+
+        // Partial cancel: -2 with EV, +1 without. Should become -1 with EV.
+        let input5 = vec![ek(-2, None, Some(1)), ek(1, None, None)];
+        let got5 = stack_eliminate_internal_negative_pops(
+            input5,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .unwrap();
+        assert_eq!(got5, vec![ek(-1, None, Some(1))]);
+    }
+
+    #[test]
     fn run_pair_full_cancel_with_remainder_positive() {
         // -1 b, -1 c, +1 c, +1 b, +1 a  =>  +1 a
         let input = vec![
-            ek(-1, Some(&[1])), // b
-            ek(-1, Some(&[2])), // c
-            ek(1, Some(&[2])),  // c
-            ek(1, Some(&[1])),  // b
-            ek(1, Some(&[0])),  // a
+            ek(-1, Some(&[1]), None), // b
+            ek(-1, Some(&[2]), None), // c
+            ek(1, Some(&[2]), None),  // c
+            ek(1, Some(&[1]), None),  // b
+            ek(1, Some(&[0]), None),  // a
         ];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert_eq!(got, vec![ek(1, Some(&[0]))]);
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
+        assert_eq!(got, vec![ek(1, Some(&[0]), None)]);
     }
 
     #[test]
     fn run_pair_partial_cancel_neg_leftover() {
         // -1 b, -1 c, +1 c  =>  -1 b (leftover; to be trimmed by trailing stage if at end)
-        let input = vec![ek(-1, Some(&[1])), ek(-1, Some(&[2])), ek(1, Some(&[2]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert_eq!(got, vec![ek(-1, Some(&[1]))]);
+        let input = vec![
+            ek(-1, Some(&[1]), None),
+            ek(-1, Some(&[2]), None),
+            ek(1, Some(&[2]), None),
+        ];
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
+        assert_eq!(got, vec![ek(-1, Some(&[1]), None)]);
     }
 
     #[test]
     fn run_pair_full_cancel_empty() {
         // -1 c, +1 c  =>  []
-        let input = vec![ek(-1, Some(&[2])), ek(1, Some(&[2]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
+        let input = vec![ek(-1, Some(&[2]), None), ek(1, Some(&[2]), None)];
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
         assert!(got.is_empty());
     }
 
     #[test]
     fn run_pair_mismatch_eliminates_stack() {
         // -1 b, +1 c  => mismatch => None
-        let input = vec![ek(-1, Some(&[1])), ek(1, Some(&[2]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect);
+        let input = vec![ek(-1, Some(&[1]), None), ek(1, Some(&[2]), None)];
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        );
         assert!(got.is_none());
     }
 
     #[test]
     fn run_pair_partial_cancel_neg_aggregates() {
         // -3 b, +1 c  =>  -2 b
-        let input = vec![ek(-3, Some(&[1])), ek(1, Some(&[2]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert_eq!(got, vec![ek(-2, Some(&[1]))]);
+        let input = vec![ek(-3, Some(&[1]), None), ek(1, Some(&[2]), None)];
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
+        assert_eq!(got, vec![ek(-2, Some(&[1]), None)]);
     }
 
     #[test]
     fn run_pair_multi_neg_partial_cancel() {
         // -1 a, -3 b, +1 c  =>  -1 a, -2 b
-        let input = vec![ek(-1, Some(&[0])), ek(-3, Some(&[1])), ek(1, Some(&[2]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert_eq!(got, vec![ek(-1, Some(&[0])), ek(-2, Some(&[1]))]);
+        let input = vec![
+            ek(-1, Some(&[0]), None),
+            ek(-3, Some(&[1]), None),
+            ek(1, Some(&[2]), None),
+        ];
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
+        assert_eq!(
+            got,
+            vec![ek(-1, Some(&[0]), None), ek(-2, Some(&[1]), None)]
+        );
     }
 
     #[test]
     fn run_pair_gap_positive_ignores_missing_slots() {
         // -1 a, -1 b, -1 c, +2 b  =>  -1 a
-        let input = vec![ek(-1, Some(&[0])), ek(-1, Some(&[1])), ek(-1, Some(&[2])), ek(2, Some(&[1]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert_eq!(got, vec![ek(-1, Some(&[0]))]);
+        let input = vec![
+            ek(-1, Some(&[0]), None),
+            ek(-1, Some(&[1]), None),
+            ek(-1, Some(&[2]), None),
+            ek(2, Some(&[1]), None),
+        ];
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
+        assert_eq!(got, vec![ek(-1, Some(&[0]), None)]);
     }
 
     #[test]
     fn run_pair_gap_negative_ignores_missing_slots() {
         // -2 b, +1 c, +1 b, +1 a  =>  +1 a
-        let input = vec![ek(-2, Some(&[1])), ek(1, Some(&[2])), ek(1, Some(&[1])), ek(1, Some(&[0]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert_eq!(got, vec![ek(1, Some(&[0]))]);
+        let input = vec![
+            ek(-2, Some(&[1]), None),
+            ek(1, Some(&[2]), None),
+            ek(1, Some(&[1]), None),
+            ek(1, Some(&[0]), None),
+        ];
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
+        assert_eq!(got, vec![ek(1, Some(&[0]), None)]);
     }
 
     #[test]
     fn trailing_negative_pops_are_removed() {
         // After internal elimination, drop trailing negatives (and zeros anywhere).
-        let input = vec![ek(1, Some(&[0])), ek(-1, Some(&[1])), ek(0, None)];
-        let trimmed = stack_eliminate_trailing_negative_pops(input, get_pop);
-        assert_eq!(trimmed, vec![ek(1, Some(&[0]))]);
+        let input = vec![
+            ek(1, Some(&[0]), None),
+            ek(-1, Some(&[1]), None),
+            ek(0, None, None),
+        ];
+        let trimmed = stack_eliminate_trailing_negative_pops(input, get_pop, can_remove);
+        assert_eq!(trimmed, vec![ek(1, Some(&[0]), None)]);
     }
 
     #[test]
     fn positive_prefix_without_negative_run_is_preserved() {
         // Starts with positives; internal elimination should leave them alone.
-        let input = vec![ek(1, Some(&[1])), ek(2, Some(&[2])), ek(-1, Some(&[3]))];
-        let mid = stack_eliminate_internal_negative_pops(input.clone(), get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
+        let input = vec![
+            ek(1, Some(&[1]), None),
+            ek(2, Some(&[2]), None),
+            ek(-1, Some(&[3]), None),
+        ];
+        let mid = stack_eliminate_internal_negative_pops(
+            input.clone(),
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
         // Only a positive prefix followed by a trailing negative; no internal pair to cancel.
         assert_eq!(mid, input);
         // Trailing negative drops
-        let final_s = stack_eliminate_trailing_negative_pops(mid, get_pop);
-        assert_eq!(final_s, vec![ek(1, Some(&[1])), ek(2, Some(&[2]))]);
+        let final_s = stack_eliminate_trailing_negative_pops(mid, get_pop, can_remove);
+        assert_eq!(
+            final_s,
+            vec![ek(1, Some(&[1]), None), ek(2, Some(&[2]), None)]
+        );
     }
 
     #[test]
@@ -494,15 +703,20 @@ mod tests {
         // At stack depth 2, we compare b and c. Their checks ([1] and [2]) do not
         // intersect, so this is a mismatch, and the whole stack is eliminated.
         let input = vec![
-            ek(1, Some(&[0])),  // a
-            ek(-2, Some(&[1])), // b
-            ek(1, Some(&[1])),  // b
-            ek(-1, Some(&[2])), // c
-            ek(2, Some(&[2])),  // c
-            ek(1, Some(&[3])),  // d
+            ek(1, Some(&[0]), None),  // a
+            ek(-2, Some(&[1]), None), // b
+            ek(1, Some(&[1]), None),  // b
+            ek(-1, Some(&[2]), None), // c
+            ek(2, Some(&[2]), None),  // c
+            ek(1, Some(&[3]), None),  // d
         ];
-        let got =
-            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect);
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        );
         assert!(got.is_none(), "Expected mismatch between b and c checks");
     }
 
@@ -522,17 +736,25 @@ mod tests {
         // Leftover pos: [+1 d].
         // Final stack: [+1 a, +1 d].
         let input = vec![
-            ek(1, Some(&[0])),     // a
-            ek(-2, Some(&[1, 5])), // b
-            ek(1, Some(&[1, 5])), // b
-            ek(-1, Some(&[2, 5])), // c
-            ek(2, Some(&[2, 5])), // c
-            ek(1, Some(&[3])),     // d
+            ek(1, Some(&[0]), None),     // a
+            ek(-2, Some(&[1, 5]), None), // b
+            ek(1, Some(&[1, 5]), None),  // b
+            ek(-1, Some(&[2, 5]), None), // c
+            ek(2, Some(&[2, 5]), None),  // c
+            ek(1, Some(&[3]), None),     // d
         ];
-        let got =
-            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-                .expect("should not mismatch");
-        assert_eq!(got, vec![ek(1, Some(&[0])), ek(1, Some(&[3]))]);
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
+        assert_eq!(
+            got,
+            vec![ek(1, Some(&[0]), None), ek(1, Some(&[3]), None)]
+        );
     }
 
     #[test]
@@ -550,23 +772,28 @@ mod tests {
         // 4. Trailing `[-1 e]` is appended.
         // Final result: `[+1 a, +1 d, -1 e]`.
         let input = vec![
-            ek(1, Some(&[0])),      // a
-            ek(-3, Some(&[1, 99])), // b
-            ek(2, Some(&[1, 99])), // b
-            ek(1, Some(&[2, 99])), // c
-            ek(-2, Some(&[3])),     // d
-            ek(3, Some(&[3])),     // d
-            ek(-1, Some(&[4])),     // e
+            ek(1, Some(&[0]), None),      // a
+            ek(-3, Some(&[1, 99]), None), // b
+            ek(2, Some(&[1, 99]), None), // b
+            ek(1, Some(&[2, 99]), None), // c
+            ek(-2, Some(&[3]), None),     // d
+            ek(3, Some(&[3]), None),     // d
+            ek(-1, Some(&[4]), None),     // e
         ];
-        let got =
-            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-                .expect("should not mismatch");
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
         assert_eq!(
             got,
             vec![
-                ek(1, Some(&[0])),  // a
-                ek(1, Some(&[3])),  // d
-                ek(-1, Some(&[4]))  // e
+                ek(1, Some(&[0]), None),  // a
+                ek(1, Some(&[3]), None),  // d
+                ek(-1, Some(&[4]), None)  // e
             ]
         );
     }
@@ -586,26 +813,31 @@ mod tests {
         //    - Checks for `g` ([6]) and `h` ([7]) do not intersect.
         //    - This is a mismatch, so the entire stack is eliminated.
         let input = vec![
-            ek(2, Some(&[0])), // a
-            ek(1, Some(&[1])), // b
+            ek(2, Some(&[0]), None), // a
+            ek(1, Some(&[1]), None), // b
             // Pair 1
-            ek(-3, Some(&[2])), // c
-            ek(-1, Some(&[3])), // d
-            ek(2, Some(&[2])),  // c
+            ek(-3, Some(&[2]), None), // c
+            ek(-1, Some(&[3]), None), // d
+            ek(2, Some(&[2]), None),  // c
             // Pair 2 (neg part merges with leftover from Pair 1)
-            ek(-2, None),       // e (unconstrained)
-            ek(5, Some(&[4])),  // e
-            ek(1, Some(&[5])),  // f
+            ek(-2, None, None),       // e (unconstrained)
+            ek(5, Some(&[4]), None),  // e
+            ek(1, Some(&[5]), None),  // f
             // Pair 3 (mismatch)
-            ek(-1, Some(&[6])), // g
-            ek(-1, Some(&[7])), // h
-            ek(2, Some(&[7])),  // h
+            ek(-1, Some(&[6]), None), // g
+            ek(-1, Some(&[7]), None), // h
+            ek(2, Some(&[7]), None),  // h
             // Trailing
-            ek(-4, Some(&[8])), // i
-            ek(-1, Some(&[9])), // j
+            ek(-4, Some(&[8]), None), // i
+            ek(-1, Some(&[9]), None), // j
         ];
-        let got =
-            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect);
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        );
         assert!(got.is_none(), "Expected mismatch between g and h");
     }
 
@@ -622,36 +854,41 @@ mod tests {
         // 6. Trailing negatives `[-4 i, -1 j]` are appended.
         // Final result before trailing elimination: `[+2 a, +1 b, +1 e, +1 f, -4 i, -1 j]`
         let input = vec![
-            ek(2, Some(&[0])), // a
-            ek(1, Some(&[1])), // b
+            ek(2, Some(&[0]), None), // a
+            ek(1, Some(&[1]), None), // b
             // Pair 1
-            ek(-3, Some(&[2])), // c
-            ek(-1, Some(&[3])), // d
-            ek(2, Some(&[2])),  // c
+            ek(-3, Some(&[2]), None), // c
+            ek(-1, Some(&[3]), None), // d
+            ek(2, Some(&[2]), None),  // c
             // Pair 2
-            ek(-2, None),      // e (unconstrained)
-            ek(5, Some(&[4])), // e
-            ek(1, Some(&[5])), // f
+            ek(-2, None, None),      // e (unconstrained)
+            ek(5, Some(&[4]), None), // e
+            ek(1, Some(&[5]), None), // f
             // Pair 3 (compatible)
-            ek(-1, Some(&[6, 100])), // g
-            ek(-1, Some(&[7, 100])), // h
-            ek(2, Some(&[7, 100])),  // h
+            ek(-1, Some(&[6, 100]), None), // g
+            ek(-1, Some(&[7, 100]), None), // h
+            ek(2, Some(&[7, 100]), None),  // h
             // Trailing
-            ek(-4, Some(&[8])), // i
-            ek(-1, Some(&[9])), // j
+            ek(-4, Some(&[8]), None), // i
+            ek(-1, Some(&[9]), None), // j
         ];
-        let got =
-            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-                .expect("should not mismatch");
+        let got = stack_eliminate_internal_negative_pops(
+            input,
+            get_pop,
+            replace_pop,
+            checks_intersect,
+            can_remove,
+        )
+        .expect("should not mismatch");
         assert_eq!(
             got,
             vec![
-                ek(2, Some(&[0])), // a
-                ek(1, Some(&[1])), // b
-                ek(1, Some(&[4])), // e
-                ek(1, Some(&[5])), // f
-                ek(-4, Some(&[8])), // i
-                ek(-1, Some(&[9])), // j
+                ek(2, Some(&[0]), None), // a
+                ek(1, Some(&[1]), None), // b
+                ek(1, Some(&[4]), None), // e
+                ek(1, Some(&[5]), None), // f
+                ek(-4, Some(&[8]), None), // i
+                ek(-1, Some(&[9]), None), // j
             ]
         );
     }
@@ -676,9 +913,9 @@ mod tests {
         let mut expected_stacks = BTreeSet::new();
         for s in initial_stacks {
             if let Some(mid) =
-                stack_eliminate_internal_negative_pops(s, get_pop, replace_pop, checks_intersect)
+                stack_eliminate_internal_negative_pops(s, get_pop, replace_pop, checks_intersect, can_remove)
             {
-                let fin = stack_eliminate_trailing_negative_pops(mid, get_pop);
+                let fin = stack_eliminate_trailing_negative_pops(mid, get_pop, can_remove);
                 expected_stacks.insert(fin);
             }
         }
@@ -693,6 +930,7 @@ mod tests {
             get_pop,
             replace_pop,
             checks_intersect,
+            can_remove,
         );
 
         let actual_stacks = Trie::get_all_paths(&god_clone, &roots_clone);
@@ -735,38 +973,38 @@ mod tests {
         // --- Build graph from the described stack trace ---
 
         // Branch 1 (from root -> n19)
-        add_edge(&god, n16, n19, ek(0, None)); // Note: zero-pop edges are filtered by the pipeline
-        add_edge(&god, n19, n20, ek(0, None)); // but are kept here to model the graph structure.
+        add_edge(&god, n16, n19, ek(0, None, None)); // Note: zero-pop edges are filtered by the pipeline
+        add_edge(&god, n19, n20, ek(0, None, None)); // but are kept here to model the graph structure.
 
         // Path through n21 (with negative pop)
-        add_edge(&god, n20, n21, ek(1, Some(&[0]))); // Using pop=1 to avoid being filtered
-        add_edge(&god, n21, n23, ek(1, None));
-        add_edge(&god, n23, n25, ek(-1, Some(&[1])));
-        add_edge(&god, n25, n27, ek(1, None));
-        add_edge(&god, n27, n28, ek(1, None));
-        add_edge(&god, n28, n18, ek(1, None));
+        add_edge(&god, n20, n21, ek(1, Some(&[0]), None)); // Using pop=1 to avoid being filtered
+        add_edge(&god, n21, n23, ek(1, None, None));
+        add_edge(&god, n23, n25, ek(-1, Some(&[1]), None));
+        add_edge(&god, n25, n27, ek(1, None, None));
+        add_edge(&god, n27, n28, ek(1, None, None));
+        add_edge(&god, n28, n18, ek(1, None, None));
 
         // Path through n22
-        add_edge(&god, n20, n22, ek(1, Some(&[2])));
-        add_edge(&god, n22, n24, ek(2, None));
-        add_edge(&god, n24, n26, ek(1, Some(&[0]))); // Leaf
+        add_edge(&god, n20, n22, ek(1, Some(&[2]), None));
+        add_edge(&god, n22, n24, ek(2, None, None));
+        add_edge(&god, n24, n26, ek(1, Some(&[0]), None)); // Leaf
 
         // Branch 2 (from root -> n29)
-        add_edge(&god, n16, n29, ek(1, None));
-        add_edge(&god, n29, n30, ek(1, None));
+        add_edge(&god, n16, n29, ek(1, None, None));
+        add_edge(&god, n29, n30, ek(1, None, None));
 
         // Path through n31 (with negative pop)
-        add_edge(&god, n30, n31, ek(1, Some(&[1])));
-        add_edge(&god, n31, n33, ek(1, None));
-        add_edge(&god, n33, n35, ek(-1, Some(&[2])));
-        add_edge(&god, n35, n37, ek(1, None));
-        add_edge(&god, n37, n38, ek(1, None));
-        add_edge(&god, n38, n18, ek(1, None));
+        add_edge(&god, n30, n31, ek(1, Some(&[1]), None));
+        add_edge(&god, n31, n33, ek(1, None, None));
+        add_edge(&god, n33, n35, ek(-1, Some(&[2]), None));
+        add_edge(&god, n35, n37, ek(1, None, None));
+        add_edge(&god, n37, n38, ek(1, None, None));
+        add_edge(&god, n38, n18, ek(1, None, None));
 
         // Path through n32
-        add_edge(&god, n30, n32, ek(1, Some(&[2])));
-        add_edge(&god, n32, n34, ek(2, None));
-        add_edge(&god, n34, n36, ek(1, Some(&[0]))); // Leaf
+        add_edge(&god, n30, n32, ek(1, Some(&[2]), None));
+        add_edge(&god, n32, n34, ek(2, None, None));
+        add_edge(&god, n34, n36, ek(1, Some(&[0]), None)); // Leaf
 
         run_trie_vs_stack_comparison_test(&god, &[n16]);
     }
@@ -780,9 +1018,9 @@ mod tests {
         let b = new_node(&god);
         let c = new_node(&god);
         let d = new_node(&god);
-        add_edge(&god, a, b, ek(1, Some(&[0])));
-        add_edge(&god, b, c, ek(-1, Some(&[0])));
-        add_edge(&god, a, d, ek(1, None)); // Dummy survivor
+        add_edge(&god, a, b, ek(1, Some(&[0]), None));
+        add_edge(&god, b, c, ek(-1, Some(&[0]), None));
+        add_edge(&god, a, d, ek(1, None, None)); // Dummy survivor
         run_trie_vs_stack_comparison_test(&god, &[a]);
     }
 
@@ -795,9 +1033,9 @@ mod tests {
         let b = new_node(&god);
         let c = new_node(&god);
         let d = new_node(&god);
-        add_edge(&god, a, b, ek(1, Some(&[0])));
-        add_edge(&god, b, c, ek(-1, Some(&[1]))); // Mismatching check
-        add_edge(&god, a, d, ek(2, Some(&[2])));   // Survivor
+        add_edge(&god, a, b, ek(1, Some(&[0]), None));
+        add_edge(&god, b, c, ek(-1, Some(&[1]), None)); // Mismatching check
+        add_edge(&god, a, d, ek(2, Some(&[2]), None));   // Survivor
         run_trie_vs_stack_comparison_test(&god, &[a]);
     }
 
@@ -808,8 +1046,8 @@ mod tests {
         let a = new_node(&god);
         let b = new_node(&god);
         let c = new_node(&god);
-        add_edge(&god, a, b, ek(2, Some(&[0])));
-        add_edge(&god, b, c, ek(1, Some(&[1])));
+        add_edge(&god, a, b, ek(2, Some(&[0]), None));
+        add_edge(&god, b, c, ek(1, Some(&[1]), None));
         run_trie_vs_stack_comparison_test(&god, &[a]);
     }
 
@@ -823,10 +1061,10 @@ mod tests {
         let c = new_node(&god);
         let d = new_node(&god);
         // Path 1
-        add_edge(&god, a, b, ek(2, None));
-        add_edge(&god, b, c, ek(-1, None));
+        add_edge(&god, a, b, ek(2, None, None));
+        add_edge(&god, b, c, ek(-1, None, None));
         // Path 2
-        add_edge(&god, a, d, ek(5, None));
+        add_edge(&god, a, d, ek(5, None, None));
         run_trie_vs_stack_comparison_test(&god, &[a]);
     }
 
@@ -840,10 +1078,10 @@ mod tests {
         let c = new_node(&god);
         let d = new_node(&god);
         // Path 1
-        add_edge(&god, a, b, ek(-2, Some(&[0])));
-        add_edge(&god, b, c, ek(3, Some(&[0])));
+        add_edge(&god, a, b, ek(-2, Some(&[0]), None));
+        add_edge(&god, b, c, ek(3, Some(&[0]), None));
         // Path 2
-        add_edge(&god, a, d, ek(1, Some(&[1])));
+        add_edge(&god, a, d, ek(1, Some(&[1]), None));
         run_trie_vs_stack_comparison_test(&god, &[a]);
     }
 
@@ -859,11 +1097,11 @@ mod tests {
         let c = new_node(&god);
 
         // Path 1 prefix
-        add_edge(&god, a, b, ek(1, Some(&[0])));
+        add_edge(&god, a, b, ek(1, Some(&[0]), None));
         // Path 2 prefix
-        add_edge(&god, d, b, ek(-1, Some(&[1]))); // Mismatching check ID
+        add_edge(&god, d, b, ek(-1, Some(&[1]), None)); // Mismatching check ID
         // Shared suffix
-        add_edge(&god, b, c, ek(1, Some(&[0])));
+        add_edge(&god, b, c, ek(1, Some(&[0]), None));
 
         run_trie_vs_stack_comparison_test(&god, &[a, d]);
     }
@@ -879,10 +1117,10 @@ mod tests {
         let d = new_node(&god);
 
         // Path 1
-        add_edge(&god, a, b, ek(-1, None));
-        add_edge(&god, b, c, ek(1, Some(&[0])));
+        add_edge(&god, a, b, ek(-1, None, None));
+        add_edge(&god, b, c, ek(1, Some(&[0]), None));
         // Path 2
-        add_edge(&god, a, d, ek(1, Some(&[0])));
+        add_edge(&god, a, d, ek(1, Some(&[0]), None));
 
         run_trie_vs_stack_comparison_test(&god, &[a]);
     }
@@ -899,12 +1137,12 @@ mod tests {
         let e = new_node(&god);
 
         // Path 1
-        add_edge(&god, a, b, ek(1, Some(&[0])));
-        add_edge(&god, b, c, ek(-1, Some(&[1]))); // Mismatch
+        add_edge(&god, a, b, ek(1, Some(&[0]), None));
+        add_edge(&god, b, c, ek(-1, Some(&[1]), None)); // Mismatch
 
         // Path 2
-        add_edge(&god, a, d, ek(-2, Some(&[2])));
-        add_edge(&god, d, e, ek(2, Some(&[2]))); // Cancels
+        add_edge(&god, a, d, ek(-2, Some(&[2]), None));
+        add_edge(&god, d, e, ek(2, Some(&[2]), None)); // Cancels
 
         run_trie_vs_stack_comparison_test(&god, &[a]);
     }
