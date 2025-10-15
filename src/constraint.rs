@@ -1964,15 +1964,16 @@ impl GrammarConstraint {
 
         // Normalize negative pops produced by templates
         let roots: Vec<_> = precomputed3.values().cloned().collect();
-        // eliminate_negative_pops(
-        //     &trie3_god,
-        //     &roots,
-        //     |(n, _)| *n,
-        //     |(_, llm_bv), n| (n, llm_bv.clone()),
-        //     || (0isize, LLMTokenBV::ones(internal_max_llm_token + 1)),
-        //     |e, n| *e |= n
-        // );
-        // assert_negative_pops_follow_property_for_trie(&trie3_god, &roots, |(n, _)| *n);
+        eliminate_negative_pops(
+            &trie3_god,
+            &roots,
+            // FGet: get_pop: FnMut(&EK) -> isize. EK is (isize, LLMTokenBV)
+            |(pop, _)| *pop,
+            // FReplace: replace_pop: FnMut(&EK, isize) -> EK. EK is (isize, LLMTokenBV)
+            |(_, llm_bv), new_pop| (new_pop, llm_bv.clone()),
+            // FIntersect: intersect_checks: FnMut(&EK, &EK) -> bool. EK is (isize, LLMTokenBV)
+            |ek1, ek2| ek1.1.intersects(&ek2.1),
+        );
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
