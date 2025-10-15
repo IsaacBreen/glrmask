@@ -544,6 +544,42 @@ mod tests {
         assert_eq!(got, vec![ek(1, Some(&[0])), ek(1, Some(&[3]))]);
     }
 
+    #[test]
+    fn even_more_complex_stack_scenario() {
+        // This test includes a leading positive, multiple neg/pos pairs, and a trailing negative.
+        // Stack: [+1 a], [-3 b], [+2 b, +1 c], [-2 d], [+3 d], [-1 e]
+        //
+        // Trace:
+        // 1. `+1 a` is emitted. `out` = `[+1 a]`.
+        // 2. `process_pair([-3 b], [+2 b, +1 c])` is called.
+        //    - Sums are both 3, cancel_amt is 3. Both runs are fully consumed.
+        // 3. `process_pair([-2 d], [+3 d])` is called.
+        //    - Sums are 2 and 3, cancel_amt is 2. Leftover is `[+1 d]`.
+        //    - `out` becomes `[+1 a, +1 d]`.
+        // 4. Trailing `[-1 e]` is appended.
+        // Final result: `[+1 a, +1 d, -1 e]`.
+        let input = vec![
+            ek(1, Some(&[0])),      // a
+            ek(-3, Some(&[1, 99])), // b
+            ek(2, Some(&[1, 99])), // b
+            ek(1, Some(&[2, 99])), // c
+            ek(-2, Some(&[3])),     // d
+            ek(3, Some(&[3])),     // d
+            ek(-1, Some(&[4])),     // e
+        ];
+        let got =
+            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
+                .expect("should not mismatch");
+        assert_eq!(
+            got,
+            vec![
+                ek(1, Some(&[0])),  // a
+                ek(1, Some(&[3])),  // d
+                ek(-1, Some(&[4]))  // e
+            ]
+        );
+    }
+
     // --- Graph-level scenario (stack-only validation) ---
 
     fn new_node(god: &TestGod) -> Trie2Index {
