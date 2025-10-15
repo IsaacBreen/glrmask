@@ -717,8 +717,8 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
                 .entry(source_node.clone())
                 .or_insert_with(|| {
                     StoredPrecomputeNodeIndex::new(
-                        stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                            crate::constraint::PrecomputedNodeContents::internal(),
+                        stored_trie_god.insert(crate::constraint::IntermediatePrecomputeNode3::new(
+                            crate::constraint::IntermediatePrecomputedNodeContents3::internal(),
                         )),
                     )
                 })
@@ -732,8 +732,8 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
                 source_node.as_arc().clone(),
                 edge_key,
                 edge_value,
-                |e, n| *e |= n,
-                |node_value, _| node_value.live_tokens |= allowed_tokens,
+                |e, n| {},
+                |node_value, _| {},
                 |_, _| {},
             );
             inserter.try_destination(dest_node.clone()).expect("Cycle detected");
@@ -841,8 +841,8 @@ pub(crate) fn merge_stored_trie_nodes(
             .into_values()
             .map(|p| {
                 let dest = StoredPrecomputeNodeIndex::new(
-                    stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                        crate::constraint::PrecomputedNodeContents::internal(),
+                    stored_trie_god.insert(crate::constraint::IntermediatePrecomputeNode3::new(
+                        crate::constraint::IntermediatePrecomputedNodeContents3::internal(),
                     )),
                 );
                 (p, dest)

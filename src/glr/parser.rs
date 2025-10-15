@@ -1,4 +1,4 @@
-use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
+use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, LLMVocab, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, IntermediateTrie3GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
 use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
@@ -148,7 +148,7 @@ pub struct ParseState {
     pub stack: Arc<GSSNode>,
     pub accepted_state: Option<Arc<GSSNode>>,
     pub prev_accepted_state: Arc<GSSNode>,
-    pub trie2_god: Option<Trie3GodWrapper>,
+    pub trie2_god: Option<IntermediateTrie3GodWrapper>,
 }
 
 impl ParseState {
@@ -170,12 +170,12 @@ impl ParseState {
         }
     }
 
-    pub(crate) fn with_god(mut self, trie2_god: Trie3GodWrapper) -> Self {
+    pub(crate) fn with_god(mut self, trie2_god: IntermediateTrie3GodWrapper) -> Self {
         self.trie2_god = Some(trie2_god);
         self
     } 
     
-    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<Trie3GodWrapper>) -> Self {
+    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<IntermediateTrie3GodWrapper>) -> Self {
         self.trie2_god = maybe_god;
         self
     }
@@ -307,7 +307,7 @@ pub struct GLRParser {
     pub combined_gss: Arc<GSSNode>,
     pub hallucinated_gss: Arc<GSSNode>,
     // New: a dedicated god for stored precomputations and the stored cache itself.
-    pub stored_trie_god: Trie3GodWrapper,
+    pub stored_trie_god: IntermediateTrie3GodWrapper,
     pub stored_below_bottom_cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>,
     // New: synthetic reduce rows (one synthetic state per NonTerminal).
     pub synthetic_reduce_rows: BTreeMap<StateID, BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>>,
@@ -392,7 +392,7 @@ impl JSONConvertible for GLRParser {
                     combined_gss,
                     hallucinated_gss,
                     // Initialize new runtime fields; they will be populated below.
-                    stored_trie_god: Trie3GodWrapper::new(),
+                    stored_trie_god: IntermediateTrie3GodWrapper::new(),
                     stored_below_bottom_cache: HashMap::new(),
                     synthetic_reduce_rows: BTreeMap::new(),
                     synthetic_reduce_state_for_nt: BTreeMap::new(),
@@ -505,7 +505,7 @@ impl GLRParser {
             combined_start_state_id,
             combined_gss,
             hallucinated_gss,
-            stored_trie_god: Trie3GodWrapper::new(),
+            stored_trie_god: IntermediateTrie3GodWrapper::new(),
             stored_below_bottom_cache: HashMap::new(),
             synthetic_reduce_rows: BTreeMap::new(),
             synthetic_reduce_state_for_nt: BTreeMap::new(),
@@ -515,7 +515,7 @@ impl GLRParser {
 
     fn initialize_synthetic_and_stored_cache(mut self) -> Self {
         // Reset caches
-        self.stored_trie_god = Trie3GodWrapper::new();
+        self.stored_trie_god = IntermediateTrie3GodWrapper::new();
         self.stored_below_bottom_cache.clear();
         self.synthetic_reduce_rows.clear();
         self.synthetic_reduce_state_for_nt.clear();
@@ -550,7 +550,7 @@ impl GLRParser {
             for tid in term_ids.iter().cloned() {
                 // Create a dedicated precompute root in the stored god
                 let root = PrecomputeNode3Index::new(
-                    self.stored_trie_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                    self.stored_trie_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal()))
                 );
                 // Seed acc with this root
                 let mut acc = Acc::new_fresh();
@@ -1199,7 +1199,7 @@ type WorkMap = BTreeMap<WorkMapKey, (ParseState, Option<usize>)>;
 type FilteredAction<'a> = (Action<'a>, Option<StateIDBV>);
 
 impl<'a> GLRParserState<'a> { // No longer generic
-    pub fn with_god(mut self, trie2_god: Trie3GodWrapper) -> GLRParserState<'a> {
+    pub fn with_god(mut self, trie2_god: IntermediateTrie3GodWrapper) -> GLRParserState<'a> {
         self.active_state.trie2_god = Some(trie2_god);
         self
     } 
@@ -2042,7 +2042,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
                                         // --- STORED REUSE on MISS ---
                                         hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
-                                        let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+                                        let (new_roots, id_map) = IntermediatePrecomputeNode3::deep_copy_subtrees_into(
                                             &self.parser.stored_trie_god, dest_god, &[stored_root.clone().into()],
                                         );
                                         let new_root = new_roots[0];
@@ -2726,7 +2726,7 @@ impl GLRParser {
 
     pub fn transfer_stored_cache_to_god(
         &self,
-        dest_god: &Trie3GodWrapper,
+        dest_god: &IntermediateTrie3GodWrapper,
     ) -> HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)> {
         if self.stored_below_bottom_cache.is_empty() {
             return HashMap::new();
@@ -2742,7 +2742,7 @@ impl GLRParser {
 
         // 2. Perform a single bulk copy of all relevant subtrees.
         // This is much more efficient as it traverses the shared parts of the trie only once.
-        let (new_roots_vec, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+        let (new_roots_vec, id_map) = IntermediatePrecomputeNode3::deep_copy_subtrees_into(
             &self.stored_trie_god,
             dest_god,
             &all_roots_vec,
@@ -2994,7 +2994,7 @@ impl GLRParser {
 
         let all_trie_stats: Vec<TrieStats> = grouped_entries.iter().map(|(value, _keys)| {
             let (trie_root, _gss_root) = value;
-            PrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root])
+            IntermediatePrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root])
         }).collect();
  
         println!("\n--- GSS Stats Summary (distribution over unique entries) ---");
@@ -3048,7 +3048,7 @@ impl GLRParser {
             let gss_stats = gather_gss_stats(&[gss_root.as_ref()]);
             println!("  GSS Stats: {:?}", gss_stats);
  
-            let trie_stats = PrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root]);
+            let trie_stats = IntermediatePrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root]);
             println!("  Trie Stats (root {}): {:?}", trie_root.as_usize(), trie_stats);
  
             println!("  Example (NonTerminal, Terminal) pairs (up to 5):");
@@ -3090,7 +3090,7 @@ impl GLRParser {
         // Combined Trie stats
         if !self.stored_below_bottom_cache.is_empty() {
             let all_trie_roots: Vec<_> = self.stored_below_bottom_cache.values().map(|(tr, _)| *tr).collect();
-            let trie_stats = PrecomputeNode3::stats(&self.stored_trie_god, &all_trie_roots);
+            let trie_stats = IntermediatePrecomputeNode3::stats(&self.stored_trie_god, &all_trie_roots);
             println!("\nCombined Stored Trie Stats (from {} total cache entries):", all_trie_roots.len());
             println!("  {:?}", trie_stats);
         }

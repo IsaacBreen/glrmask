@@ -56,7 +56,6 @@ pub use crate::constraint_precompute0_utils::Trie0Config;
 pub use crate::constraint_precompute1_utils::Trie1Config;
 pub use crate::constraint_precompute2_utils::Trie2Config;
 pub use crate::constraint_precompute3_utils::Trie3Config;
-pub(crate) use crate::constraint::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
 use crate::constraint_precompute3_eliminate_negative_pops::{eliminate_negative_pops};
 use crate::constraint_precompute3_utils::optimize_trie3_size;
@@ -65,6 +64,7 @@ use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use std::iter::FromIterator;
+use crate::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
 
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;
@@ -107,7 +107,7 @@ impl JSONConvertible for TerminalAllowanceCheckMode {
 
 pub type PrecomputeNode0 = Trie<Option<(GrammarTokenID, Option<TokenizerStateID>)>, LLMTokenBV, PrecomputedNodeContents0>;
 pub type PrecomputeNode1 = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-pub type PrecomputeNode2 = Trie<(isize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
+pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 
 // New types for intermediate trie 3
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -121,6 +121,18 @@ pub enum IntermediateTrie3EdgeKey {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IntermediatePrecomputedNodeContents3 {
     pub end: bool,
+}
+
+impl IntermediatePrecomputedNodeContents3 {
+    pub fn leaf() -> Self {
+        Self { end: true }
+    }
+    pub fn internal() -> Self {
+        Self { end: false }
+    }
+    pub fn root() -> Self {
+        Self { end: false }
+    }
 }
 
 pub type IntermediatePrecomputeNode3 = Trie<IntermediateTrie3EdgeKey, (), IntermediatePrecomputedNodeContents3>;
@@ -1968,7 +1980,7 @@ impl GrammarConstraint {
         }
 
         // --- Convert intermediate trie to final Trie3 format ---
-        let (precomputed3, trie3_god) = Self::convert_intermediate_trie3_to_final(
+        let (mut precomputed3, trie3_god) = Self::convert_intermediate_trie3_to_final(
             &intermediate_precomputed3,
             &intermediate_trie3_god,
             internal_max_llm_token,
@@ -2314,16 +2326,6 @@ impl GrammarConstraint {
 
         let (gss_str, state_ids) = print_gss_forest(roots, &self.parser.terminal_map, &config);
         println!("{}", gss_str);
-    }
-
-    pub fn state_with_nodes(&self, nodes: Vec<(usize, Arc<GSSNode>)>) -> GrammarConstraintState<'_> {
-        let mut state = BTreeMap::new();
-        for (tokenizer_state_id_val, gss_node) in nodes {
-            let tokenizer_state_id = TokenizerStateID(tokenizer_state_id_val);
-            let glr_state = self.parser.init_glr_parser_from_stack(gss_node).with_god(self.trie3_god.clone());
-            state.insert(tokenizer_state_id, glr_state);
-        }
-        GrammarConstraintState { parent: self, state }
     }
 }
 
@@ -2709,7 +2711,7 @@ pub struct GrammarConstraintState<'a> {
 }
 
 pub(crate) mod constraint_precompute3_utils {
-    use super::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
+    use super::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, PrecomputeNode3Index};
     use crate::constraint::LLMTokenBV;
     use crate::datastructures::trie::{Trie, Trie2Index};
     use std::collections::{HashMap, VecDeque};
@@ -2787,8 +2789,10 @@ pub type Trie0GodWrapper = GodWrapper<Option<(TerminalID, Option<TokenizerStateI
 pub type Trie0God = God<Option<(TerminalID, Option<TokenizerStateID>)>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie1God = God<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
-pub type Trie2GodWrapper = GodWrapper<(isize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
-pub type Trie2God = God<(isize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
+pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
+pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
+pub type Trie3GodWrapper = GodWrapper<(isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
+pub type Trie3God = God<(isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {

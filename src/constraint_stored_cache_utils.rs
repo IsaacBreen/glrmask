@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::constraint::{PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, LLMTokenBV, PrecomputedNodeContents};
+use crate::constraint::{PrecomputeNode3Index, StateIDBV, IntermediateTrie3GodWrapper, LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::gss_leveled_adapter::{GSSNode, map_trie3_node_ids};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::table::{NonTerminalID, TerminalID};
@@ -19,7 +19,7 @@ pub type StoredCacheValue = (PrecomputeNode3Index, Arc<GSSNode>);
 /// and updates the cache entries accordingly.
 pub fn optimize_stored_cache(
     cache: &mut HashMap<StoredCacheKey, StoredCacheValue>,
-    trie3_god: &Trie3GodWrapper,
+    trie3_god: &IntermediateTrie3GodWrapper,
     max_iters: usize,
 ) {
     if cache.is_empty() || max_iters == 0 {
@@ -74,7 +74,7 @@ pub fn optimize_stored_cache(
 
 /// Performs WL refinement on the graph defined by `roots_vec` and returns the mapping.
 fn merge_trie3_nodes_and_get_map_internal(
-    trie3_god: &Trie3GodWrapper,
+    trie3_god: &IntermediateTrie3GodWrapper,
     roots_vec: &[PrecomputeNode3Index],
     max_iters: usize,
 ) -> HashMap<Trie2Index, Trie2Index> {
