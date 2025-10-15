@@ -1735,7 +1735,7 @@ impl GrammarConstraint {
         internal_max_llm_token: usize,
     ) -> (IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index) {
         // Create template start node
-        let start = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
+        let start = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
 
         // Seed hallucinated GLR state with this start node in Acc
         let mut acc = Acc::new_fresh();
@@ -1773,7 +1773,7 @@ impl GrammarConstraint {
 
         for (items, acc) in stacks.iter() {
             // Create a head node and hook it from all stored trie nodes in this stack's Acc
-            let head = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
+            let head = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
             for src in acc.stored_trie_nodes().iter() {
                 let inserter = EdgeInserter::new(
                     trie3_god,
@@ -1793,7 +1793,7 @@ impl GrammarConstraint {
                     cur.as_arc().clone(),
                     IntermediateTrie3EdgeKey::Push(state_bv), (), |_, _| {}, |_, _| {}, |_, _| {},
                 );
-                let next = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
+                let next = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                 let actual = inserter.try_destination(next.clone()).expect("Failed to insert (-1) pop edge in template chain");
                 cur = actual;
             }
@@ -1802,7 +1802,7 @@ impl GrammarConstraint {
         }
 
         // Converge all final nodes into a single shared end node.
-        let end = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
+        let end = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
         for src in final_nodes {
             let inserter = EdgeInserter::new(
                 trie3_god,
@@ -1846,7 +1846,7 @@ impl GrammarConstraint {
         // Create Trie3 roots and seed initial sets
         let mut initial_values_for_map: Vec<(PrecomputeNode1Index, BTreeSet<IntermediatePrecomputeNode3Index>)> = Vec::new();
         for (trie1_root, tokenizer_state_ids) in &trie1_roots_to_tokenizer_states {
-            let trie3_root = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
+            let trie3_root = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
             for tokenizer_state_id in tokenizer_state_ids {
                 intermediate_precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
             }
@@ -1856,7 +1856,10 @@ impl GrammarConstraint {
         }
 
         // Shared end node for Trie1-end positions
-        let trie3_end = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: true })));
+        println!("FK1: {}", Trie::pretty_print_arena(&intermediate_trie3_god));
+        let trie3_end = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
+        println!("trie3_end: {:?}", trie3_end);
+        println!("FK2: {}", Trie::pretty_print_arena(&intermediate_trie3_god));
 
         Trie::special_map_grouped(
             &trie1_god,
@@ -1864,7 +1867,7 @@ impl GrammarConstraint {
             // step: merge current set into a single node, then attach the terminal template or direct LLM edges
             |current_nodes_set, edge_grammar_token_opt, destinations_map| {
                 // Merge current set into a single node with unconditional edges
-                let merged = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
+                let merged = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                 for src in current_nodes_set.iter() {
                     let inserter = EdgeInserter::new(
                         &intermediate_trie3_god,
@@ -1894,7 +1897,7 @@ impl GrammarConstraint {
 
                         // For each destination in Trie1, fork a node from copied_end with LLM tokens on the edge.
                         for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
-                            let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
+                            let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                             let inserter = EdgeInserter::new(
                                 &intermediate_trie3_god,
                                 copied_end.as_arc().clone(),
@@ -1909,7 +1912,7 @@ impl GrammarConstraint {
                     None => {
                         // No grammar token on this edge: fan out directly from merged with LLM-token edges.
                         for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
-                            let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
+                            let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                             let inserter = EdgeInserter::new(
                                 &intermediate_trie3_god,
                                 merged.as_arc().clone(),
@@ -1966,7 +1969,7 @@ impl GrammarConstraint {
         intermediate_trie3_god.clear();
         let mut new_root_map: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
         for (sid, _old_root) in &intermediate_precomputed3 {
-            let new_root = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
+            let new_root = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
             new_root_map.insert(*sid, new_root);
         }
         intermediate_precomputed3 = new_root_map;
@@ -1979,7 +1982,7 @@ impl GrammarConstraint {
             if let Some(root_idx) = intermediate_precomputed3.values().next() {
                 let mut current_idx = *root_idx;
                 for edge_key in path {
-                    let new_node = IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false });
+                    let new_node = IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal());
                     let new_idx = IntermediatePrecomputeNode3Index::from(intermediate_trie3_god.insert(new_node));
                     current_idx.write(&intermediate_trie3_god).unwrap().force_insert_to_node(edge_key, (), new_idx);
                     current_idx = new_idx;
