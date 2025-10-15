@@ -1098,18 +1098,20 @@ mod tests {
     #[test]
     fn test_user_structure_as_stacks() {
         // This test models the stacks from `test_graph_from_user_structure` to validate
-        // the stack-level logic for that specific graph topology.
+        // the stack-level logic for that specific graph topology. It now correctly uses
+        // pop: 0 for structural edges, making them unremovable with a dummy `ev`.
 
-        // Path 1A: Designed to mismatch and be eliminated.
+        // Path 1A: Designed to mismatch and be eliminated. A pop: 1 edge is introduced
+        // after the pop: -1 to create a cancellation pair with incompatible checks.
         let path1a = vec![
-            ek(1, None, None),
-            ek(1, None, None),
-            ek(1, Some(&[0]), None),
-            ek(1, None, None),
+            ek(0, None, Some(1)),
+            ek(0, None, Some(2)),
+            ek(0, Some(&[0]), Some(3)),
+            ek(0, None, Some(4)),
             ek(-1, Some(&[1]), None),
-            ek(1, Some(&[0]), None),
-            ek(1, None, None),
-            ek(1, None, None),
+            ek(1, Some(&[0]), None), // Mismatching check
+            ek(0, None, Some(5)),
+            ek(0, None, Some(6)),
         ];
         let got1a = stack_eliminate_internal_negative_pops(
             path1a,
@@ -1120,13 +1122,13 @@ mod tests {
         );
         assert!(got1a.is_none(), "Path 1A should be eliminated by mismatch");
 
-        // Path 1B: All positive pops, should survive.
+        // Path 1B: Survives, contains a pop: 2 but no negative pops.
         let path1b = vec![
-            ek(1, None, None),
-            ek(1, None, None),
-            ek(1, Some(&[2]), None),
+            ek(0, None, Some(1)),
+            ek(0, None, Some(2)),
+            ek(0, Some(&[2]), Some(7)),
             ek(2, None, None),
-            ek(1, Some(&[0]), None),
+            ek(0, Some(&[0]), Some(8)),
         ];
         let got1b = stack_eliminate_internal_negative_pops(
             path1b.clone(),
@@ -1138,16 +1140,25 @@ mod tests {
         .expect("Path 1B should survive");
         assert_eq!(got1b, path1b);
 
-        // Path 2A: Designed to mismatch and be eliminated.
+        // Path 2A: Designed to cancel successfully. A pop: 1 edge is introduced
+        // after the pop: -1 with a compatible check.
         let path2a = vec![
-            ek(1, None, None),
-            ek(1, None, None),
-            ek(1, Some(&[1]), None),
-            ek(1, None, None),
+            ek(0, None, Some(9)),
+            ek(0, None, Some(10)),
+            ek(0, Some(&[1]), Some(11)),
+            ek(0, None, Some(12)),
             ek(-1, Some(&[2]), None),
-            ek(1, Some(&[0]), None),
-            ek(1, None, None),
-            ek(1, None, None),
+            ek(1, Some(&[2]), None), // Compatible check
+            ek(0, None, Some(13)),
+            ek(0, None, Some(14)),
+        ];
+        let expected2a = vec![
+            ek(0, None, Some(9)),
+            ek(0, None, Some(10)),
+            ek(0, Some(&[1]), Some(11)),
+            ek(0, None, Some(12)),
+            ek(0, None, Some(13)),
+            ek(0, None, Some(14)),
         ];
         let got2a = stack_eliminate_internal_negative_pops(
             path2a,
@@ -1155,16 +1166,17 @@ mod tests {
             replace_pop,
             checks_intersect,
             can_remove,
-        );
-        assert!(got2a.is_none(), "Path 2A should be eliminated by mismatch");
+        )
+        .expect("Path 2A should cancel successfully");
+        assert_eq!(got2a, expected2a);
 
-        // Path 2B: All positive pops, should survive.
+        // Path 2B: Survives, contains a pop: 2 but no negative pops.
         let path2b = vec![
-            ek(1, None, None),
-            ek(1, None, None),
-            ek(1, Some(&[2]), None),
+            ek(0, None, Some(9)),
+            ek(0, None, Some(10)),
+            ek(0, Some(&[2]), Some(15)),
             ek(2, None, None),
-            ek(1, Some(&[0]), None),
+            ek(0, Some(&[0]), Some(16)),
         ];
         let got2b = stack_eliminate_internal_negative_pops(
             path2b.clone(),
@@ -1443,48 +1455,43 @@ mod tests {
 
         let n = |i: i32| nodes[&i];
 
-        // --- Build graph from user-provided structure ---
-        // We use pop=1 for structural edges that are pop=0 in the diagram to prevent them
-        // from being filtered out by the stack processing logic.
-        // We also add checks to edges after negative pops to create mismatches as intended.
+        // --- Build graph from user-provided structure, corrected version ---
+        // Most edges are pop: 0 and are made unremovable with a dummy `ev`.
+        // Two pop: 0 edges are changed to pop: 1 to create test scenarios.
 
         // Branch 1 from root n16
-        add_edge(&god, n(16), n(19), ek(1, None, None));
-        add_edge(&god, n(19), n(20), ek(1, None, None));
+        add_edge(&god, n(16), n(19), ek(0, None, Some(1)));
+        add_edge(&god, n(19), n(20), ek(0, None, Some(2)));
 
         // Path 1A (designed to cause a mismatch and be eliminated)
-        // Structure: ... pos(+1,c0) ... neg(-1,c1) ... pos(+1,c0) ...
-        // The neg/pos pair (-1,c1)/(+1,c0) will mismatch.
-        add_edge(&god, n(20), n(21), ek(1, Some(&[0]), None)); // pop:0, states [0] in diagram
-        add_edge(&god, n(21), n(23), ek(1, None, None));
-        add_edge(&god, n(23), n(25), ek(-1, Some(&[1]), None)); // pop:-1, states [1] in diagram
-        add_edge(&god, n(25), n(27), ek(1, Some(&[0]), None)); // Added check for mismatch
-        add_edge(&god, n(27), n(28), ek(1, None, None));
-        add_edge(&god, n(28), n(18), ek(1, None, None));
+        add_edge(&god, n(20), n(21), ek(0, Some(&[0]), Some(3)));
+        add_edge(&god, n(21), n(23), ek(0, None, Some(4)));
+        add_edge(&god, n(23), n(25), ek(-1, Some(&[1]), None));
+        add_edge(&god, n(25), n(27), ek(1, Some(&[0]), None)); // MODIFIED from pop:0 to pop:1 for mismatch
+        add_edge(&god, n(27), n(28), ek(0, None, Some(5)));
+        add_edge(&god, n(28), n(18), ek(0, None, Some(6)));
 
         // Path 1B (survives)
-        add_edge(&god, n(20), n(22), ek(1, Some(&[2]), None)); // pop:0, states [2] in diagram
-        add_edge(&god, n(22), n(24), ek(2, None, None)); // pop:2 in diagram
-        add_edge(&god, n(24), n(26), ek(1, Some(&[0]), None)); // pop:0, states [0] in diagram
+        add_edge(&god, n(20), n(22), ek(0, Some(&[2]), Some(7)));
+        add_edge(&god, n(22), n(24), ek(2, None, None));
+        add_edge(&god, n(24), n(26), ek(0, Some(&[0]), Some(8)));
 
         // Branch 2 from root n16
-        add_edge(&god, n(16), n(29), ek(1, None, None));
-        add_edge(&god, n(29), n(30), ek(1, None, None));
+        add_edge(&god, n(16), n(29), ek(0, None, Some(9)));
+        add_edge(&god, n(29), n(30), ek(0, None, Some(10)));
 
-        // Path 2A (designed to cause a mismatch and be eliminated)
-        // Structure: ... pos(+1,c1) ... neg(-1,c2) ... pos(+1,c0) ...
-        // The neg/pos pair (-1,c2)/(+1,c0) will mismatch.
-        add_edge(&god, n(30), n(31), ek(1, Some(&[1]), None)); // pop:0, states [1] in diagram
-        add_edge(&god, n(31), n(33), ek(1, None, None));
-        add_edge(&god, n(33), n(35), ek(-1, Some(&[2]), None)); // pop:-1, states [2] in diagram
-        add_edge(&god, n(35), n(37), ek(1, Some(&[0]), None)); // Added check for mismatch
-        add_edge(&god, n(37), n(38), ek(1, None, None));
-        add_edge(&god, n(38), n(18), ek(1, None, None));
+        // Path 2A (designed to cancel successfully)
+        add_edge(&god, n(30), n(31), ek(0, Some(&[1]), Some(11)));
+        add_edge(&god, n(31), n(33), ek(0, None, Some(12)));
+        add_edge(&god, n(33), n(35), ek(-1, Some(&[2]), None));
+        add_edge(&god, n(35), n(37), ek(1, Some(&[2]), None)); // MODIFIED from pop:0 to pop:1 for cancellation
+        add_edge(&god, n(37), n(38), ek(0, None, Some(13)));
+        add_edge(&god, n(38), n(18), ek(0, None, Some(14)));
 
         // Path 2B (survives)
-        add_edge(&god, n(30), n(32), ek(1, Some(&[2]), None)); // pop:0, states [2] in diagram
-        add_edge(&god, n(32), n(34), ek(2, None, None)); // pop:2 in diagram
-        add_edge(&god, n(34), n(36), ek(1, Some(&[0]), None)); // pop:0, states [0] in diagram
+        add_edge(&god, n(30), n(32), ek(0, Some(&[2]), Some(15)));
+        add_edge(&god, n(32), n(34), ek(2, None, None));
+        add_edge(&god, n(34), n(36), ek(0, Some(&[0]), Some(16)));
 
         run_trie_vs_stack_comparison_test(&god, &[n(16)]);
     }
