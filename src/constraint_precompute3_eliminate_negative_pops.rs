@@ -319,16 +319,9 @@ where
     FIntersect: FnMut(&EK, &EK) -> bool,
     FCanRemove: FnMut(&EK) -> bool,
 {
-    // Remove zero-pop items that can be removed.
-    let mut cleaned: Vec<EK> = Vec::with_capacity(stack.len());
-    for ek in stack {
-        if get_pop(&ek) != 0 || !can_remove(&ek) {
-            cleaned.push(ek);
-        }
-    }
 
     // Buffers for current negative and positive runs.
-    let mut out: Vec<EK> = Vec::with_capacity(cleaned.len());
+    let mut out: Vec<EK> = Vec::with_capacity(stack.clone().len());
     let mut neg_buf: Vec<EK> = Vec::new();
     let mut pos_buf: Vec<EK> = Vec::new();
     let mut in_pos = false;
@@ -470,7 +463,7 @@ where
         Some((leftover_neg, pos_left))
     }
 
-    for ek in cleaned.into_iter() {
+    for ek in stack.into_iter() {
         let p = get_pop(&ek);
         if p < 0 {
             // Negative element
@@ -567,21 +560,15 @@ where
     FCanRemove: FnMut(&EK) -> bool,
 {
     // First, remove zero-pop items that can be removed.
-    let mut cleaned: Vec<EK> = Vec::with_capacity(stack.len());
-    for ek in stack {
-        if get_pop(&ek) != 0 || !can_remove(&ek) {
-            cleaned.push(ek);
-        }
-    }
 
-    // Then drop trailing negatives.
-    let cut = cleaned
+    // Drop trailing negatives.
+    let cut = stack.clone()
         .iter()
         .rposition(|ek| get_pop(ek) >= 0)
         .map(|i| i + 1)
         .unwrap_or(0);
-    cleaned.truncate(cut);
-    cleaned
+    stack.clone().truncate(cut);
+    stack.clone()
 }
 
 #[cfg(test)]
