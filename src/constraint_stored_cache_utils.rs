@@ -90,16 +90,16 @@ fn merge_trie3_nodes_and_get_map_internal(
     }
 
     let mut ends: Vec<bool> = vec![false; n];
-    type RawEdge3 = (isize, LLMTokenBV, usize, StateIDBV);
+    type RawEdge3 = (crate::constraint::IntermediateTrie3EdgeKey, usize);
     let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
 
     for (u_dense, u_idx) in old_of.iter().enumerate() {
         let guard = u_idx.read(trie3_god).unwrap();
         ends[u_dense] = guard.value.end;
         for (ek, dest_map) in guard.children() {
-            for (v_idx, bv) in dest_map {
+            for (v_idx, _bv) in dest_map {
                 if let Some(&v_dense) = dense_of.get(v_idx) {
-                    raw_edges[u_dense].push((ek.0, ek.1.clone(), v_dense, bv.clone()));
+                    raw_edges[u_dense].push((ek.clone(), v_dense));
                 }
             }
         }
@@ -111,8 +111,7 @@ fn merge_trie3_nodes_and_get_map_internal(
     for it in 0..max_iters {
         // Signature: (end_flag, sorted_list_of_aggregated_edges)
         // Aggregated edge: ((pop, LLMTokenBV, dest_class), StateIDBV)
-        type AggregatedEdge3 = ((isize, LLMTokenBV, usize), StateIDBV);
-        type Signature3 = (bool, Vec<AggregatedEdge3>);
+        type Signature3 = (bool, Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)>);
 
         let mut sig_to_id: HashMap<Signature3, usize> = HashMap::new();
         let mut new_class = vec![0; n];
@@ -124,13 +123,12 @@ fn merge_trie3_nodes_and_get_map_internal(
         #[cfg(rustrover)]
         let its = 0..n;
         for u in its {
-            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-            for (p, bv_key, v_dense, sids) in &raw_edges[u] {
-                let dest_class = prev_class[*v_dense];
-                let key = (*p, bv_key.clone(), dest_class);
-                aggr.entry(key).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
-            }
-            let agg_edges: Vec<AggregatedEdge3> = aggr.into_iter().collect();
+            let mut agg_edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = raw_edges[u]
+                .iter()
+                .map(|(ek, v_dense)| (ek.clone(), prev_class[*v_dense]))
+                .collect();
+            agg_edges.sort();
+            agg_edges.dedup();
 
             let sig: Signature3 = (ends[u], agg_edges);
 
@@ -169,34 +167,26 @@ fn merge_trie3_nodes_and_get_map_internal(
     // Rewrite representatives' children and live tokens
     for class_id in 0..num_classes {
         if let Some(rep_idx) = representatives[class_id] {
-            let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
-
-            // Aggregate edges based on final partition
-            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-            for (p, bv_key, v_dense, sids) in &raw_edges[u_dense] {
-                let dest_class = final_partition[*v_dense];
-                aggr.entry((*p, bv_key.clone(), dest_class)).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
-            }
-
             let mut new_children = BTreeMap::new();
-            let mut new_live_tokens = LLMTokenBV::zeros();
-            for ((p, bv_key, dest_class), sids) in aggr {
-                if let Some(dest_rep_idx) = representatives[dest_class] {
-                    new_children.entry((p, bv_key.clone())).or_insert_with(OrderedHashMap::new).insert(dest_rep_idx, sids);
-                    new_live_tokens |= &bv_key;
-                }
-            }
-
-            // Union live tokens from all nodes in the class
+            // Collect all edges from all nodes in the class
             for (i, &c) in final_partition.iter().enumerate() {
                 if c == class_id {
-                    new_live_tokens |= &old_of[i].read(trie3_god).unwrap().value.live_tokens;
+                    let u_idx = old_of[i];
+                    let guard = u_idx.read(trie3_god).unwrap();
+                    for (ek, dest_map) in guard.children() {
+                        for (v_idx, _ev) in dest_map {
+                            let v_dense = dense_of[v_idx];
+                            let dest_class = final_partition[v_dense];
+                            if let Some(dest_rep_idx) = representatives[dest_class] {
+                                new_children.entry(ek.clone()).or_insert_with(OrderedHashMap::new).insert(dest_rep_idx, ());
+                            }
+                        }
+                    }
                 }
             }
 
             let mut guard = rep_idx.write(trie3_god).unwrap();
             *guard.children_mut() = new_children;
-            guard.value.live_tokens = new_live_tokens;
         }
     }
 

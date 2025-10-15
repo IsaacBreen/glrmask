@@ -24,6 +24,7 @@ pub fn eliminate_pushes_and_pops(
         let mut i = 0;
         while i < stack.len() {
             if let IntermediateTrie3EdgeKey::Push(push_states) = &stack[i] {
+                let push_states = push_states.clone();
                 // Find nearest pop to the right, not blocked by another push
                 let mut pop_j = None;
                 for j in (i + 1)..stack.len() {

@@ -725,20 +725,19 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
                 .clone();
 
             let edge_key = (0, allowed_tokens.clone());
-            let edge_value = StateIDBV::max_ones();
+            let edge_key = crate::constraint::IntermediateTrie3EdgeKey::CheckLLM(allowed_tokens.clone());
+            let edge_value = ();
 
             let inserter = crate::datastructures::trie::EdgeInserter::new(
                 stored_trie_god,
                 source_node.as_arc().clone(),
                 edge_key,
                 edge_value,
-                |e, n| {},
-                |node_value, _| {},
+                |_, _| {},
+                |_, _| {},
                 |_, _| {},
             );
             inserter.try_destination(dest_node.clone()).expect("Cycle detected");
-
-            dest_node.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
 
             final_nodes.insert(dest_node);
         }
@@ -875,8 +874,8 @@ pub(crate) fn merge_stored_trie_nodes(
             .collect();
 
         let tokens_for_edge = acc.llm_tokens_union.clone();
-        let edge_key = (0, tokens_for_edge.clone());
-        let edge_value = StateIDBV::max_ones();
+        let edge_key = crate::constraint::IntermediateTrie3EdgeKey::CheckLLM(tokens_for_edge.clone());
+        let edge_value = ();
 
         for source_node in acc.stored_trie_nodes() {
             let dest_node = source_to_dest_map.get(source_node).unwrap();
@@ -885,13 +884,12 @@ pub(crate) fn merge_stored_trie_nodes(
                 stored_trie_god,
                 source_node.as_arc().clone(),
                 edge_key.clone(),
-                edge_value.clone(),
-                |e, n| *e |= n,
-                |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
-                |_, _| {}, // Unconditional insertion
+                edge_value,
+                |_, _| {},
+                |_, _| {},
+                |_, _| {},
             );
             inserter.try_destination(dest_node.clone()).expect("Cycle detected when merging stored_trie nodes");
-            dest_node.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
         }
 
         new_acc.stored_trie_nodes = new_nodes;
