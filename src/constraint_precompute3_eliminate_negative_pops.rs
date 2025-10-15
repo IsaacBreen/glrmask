@@ -147,8 +147,6 @@ fn rebuild_graph_from_stacks<EK, EV, T>(
 /// Graph-level transform: eliminate internal negative pops by pairwise cancellation
 /// of negative/positive runs (negative on the left, positive on the right), using
 /// the provided closures to read/modify pop and test check compatibility.
-///
-/// Not implemented yet.
 pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FIntersect>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
@@ -181,7 +179,6 @@ pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FInte
 }
 
 /// Graph-level transform: remove trailing negative pops at the ends of stacks.
-/// Not implemented yet.
 pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet>(
     god: &GodWrapper<EK, EV, T>,
     roots: &[Trie2Index],
