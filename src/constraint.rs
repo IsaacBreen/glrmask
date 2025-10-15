@@ -1963,22 +1963,11 @@ impl GrammarConstraint {
         );
 
         // Normalize negative pops produced by templates
-        let roots: Vec<_> = precomputed3.values().cloned().collect();
-        // eliminate_negative_pops(
-        //     &trie3_god,
-        //     &roots,
-        //     // FGet: get_pop: FnMut(&EK, &EV) -> isize. EK is (isize, LLMTokenBV)
-        //     |(pop, _), _| *pop,
-        //     // FReplace: replace_pop: FnMut(&EK, &EV, isize) -> (EK, EV). EK is (isize, LLMTokenBV), EV is StateIDBV
-        //     |&(_, ref llm_bv), ev, new_pop| ((new_pop, llm_bv.clone()), ev.clone()),
-        //     // FIntersect: intersect_checks: FnMut(&EK, &EV, &EK, &EV) -> bool. EK is (isize, LLMTokenBV), EV is StateIDBV
-        //     |_ek1, ev1, _ek2, ev2| ev1.intersects(ev2),
-        //     |(n, ref llm_bv), state_bv| *n < 0 || *n == 0 && (*llm_bv == tokens_all && *state_bv == states_all),
-        // );
+        // Or whatever it's called now.
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
-        // optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
         (precomputed3, trie3_god)
     }
 
