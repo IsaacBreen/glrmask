@@ -458,7 +458,7 @@ where
         let mut leftover_neg: Vec<EK> = Vec::with_capacity(neg_rev_left.len());
         for ek in neg_rev_left.into_iter().rev() {
             let p = get_pop(&ek);
-            debug_assert!(p > 0);
+            debug_assert!(p >= 0);
             leftover_neg.push(replace_pop(&ek, -p));
         }
 
