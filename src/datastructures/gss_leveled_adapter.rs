@@ -19,8 +19,8 @@ use crate::hit;
 use crate::tokenizer::LLMTokenID;
 
 // Adapter aliases for precompute-trie types (referencing constraint.rs)
-pub type StoredPrecomputeNodeIndex = crate::constraint::PrecomputeNode3Index;
-pub type StoredTrieGodWrapper = crate::constraint::Trie3GodWrapper;
+pub type StoredPrecomputeNodeIndex = crate::constraint::IntermediatePrecomputeNode3Index;
+pub type StoredTrieGodWrapper = crate::constraint::IntermediateTrie3GodWrapper;
 
 // --- Acc type compatible with LeveledGSS A ---
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -774,9 +774,7 @@ impl GSSNode {
 pub(crate) fn deep_add_precompute_trie_edges(
     root_arc: &mut Arc<GSSNode>,
     god: &StoredTrieGodWrapper,
-    edge_key: &(isize, LLMTokenBV),
-    edge_value: &StateIDBV,
-    tokens_for_update: &LLMTokenBV,
+    edge_key: &crate::constraint::IntermediateTrie3EdgeKey,
     destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
     _memo: &mut PruneAndTransformRecursiveMemo,
 ) {
@@ -793,11 +791,7 @@ pub(crate) fn deep_add_precompute_trie_edges(
             let inserter = crate::datastructures::trie::EdgeInserter::new(
                 god,
                 source_arc,
-                edge_key.clone(),
-                edge_value.clone(),
-                |e, n| *e |= n,
-                |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
-                |_, _| {}, // Unconditional insertion
+                edge_key.clone(), (), |_, _| {}, |_, _| {}, |_, _| {},
             );
             inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
         }
