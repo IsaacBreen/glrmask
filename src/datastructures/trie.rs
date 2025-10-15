@@ -865,6 +865,52 @@ where
         output
     }
 
+    /// Pretty-prints the entire trie structure in the arena.
+    /// It automatically identifies root nodes (those with an in-degree of 0)
+    /// and prints from there. If no roots are found (e.g., a graph of only cycles),
+    /// it will print from all nodes.
+    pub fn pretty_print_arena(arena: &Arena<Self>) -> String {
+        let all_node_indices: Vec<Trie2Index> =
+            arena.indices().into_iter().map(Trie2Index::from).collect();
+        if all_node_indices.is_empty() {
+            return "[Arena is empty]\n".to_string();
+        }
+
+        let mut in_degrees: std::collections::HashMap<Trie2Index, usize> =
+            all_node_indices.iter().map(|&idx| (idx, 0)).collect();
+
+        for &node_idx in &all_node_indices {
+            if let Some(guard) = node_idx.read(arena) {
+                for dest_map in guard.children.values() {
+                    for &child_idx in dest_map.keys() {
+                        if let Some(degree) = in_degrees.get_mut(&child_idx) {
+                            *degree += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut roots: Vec<Trie2Index> = in_degrees
+            .iter()
+            .filter(|(_, &degree)| degree == 0)
+            .map(|(&idx, _)| idx)
+            .collect();
+
+        roots.sort();
+
+        if roots.is_empty() {
+            // This case handles graphs with no nodes of in-degree 0 (e.g., all nodes are in cycles).
+            let mut output = String::from("[Warning: No nodes with in-degree 0 found. Graph may contain only cycles.]\n[Printing from all nodes as roots.]\n\n");
+            let mut sorted_nodes = all_node_indices;
+            sorted_nodes.sort(); // Sort for deterministic output
+            output.push_str(&Self::pretty_print(arena, &sorted_nodes));
+            return output;
+        }
+
+        Self::pretty_print(arena, &roots)
+    }
+
     fn pretty_print_recursive(
         node_idx: Trie2Index,
         arena: &Arena<Self>,

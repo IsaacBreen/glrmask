@@ -848,6 +848,89 @@ local_system:
           }
       }
 
+      // Add this impl block for pretty-printing functionality
+      impl<EK, EV, T> Trie<EK, EV, T>
+      where
+          EK: Ord + Clone + Debug,
+          EV: Clone + Debug,
+          T: Debug,
+      {
+          /// Pretty-prints the trie structure starting from the given roots into a String.
+          /// Handles shared subtrees and cycles to avoid infinite loops and redundant output.
+          pub fn pretty_print(arena: &Arena<Self>, roots: &[Trie2Index]) -> String {
+              let mut output = String::new();
+              let mut printed_nodes = HashSet::new();
+
+              for (i, &root) in roots.iter().enumerate() {
+                  if i > 0 {
+                      output.push_str("\n");
+                  }
+                  output.push_str(&format!("[Root {}]\n", i));
+                  let mut visiting = HashSet::new();
+                  Self::pretty_print_recursive(root, arena, "", true, &mut visiting, &mut printed_nodes, &mut output);
+              }
+              output
+          }
+
+          fn pretty_print_recursive(
+              node_idx: Trie2Index,
+              arena: &Arena<Self>,
+              prefix: &str,
+              is_last: bool,
+              visiting: &mut HashSet<usize>,
+              printed_nodes: &mut HashSet<usize>,
+              output: &mut String,
+          ) {
+              let node_guard = match node_idx.read(arena) {
+                  Some(guard) => guard,
+                  None => {
+                      let connector = if is_last { "└── " } else { "├── " };
+                      output.push_str(&format!("{}{}[Invalid Node Index: {}]\n", prefix, connector, node_idx.as_usize()));
+                      return;
+                  }
+              };
+
+              let connector = if is_last { "└── " } else { "├── " };
+              output.push_str(&format!(
+                  "{}{}[Node {}] (max_depth: {}, value: {:?})",
+                  prefix,
+                  connector,
+                  node_idx.as_usize(),
+                  node_guard.max_depth,
+                  &node_guard.value
+              ));
+
+              if visiting.contains(&node_idx.as_usize()) {
+                  output.push_str(" (Cycle detected)\n");
+                  return;
+              }
+
+              if printed_nodes.contains(&node_idx.as_usize()) {
+                  output.push_str(" (Shared, already shown)\n");
+                  return;
+              }
+              output.push_str("\n");
+
+              visiting.insert(node_idx.as_usize());
+              printed_nodes.insert(node_idx.as_usize());
+
+              let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+
+              let children_edges: Vec<_> = node_guard.children.iter().flat_map(|(ek, dest_map)| dest_map.iter().map(move |(child_idx, ev)| (ek, ev, *child_idx))).collect();
+
+              let num_children = children_edges.len();
+              for (i, (ek, ev, child_idx)) in children_edges.iter().enumerate() {
+                  let is_last_child = i == num_children - 1;
+                  let child_connector = if is_last_child { "└── " } else { "├── " };
+                  output.push_str(&format!("{}{}Edge: {:?} (value: {:?})\n", &new_prefix, child_connector, ek, ev));
+                  let recursive_prefix = format!("{}{}", &new_prefix, if is_last_child { "    " } else { "│   " });
+                  Self::pretty_print_recursive(*child_idx, arena, &recursive_prefix, true, visiting, printed_nodes, output);
+              }
+
+              visiting.remove(&node_idx.as_usize());
+          }
+      }
+
       // Implementation block for special_map and related functionality
       // Requires T: Clone, EK: Ord + Clone, EV: Clone
       impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
@@ -2872,6 +2955,52 @@ local_system:
                   Self::pretty_print_recursive(root, arena, "", true, &mut visiting, &mut printed_nodes, &mut output);
               }
               output
+          }
+
+          /// Pretty-prints the entire trie structure in the arena.
+          /// It automatically identifies root nodes (those with an in-degree of 0)
+          /// and prints from there. If no roots are found (e.g., a graph of only cycles),
+          /// it will print from all nodes.
+          pub fn pretty_print_arena(arena: &Arena<Self>) -> String {
+              let all_node_indices: Vec<Trie2Index> =
+                  arena.indices().into_iter().map(Trie2Index::from).collect();
+              if all_node_indices.is_empty() {
+                  return "[Arena is empty]\n".to_string();
+              }
+
+              let mut in_degrees: std::collections::HashMap<Trie2Index, usize> =
+                  all_node_indices.iter().map(|&idx| (idx, 0)).collect();
+
+              for &node_idx in &all_node_indices {
+                  if let Some(guard) = node_idx.read(arena) {
+                      for dest_map in guard.children.values() {
+                          for &child_idx in dest_map.keys() {
+                              if let Some(degree) = in_degrees.get_mut(&child_idx) {
+                                  *degree += 1;
+                              }
+                          }
+                      }
+                  }
+              }
+
+              let mut roots: Vec<Trie2Index> = in_degrees
+                  .iter()
+                  .filter(|(_, &degree)| degree == 0)
+                  .map(|(&idx, _)| idx)
+                  .collect();
+
+              roots.sort();
+
+              if roots.is_empty() {
+                  // This case handles graphs with no nodes of in-degree 0 (e.g., all nodes are in cycles).
+                  let mut output = String::from("[Warning: No nodes with in-degree 0 found. Graph may contain only cycles.]\n[Printing from all nodes as roots.]\n\n");
+                  let mut sorted_nodes = all_node_indices;
+                  sorted_nodes.sort(); // Sort for deterministic output
+                  output.push_str(&Self::pretty_print(arena, &sorted_nodes));
+                  return output;
+              }
+
+              Self::pretty_print(arena, &roots)
           }
 
           fn pretty_print_recursive(
@@ -4977,6 +5106,89 @@ messages:
           }
       }
 
+      // Add this impl block for pretty-printing functionality
+      impl<EK, EV, T> Trie<EK, EV, T>
+      where
+          EK: Ord + Clone + Debug,
+          EV: Clone + Debug,
+          T: Debug,
+      {
+          /// Pretty-prints the trie structure starting from the given roots into a String.
+          /// Handles shared subtrees and cycles to avoid infinite loops and redundant output.
+          pub fn pretty_print(arena: &Arena<Self>, roots: &[Trie2Index]) -> String {
+              let mut output = String::new();
+              let mut printed_nodes = HashSet::new();
+
+              for (i, &root) in roots.iter().enumerate() {
+                  if i > 0 {
+                      output.push_str("\n");
+                  }
+                  output.push_str(&format!("[Root {}]\n", i));
+                  let mut visiting = HashSet::new();
+                  Self::pretty_print_recursive(root, arena, "", true, &mut visiting, &mut printed_nodes, &mut output);
+              }
+              output
+          }
+
+          fn pretty_print_recursive(
+              node_idx: Trie2Index,
+              arena: &Arena<Self>,
+              prefix: &str,
+              is_last: bool,
+              visiting: &mut HashSet<usize>,
+              printed_nodes: &mut HashSet<usize>,
+              output: &mut String,
+          ) {
+              let node_guard = match node_idx.read(arena) {
+                  Some(guard) => guard,
+                  None => {
+                      let connector = if is_last { "└── " } else { "├── " };
+                      output.push_str(&format!("{}{}[Invalid Node Index: {}]\n", prefix, connector, node_idx.as_usize()));
+                      return;
+                  }
+              };
+
+              let connector = if is_last { "└── " } else { "├── " };
+              output.push_str(&format!(
+                  "{}{}[Node {}] (max_depth: {}, value: {:?})",
+                  prefix,
+                  connector,
+                  node_idx.as_usize(),
+                  node_guard.max_depth,
+                  &node_guard.value
+              ));
+
+              if visiting.contains(&node_idx.as_usize()) {
+                  output.push_str(" (Cycle detected)\n");
+                  return;
+              }
+
+              if printed_nodes.contains(&node_idx.as_usize()) {
+                  output.push_str(" (Shared, already shown)\n");
+                  return;
+              }
+              output.push_str("\n");
+
+              visiting.insert(node_idx.as_usize());
+              printed_nodes.insert(node_idx.as_usize());
+
+              let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+
+              let children_edges: Vec<_> = node_guard.children.iter().flat_map(|(ek, dest_map)| dest_map.iter().map(move |(child_idx, ev)| (ek, ev, *child_idx))).collect();
+
+              let num_children = children_edges.len();
+              for (i, (ek, ev, child_idx)) in children_edges.iter().enumerate() {
+                  let is_last_child = i == num_children - 1;
+                  let child_connector = if is_last_child { "└── " } else { "├── " };
+                  output.push_str(&format!("{}{}Edge: {:?} (value: {:?})\n", &new_prefix, child_connector, ek, ev));
+                  let recursive_prefix = format!("{}{}", &new_prefix, if is_last_child { "    " } else { "│   " });
+                  Self::pretty_print_recursive(*child_idx, arena, &recursive_prefix, true, visiting, printed_nodes, output);
+              }
+
+              visiting.remove(&node_idx.as_usize());
+          }
+      }
+
       // Implementation block for special_map and related functionality
       // Requires T: Clone, EK: Ord + Clone, EV: Clone
       impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
@@ -6138,7 +6350,7 @@ messages:
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: Add to this code some way to take an arena and pretty print the whole tree.
+  - user: Make it possible to pretty print the entire arena without specifying roots.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6157,117 +6369,135 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add a pretty-printing utility for your `Trie` and `Arena`, followed by the corresponding git diff.
+      Of course! Here are the step-by-step instructions to add the arena pretty-printing functionality, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/datastructures/trie.rs`.**
+      1.  **Open the file `src/datastructures/trie.rs`**.
 
-      2.  **Locate the end of the `impl` block for `Trie` that contains the `get_all_paths` and `get_all_paths_recursive` methods.** This block ends around line 811.
+      2.  **Locate the `impl` block for pretty-printing**. You can search for the following line to find it:
+          ```rust
+          impl<EK, EV, T> Trie<EK, EV, T>
+          where
+              EK: Ord + Clone + Debug,
+              EV: Clone + Debug,
+              T: Debug,
+          {
+          ```
 
-      3.  **Insert the new code block** immediately after the closing brace `}` of that `impl` block, and before the comment `// Implementation block for special_map and related functionality`.
+      3.  **Insert the new function**. Inside this `impl` block, right after the existing `pretty_print` function and before the `pretty_print_recursive` function, add the following code for the new `pretty_print_arena` function:
 
-      The new code adds a new `impl` block for `Trie` with a public `pretty_print` method. This method traverses the graph from a set of roots and builds a formatted string representing the structure, correctly handling cycles and shared subtrees to avoid infinite loops or redundant output.
+          ```rust
+              /// Pretty-prints the entire trie structure in the arena.
+              /// It automatically identifies root nodes (those with an in-degree of 0)
+              /// and prints from there. If no roots are found (e.g., a graph of only cycles),
+              /// it will print from all nodes.
+              pub fn pretty_print_arena(arena: &Arena<Self>) -> String {
+                  let all_node_indices: Vec<Trie2Index> =
+                      arena.indices().into_iter().map(Trie2Index::from).collect();
+                  if all_node_indices.is_empty() {
+                      return "[Arena is empty]\n".to_string();
+                  }
+          
+                  let mut in_degrees: std::collections::HashMap<Trie2Index, usize> =
+                      all_node_indices.iter().map(|&idx| (idx, 0)).collect();
+          
+                  for &node_idx in &all_node_indices {
+                      if let Some(guard) = node_idx.read(arena) {
+                          for dest_map in guard.children.values() {
+                              for &child_idx in dest_map.keys() {
+                                  if let Some(degree) = in_degrees.get_mut(&child_idx) {
+                                      *degree += 1;
+                                  }
+                              }
+                          }
+                      }
+                  }
+          
+                  let mut roots: Vec<Trie2Index> = in_degrees
+                      .iter()
+                      .filter(|(_, &degree)| degree == 0)
+                      .map(|(&idx, _)| idx)
+                      .collect();
+          
+                  roots.sort();
+          
+                  if roots.is_empty() {
+                      // This case handles graphs with no nodes of in-degree 0 (e.g., all nodes are in cycles).
+                      let mut output = String::from("[Warning: No nodes with in-degree 0 found. Graph may contain only cycles.]\n[Printing from all nodes as roots.]\n\n");
+                      let mut sorted_nodes = all_node_indices;
+                      sorted_nodes.sort(); // Sort for deterministic output
+                      output.push_str(&Self::pretty_print(arena, &sorted_nodes));
+                      return output;
+                  }
+          
+                  Self::pretty_print(arena, &roots)
+              }
+          ```
+
+      After these changes, you will be able to call `Trie::pretty_print_arena(&arena)` to get a string representation of the entire graph stored in the arena.
 
       ### Git Diff
 
-      Here is the git patch to apply the changes:
+      Here is the git diff for the changes described above.
 
       ```diff
       diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
-      index 2411111..1111111 100644
       --- a/src/datastructures/trie.rs
       +++ b/src/datastructures/trie.rs
-      @@ -809,6 +809,87 @@
+      @@ -907,6 +907,48 @@
+               output
            }
-       }
        
-      +// Add this impl block for pretty-printing functionality
-      +impl<EK, EV, T> Trie<EK, EV, T>
-      +where
-      +    EK: Ord + Clone + Debug,
-      +    EV: Clone + Debug,
-      +    T: Debug,
-      +{
-      +    /// Pretty-prints the trie structure starting from the given roots into a String.
-      +    /// Handles shared subtrees and cycles to avoid infinite loops and redundant output.
-      +    pub fn pretty_print(arena: &Arena<Self>, roots: &[Trie2Index]) -> String {
-      +        let mut output = String::new();
-      +        let mut printed_nodes = HashSet::new();
-      +
-      +        for (i, &root) in roots.iter().enumerate() {
-      +            if i > 0 {
-      +                output.push_str("\n");
-      +            }
-      +            output.push_str(&format!("[Root {}]\n", i));
-      +            let mut visiting = HashSet::new();
-      +            Self::pretty_print_recursive(root, arena, "", true, &mut visiting, &mut printed_nodes, &mut output);
+      +    /// Pretty-prints the entire trie structure in the arena.
+      +    /// It automatically identifies root nodes (those with an in-degree of 0)
+      +    /// and prints from there. If no roots are found (e.g., a graph of only cycles),
+      +    /// it will print from all nodes.
+      +    pub fn pretty_print_arena(arena: &Arena<Self>) -> String {
+      +        let all_node_indices: Vec<Trie2Index> =
+      +            arena.indices().into_iter().map(Trie2Index::from).collect();
+      +        if all_node_indices.is_empty() {
+      +            return "[Arena is empty]\n".to_string();
       +        }
-      +        output
+      +
+      +        let mut in_degrees: std::collections::HashMap<Trie2Index, usize> =
+      +            all_node_indices.iter().map(|&idx| (idx, 0)).collect();
+      +
+      +        for &node_idx in &all_node_indices {
+      +            if let Some(guard) = node_idx.read(arena) {
+      +                for dest_map in guard.children.values() {
+      +                    for &child_idx in dest_map.keys() {
+      +                        if let Some(degree) = in_degrees.get_mut(&child_idx) {
+      +                            *degree += 1;
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        let mut roots: Vec<Trie2Index> = in_degrees
+      +            .iter()
+      +            .filter(|(_, &degree)| degree == 0)
+      +            .map(|(&idx, _)| idx)
+      +            .collect();
+      +
+      +        roots.sort();
+      +
+      +        if roots.is_empty() {
+      +            // This case handles graphs with no nodes of in-degree 0 (e.g., all nodes are in cycles).
+      +            let mut output = String::from("[Warning: No nodes with in-degree 0 found. Graph may contain only cycles.]\n[Printing from all nodes as roots.]\n\n");
+      +            let mut sorted_nodes = all_node_indices;
+      +            sorted_nodes.sort(); // Sort for deterministic output
+      +            output.push_str(&Self::pretty_print(arena, &sorted_nodes));
+      +            return output;
+      +        }
+      +
+      +        Self::pretty_print(arena, &roots)
       +    }
       +
-      +    fn pretty_print_recursive(
-      +        node_idx: Trie2Index,
-      +        arena: &Arena<Self>,
-      +        prefix: &str,
-      +        is_last: bool,
-      +        visiting: &mut HashSet<usize>,
-      +        printed_nodes: &mut HashSet<usize>,
-      +        output: &mut String,
-      +    ) {
-      +        let node_guard = match node_idx.read(arena) {
-      +            Some(guard) => guard,
-      +            None => {
-      +                let connector = if is_last { "└── " } else { "├── " };
-      +                output.push_str(&format!("{}{}[Invalid Node Index: {}]\n", prefix, connector, node_idx.as_usize()));
-      +                return;
-      +            }
-      +        };
-      +
-      +        let connector = if is_last { "└── " } else { "├── " };
-      +        output.push_str(&format!(
-      +            "{}{}[Node {}] (max_depth: {}, value: {:?})",
-      +            prefix,
-      +            connector,
-      +            node_idx.as_usize(),
-      +            node_guard.max_depth,
-      +            &node_guard.value
-      +        ));
-      +
-      +        if visiting.contains(&node_idx.as_usize()) {
-      +            output.push_str(" (Cycle detected)\n");
-      +            return;
-      +        }
-      +
-      +        if printed_nodes.contains(&node_idx.as_usize()) {
-      +            output.push_str(" (Shared, already shown)\n");
-      +            return;
-      +        }
-      +        output.push_str("\n");
-      +
-      +        visiting.insert(node_idx.as_usize());
-      +        printed_nodes.insert(node_idx.as_usize());
-      +
-      +        let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
-      +
-      +        let children_edges: Vec<_> = node_guard.children.iter().flat_map(|(ek, dest_map)| dest_map.iter().map(move |(child_idx, ev)| (ek, ev, *child_idx))).collect();
-      +
-      +        let num_children = children_edges.len();
-      +        for (i, (ek, ev, child_idx)) in children_edges.iter().enumerate() {
-      +            let is_last_child = i == num_children - 1;
-      +            let child_connector = if is_last_child { "└── " } else { "├── " };
-      +            output.push_str(&format!("{}{}Edge: {:?} (value: {:?})\n", &new_prefix, child_connector, ek, ev));
-      +            let recursive_prefix = format!("{}{}", &new_prefix, if is_last_child { "    " } else { "│   " });
-      +            Self::pretty_print_recursive(*child_idx, arena, &recursive_prefix, true, visiting, printed_nodes, output);
-      +        }
-      +
-      +        visiting.remove(&node_idx.as_usize());
-      +    }
-      +}
-      +
-       // Implementation block for special_map and related functionality
-       // Requires T: Clone, EK: Ord + Clone, EV: Clone
-       impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
+           fn pretty_print_recursive(
+               node_idx: Trie2Index,
+               arena: &Arena<Self>,
 
       ```
     metadata:
@@ -6280,7 +6510,7 @@ messages:
       Applying patch to 'src/datastructures/trie.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/trie.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Add pretty_print method to Trie
-      for tree visualization"'
+  - user: 'Changes committed with message: "feat(trie): Add pretty_print_arena to
+      print entire trie graph from roots"'
     metadata:
 ...
