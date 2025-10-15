@@ -224,12 +224,14 @@ pub fn eliminate_internal_negative_pops_on_trie<
         let mut current_idx = new_root_map[&root_t];
         for pe in path {
             // This creates an unrolled graph, which is fine for a dummy impl.
-            let new_idx = current_idx.write(god).unwrap().force_insert_to_new_node(
-                god,
-                pe.ek.clone(),
-                pe.ev.clone(),
-                pe.dst_node_value.clone(),
-            );
+            // We must separate node creation from edge insertion to avoid deadlocking the Arena's RwLock.
+            let new_node = Trie::new(pe.dst_node_value.clone());
+            let new_idx = Trie2Index::from(god.insert(new_node));
+
+            {
+                let mut current_guard = current_idx.write(god).unwrap();
+                current_guard.force_insert_to_node(pe.ek.clone(), pe.ev.clone(), new_idx);
+            }
             current_idx = new_idx;
         }
     }
@@ -282,12 +284,15 @@ pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet, FCanRemove>(
         }
         let mut current_idx = new_root_map[&root_t];
         for pe in path {
-            let new_idx = current_idx.write(_god).unwrap().force_insert_to_new_node(
-                _god,
-                pe.ek.clone(),
-                pe.ev.clone(),
-                pe.dst_node_value.clone(),
-            );
+            // This creates an unrolled graph, which is fine for a dummy impl.
+            // We must separate node creation from edge insertion to avoid deadlocking the Arena's RwLock.
+            let new_node = Trie::new(pe.dst_node_value.clone());
+            let new_idx = Trie2Index::from(_god.insert(new_node));
+
+            {
+                let mut current_guard = current_idx.write(_god).unwrap();
+                current_guard.force_insert_to_node(pe.ek.clone(), pe.ev.clone(), new_idx);
+            }
             current_idx = new_idx;
         }
     }
