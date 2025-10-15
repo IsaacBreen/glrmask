@@ -1097,69 +1097,70 @@ mod tests {
 
     #[test]
     fn test_user_structure_as_stacks() {
-        // This test models the stacks from `test_graph_from_user_structure` to validate
-        // the stack-level logic for that specific graph topology. It now correctly uses
-        // pop: 0 for structural edges, making them unremovable with a dummy `ev`.
+        // This test models the stacks from the user-provided graph structure, respecting
+        // that most edges are pop: 0. Edges with `ev: None` are removable if pop is 0.
 
-        // Path 1A: Designed to mismatch and be eliminated. A pop: 1 edge is introduced
-        // after the pop: -1 to create a cancellation pair with incompatible checks.
+        // Path 1A from the graph.
         let path1a = vec![
-            ek(0, None, Some(1)),
-            ek(0, None, Some(2)),
-            ek(0, Some(&[0]), Some(3)),
-            ek(0, None, Some(4)),
-            ek(-1, Some(&[1]), None),
-            ek(1, Some(&[0]), None), // Mismatching check
-            ek(0, None, Some(5)),
-            ek(0, None, Some(6)),
+            ek(0, None, None),          // from 16->19
+            ek(0, None, None),          // from 19->20
+            ek(0, Some(&[0]), None),    // from 20->21
+            ek(0, None, None),          // from 21->23
+            ek(-1, Some(&[1]), None),   // from 23->25
+            ek(0, None, None),          // from 25->27
+            ek(0, None, Some(1)),       // from 27->28, `tokens: [1]` -> not removable
+            ek(0, None, None),          // from 28->18
         ];
-        let got1a = stack_eliminate_internal_negative_pops(
+        // After cleaning, only non-zero pops or non-removable items remain.
+        let expected1a_internal = vec![ek(-1, Some(&[1]), None), ek(0, None, Some(1))];
+        let got1a_internal = stack_eliminate_internal_negative_pops(
             path1a,
             get_pop,
             replace_pop,
             checks_intersect,
             can_remove,
         );
-        assert!(got1a.is_none(), "Path 1A should be eliminated by mismatch");
+        assert_eq!(
+            got1a_internal.as_ref(),
+            Some(&expected1a_internal),
+            "Path 1A should not mismatch"
+        );
+        // The trailing elim stage does not remove the -1 because it's not at the trail.
+        let got1a_final =
+            stack_eliminate_trailing_negative_pops(got1a_internal.unwrap(), get_pop, can_remove);
+        assert_eq!(got1a_final, expected1a_internal);
 
-        // Path 1B: Survives, contains a pop: 2 but no negative pops.
+        // Path 1B from the graph.
         let path1b = vec![
-            ek(0, None, Some(1)),
-            ek(0, None, Some(2)),
-            ek(0, Some(&[2]), Some(7)),
-            ek(2, None, None),
-            ek(0, Some(&[0]), Some(8)),
+            ek(0, None, None),          // from 16->19
+            ek(0, None, None),          // from 19->20
+            ek(0, Some(&[2]), None),    // from 20->22
+            ek(2, None, None),          // from 22->24
+            ek(0, Some(&[0]), None),    // from 24->26
         ];
+        let expected1b = vec![ek(2, None, None)];
         let got1b = stack_eliminate_internal_negative_pops(
-            path1b.clone(),
+            path1b,
             get_pop,
             replace_pop,
             checks_intersect,
             can_remove,
         )
         .expect("Path 1B should survive");
-        assert_eq!(got1b, path1b);
+        assert_eq!(got1b, expected1b);
 
-        // Path 2A: Designed to cancel successfully. A pop: 1 edge is introduced
-        // after the pop: -1 with a compatible check.
+        // Path 2A from the graph.
         let path2a = vec![
-            ek(0, None, Some(9)),
-            ek(0, None, Some(10)),
-            ek(0, Some(&[1]), Some(11)),
-            ek(0, None, Some(12)),
-            ek(-1, Some(&[2]), None),
-            ek(1, Some(&[2]), None), // Compatible check
-            ek(0, None, Some(13)),
-            ek(0, None, Some(14)),
+            ek(0, None, None),          // from 16->29
+            ek(0, None, None),          // from 29->30
+            ek(0, Some(&[1]), None),    // from 30->31
+            ek(0, None, None),          // from 31->33
+            ek(-1, Some(&[2]), None),   // from 33->35
+            ek(0, None, None),          // from 35->37
+            ek(0, None, Some(2)),       // from 37->38, `tokens: [0]` -> not removable
+            ek(0, None, None),          // from 38->18
         ];
-        let expected2a = vec![
-            ek(0, None, Some(9)),
-            ek(0, None, Some(10)),
-            ek(0, Some(&[1]), Some(11)),
-            ek(0, None, Some(12)),
-            ek(0, None, Some(13)),
-            ek(0, None, Some(14)),
-        ];
+        let expected2a = vec![ek(-1, Some(&[2]), None), ek(0, None, Some(2))];
         let got2a = stack_eliminate_internal_negative_pops(
             path2a,
             get_pop,
@@ -1167,26 +1168,27 @@ mod tests {
             checks_intersect,
             can_remove,
         )
-        .expect("Path 2A should cancel successfully");
+        .expect("Path 2A should not mismatch");
         assert_eq!(got2a, expected2a);
 
-        // Path 2B: Survives, contains a pop: 2 but no negative pops.
+        // Path 2B from the graph.
         let path2b = vec![
-            ek(0, None, Some(9)),
-            ek(0, None, Some(10)),
-            ek(0, Some(&[2]), Some(15)),
-            ek(2, None, None),
-            ek(0, Some(&[0]), Some(16)),
+            ek(0, None, None),          // from 16->29
+            ek(0, None, None),          // from 29->30
+            ek(0, Some(&[2]), None),    // from 30->32
+            ek(2, None, None),          // from 32->34
+            ek(0, Some(&[0]), None),    // from 34->36
         ];
+        let expected2b = vec![ek(2, None, None)];
         let got2b = stack_eliminate_internal_negative_pops(
-            path2b.clone(),
+            path2b,
             get_pop,
             replace_pop,
             checks_intersect,
             can_remove,
         )
         .expect("Path 2B should survive");
-        assert_eq!(got2b, path2b);
+        assert_eq!(got2b, expected2b);
     }
 
     // --- Graph-level scenario (stack-only validation) ---
@@ -1456,42 +1458,45 @@ mod tests {
         let n = |i: i32| nodes[&i];
 
         // --- Build graph from user-provided structure, corrected version ---
-        // Most edges are pop: 0 and are made unremovable with a dummy `ev`.
-        // Two pop: 0 edges are changed to pop: 1 to create test scenarios.
+        // Mapping from diagram to TestEK:
+        // - `pop` is as specified.
+        // - `states [x]` maps to `check: Some(&[x])`.
+        // - `tokens: [range]` or not specified maps to `ev: None` (removable if pop=0).
+        // - `tokens: [specific_id]` maps to `ev: Some(...)` (not removable).
 
         // Branch 1 from root n16
-        add_edge(&god, n(16), n(19), ek(0, None, Some(1)));
-        add_edge(&god, n(19), n(20), ek(0, None, Some(2)));
+        add_edge(&god, n(16), n(19), ek(0, None, None));
+        add_edge(&god, n(19), n(20), ek(0, None, None));
 
-        // Path 1A (designed to cause a mismatch and be eliminated)
-        add_edge(&god, n(20), n(21), ek(0, Some(&[0]), Some(3)));
-        add_edge(&god, n(21), n(23), ek(0, None, Some(4)));
+        // Path 1A
+        add_edge(&god, n(20), n(21), ek(0, Some(&[0]), None));
+        add_edge(&god, n(21), n(23), ek(0, None, None));
         add_edge(&god, n(23), n(25), ek(-1, Some(&[1]), None));
-        add_edge(&god, n(25), n(27), ek(1, Some(&[0]), None)); // MODIFIED from pop:0 to pop:1 for mismatch
-        add_edge(&god, n(27), n(28), ek(0, None, Some(5)));
-        add_edge(&god, n(28), n(18), ek(0, None, Some(6)));
+        add_edge(&god, n(25), n(27), ek(0, None, None));
+        add_edge(&god, n(27), n(28), ek(0, None, Some(1))); // `tokens: [1]`
+        add_edge(&god, n(28), n(18), ek(0, None, None));
 
-        // Path 1B (survives)
-        add_edge(&god, n(20), n(22), ek(0, Some(&[2]), Some(7)));
+        // Path 1B
+        add_edge(&god, n(20), n(22), ek(0, Some(&[2]), None));
         add_edge(&god, n(22), n(24), ek(2, None, None));
-        add_edge(&god, n(24), n(26), ek(0, Some(&[0]), Some(8)));
+        add_edge(&god, n(24), n(26), ek(0, Some(&[0]), None));
 
         // Branch 2 from root n16
-        add_edge(&god, n(16), n(29), ek(0, None, Some(9)));
-        add_edge(&god, n(29), n(30), ek(0, None, Some(10)));
+        add_edge(&god, n(16), n(29), ek(0, None, None));
+        add_edge(&god, n(29), n(30), ek(0, None, None));
 
-        // Path 2A (designed to cancel successfully)
-        add_edge(&god, n(30), n(31), ek(0, Some(&[1]), Some(11)));
-        add_edge(&god, n(31), n(33), ek(0, None, Some(12)));
+        // Path 2A
+        add_edge(&god, n(30), n(31), ek(0, Some(&[1]), None));
+        add_edge(&god, n(31), n(33), ek(0, None, None));
         add_edge(&god, n(33), n(35), ek(-1, Some(&[2]), None));
-        add_edge(&god, n(35), n(37), ek(1, Some(&[2]), None)); // MODIFIED from pop:0 to pop:1 for cancellation
-        add_edge(&god, n(37), n(38), ek(0, None, Some(13)));
-        add_edge(&god, n(38), n(18), ek(0, None, Some(14)));
+        add_edge(&god, n(35), n(37), ek(0, None, None));
+        add_edge(&god, n(37), n(38), ek(0, None, Some(2))); // `tokens: [0]`
+        add_edge(&god, n(38), n(18), ek(0, None, None));
 
-        // Path 2B (survives)
-        add_edge(&god, n(30), n(32), ek(0, Some(&[2]), Some(15)));
+        // Path 2B
+        add_edge(&god, n(30), n(32), ek(0, Some(&[2]), None));
         add_edge(&god, n(32), n(34), ek(2, None, None));
-        add_edge(&god, n(34), n(36), ek(0, Some(&[0]), Some(16)));
+        add_edge(&god, n(34), n(36), ek(0, Some(&[0]), None));
 
         run_trie_vs_stack_comparison_test(&god, &[n(16)]);
     }
