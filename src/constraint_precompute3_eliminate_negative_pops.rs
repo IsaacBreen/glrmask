@@ -74,13 +74,6 @@ pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FInte
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
 {
-    // TODO: Implement the graph-level version by scanning paths and performing local rewrites.
-    // Strategy sketch:
-    // - Enumerate stacks (paths) or perform local rewrites along edges while preserving
-    //   branching semantics. Use on-the-fly cloning where needed to avoid mutating shared nodes.
-    // - For each negative/positive run pair (local to a path segment), test compatibility via
-    //   intersect_checks, and cancel pops up to the min of run totals, producing remainders.
-    // - Eliminate stacks exhibiting mismatches (remove the paths/edges).
     todo!()
 }
 
@@ -96,8 +89,6 @@ pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet>(
     T: Clone,
     FGet: FnMut(&EK) -> isize,
 {
-    // TODO: Implement the graph-level version by pruning or neutralizing trailing negative
-    // edges on all terminal paths. Also remove edges with pop == 0.
     todo!()
 }
 
