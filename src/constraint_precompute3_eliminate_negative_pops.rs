@@ -125,9 +125,9 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect, FCanRemove
     EK: Ord + Clone,
     EV: Clone + Ord,
     T: Clone + Ord + PartialEq,
-    FGet: FnMut(&EK) -> isize,
-    FReplace: FnMut(&EK, isize) -> EK,
-    FIntersect: FnMut(&EK, &EK) -> bool,
+    FGet: FnMut(&EK, &EV) -> isize,
+    FReplace: FnMut(&EK, &EV, isize) -> (EK, EV),
+    FIntersect: FnMut(&EK, &EV, &EK, &EV) -> bool,
     FCanRemove: FnMut(&EK, &EV) -> bool,
 {
     // Stage 1: eliminate internal negative pops (graph-level)
@@ -168,24 +168,26 @@ pub fn eliminate_internal_negative_pops_on_trie<
     EK: Ord + Clone,
     EV: Clone + Ord,
     T: Clone + Ord + PartialEq,
-    FGet: FnMut(&EK) -> isize,
-    FReplace: FnMut(&EK, isize) -> EK,
-    FIntersect: FnMut(&EK, &EK) -> bool,
+    FGet: FnMut(&EK, &EV) -> isize,
+    FReplace: FnMut(&EK, &EV, isize) -> (EK, EV),
+    FIntersect: FnMut(&EK, &EV, &EK, &EV) -> bool,
     FCanRemove: FnMut(&EK, &EV) -> bool,
 {
     let paths = get_all_paths_with_data(god, roots);
     let mut processed_paths = BTreeSet::new();
 
     for (root_t, path) in paths {
-        let temp_get_pop = |pe: &PathElement<EK, EV, T>| get_pop(&pe.ek);
+        let temp_get_pop = |pe: &PathElement<EK, EV, T>| get_pop(&pe.ek, &pe.ev);
         let temp_replace_pop = |pe: &PathElement<EK, EV, T>, new_pop| {
             let mut new_pe = pe.clone();
-            new_pe.ek = replace_pop(&pe.ek, new_pop);
+            let (new_ek, new_ev) = replace_pop(&pe.ek, &pe.ev, new_pop);
+            new_pe.ek = new_ek;
+            new_pe.ev = new_ev;
             new_pe
         };
         let temp_intersect_checks =
             |pe1: &PathElement<EK, EV, T>, pe2: &PathElement<EK, EV, T>| {
-                intersect_checks(&pe1.ek, &pe2.ek)
+                intersect_checks(&pe1.ek, &pe1.ev, &pe2.ek, &pe2.ev)
             };
         let temp_can_remove = |pe: &PathElement<EK, EV, T>| {
             can_remove(&pe.ek, &pe.ev) && pe.src_node_value == pe.dst_node_value
@@ -248,14 +250,14 @@ pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet, FCanRemove>(
     EK: Ord + Clone,
     EV: Clone + Ord,
     T: Clone + Ord + PartialEq,
-    FGet: FnMut(&EK) -> isize,
+    FGet: FnMut(&EK, &EV) -> isize,
     FCanRemove: FnMut(&EK, &EV) -> bool,
 {
     let paths = get_all_paths_with_data(_god, _roots);
     let mut processed_paths = BTreeSet::new();
 
     for (root_t, path) in paths {
-        let temp_get_pop = |pe: &PathElement<EK, EV, T>| get_pop(&pe.ek);
+        let temp_get_pop = |pe: &PathElement<EK, EV, T>| get_pop(&pe.ek, &pe.ev);
         let temp_can_remove = |pe: &PathElement<EK, EV, T>| {
             can_remove(&pe.ek, &pe.ev) && pe.src_node_value == pe.dst_node_value
         };
@@ -1127,9 +1129,9 @@ mod tests {
         eliminate_negative_pops(
             &god_clone,
             &roots_clone,
-            get_pop,
-            replace_pop,
-            checks_intersect,
+            |ek, _ev| get_pop(ek),
+            |ek, _ev, new_pop| (replace_pop(ek, new_pop), ()),
+            |ek1, _ev1, ek2, _ev2| checks_intersect(ek1, ek2),
             |ek, _ev| can_remove(ek),
         );
 
