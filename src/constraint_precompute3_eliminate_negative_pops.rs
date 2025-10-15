@@ -494,6 +494,57 @@ mod tests {
         assert_eq!(final_s, vec![ek(1, Some(&[1])), ek(2, Some(&[2]))]);
     }
 
+    #[test]
+    fn complex_stack_with_multiple_run_pairs_and_mismatch() {
+        // +1 a, [-2 b, +1 b], [-1 c, +2 c], +1 d
+        // The first pair [-2 b, +1 b] should leave [-1 b].
+        // This is combined with the next negative run, giving [-1 b, -1 c].
+        // This is paired with [+2 c, +1 d].
+        // Reversed neg: [+1 c, +1 b]. Pos: [+2 c, +1 d].
+        // At stack depth 2, we compare b and c. Their checks ([1] and [2]) do not
+        // intersect, so this is a mismatch, and the whole stack is eliminated.
+        let input = vec![
+            ek(1, Some(&[0])),  // a
+            ek(-2, Some(&[1])), // b
+            ek(1, Some(&[1])),  // b
+            ek(-1, Some(&[2])), // c
+            ek(2, Some(&[2])),  // c
+            ek(1, Some(&[3])),  // d
+        ];
+        let got =
+            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect);
+        assert!(got.is_none(), "Expected mismatch between b and c checks");
+    }
+
+    #[test]
+    fn complex_stack_with_multiple_run_pairs_compatible() {
+        // Same as above, but checks for b and c are compatible.
+        // `b` is [1, 5], `c` is [2, 5]. They intersect on 5.
+        // First pair: [-2 b, +1 b] -> [-1 b]
+        // Next negative run: [-1 b, -1 c]
+        // Next positive run: [+2 c, +1 d]
+        // Pair: [-1 b, -1 c] vs [+2 c, +1 d].
+        // Reversed neg: [+1 c, +1 b]. Total pop 2.
+        // Pos: [+2 c, +1 d]. Total pop 3.
+        // Cancel amount is 2.
+        // Check positions: neg_rev has c at 1, b at 2. pos has c at 2.
+        // At position 2, b and c checks must intersect. They do.
+        // Leftover pos: [+1 d].
+        // Final stack: [+1 a, +1 d].
+        let input = vec![
+            ek(1, Some(&[0])),     // a
+            ek(-2, Some(&[1, 5])), // b
+            ek(1, Some(&[1, 5])), // b
+            ek(-1, Some(&[2, 5])), // c
+            ek(2, Some(&[2, 5])), // c
+            ek(1, Some(&[3])),     // d
+        ];
+        let got =
+            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
+                .expect("should not mismatch");
+        assert_eq!(got, vec![ek(1, Some(&[0])), ek(1, Some(&[3]))]);
+    }
+
     // --- Graph-level scenario (stack-only validation) ---
 
     fn new_node(god: &TestGod) -> Trie2Index {
