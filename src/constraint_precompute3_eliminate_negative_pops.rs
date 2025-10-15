@@ -342,14 +342,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constraint::PrecomputedNodeContents;
     use crate::datastructures::trie::{Trie, Trie2Index};
     use crate::trie_test_framework::harness;
     use std::collections::{BTreeMap, BTreeSet};
 
     // Test harness types
     type TestEV = ();
-    type TestT = PrecomputedNodeContents;
+    type TestT = ();
     type TestGod = GodWrapper<TestEK, TestEV, TestT>;
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -548,7 +547,7 @@ mod tests {
     // --- Graph-level scenario (stack-only validation) ---
 
     fn new_node(god: &TestGod) -> Trie2Index {
-        harness::new_node(god, PrecomputedNodeContents::internal())
+        harness::new_node(god, ())
     }
 
     fn add_edge(god: &TestGod, from: Trie2Index, to: Trie2Index, key: TestEK) {
