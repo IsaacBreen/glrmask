@@ -1856,10 +1856,7 @@ impl GrammarConstraint {
         }
 
         // Shared end node for Trie1-end positions
-        println!("FK1: {}", Trie::pretty_print_arena(&intermediate_trie3_god));
         let trie3_end = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
-        println!("trie3_end: {:?}", trie3_end);
-        println!("FK2: {}", Trie::pretty_print_arena(&intermediate_trie3_god));
 
         Trie::special_map_grouped(
             &trie1_god,
@@ -1991,8 +1988,6 @@ impl GrammarConstraint {
             }
         }
 
-        println!("FK: {}", Trie::pretty_print_arena(&intermediate_trie3_god));
-
         // --- Convert intermediate trie to final Trie3 format ---
         let (mut precomputed3, trie3_god) = Self::convert_intermediate_trie3_to_final(
             &intermediate_precomputed3,
@@ -2002,7 +1997,7 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
-        // optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
         (precomputed3, trie3_god)
     }
 
