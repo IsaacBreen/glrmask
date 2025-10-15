@@ -1974,7 +1974,6 @@ impl GrammarConstraint {
             // FIntersect: intersect_checks: FnMut(&EK, &EK) -> bool. EK is (isize, LLMTokenBV)
             |ek1, ek2| ek1.1.intersects(&ek2.1),
         );
-        Trie::recompute_all_max_depths(&trie3_god, &roots);
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
