@@ -1947,11 +1947,19 @@ impl GrammarConstraint {
         // --- New: Path extraction, elimination, and trie rebuilding ---
         let roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
         let paths = IntermediatePrecomputeNode3::get_all_paths(&intermediate_trie3_god, &roots);
+        println!("Paths:");
+        for path in &paths {
+            println!("  {:?}", path);
+        }
         let mut processed_paths = BTreeSet::new();
         for path in paths {
             if let Some(new_path) = eliminate_pushes_and_pops(path) {
                 processed_paths.insert(new_path);
             }
+        }
+        println!("Processed paths:");
+        for path in &processed_paths {
+            println!("  {:?}", path);
         }
 
         // Rebuild the intermediate trie from the processed paths.
