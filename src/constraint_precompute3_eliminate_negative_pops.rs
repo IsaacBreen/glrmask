@@ -123,7 +123,7 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect, FCanRemove
     mut can_remove: FCanRemove,
 ) where
     EK: Ord + Clone,
-    EV: Clone,
+    EV: Clone + Ord,
     T: Clone + Ord + PartialEq,
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
@@ -166,7 +166,7 @@ pub fn eliminate_internal_negative_pops_on_trie<
     can_remove: &mut FCanRemove,
 ) where
     EK: Ord + Clone,
-    EV: Clone,
+    EV: Clone + Ord,
     T: Clone + Ord + PartialEq,
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
@@ -208,7 +208,7 @@ pub fn eliminate_internal_negative_pops_on_trie<
 
     god.clear();
 
-    let mut new_root_map: HashMap<T, Trie2Index> = HashMap::new();
+    let mut new_root_map: BTreeMap<T, Trie2Index> = BTreeMap::new();
     for (old_idx, root_t) in &old_roots_with_values {
         let new_node = Trie::new(root_t.clone());
         god.insert_at((*old_idx).into(), new_node);
@@ -244,7 +244,7 @@ pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet, FCanRemove>(
     can_remove: &mut FCanRemove,
 ) where
     EK: Ord + Clone,
-    EV: Clone,
+    EV: Clone + Ord,
     T: Clone + Ord + PartialEq,
     FGet: FnMut(&EK) -> isize,
     FCanRemove: FnMut(&EK, &EV) -> bool,
@@ -269,7 +269,7 @@ pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet, FCanRemove>(
 
     _god.clear();
 
-    let mut new_root_map: HashMap<T, Trie2Index> = HashMap::new();
+    let mut new_root_map: BTreeMap<T, Trie2Index> = BTreeMap::new();
     for (old_idx, root_t) in &old_roots_with_values {
         let new_node = Trie::new(root_t.clone());
         _god.insert_at((*old_idx).into(), new_node);
