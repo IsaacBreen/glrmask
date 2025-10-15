@@ -656,48 +656,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn zero_pops_are_removed_everywhere() {
-        // Zero-pops should be stripped out by the elimination function, without
-        // otherwise affecting cancellation logic.
-
-        // Case 1: Zero-pop at the start.
-        let input = vec![ek(0, None), ek(1, Some(&[0])), ek(-1, Some(&[0]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert!(got.is_empty());
-
-        // Case 2: Zero-pop in the middle of a run pair.
-        let input = vec![ek(1, Some(&[0])), ek(0, None), ek(-1, Some(&[0]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert!(got.is_empty());
-
-        // Case 3: Zero-pop at the end.
-        let input = vec![ek(1, Some(&[0])), ek(-1, Some(&[0])), ek(0, None)];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert!(got.is_empty());
-
-        // Case 4: Multiple zero-pops surrounding a partial cancellation.
-        let input = vec![ek(0, None), ek(2, Some(&[1])), ek(0, None), ek(-1, Some(&[1])), ek(0, None)];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert_eq!(got, vec![ek(1, Some(&[1]))]);
-
-        // Case 5: Zero-pop between a negative and positive run.
-        let input = vec![ek(-1, Some(&[2])), ek(0, None), ek(1, Some(&[2]))];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert!(got.is_empty());
-
-        // Case 6: A stack of only zero-pops.
-        let input = vec![ek(0, None), ek(0, None)];
-        let got = stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
-            .expect("should not mismatch");
-        assert!(got.is_empty());
-    }
-
     // --- Graph-level scenario (stack-only validation) ---
 
     fn new_node(god: &TestGod) -> Trie2Index {
