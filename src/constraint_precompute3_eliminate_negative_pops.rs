@@ -22,7 +22,93 @@
 //   an empty set denotes "unconstrained" (i.e., a universal set). The intersection then
 //   uses the rule: empty ∩ X = X (non-empty) ⇒ match; non-empty ∩ non-empty empty ⇒ mismatch.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
 use crate::datastructures::trie::{GodWrapper, Trie, Trie2Index};
+
+// Helper struct to carry all data associated with a path segment.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct PathElement<EK, EV, T> {
+    ek: EK,
+    ev: EV,
+    src_node_value: T,
+    dst_node_value: T,
+}
+
+// Helper to extract all paths with full EK, EV, and T data.
+fn get_all_paths_with_data<EK, EV, T>(
+    god: &GodWrapper<EK, EV, T>,
+    roots: &[Trie2Index],
+) -> BTreeSet<(T, Vec<PathElement<EK, EV, T>>)>
+where
+    EK: Ord + Clone,
+    EV: Ord + Clone,
+    T: Ord + Clone,
+{
+    let mut all_paths = BTreeSet::new();
+    for &root in roots {
+        if let Some(root_guard) = root.read(god) {
+            let root_value = root_guard.value.clone();
+            let mut visiting = BTreeSet::new();
+            get_all_paths_with_data_recursive(
+                god,
+                root,
+                vec![],
+                &mut all_paths,
+                &mut visiting,
+                root_value,
+            );
+        }
+    }
+    all_paths
+}
+
+fn get_all_paths_with_data_recursive<EK, EV, T>(
+    god: &GodWrapper<EK, EV, T>,
+    node_idx: Trie2Index,
+    current_path: Vec<PathElement<EK, EV, T>>,
+    all_paths: &mut BTreeSet<(T, Vec<PathElement<EK, EV, T>>)>,
+    visiting: &mut BTreeSet<Trie2Index>,
+    root_value: T,
+) where
+    EK: Ord + Clone,
+    EV: Ord + Clone,
+    T: Ord + Clone,
+{
+    if !visiting.insert(node_idx) {
+        return; // Cycle detected
+    }
+
+    if let Some(guard) = node_idx.read(god) {
+        if guard.is_leaf() {
+            all_paths.insert((root_value, current_path));
+        } else {
+            let src_node_value = guard.value.clone();
+            for (edge_key, dest_map) in guard.children() {
+                for (child_idx, edge_value) in dest_map.iter() {
+                    if let Some(child_guard) = child_idx.read(god) {
+                        let mut new_path = current_path.clone();
+                        new_path.push(PathElement {
+                            ek: edge_key.clone(),
+                            ev: edge_value.clone(),
+                            src_node_value: src_node_value.clone(),
+                            dst_node_value: child_guard.value.clone(),
+                        });
+                        get_all_paths_with_data_recursive(
+                            god,
+                            *child_idx,
+                            new_path,
+                            all_paths,
+                            visiting,
+                            root_value.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    visiting.remove(&node_idx);
+}
 
 /// Perform negative-pop elimination on the trie:
 /// - First eliminate internal negative pops by canceling negative/positive run pairs.
@@ -38,7 +124,7 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect, FCanRemove
 ) where
     EK: Ord + Clone,
     EV: Clone,
-    T: Clone,
+    T: Clone + Ord + PartialEq,
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
@@ -63,23 +149,90 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect, FCanRemove
 /// the provided closures to read/modify pop and test check compatibility.
 ///
 /// Not implemented yet.
-pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FIntersect, FCanRemove>(
-    _god: &GodWrapper<EK, EV, T>,
-    _roots: &[Trie2Index],
-    _get_pop: &mut FGet,
-    _replace_pop: &mut FReplace,
-    _intersect_checks: &mut FIntersect,
-    _can_remove: &mut FCanRemove,
+pub fn eliminate_internal_negative_pops_on_trie<
+    EK,
+    EV,
+    T,
+    FGet,
+    FReplace,
+    FIntersect,
+    FCanRemove,
+>(
+    god: &GodWrapper<EK, EV, T>,
+    roots: &[Trie2Index],
+    get_pop: &mut FGet,
+    replace_pop: &mut FReplace,
+    intersect_checks: &mut FIntersect,
+    can_remove: &mut FCanRemove,
 ) where
     EK: Ord + Clone,
     EV: Clone,
-    T: Clone,
+    T: Clone + Ord + PartialEq,
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
     FCanRemove: FnMut(&EK, &EV) -> bool,
 {
-    todo!()
+    let paths = get_all_paths_with_data(god, roots);
+    let mut processed_paths = BTreeSet::new();
+
+    for (root_t, path) in paths {
+        let temp_get_pop = |pe: &PathElement<EK, EV, T>| get_pop(&pe.ek);
+        let temp_replace_pop = |pe: &PathElement<EK, EV, T>, new_pop| {
+            let mut new_pe = pe.clone();
+            new_pe.ek = replace_pop(&pe.ek, new_pop);
+            new_pe
+        };
+        let temp_intersect_checks =
+            |pe1: &PathElement<EK, EV, T>, pe2: &PathElement<EK, EV, T>| {
+                intersect_checks(&pe1.ek, &pe2.ek)
+            };
+        let temp_can_remove = |pe: &PathElement<EK, EV, T>| {
+            can_remove(&pe.ek, &pe.ev) && pe.src_node_value == pe.dst_node_value
+        };
+
+        if let Some(new_path) = stack_eliminate_internal_negative_pops(
+            path,
+            temp_get_pop,
+            temp_replace_pop,
+            temp_intersect_checks,
+            temp_can_remove,
+        ) {
+            processed_paths.insert((root_t, new_path));
+        }
+    }
+
+    // Rebuild the trie from the processed paths, preserving root indices.
+    let old_roots_with_values: Vec<(Trie2Index, T)> =
+        roots.iter().map(|r| (*r, r.read(god).unwrap().value.clone())).collect();
+
+    god.clear();
+
+    let mut new_root_map: HashMap<T, Trie2Index> = HashMap::new();
+    for (old_idx, root_t) in &old_roots_with_values {
+        let new_node = Trie::new(root_t.clone());
+        god.insert_at((*old_idx).into(), new_node);
+        new_root_map.insert(root_t.clone(), *old_idx);
+    }
+
+    for (root_t, path) in processed_paths {
+        if !new_root_map.contains_key(&root_t) {
+            // This case can happen if a root was a leaf and its path was empty and got eliminated.
+            // We ensure the root node still exists.
+            continue;
+        }
+        let mut current_idx = new_root_map[&root_t];
+        for pe in path {
+            // This creates an unrolled graph, which is fine for a dummy impl.
+            let new_idx = current_idx.write(god).unwrap().force_insert_to_new_node(
+                god,
+                pe.ek.clone(),
+                pe.ev.clone(),
+                pe.dst_node_value.clone(),
+            );
+            current_idx = new_idx;
+        }
+    }
 }
 
 /// Graph-level transform: remove trailing negative pops at the ends of stacks.
@@ -87,15 +240,57 @@ pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FInte
 pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet, FCanRemove>(
     _god: &GodWrapper<EK, EV, T>,
     _roots: &[Trie2Index],
-    _get_pop: &mut FGet,
-    _can_remove: &mut FCanRemove,
+    get_pop: &mut FGet,
+    can_remove: &mut FCanRemove,
 ) where
     EK: Ord + Clone,
     EV: Clone,
-    T: Clone,
+    T: Clone + Ord + PartialEq,
     FGet: FnMut(&EK) -> isize,
+    FCanRemove: FnMut(&EK, &EV) -> bool,
 {
-    todo!()
+    let paths = get_all_paths_with_data(_god, _roots);
+    let mut processed_paths = BTreeSet::new();
+
+    for (root_t, path) in paths {
+        let temp_get_pop = |pe: &PathElement<EK, EV, T>| get_pop(&pe.ek);
+        let temp_can_remove = |pe: &PathElement<EK, EV, T>| {
+            can_remove(&pe.ek, &pe.ev) && pe.src_node_value == pe.dst_node_value
+        };
+
+        let new_path =
+            stack_eliminate_trailing_negative_pops(path, temp_get_pop, temp_can_remove);
+        processed_paths.insert((root_t, new_path));
+    }
+
+    // Rebuild the trie from the processed paths, preserving root indices.
+    let old_roots_with_values: Vec<(Trie2Index, T)> =
+        _roots.iter().map(|r| (*r, r.read(_god).unwrap().value.clone())).collect();
+
+    _god.clear();
+
+    let mut new_root_map: HashMap<T, Trie2Index> = HashMap::new();
+    for (old_idx, root_t) in &old_roots_with_values {
+        let new_node = Trie::new(root_t.clone());
+        _god.insert_at((*old_idx).into(), new_node);
+        new_root_map.insert(root_t.clone(), *old_idx);
+    }
+
+    for (root_t, path) in processed_paths {
+        if !new_root_map.contains_key(&root_t) {
+            continue;
+        }
+        let mut current_idx = new_root_map[&root_t];
+        for pe in path {
+            let new_idx = current_idx.write(_god).unwrap().force_insert_to_new_node(
+                _god,
+                pe.ek.clone(),
+                pe.ev.clone(),
+                pe.dst_node_value.clone(),
+            );
+            current_idx = new_idx;
+        }
+    }
 }
 
 /// Reference stack function: eliminate internal negative pops by canceling adjacent
