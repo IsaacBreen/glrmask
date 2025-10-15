@@ -821,5 +821,101 @@ mod tests {
         add_edge(&god, b, c, ek(1, Some(&[1])));
         run_trie_vs_stack_comparison_test(&god, &[a]);
     }
+
+    #[test]
+    fn test_trailing_negative_is_removed_via_runner() {
+        // Path 1: A --(+2)--> B --(-1)--> C. The trailing negative should be removed.
+        // Path 2: A --(+5)--> D. Should survive untouched.
+        let god = TestGod::new();
+        let a = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+        let d = new_node(&god);
+        // Path 1
+        add_edge(&god, a, b, ek(2, None));
+        add_edge(&god, b, c, ek(-1, None));
+        // Path 2
+        add_edge(&god, a, d, ek(5, None));
+        run_trie_vs_stack_comparison_test(&god, &[a]);
+    }
+
+    #[test]
+    fn test_partial_cancel_on_graph_via_runner() {
+        // Path 1: A --(-2, c0)--> B --(+3, c0)--> C. Should result in a path with (+1, c0).
+        // Path 2: A --(+1, c1)--> D. Survivor.
+        let god = TestGod::new();
+        let a = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+        let d = new_node(&god);
+        // Path 1
+        add_edge(&god, a, b, ek(-2, Some(&[0])));
+        add_edge(&god, b, c, ek(3, Some(&[0])));
+        // Path 2
+        add_edge(&god, a, d, ek(1, Some(&[1])));
+        run_trie_vs_stack_comparison_test(&god, &[a]);
+    }
+
+    #[test]
+    fn test_shared_node_with_divergent_outcomes_via_runner() {
+        // Path 1: A --(+1, c0)--> B --(+1, c0)--> C. Should survive.
+        // Path 2: D --(-1, c1)--> B --(+1, c0)--> C. Should be eliminated by mismatch.
+        // Both paths share the B->C edge.
+        let god = TestGod::new();
+        let a = new_node(&god);
+        let d = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+
+        // Path 1 prefix
+        add_edge(&god, a, b, ek(1, Some(&[0])));
+        // Path 2 prefix
+        add_edge(&god, d, b, ek(-1, Some(&[1]))); // Mismatching check ID
+        // Shared suffix
+        add_edge(&god, b, c, ek(1, Some(&[0])));
+
+        run_trie_vs_stack_comparison_test(&god, &[a, d]);
+    }
+
+    #[test]
+    fn test_unconstrained_check_cancels_correctly_via_runner() {
+        // Path 1: A --(-1, None)--> B --(+1, c0)--> C. Should cancel to empty.
+        // Path 2: A --(+1, c0)--> D. Survivor.
+        let god = TestGod::new();
+        let a = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+        let d = new_node(&god);
+
+        // Path 1
+        add_edge(&god, a, b, ek(-1, None));
+        add_edge(&god, b, c, ek(1, Some(&[0])));
+        // Path 2
+        add_edge(&god, a, d, ek(1, Some(&[0])));
+
+        run_trie_vs_stack_comparison_test(&god, &[a]);
+    }
+
+    #[test]
+    fn test_all_paths_eliminated_via_runner() {
+        // Path 1: A --(+1, c0)--> B --(-1, c1)--> C (mismatch)
+        // Path 2: A --(-2, c2)--> D --(+2, c2)--> E (full cancel)
+        let god = TestGod::new();
+        let a = new_node(&god);
+        let b = new_node(&god);
+        let c = new_node(&god);
+        let d = new_node(&god);
+        let e = new_node(&god);
+
+        // Path 1
+        add_edge(&god, a, b, ek(1, Some(&[0])));
+        add_edge(&god, b, c, ek(-1, Some(&[1]))); // Mismatch
+
+        // Path 2
+        add_edge(&god, a, d, ek(-2, Some(&[2])));
+        add_edge(&god, d, e, ek(2, Some(&[2]))); // Cancels
+
+        run_trie_vs_stack_comparison_test(&god, &[a]);
+    }
 }
 
