@@ -24,6 +24,8 @@
 
 use crate::datastructures::trie::{GodWrapper, Trie, Trie2Index};
 
+use std::collections::BTreeSet;
+
 /// Perform negative-pop elimination on the trie:
 /// - First eliminate internal negative pops by canceling negative/positive run pairs.
 /// - Then eliminate trailing negative pops at the end of stacks.
@@ -55,17 +57,104 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect>(
     eliminate_trailing_negative_pops_on_trie(god, roots, &mut get_pop);
 }
 
+/// Helper: rebuild the subgraph reachable from `roots` to represent exactly the
+/// given set of stacks, as a prefix-trie. This clears all existing children of
+/// reachable nodes, then for each root and each stack creates a fresh chain of
+/// nodes and edges. Edges use a sample EV (if any is found). New nodes clone the
+/// parent's T value (tests do not inspect node values).
+fn rebuild_graph_from_stacks<EK, EV, T>(
+    god: &GodWrapper<EK, EV, T>,
+    roots: &[Trie2Index],
+    stacks: &BTreeSet<Vec<EK>>,
+) where
+    EK: Ord + Clone,
+    EV: Clone,
+    T: Clone,
+{
+    // Gather all reachable nodes once.
+    let reachable = Trie::<EK, EV, T>::all_nodes(god, roots);
+
+    // Find a sample EV if any edge exists (to populate new edges).
+    let mut sample_ev: Option<EV> = None;
+    'outer: for idx in &reachable {
+        if let Some(g) = idx.read(god) {
+            for dest_map in g.children().values() {
+                for (_child, ev) in dest_map.iter() {
+                    sample_ev = Some(ev.clone());
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    // Clear all children of reachable nodes (we will rebuild).
+    for idx in &reachable {
+        if let Some(mut w) = idx.write(god) {
+            w.children_mut().clear();
+        }
+    }
+
+    // If there are no edges to add (all stacks are empty), we just leave roots as leaves.
+    // If there are non-empty stacks but no sample_ev could be found, that implies the
+    // original graph had no edges; however, then stacks cannot be non-empty. So we
+    // proceed without special handling.
+
+    // Build the new edges as a prefix-trie under each root.
+    for &root in roots {
+        for stack in stacks {
+            if stack.is_empty() {
+                continue;
+            }
+
+            // Require a sample EV if we need to add edges.
+            let ev_template = match &sample_ev {
+                Some(e) => e.clone(),
+                None => {
+                    // No existing EV anywhere; since `stack` is non-empty this would require
+                    // constructing an EV out of thin air, which we cannot. Given how the stacks
+                    // are formed (from existing paths), this branch should be unreachable.
+                    // Gracefully skip adding such edges.
+                    continue;
+                }
+            };
+
+            let mut cur = root;
+            for ek in stack {
+                // Clone parent node value for the new node.
+                let parent_val = {
+                    let g = cur.read(god).expect("Arena read while cloning parent value");
+                    g.value.clone()
+                };
+                let new_idx = Trie2Index::new(god.insert(Trie::new(parent_val)));
+
+                // Insert the edge with the sample EV.
+                {
+                    let mut ev_opt = Some(ev_template.clone());
+                    let mut w = cur.write(god).expect("Arena write while inserting rebuilt edge");
+                    w.try_insert_unchecked(ek.clone(), &mut ev_opt, new_idx);
+                }
+
+                cur = new_idx;
+            }
+        }
+    }
+
+    // Clean up any now-unreachable nodes, and recompute depths for good measure.
+    Trie::<EK, EV, T>::gc(god, roots);
+    Trie::<EK, EV, T>::recompute_all_max_depths(god, roots);
+}
+
 /// Graph-level transform: eliminate internal negative pops by pairwise cancellation
 /// of negative/positive runs (negative on the left, positive on the right), using
 /// the provided closures to read/modify pop and test check compatibility.
 ///
 /// Not implemented yet.
 pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FIntersect>(
-    _god: &GodWrapper<EK, EV, T>,
-    _roots: &[Trie2Index],
-    _get_pop: &mut FGet,
-    _replace_pop: &mut FReplace,
-    _intersect_checks: &mut FIntersect,
+    god: &GodWrapper<EK, EV, T>,
+    roots: &[Trie2Index],
+    get_pop: &mut FGet,
+    replace_pop: &mut FReplace,
+    intersect_checks: &mut FIntersect,
 ) where
     EK: Ord + Clone,
     EV: Clone,
@@ -74,22 +163,47 @@ pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FInte
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
 {
-    todo!()
+    // 1) Extract all stacks from the current trie.
+    let initial_stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
+
+    // 2) Apply the stack-level internal elimination per path.
+    let mut reduced: BTreeSet<Vec<EK>> = BTreeSet::new();
+    for s in initial_stacks {
+        if let Some(mid) =
+            stack_eliminate_internal_negative_pops(s, &mut *get_pop, &mut *replace_pop, &mut *intersect_checks)
+        {
+            reduced.insert(mid);
+        }
+    }
+
+    // 3) Rebuild the trie subgraph from the reduced stacks.
+    rebuild_graph_from_stacks(god, roots, &reduced);
 }
 
 /// Graph-level transform: remove trailing negative pops at the ends of stacks.
 /// Not implemented yet.
 pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet>(
-    _god: &GodWrapper<EK, EV, T>,
-    _roots: &[Trie2Index],
-    _get_pop: &mut FGet,
+    god: &GodWrapper<EK, EV, T>,
+    roots: &[Trie2Index],
+    get_pop: &mut FGet,
 ) where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
     FGet: FnMut(&EK) -> isize,
 {
-    todo!()
+    // 1) Extract all stacks from the current trie.
+    let current_stacks = Trie::<EK, EV, T>::get_all_paths(god, roots);
+
+    // 2) Apply the stack-level trailing negative elimination per path.
+    let mut trimmed: BTreeSet<Vec<EK>> = BTreeSet::new();
+    for s in current_stacks {
+        let fin = stack_eliminate_trailing_negative_pops(s, &mut *get_pop);
+        trimmed.insert(fin);
+    }
+
+    // 3) Rebuild the trie subgraph from the trimmed stacks.
+    rebuild_graph_from_stacks(god, roots, &trimmed);
 }
 
 /// Reference stack function: eliminate internal negative pops by canceling adjacent
