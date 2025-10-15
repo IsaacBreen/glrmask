@@ -365,9 +365,10 @@ mod tests {
     use super::*;
     use crate::constraint::PrecomputedNodeContents;
     use crate::datastructures::trie::{Trie, Trie2Index};
+    use crate::trie_test_framework::TrieTestFramework;
     use std::collections::{BTreeMap, BTreeSet};
 
-    // --- Test Helpers ---
+    // --- Test Harness Types and Config ---
 
     type TestEV = ();
     type TestT = PrecomputedNodeContents;
@@ -385,9 +386,11 @@ mod tests {
         }
     }
 
-    // Canonicalize a stack of edges:
-    // - If an unconditional pop is followed by any other pop, they are merged.
-    // - Remove unconditional no-ops (pop == 0, check == None).
+    // --- Stack-based Reference Implementations ---
+
+    /// Canonicalize a stack of edges:
+    /// - If an unconditional pop is followed by any other pop, they are merged.
+    /// - Remove unconditional no-ops (pop == 0, check == None).
     fn compress_stack(stack: Vec<TestEK>) -> Vec<TestEK> {
         let mut out: Vec<TestEK> = Vec::new();
         for ek in stack {
@@ -407,6 +410,7 @@ mod tests {
             .collect()
     }
 
+    /// Reference implementation for the "bubble up" transformation.
     fn bubble_up_negative_pops_stack(stack: Vec<TestEK>) -> Vec<TestEK> {
         // Single-pass bubbling:
         // For each pair (A, B) where B.pop < 0, rewrite [A, B] as:
@@ -439,8 +443,7 @@ mod tests {
         out
     }
 
-    // Neutralize any remaining trailing unconditional pops by setting them to pop 0.
-    // This mirrors the "make them unconditional pop 0" instruction at the end of paths.
+    /// Reference implementation for the "neutralize" transformation.
     fn neutralize_remaining_negative_pops_stack(mut stack: Vec<TestEK>) -> Vec<TestEK> {
         // If the tail is a negative pop, neutralize it to pop 0, check None.
         if let Some(last) = stack.last_mut() {
@@ -452,9 +455,11 @@ mod tests {
         stack
     }
 
-    // Compute realized actions as a map from absolute position to check id.
-    // Position is the running sum of pops; we record positions at which a check occurs.
-    // This is the semantic invariant that must be preserved by bubbling.
+    // --- Semantic Invariant Checkers ---
+
+    /// Compute realized actions as a map from absolute position to check id.
+    /// Position is the running sum of pops; we record positions at which a check occurs.
+    /// This is the semantic invariant that must be preserved by bubbling.
     fn realized_actions(stack: &[TestEK]) -> BTreeMap<isize, usize> {
         let mut map = BTreeMap::new();
         let mut pos: isize = 0;
@@ -472,78 +477,85 @@ mod tests {
         map
     }
 
-    // --- Trie Construction Helpers ---
+    // --- Trie Construction Helpers (using the framework's harness) ---
+    use crate::trie_test_framework::harness;
 
     fn new_node(god: &TestGod) -> Trie2Index {
-        Trie2Index::new(god.insert(Trie::new(PrecomputedNodeContents::internal())))
+        harness::new_node(god, PrecomputedNodeContents::internal())
     }
 
     fn add_edge(god: &TestGod, from: Trie2Index, to: Trie2Index, key: TestEK) {
-        let mut w = from
-            .write(god)
-            .expect("Arena write poisoned while adding edge");
-        let mut ev: Option<TestEV> = Some(());
-        w.try_insert(key, &mut ev, to);
+        harness::add_edge(god, from, to, key, ());
     }
 
-    fn flatten_trie_to_stacks(god: &TestGod, roots: &[Trie2Index]) -> BTreeSet<Vec<TestEK>> {
-        Trie::<TestEK, TestEV, TestT>::get_all_paths(god, roots)
-    }
+    // --- Main Test Runner ---
 
-    fn map_to_stacks(
-        f: impl Fn(Vec<TestEK>) -> Vec<TestEK>,
-        stacks: &BTreeSet<Vec<TestEK>>,
-    ) -> BTreeSet<Vec<TestEK>> {
-        stacks.iter().map(|s| f(s.clone())).collect()
-    }
-
-    // Keep this around for future integration tests; mark as ignored for now
-    // because the graph versions are not implemented yet.
     fn run_test(god: &TestGod, roots: &[Trie2Index]) {
-        let stacks = flatten_trie_to_stacks(god, roots);
+        // --- Stage 1: Test `bubble_up_negative_pops` ---
 
-        // bubble
-        let bubbled_stacks = map_to_stacks(bubble_up_negative_pops_stack, &stacks);
+        // Define the trie transformation for the bubble-up stage.
+        let trie_bubble_transform = |god: &TestGod, roots: &[Trie2Index]| {
+            bubble_up_negative_pops(
+                god,
+                roots,
+                |ek| ek.pop,
+                |ek, new_pop| TestEK::new(new_pop, ek.check),
+                || TestEK::new(0, None),
+                |ev1, _ev2| *ev1 = (),
+            );
+        };
+
+        // Define an assertion for the intermediate state after bubbling.
+        let bubble_assertion = |stacks: &BTreeSet<Vec<TestEK>>| {
+            assert_negative_pops_follow_property_for_stacks(stacks, |ek| ek.pop);
+        };
+
+        // Run the test for the bubble-up stage.
+        TrieTestFramework::new(god, roots)
+            .with_stack_canonicalizer(compress_stack)
+            .with_assertion(bubble_assertion)
+            .test_transform(bubble_up_negative_pops_stack, trie_bubble_transform);
+
+        // --- Stage 2: Test `neutralize_remaining_negative_pops` ---
+        // This stage must run on the output of the bubble-up stage.
+
+        // First, create the post-bubble trie state manually.
+        let (god_after_bubble, roots_after_bubble, _) = Trie::deep_copy_subtrees(god, roots);
         bubble_up_negative_pops(
-            god,
-            roots,
+            &god_after_bubble,
+            &roots_after_bubble,
             |ek| ek.pop,
-            |ek, new_pop| TestEK::new(new_pop, ek.check), // replace_pop
-            || TestEK::new(0, None),                      // neutral_key
+            |ek, new_pop| TestEK::new(new_pop, ek.check),
+            || TestEK::new(0, None),
             |ev1, _ev2| *ev1 = (),
         );
-        let bubbled_trie_flattened = flatten_trie_to_stacks(god, roots);
-        assert_negative_pops_follow_property_for_stacks(&bubbled_stacks, |ek| ek.pop);
-        assert_negative_pops_follow_property_for_stacks(&bubbled_trie_flattened, |ek| ek.pop);
-        assert_eq!(
-            map_to_stacks(compress_stack, &bubbled_stacks),
-            map_to_stacks(compress_stack, &bubbled_trie_flattened)
-        );
 
-        // neutralize
-        let neutralized_stacks =
-            map_to_stacks(neutralize_remaining_negative_pops_stack, &bubbled_stacks);
-        neutralize_remaining_negative_pops(
-            god,
-            roots,
-            |ek| ek.pop,
-            |ek, new_pop| TestEK::new(new_pop, ek.check), // replace_pop
-            || TestEK::new(0, None),                      // neutral_key
-            |ev1, _ev2| *ev1 = (),
-        );
-        let neutralized_trie_flattened = flatten_trie_to_stacks(god, roots);
-        assert_eq!(
-            map_to_stacks(compress_stack, &neutralized_stacks),
-            map_to_stacks(compress_stack, &neutralized_trie_flattened)
-        );
+        // Define the trie transformation for the neutralize stage.
+        let trie_neutralize_transform = |god: &TestGod, roots: &[Trie2Index]| {
+            neutralize_remaining_negative_pops(
+                god,
+                roots,
+                |ek| ek.pop,
+                |ek, new_pop| TestEK::new(new_pop, ek.check),
+                || TestEK::new(0, None),
+                |ev1, _ev2| *ev1 = (),
+            );
+        };
 
-        // final check
-        let final_stacks = neutralized_trie_flattened;
-        for stack in final_stacks {
-            for ek in &stack {
-                assert!(ek.pop >= 0);
+        // Define an assertion for the final state.
+        let final_assertion = |stacks: &BTreeSet<Vec<TestEK>>| {
+            for stack in stacks {
+                for ek in stack {
+                    assert!(ek.pop >= 0, "Final stack should not have negative pops: {:?}", stack);
+                }
             }
-        }
+        };
+
+        // Run the test for the neutralize stage, starting from the bubbled trie.
+        TrieTestFramework::new(&god_after_bubble, &roots_after_bubble)
+            .with_stack_canonicalizer(compress_stack)
+            .with_assertion(final_assertion)
+            .test_transform(neutralize_remaining_negative_pops_stack, trie_neutralize_transform);
     }
 
     // --- Unit tests for the stack helpers (explicit outputs) ---
@@ -687,7 +699,7 @@ mod tests {
         }
     }
 
-    // --- Graph-level expectations (ignored until the TODOs are implemented) ---
+    // --- Graph-level tests ---
 
     #[test]
     fn test_example() {
@@ -798,8 +810,6 @@ mod tests {
         let roots = vec![a];
         run_test(&god, &roots);
     }
-
-    // --- New graph-level tests (non-ignored) that include terminal edges to allow merging ---
 
     #[test]
     fn test_graph_example_with_terminal() {
@@ -1012,5 +1022,3 @@ mod tests {
         run_test(&god, &roots);
     }
 }
-
-
