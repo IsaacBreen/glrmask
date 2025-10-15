@@ -2043,7 +2043,7 @@ impl GrammarConstraint {
 
                     let (final_key, final_value) = match edge_key {
                         IntermediateTrie3EdgeKey::Pop(n, states) => ((*n as isize, tokens_all.clone()), states.clone()),
-                        IntermediateTrie3EdgeKey::Push(states) => ((-1, tokens_all.clone()), states.clone()),
+                        IntermediateTrie3EdgeKey::Push(states) => ((0, tokens_all.clone()), states_all.clone()),
                         IntermediateTrie3EdgeKey::CheckLLM(tokens) => ((0, tokens.clone()), states_all.clone()),
                         IntermediateTrie3EdgeKey::NoOp => ((0, tokens_all.clone()), states_all.clone()),
                     };
