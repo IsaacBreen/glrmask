@@ -23,8 +23,6 @@
 //   uses the rule: empty ∩ X = X (non-empty) ⇒ match; non-empty ∩ non-empty empty ⇒ mismatch.
 
 use crate::datastructures::trie::{GodWrapper, Trie, Trie2Index};
-use crate::datastructures::trie::Index;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// Perform negative-pop elimination on the trie:
 /// - First eliminate internal negative pops by canceling negative/positive run pairs.
@@ -57,209 +55,17 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect>(
     eliminate_trailing_negative_pops_on_trie(god, roots, &mut get_pop);
 }
 
-// Snapshot of a node used for read-only traversal while we rebuild a rewritten graph in-place.
-#[derive(Clone)]
-struct NodeSnapshot<EK, EV, T> {
-    value: T,
-    // Each edge instance is (key, value, child_index_usize)
-    edges: Vec<(EK, EV, usize)>,
-}
-
-fn snapshot_reachable<EK, EV, T>(
-    god: &GodWrapper<EK, EV, T>,
-    roots: &[Trie2Index],
-) -> HashMap<usize, NodeSnapshot<EK, EV, T>>
-where
-    EK: Ord + Clone,
-    EV: Clone,
-    T: Clone,
-{
-    let mut snap: HashMap<usize, NodeSnapshot<EK, EV, T>> = HashMap::new();
-    let all = Trie::<EK, EV, T>::all_nodes(god, roots);
-    for idx in all {
-        let u = idx.as_usize();
-        let g = idx.read(god).expect("snapshot: read");
-        let mut edges: Vec<(EK, EV, usize)> = Vec::new();
-        for (ek, dest_map) in g.children() {
-            for (child_idx, ev) in dest_map.iter() {
-                edges.push((ek.clone(), ev.clone(), child_idx.as_usize()));
-            }
-        }
-        snap.insert(
-            u,
-            NodeSnapshot {
-                value: g.value.clone(),
-                edges,
-            },
-        );
-    }
-    snap
-}
-
-#[derive(Clone)]
-struct PathState<EK, EV, T> {
-    new_idx: Trie2Index,
-    neg_buf: Vec<(EK, EV)>,
-    pos_buf: Vec<(EK, EV)>,
-    in_pos: bool,
-    alive: bool,
-    // For emitting leftover pos edges produced by pair resolution.
-    last_pos_value: Option<T>,
-    // For emitting trailing negatives at finalize (or generic value hint).
-    last_value_hint: Option<T>,
-}
-
-fn subtract_from_front_ev<EK, EV, FGet, FReplace>(
-    mut seq: Vec<(EK, EV)>,
-    mut amt: usize,
-    get_pop: &mut FGet,
-    replace_pop: &mut FReplace,
-) -> Vec<(EK, EV)>
-where
-    EK: Clone,
-    EV: Clone,
-    FGet: FnMut(&EK) -> isize,
-    FReplace: FnMut(&EK, isize) -> EK,
-{
-    if amt == 0 || seq.is_empty() {
-        return seq;
-    }
-    let mut out: Vec<(EK, EV)> = Vec::with_capacity(seq.len());
-    for (ek, ev) in seq.into_iter() {
-        if amt == 0 {
-            out.push((ek, ev));
-            continue;
-        }
-        let p = get_pop(&ek);
-        debug_assert!(p > 0);
-        let pu = p as usize;
-        if pu > amt {
-            let new_p = (pu - amt) as isize;
-            let new_ek = replace_pop(&ek, new_p);
-            out.push((new_ek, ev));
-            amt = 0;
-        } else if pu == amt {
-            amt = 0;
-            // fully consumed; drop it
-        } else {
-            amt -= pu;
-            // fully consumed; drop it
-        }
-    }
-    out
-}
-
-fn process_pair_ev<EK, EV, FGet, FReplace, FIntersect>(
-    neg_buf: Vec<(EK, EV)>,
-    pos_buf: Vec<(EK, EV)>,
-    get_pop: &mut FGet,
-    replace_pop: &mut FReplace,
-    intersect_checks: &mut FIntersect,
-) -> Option<(Vec<(EK, EV)>, Vec<(EK, EV)>)>
-where
-    EK: Clone,
-    EV: Clone,
-    FGet: FnMut(&EK) -> isize,
-    FReplace: FnMut(&EK, isize) -> EK,
-    FIntersect: FnMut(&EK, &EK) -> bool,
-{
-    // Reverse negative run and convert to positive pops.
-    let mut neg_rev: Vec<(EK, EV)> = Vec::with_capacity(neg_buf.len());
-    for (ek, ev) in neg_buf.iter().rev() {
-        let p = get_pop(ek);
-        debug_assert!(p < 0);
-        neg_rev.push((replace_pop(ek, -p), ev.clone()));
-    }
-
-    // Build boundary maps to test compatibility on overlapping positions.
-    let mut neg_map: BTreeMap<usize, &EK> = BTreeMap::new();
-    let mut pos_map: BTreeMap<usize, &EK> = BTreeMap::new();
-
-    let mut cum = 0usize;
-    for (ek, _ev) in &neg_rev {
-        let p = get_pop(ek);
-        debug_assert!(p > 0);
-        cum += p as usize;
-        neg_map.insert(cum, ek);
-    }
-    cum = 0;
-    for (ek, _ev) in &pos_buf {
-        let p = get_pop(ek);
-        debug_assert!(p > 0);
-        cum += p as usize;
-        pos_map.insert(cum, ek);
-    }
-
-    let mut itn = neg_map.iter().peekable();
-    let mut itp = pos_map.iter().peekable();
-    while let (Some((npos, nek)), Some((ppos, pek))) = (itn.peek(), itp.peek()) {
-        if npos == ppos {
-            if !intersect_checks(nek, pek) {
-                return None;
-            }
-            itn.next();
-            itp.next();
-        } else if npos < ppos {
-            itn.next();
-        } else {
-            itp.next();
-        }
-    }
-
-    let sum_neg: usize = neg_rev.iter().map(|(ek, _)| get_pop(ek).max(0) as usize).sum();
-    let sum_pos: usize = pos_buf.iter().map(|(ek, _)| get_pop(ek).max(0) as usize).sum();
-    let cancel_amt = sum_neg.min(sum_pos);
-
-    // Subtract from fronts.
-    let neg_rev_left = subtract_from_front_ev(neg_rev, cancel_amt, get_pop, replace_pop);
-    let pos_left = subtract_from_front_ev(pos_buf, cancel_amt, get_pop, replace_pop);
-
-    // Convert neg_rev_left back to original order with negative pops.
-    let mut leftover_neg: Vec<(EK, EV)> = Vec::with_capacity(neg_rev_left.len());
-    for (ekp, ev) in neg_rev_left.into_iter().rev() {
-        let p = get_pop(&ekp);
-        debug_assert!(p > 0);
-        leftover_neg.push((replace_pop(&ekp, -p), ev));
-    }
-
-    Some((leftover_neg, pos_left))
-}
-
-fn emit_sequence<EK, EV, T>(
-    god: &GodWrapper<EK, EV, T>,
-    mut from_idx: Trie2Index,
-    seq: &[(EK, EV)],
-    next_node_value: &T,
-) -> Trie2Index
-where
-    EK: Ord + Clone,
-    EV: Clone,
-    T: Clone,
-{
-    let mut cur = from_idx;
-    for (ek, ev) in seq.iter() {
-        // Create child node first (avoid nested write deadlocks).
-        let child_idx = Trie2Index::from_usize(god.insert(Trie::new(next_node_value.clone())).as_usize());
-        {
-            let mut w = cur.write(god).expect("emit_sequence: write");
-            w.force_insert_to_node(ek.clone(), ev.clone(), child_idx);
-        }
-        cur = child_idx;
-    }
-    cur
-}
-
 /// Graph-level transform: eliminate internal negative pops by pairwise cancellation
 /// of negative/positive runs (negative on the left, positive on the right), using
 /// the provided closures to read/modify pop and test check compatibility.
 ///
 /// Not implemented yet.
 pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FIntersect>(
-    god: &GodWrapper<EK, EV, T>,
-    roots: &[Trie2Index],
-    get_pop: &mut FGet,
-    replace_pop: &mut FReplace,
-    intersect_checks: &mut FIntersect,
+    _god: &GodWrapper<EK, EV, T>,
+    _roots: &[Trie2Index],
+    _get_pop: &mut FGet,
+    _replace_pop: &mut FReplace,
+    _intersect_checks: &mut FIntersect,
 ) where
     EK: Ord + Clone,
     EV: Clone,
@@ -268,317 +74,31 @@ pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FInte
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
 {
-    // Snapshot original reachable graph so we can rebuild safely in-place.
-    let snap = snapshot_reachable(god, roots);
-
-    // Helper: emit positive prefix edge (immediate emission case).
-    fn emit_single_edge<EK, EV, T>(
-        god: &GodWrapper<EK, EV, T>,
-        from_idx: Trie2Index,
-        ek: EK,
-        ev: EV,
-        child_value: &T,
-    ) -> Trie2Index
-    where
-        EK: Ord + Clone,
-        EV: Clone,
-        T: Clone,
-    {
-        let child_idx = Trie2Index::from_usize(god.insert(Trie::new(child_value.clone())).as_usize());
-        {
-            let mut w = from_idx.write(god).expect("emit_single_edge: write");
-            w.force_insert_to_node(ek, ev, child_idx);
-        }
-        child_idx
-    }
-
-    // DFS over snapshot, building a rewritten graph (mid graph) under original root indices.
-    fn dfs<EK, EV, T, FGet, FReplace, FIntersect>(
-        god: &GodWrapper<EK, EV, T>,
-        snap: &HashMap<usize, NodeSnapshot<EK, EV, T>>,
-        get_pop: &mut FGet,
-        replace_pop: &mut FReplace,
-        intersect_checks: &mut FIntersect,
-        old_idx: usize,
-        mut state: PathState<EK, EV, T>,
-        path_visiting: &mut HashSet<usize>,
-    ) where
-        EK: Ord + Clone,
-        EV: Clone,
-        T: Clone,
-        FGet: FnMut(&EK) -> isize,
-        FReplace: FnMut(&EK, isize) -> EK,
-        FIntersect: FnMut(&EK, &EK) -> bool,
-    {
-        if !state.alive {
-            return;
-        }
-        if !path_visiting.insert(old_idx) {
-            // Cycle: do not expand further (same behavior as get_all_paths).
-            // No finalization; nothing further is emitted.
-            path_visiting.remove(&old_idx);
-            return;
-        }
-        let node_snap = match snap.get(&old_idx) {
-            Some(s) => s.clone(),
-            None => {
-                path_visiting.remove(&old_idx);
-                return;
-            }
-        };
-        if node_snap.edges.is_empty() {
-            // Finalize end: resolve pending pos run, then append trailing negatives.
-            if state.in_pos {
-                if let Some((leftover_neg, leftover_pos)) = process_pair_ev(
-                    state.neg_buf.clone(),
-                    state.pos_buf.clone(),
-                    get_pop,
-                    replace_pop,
-                    intersect_checks,
-                ) {
-                    if !leftover_pos.is_empty() {
-                        if let Some(val) = state.last_pos_value.as_ref() {
-                            state.new_idx =
-                                emit_sequence(god, state.new_idx, &leftover_pos, val);
-                        }
-                    }
-                    state.neg_buf = leftover_neg;
-                    state.pos_buf.clear();
-                    state.in_pos = false;
-                } else {
-                    // Mismatch eliminates this branch
-                    state.alive = false;
-                }
-            }
-            if state.alive && !state.neg_buf.is_empty() {
-                // Append trailing negatives. Use last_value_hint if present, else the node's own value.
-                let fallback_val = node_snap.value.clone();
-                let val = state
-                    .last_value_hint
-                    .as_ref()
-                    .unwrap_or(&fallback_val);
-                state.new_idx = emit_sequence(god, state.new_idx, &state.neg_buf, val);
-            }
-            path_visiting.remove(&old_idx);
-            return;
-        }
-
-        // Expand each outgoing edge
-        for (ek, ev, child_u) in node_snap.edges.iter().cloned() {
-            let child_val = snap
-                .get(&child_u)
-                .map(|s| s.value.clone())
-                .unwrap_or_else(|| node_snap.value.clone());
-
-            let mut st = state.clone();
-            if !st.alive {
-                continue;
-            }
-            let p = get_pop(&ek);
-            if p == 0 {
-                // Skip emitting, just propagate
-                st.last_value_hint = Some(child_val.clone());
-                dfs(
-                    god,
-                    snap,
-                    get_pop,
-                    replace_pop,
-                    intersect_checks,
-                    child_u,
-                    st,
-                    path_visiting,
-                );
-                continue;
-            }
-            if p > 0 {
-                if !st.in_pos && st.neg_buf.is_empty() {
-                    // Emit immediately
-                    st.new_idx = emit_single_edge(god, st.new_idx, ek, ev, &child_val);
-                    st.last_value_hint = Some(child_val.clone());
-                } else {
-                    // Buffer into pos run
-                    st.in_pos = true;
-                    st.pos_buf.push((ek, ev));
-                    st.last_pos_value = Some(child_val.clone());
-                    st.last_value_hint = Some(child_val.clone());
-                }
-                dfs(
-                    god,
-                    snap,
-                    get_pop,
-                    replace_pop,
-                    intersect_checks,
-                    child_u,
-                    st,
-                    path_visiting,
-                );
-                continue;
-            } else {
-                // Negative
-                if st.in_pos {
-                    // Resolve pair first
-                    match process_pair_ev(
-                        st.neg_buf.clone(),
-                        st.pos_buf.clone(),
-                        get_pop,
-                        replace_pop,
-                        intersect_checks,
-                    ) {
-                        None => {
-                            // Eliminate branch
-                            // Do not recurse further
-                            continue;
-                        }
-                        Some((leftover_neg, leftover_pos)) => {
-                            if !leftover_pos.is_empty() {
-                                if let Some(val) = st.last_pos_value.as_ref() {
-                                    st.new_idx =
-                                        emit_sequence(god, st.new_idx, &leftover_pos, val);
-                                }
-                            }
-                            st.neg_buf = leftover_neg;
-                            st.pos_buf.clear();
-                            st.in_pos = false;
-                        }
-                    }
-                }
-                // Buffer current negative
-                st.neg_buf.push((ek, ev));
-                st.last_value_hint = Some(child_val.clone());
-                dfs(
-                    god,
-                    snap,
-                    get_pop,
-                    replace_pop,
-                    intersect_checks,
-                    child_u,
-                    st,
-                    path_visiting,
-                );
-            }
-        }
-        path_visiting.remove(&old_idx);
-    }
-
-    // Prepare each root: overwrite the root node at the same index with an empty rewritten node.
-    for &root in roots {
-        let r_u = root.as_usize();
-        if let Some(root_snap) = snap.get(&r_u) {
-            // Replace root in-place at the same index.
-            let _old = god.insert_at(Index::from(r_u), Trie::new(root_snap.value.clone()));
-            let state = PathState {
-                new_idx: root,
-                neg_buf: Vec::new(),
-                pos_buf: Vec::new(),
-                in_pos: false,
-                alive: true,
-                last_pos_value: None,
-                last_value_hint: Some(root_snap.value.clone()),
-            };
-            let mut visiting = HashSet::new();
-            dfs(
-                god,
-                &snap,
-                get_pop,
-                replace_pop,
-                intersect_checks,
-                r_u,
-                state,
-                &mut visiting,
-            );
-        }
-    }
+    // TODO: Implement the graph-level version by scanning paths and performing local rewrites.
+    // Strategy sketch:
+    // - Enumerate stacks (paths) or perform local rewrites along edges while preserving
+    //   branching semantics. Use on-the-fly cloning where needed to avoid mutating shared nodes.
+    // - For each negative/positive run pair (local to a path segment), test compatibility via
+    //   intersect_checks, and cancel pops up to the min of run totals, producing remainders.
+    // - Eliminate stacks exhibiting mismatches (remove the paths/edges).
+    todo!()
 }
 
 /// Graph-level transform: remove trailing negative pops at the ends of stacks.
 /// Not implemented yet.
 pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet>(
-    god: &GodWrapper<EK, EV, T>,
-    roots: &[Trie2Index],
-    get_pop: &mut FGet,
+    _god: &GodWrapper<EK, EV, T>,
+    _roots: &[Trie2Index],
+    _get_pop: &mut FGet,
 ) where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
     FGet: FnMut(&EK) -> isize,
 {
-    // Work on reachable subgraph only.
-    let reachable = Trie::<EK, EV, T>::all_nodes(god, roots);
-    if reachable.is_empty() {
-        return;
-    }
-
-    // Pass 1: remove all zero-pop edges.
-    for idx in &reachable {
-        let mut w = idx.write(god).expect("write");
-        // Build a filtered children map without zero-pop keys and with only non-empty dest maps.
-        let mut new_children: BTreeMap<EK, ordered_hash_map::OrderedHashMap<Trie2Index, EV>> =
-            BTreeMap::new();
-        for (ek, dest_map) in w.children().iter() {
-            if get_pop(ek) == 0 {
-                continue;
-            }
-            if !dest_map.is_empty() {
-                new_children.insert(ek.clone(), dest_map.clone());
-            }
-        }
-        w.children_mut().clear();
-        for (ek, dm) in new_children {
-            w.children_mut().insert(ek, dm);
-        }
-    }
-
-    // Iteratively prune negative edges to leaf children until stable.
-    loop {
-        // Compute outdegrees
-        let mut outdeg: HashMap<usize, usize> = HashMap::new();
-        for idx in &reachable {
-            let u = idx.as_usize();
-            outdeg.entry(u).or_insert(0);
-        }
-        for idx in &reachable {
-            if let Some(g) = idx.read(god) {
-                for dest_map in g.children().values() {
-                    for (child, _ev) in dest_map.iter() {
-                        let v = child.as_usize();
-                        *outdeg.entry(v).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-
-        let mut changed = false;
-        for idx in &reachable {
-            let mut w = idx.write(god).expect("write");
-            // For negative keys, remove edges to leaf children
-            let keys: Vec<EK> = w.children().keys().cloned().collect();
-            for key in keys {
-                let pop = get_pop(&key);
-                if pop < 0 {
-                    if let Some(dm) = w.get_mut(&key) {
-                        let children: Vec<Trie2Index> = dm.keys().cloned().collect();
-                        for child in children {
-                            let v = child.as_usize();
-                            if outdeg.get(&v).cloned().unwrap_or(0) == 0 {
-                                if dm.remove(&child).is_some() {
-                                    changed = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                // Clean empty maps
-                if let Some(dm) = w.get(&key) {
-                    if dm.is_empty() {
-                        w.children_mut().remove(&key);
-                    }
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    // TODO: Implement the graph-level version by pruning or neutralizing trailing negative
+    // edges on all terminal paths. Also remove edges with pop == 0.
+    todo!()
 }
 
 /// Reference stack function: eliminate internal negative pops by canceling adjacent
