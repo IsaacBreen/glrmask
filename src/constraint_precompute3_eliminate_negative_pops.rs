@@ -38,8 +38,8 @@ pub fn eliminate_negative_pops<EK, EV, T, FGet, FReplace, FIntersect>(
     mut intersect_checks: FIntersect,
 ) where
     EK: Ord + Clone,
-    EV: Clone,
-    T: Clone,
+    EV: Clone + PartialEq,
+    T: Clone + PartialEq,
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
@@ -157,8 +157,8 @@ pub fn eliminate_internal_negative_pops_on_trie<EK, EV, T, FGet, FReplace, FInte
     intersect_checks: &mut FIntersect,
 ) where
     EK: Ord + Clone,
-    EV: Clone,
-    T: Clone,
+    EV: Clone + PartialEq,
+    T: Clone + PartialEq,
     FGet: FnMut(&EK) -> isize,
     FReplace: FnMut(&EK, isize) -> EK,
     FIntersect: FnMut(&EK, &EK) -> bool,
@@ -188,8 +188,8 @@ pub fn eliminate_trailing_negative_pops_on_trie<EK, EV, T, FGet>(
     get_pop: &mut FGet,
 ) where
     EK: Ord + Clone,
-    EV: Clone,
-    T: Clone,
+    EV: Clone + PartialEq,
+    T: Clone + PartialEq,
     FGet: FnMut(&EK) -> isize,
 {
     // 1) Extract all stacks from the current trie.
