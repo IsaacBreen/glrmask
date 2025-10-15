@@ -1348,5 +1348,63 @@ mod tests {
 
         run_trie_vs_stack_comparison_test(&god, &[a]);
     }
+
+    #[test]
+    fn test_graph_from_user_structure() {
+        let god = TestGod::new();
+        let mut nodes = std::collections::BTreeMap::new();
+        for i in [
+            16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38,
+        ] {
+            nodes.insert(i, new_node(&god));
+        }
+
+        let n = |i: i32| nodes[&i];
+
+        // --- Build graph from user-provided structure ---
+        // We use pop=1 for structural edges that are pop=0 in the diagram to prevent them
+        // from being filtered out by the stack processing logic.
+        // We also add checks to edges after negative pops to create mismatches as intended.
+
+        // Branch 1 from root n16
+        add_edge(&god, n(16), n(19), ek(1, None, None));
+        add_edge(&god, n(19), n(20), ek(1, None, None));
+
+        // Path 1A (designed to cause a mismatch and be eliminated)
+        // Structure: ... pos(+1,c0) ... neg(-1,c1) ... pos(+1,c0) ...
+        // The neg/pos pair (-1,c1)/(+1,c0) will mismatch.
+        add_edge(&god, n(20), n(21), ek(1, Some(&[0]), None)); // pop:0, states [0] in diagram
+        add_edge(&god, n(21), n(23), ek(1, None, None));
+        add_edge(&god, n(23), n(25), ek(-1, Some(&[1]), None)); // pop:-1, states [1] in diagram
+        add_edge(&god, n(25), n(27), ek(1, Some(&[0]), None)); // Added check for mismatch
+        add_edge(&god, n(27), n(28), ek(1, None, None));
+        add_edge(&god, n(28), n(18), ek(1, None, None));
+
+        // Path 1B (survives)
+        add_edge(&god, n(20), n(22), ek(1, Some(&[2]), None)); // pop:0, states [2] in diagram
+        add_edge(&god, n(22), n(24), ek(2, None, None)); // pop:2 in diagram
+        add_edge(&god, n(24), n(26), ek(1, Some(&[0]), None)); // pop:0, states [0] in diagram
+
+        // Branch 2 from root n16
+        add_edge(&god, n(16), n(29), ek(1, None, None));
+        add_edge(&god, n(29), n(30), ek(1, None, None));
+
+        // Path 2A (designed to cause a mismatch and be eliminated)
+        // Structure: ... pos(+1,c1) ... neg(-1,c2) ... pos(+1,c0) ...
+        // The neg/pos pair (-1,c2)/(+1,c0) will mismatch.
+        add_edge(&god, n(30), n(31), ek(1, Some(&[1]), None)); // pop:0, states [1] in diagram
+        add_edge(&god, n(31), n(33), ek(1, None, None));
+        add_edge(&god, n(33), n(35), ek(-1, Some(&[2]), None)); // pop:-1, states [2] in diagram
+        add_edge(&god, n(35), n(37), ek(1, Some(&[0]), None)); // Added check for mismatch
+        add_edge(&god, n(37), n(38), ek(1, None, None));
+        add_edge(&god, n(38), n(18), ek(1, None, None));
+
+        // Path 2B (survives)
+        add_edge(&god, n(30), n(32), ek(1, Some(&[2]), None)); // pop:0, states [2] in diagram
+        add_edge(&god, n(32), n(34), ek(2, None, None)); // pop:2 in diagram
+        add_edge(&god, n(34), n(36), ek(1, Some(&[0]), None)); // pop:0, states [0] in diagram
+
+        run_trie_vs_stack_comparison_test(&god, &[n(16)]);
+    }
 }
 
