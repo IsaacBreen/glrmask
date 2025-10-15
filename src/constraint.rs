@@ -1987,7 +1987,7 @@ impl GrammarConstraint {
             }
         }
 
-        println!("FK: {}", Trie::pretty_print(&trie3_god));
+        println!("FK: {}", Trie::pretty_print(&intermediate_trie3_god, &roots));
 
         // --- Convert intermediate trie to final Trie3 format ---
         let (mut precomputed3, trie3_god) = Self::convert_intermediate_trie3_to_final(
