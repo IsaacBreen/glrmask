@@ -1972,7 +1972,7 @@ impl GrammarConstraint {
             // FReplace: replace_pop: FnMut(&EK, &EV, isize) -> (EK, EV). EK is (isize, LLMTokenBV), EV is StateIDBV
             |&(_, ref llm_bv), ev, new_pop| ((new_pop, llm_bv.clone()), ev.clone()),
             // FIntersect: intersect_checks: FnMut(&EK, &EV, &EK, &EV) -> bool. EK is (isize, LLMTokenBV), EV is StateIDBV
-            |ek1, _ev1, ek2, _ev2| ek1.1.intersects(&ek2.1),
+            |_ek1, ev1, _ek2, ev2| ev1.intersects(ev2),
             |_, _| true,
         );
 
