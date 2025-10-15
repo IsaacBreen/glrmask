@@ -1243,6 +1243,91 @@ local_system:
               );
           }
 
+          #[test]
+          fn ambitious_stack_cancellation_with_mismatch() {
+              // A long stack with multiple interacting runs, designed to fail on a mismatch.
+              // Structure: [+lead], [-neg1, +pos1], [-neg2, +pos2], [-neg3, +pos3], [-trail]
+              // Trace:
+              // 1. Leading positive `[+2 a, +1 b]` is emitted.
+              // 2. Pair 1: `[-3 c, -1 d]` vs `[+2 c]`. Leftover neg: `[-1 c, -1 d]`.
+              // 3. This leftover merges with next neg `-2 e`, forming `[-1 c, -1 d, -2 e]`.
+              // 4. Pair 2: `[-1 c, -1 d, -2 e]` vs `[+5 e, +1 f]`. Leftover pos: `[+1 e, +1 f]`.
+              // 5. Pair 3: `[-1 g, -1 h]` vs `[+2 h]`.
+              //    - `neg_rev` is `[+1 h, +1 g]`. `pos` is `[+2 h]`.
+              //    - `neg_map` has `g` at position 2. `pos_map` has `h` at position 2.
+              //    - Checks for `g` ([6]) and `h` ([7]) do not intersect.
+              //    - This is a mismatch, so the entire stack is eliminated.
+              let input = vec![
+                  ek(2, Some(&[0])), // a
+                  ek(1, Some(&[1])), // b
+                  // Pair 1
+                  ek(-3, Some(&[2])), // c
+                  ek(-1, Some(&[3])), // d
+                  ek(2, Some(&[2])),  // c
+                  // Pair 2 (neg part merges with leftover from Pair 1)
+                  ek(-2, None),       // e (unconstrained)
+                  ek(5, Some(&[4])),  // e
+                  ek(1, Some(&[5])),  // f
+                  // Pair 3 (mismatch)
+                  ek(-1, Some(&[6])), // g
+                  ek(-1, Some(&[7])), // h
+                  ek(2, Some(&[7])),  // h
+                  // Trailing
+                  ek(-4, Some(&[8])), // i
+                  ek(-1, Some(&[9])), // j
+              ];
+              let got =
+                  stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect);
+              assert!(got.is_none(), "Expected mismatch between g and h");
+          }
+
+          #[test]
+          fn ambitious_stack_cancellation_success() {
+              // Same as the mismatch test, but with compatible checks for the final pair.
+              // Trace:
+              // 1. Leading positive `[+2 a, +1 b]` is emitted.
+              // 2. Pair 1: `[-3 c, -1 d]` vs `[+2 c]`. Leftover neg: `[-1 c, -1 d]`.
+              // 3. Merged neg run: `[-1 c, -1 d, -2 e]`.
+              // 4. Pair 2: `[-1 c, -1 d, -2 e]` vs `[+5 e, +1 f]`. Leftover pos: `[+1 e, +1 f]`.
+              //    `out` is now `[+2 a, +1 b, +1 e, +1 f]`.
+              // 5. Pair 3: `[-1 g, -1 h]` vs `[+2 h]`. Checks are compatible. Cancels perfectly.
+              // 6. Trailing negatives `[-4 i, -1 j]` are appended.
+              // Final result before trailing elimination: `[+2 a, +1 b, +1 e, +1 f, -4 i, -1 j]`
+              let input = vec![
+                  ek(2, Some(&[0])), // a
+                  ek(1, Some(&[1])), // b
+                  // Pair 1
+                  ek(-3, Some(&[2])), // c
+                  ek(-1, Some(&[3])), // d
+                  ek(2, Some(&[2])),  // c
+                  // Pair 2
+                  ek(-2, None),      // e (unconstrained)
+                  ek(5, Some(&[4])), // e
+                  ek(1, Some(&[5])), // f
+                  // Pair 3 (compatible)
+                  ek(-1, Some(&[6, 100])), // g
+                  ek(-1, Some(&[7, 100])), // h
+                  ek(2, Some(&[7, 100])),  // h
+                  // Trailing
+                  ek(-4, Some(&[8])), // i
+                  ek(-1, Some(&[9])), // j
+              ];
+              let got =
+                  stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
+                      .expect("should not mismatch");
+              assert_eq!(
+                  got,
+                  vec![
+                      ek(2, Some(&[0])), // a
+                      ek(1, Some(&[1])), // b
+                      ek(1, Some(&[4])), // e
+                      ek(1, Some(&[5])), // f
+                      ek(-4, Some(&[8])), // i
+                      ek(-1, Some(&[9])), // j
+                  ]
+              );
+          }
+
           // --- Graph-level scenario (stack-only validation) ---
 
           fn new_node(god: &TestGod) -> Trie2Index {
@@ -2547,5 +2632,229 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Test: Enhance stack elimination tests
       with multi-pair and complex scenarios"'
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_eliminate_negative_pops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      MORE.
+      Be more ambitious!
+      That input is tiny!
+    metadata:
+  - assistant: |-
+      Of course. Here are the instructions to add a significantly more complex and ambitious set of test cases for the stack elimination logic, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  Open the file `src/constraint_precompute3_eliminate_negative_pops.rs`.
+      2.  Navigate to the `tests` module at the end of the file.
+      3.  Find the test function `even_more_complex_stack_scenario`, which was the last test added.
+      4.  Insert the two new test functions provided below immediately after it and before the comment `// --- Graph-level scenario (stack-only validation) ---`. These tests cover a longer, more intricate sequence of operations, including one designed to fail due to a check mismatch and a corresponding one designed to succeed.
+
+      Here is the code for the new test functions:
+
+      ```rust
+          #[test]
+          fn ambitious_stack_cancellation_with_mismatch() {
+              // A long stack with multiple interacting runs, designed to fail on a mismatch.
+              // Structure: [+lead], [-neg1, +pos1], [-neg2, +pos2], [-neg3, +pos3], [-trail]
+              // Trace:
+              // 1. Leading positive `[+2 a, +1 b]` is emitted.
+              // 2. Pair 1: `[-3 c, -1 d]` vs `[+2 c]`. Leftover neg: `[-1 c, -1 d]`.
+              // 3. This leftover merges with next neg `-2 e`, forming `[-1 c, -1 d, -2 e]`.
+              // 4. Pair 2: `[-1 c, -1 d, -2 e]` vs `[+5 e, +1 f]`. Leftover pos: `[+1 e, +1 f]`.
+              // 5. Pair 3: `[-1 g, -1 h]` vs `[+2 h]`.
+              //    - `neg_rev` is `[+1 h, +1 g]`. `pos` is `[+2 h]`.
+              //    - `neg_map` has `g` at position 2. `pos_map` has `h` at position 2.
+              //    - Checks for `g` ([6]) and `h` ([7]) do not intersect.
+              //    - This is a mismatch, so the entire stack is eliminated.
+              let input = vec![
+                  ek(2, Some(&[0])), // a
+                  ek(1, Some(&[1])), // b
+                  // Pair 1
+                  ek(-3, Some(&[2])), // c
+                  ek(-1, Some(&[3])), // d
+                  ek(2, Some(&[2])),  // c
+                  // Pair 2 (neg part merges with leftover from Pair 1)
+                  ek(-2, None),       // e (unconstrained)
+                  ek(5, Some(&[4])),  // e
+                  ek(1, Some(&[5])),  // f
+                  // Pair 3 (mismatch)
+                  ek(-1, Some(&[6])), // g
+                  ek(-1, Some(&[7])), // h
+                  ek(2, Some(&[7])),  // h
+                  // Trailing
+                  ek(-4, Some(&[8])), // i
+                  ek(-1, Some(&[9])), // j
+              ];
+              let got =
+                  stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect);
+              assert!(got.is_none(), "Expected mismatch between g and h");
+          }
+
+          #[test]
+          fn ambitious_stack_cancellation_success() {
+              // Same as the mismatch test, but with compatible checks for the final pair.
+              // Trace:
+              // 1. Leading positive `[+2 a, +1 b]` is emitted.
+              // 2. Pair 1: `[-3 c, -1 d]` vs `[+2 c]`. Leftover neg: `[-1 c, -1 d]`.
+              // 3. Merged neg run: `[-1 c, -1 d, -2 e]`.
+              // 4. Pair 2: `[-1 c, -1 d, -2 e]` vs `[+5 e, +1 f]`. Leftover pos: `[+1 e, +1 f]`.
+              //    `out` is now `[+2 a, +1 b, +1 e, +1 f]`.
+              // 5. Pair 3: `[-1 g, -1 h]` vs `[+2 h]`. Checks are compatible. Cancels perfectly.
+              // 6. Trailing negatives `[-4 i, -1 j]` are appended.
+              // Final result before trailing elimination: `[+2 a, +1 b, +1 e, +1 f, -4 i, -1 j]`
+              let input = vec![
+                  ek(2, Some(&[0])), // a
+                  ek(1, Some(&[1])), // b
+                  // Pair 1
+                  ek(-3, Some(&[2])), // c
+                  ek(-1, Some(&[3])), // d
+                  ek(2, Some(&[2])),  // c
+                  // Pair 2
+                  ek(-2, None),      // e (unconstrained)
+                  ek(5, Some(&[4])), // e
+                  ek(1, Some(&[5])), // f
+                  // Pair 3 (compatible)
+                  ek(-1, Some(&[6, 100])), // g
+                  ek(-1, Some(&[7, 100])), // h
+                  ek(2, Some(&[7, 100])),  // h
+                  // Trailing
+                  ek(-4, Some(&[8])), // i
+                  ek(-1, Some(&[9])), // j
+              ];
+              let got =
+                  stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
+                      .expect("should not mismatch");
+              assert_eq!(
+                  got,
+                  vec![
+                      ek(2, Some(&[0])), // a
+                      ek(1, Some(&[1])), // b
+                      ek(1, Some(&[4])), // e
+                      ek(1, Some(&[5])), // f
+                      ek(-4, Some(&[8])), // i
+                      ek(-1, Some(&[9])), // j
+                  ]
+              );
+          }
+      ```
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/src/constraint_precompute3_eliminate_negative_pops.rs b/src/constraint_precompute3_eliminate_negative_pops.rs
+      index 1111111..2222222 100644
+      --- a/src/constraint_precompute3_eliminate_negative_pops.rs
+      +++ b/src/constraint_precompute3_eliminate_negative_pops.rs
+      @@ -619,6 +619,86 @@
+               );
+           }
+       
+      +    #[test]
+      +    fn ambitious_stack_cancellation_with_mismatch() {
+      +        // A long stack with multiple interacting runs, designed to fail on a mismatch.
+      +        // Structure: [+lead], [-neg1, +pos1], [-neg2, +pos2], [-neg3, +pos3], [-trail]
+      +        // Trace:
+      +        // 1. Leading positive `[+2 a, +1 b]` is emitted.
+      +        // 2. Pair 1: `[-3 c, -1 d]` vs `[+2 c]`. Leftover neg: `[-1 c, -1 d]`.
+      +        // 3. This leftover merges with next neg `-2 e`, forming `[-1 c, -1 d, -2 e]`.
+      +        // 4. Pair 2: `[-1 c, -1 d, -2 e]` vs `[+5 e, +1 f]`. Leftover pos: `[+1 e, +1 f]`.
+      +        // 5. Pair 3: `[-1 g, -1 h]` vs `[+2 h]`.
+      +        //    - `neg_rev` is `[+1 h, +1 g]`. `pos` is `[+2 h]`.
+      +        //    - `neg_map` has `g` at position 2. `pos_map` has `h` at position 2.
+      +        //    - Checks for `g` ([6]) and `h` ([7]) do not intersect.
+      +        //    - This is a mismatch, so the entire stack is eliminated.
+      +        let input = vec![
+      +            ek(2, Some(&[0])), // a
+      +            ek(1, Some(&[1])), // b
+      +            // Pair 1
+      +            ek(-3, Some(&[2])), // c
+      +            ek(-1, Some(&[3])), // d
+      +            ek(2, Some(&[2])),  // c
+      +            // Pair 2 (neg part merges with leftover from Pair 1)
+      +            ek(-2, None),       // e (unconstrained)
+      +            ek(5, Some(&[4])),  // e
+      +            ek(1, Some(&[5])),  // f
+      +            // Pair 3 (mismatch)
+      +            ek(-1, Some(&[6])), // g
+      +            ek(-1, Some(&[7])), // h
+      +            ek(2, Some(&[7])),  // h
+      +            // Trailing
+      +            ek(-4, Some(&[8])), // i
+      +            ek(-1, Some(&[9])), // j
+      +        ];
+      +        let got =
+      +            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect);
+      +        assert!(got.is_none(), "Expected mismatch between g and h");
+      +    }
+      +
+      +    #[test]
+      +    fn ambitious_stack_cancellation_success() {
+      +        // Same as the mismatch test, but with compatible checks for the final pair.
+      +        // Trace:
+      +        // 1. Leading positive `[+2 a, +1 b]` is emitted.
+      +        // 2. Pair 1: `[-3 c, -1 d]` vs `[+2 c]`. Leftover neg: `[-1 c, -1 d]`.
+      +        // 3. Merged neg run: `[-1 c, -1 d, -2 e]`.
+      +        // 4. Pair 2: `[-1 c, -1 d, -2 e]` vs `[+5 e, +1 f]`. Leftover pos: `[+1 e, +1 f]`.
+      +        //    `out` is now `[+2 a, +1 b, +1 e, +1 f]`.
+      +        // 5. Pair 3: `[-1 g, -1 h]` vs `[+2 h]`. Checks are compatible. Cancels perfectly.
+      +        // 6. Trailing negatives `[-4 i, -1 j]` are appended.
+      +        // Final result before trailing elimination: `[+2 a, +1 b, +1 e, +1 f, -4 i, -1 j]`
+      +        let input = vec![
+      +            ek(2, Some(&[0])), // a
+      +            ek(1, Some(&[1])), // b
+      +            // Pair 1
+      +            ek(-3, Some(&[2])), // c
+      +            ek(-1, Some(&[3])), // d
+      +            ek(2, Some(&[2])),  // c
+      +            // Pair 2
+      +            ek(-2, None),      // e (unconstrained)
+      +            ek(5, Some(&[4])), // e
+      +            ek(1, Some(&[5])), // f
+      +            // Pair 3 (compatible)
+      +            ek(-1, Some(&[6, 100])), // g
+      +            ek(-1, Some(&[7, 100])), // h
+      +            ek(2, Some(&[7, 100])),  // h
+      +            // Trailing
+      +            ek(-4, Some(&[8])), // i
+      +            ek(-1, Some(&[9])), // j
+      +        ];
+      +        let got =
+      +            stack_eliminate_internal_negative_pops(input, get_pop, replace_pop, checks_intersect)
+      +                .expect("should not mismatch");
+      +        assert_eq!(
+      +            got,
+      +            vec![
+      +                ek(2, Some(&[0])), // a
+      +                ek(1, Some(&[1])), // b
+      +                ek(1, Some(&[4])), // e
+      +                ek(1, Some(&[5])), // f
+      +                ek(-4, Some(&[8])), // i
+      +                ek(-1, Some(&[9])), // j
+      +            ]
+      +        );
+      +    }
+      +
+           // --- Graph-level scenario (stack-only validation) ---
+       
+           fn new_node(god: &TestGod) -> Trie2Index {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_eliminate_negative_pops.rs
+      Applying patch to 'src/constraint_precompute3_eliminate_negative_pops.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_eliminate_negative_pops.rs.
+    metadata:
+  - user: 'Changes committed with message: "Test: Add extensive, complex scenarios
+      for internal negative pop elimination logic and clean up test types"'
     metadata:
 ...
