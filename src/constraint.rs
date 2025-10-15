@@ -1974,19 +1974,20 @@ impl GrammarConstraint {
         }
         intermediate_precomputed3 = new_root_map;
 
-        for path in processed_paths {
-            // This logic assumes all paths start from the same conceptual root, which is not true.
-            // We need to associate paths with their original tokenizer state IDs.
-            // For now, let's assume a single root for simplicity of getting this to compile.
-            // This part needs to be fixed to handle multiple roots correctly.
-            if let Some(root_idx) = intermediate_precomputed3.values().next() {
+        // Create a single shared leaf node.
+        let leaf_node = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        for root_idx in intermediate_precomputed3.values() {
+            for path in &processed_paths {
                 let mut current_idx = *root_idx;
                 for edge_key in path {
                     let new_node = IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal());
                     let new_idx = IntermediatePrecomputeNode3Index::from(intermediate_trie3_god.insert(new_node));
-                    current_idx.write(&intermediate_trie3_god).unwrap().force_insert_to_node(edge_key, (), new_idx);
+                    current_idx.write(&intermediate_trie3_god).unwrap().force_insert_to_node(edge_key.clone(), (), new_idx);
                     current_idx = new_idx;
                 }
+                // After the path is built, connect the last node to the shared leaf.
+                current_idx.write(&intermediate_trie3_god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), leaf_node);
             }
         }
 
