@@ -1759,7 +1759,7 @@ impl GrammarConstraint {
 
             // Now walk the stack; items go top->bottom; first item is the hallucinated state: skip it.
             let mut cur = head.clone();
-            for state_content in items.iter().skip(1).rev() {
+            for state_content in items.iter().skip(1) {
                 let mut state_bv = StateIDBV::zeros();
                 state_bv.insert(state_content.state_id.0);
                 let edge_key = (-1isize, tokens_all.clone()); // negative pop, will be normalized later
