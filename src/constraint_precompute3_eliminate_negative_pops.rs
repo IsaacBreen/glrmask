@@ -504,39 +504,39 @@ mod tests {
         harness::add_edge(god, from, to, key, ());
     }
 
-    /// Common test runner for validating the stack-level elimination pipeline.
-    /// It extracts all paths from a given trie, runs them through the full pipeline,
-    /// and asserts that all surviving paths are valid (i.e., have no negative pops).
-    fn run_stack_pipeline_test(god: &TestGod, roots: &[Trie2Index]) {
-        // Extract stacks
-        let stacks = Trie::<TestEK, TestEV, TestT>::get_all_paths(god, roots);
-        assert!(!stacks.is_empty(), "Test setup should produce at least one stack.");
-
-        // Apply the stack pipeline to each stack: internal cancellation + trailing elimination.
-        let mut final_stacks = BTreeSet::new();
-        for s in stacks {
+    /// Test runner that compares the trie-level transformation against the stack-based
+    /// reference implementation.
+    /// This is designed to fail with a `todo!()` panic until the trie-level functions
+    /// are implemented, confirming that the test harness is correctly wired.
+    fn run_trie_vs_stack_comparison_test(god: &TestGod, roots: &[Trie2Index]) {
+        // 1. Calculate EXPECTED stacks from the original trie using the stack-based reference functions.
+        let initial_stacks = Trie::<TestEK, TestEV, TestT>::get_all_paths(god, roots);
+        let mut expected_stacks = BTreeSet::new();
+        for s in initial_stacks {
             if let Some(mid) =
                 stack_eliminate_internal_negative_pops(s, get_pop, replace_pop, checks_intersect)
             {
                 let fin = stack_eliminate_trailing_negative_pops(mid, get_pop);
-                final_stacks.insert(fin);
+                expected_stacks.insert(fin);
             }
         }
 
-        // For sanity, we expect at least one surviving stack and all are non-negative-only now.
-        assert!(
-            !final_stacks.is_empty(),
-            "Expected some surviving stacks after the elimination pipeline"
+        // 2. Calculate ACTUAL stacks by running the trie-level transform on a clone.
+        let (god_clone, roots_clone, _) = Trie::deep_copy_subtrees(god, roots);
+
+        // This is the call that is expected to panic until implemented.
+        eliminate_negative_pops(
+            &god_clone,
+            &roots_clone,
+            get_pop,
+            replace_pop,
+            checks_intersect,
         );
-        for s in &final_stacks {
-            for ek in s {
-                assert!(
-                    ek.pop >= 0,
-                    "Final stacks must not contain negative pops: {:?}",
-                    s
-                );
-            }
-        }
+
+        let actual_stacks = Trie::get_all_paths(&god_clone, &roots_clone);
+
+        // 3. Compare the results.
+        assert_eq!(expected_stacks, actual_stacks);
     }
 
     /// Validate the stack pipeline on a complex graph by:
@@ -606,14 +606,13 @@ mod tests {
         add_edge(&god, n32, n34, ek(2, None));
         add_edge(&god, n34, n36, ek(1, Some(&[0]))); // Leaf
 
-        run_stack_pipeline_test(&god, &[n16]);
+        run_trie_vs_stack_comparison_test(&god, &[n16]);
     }
 
     #[test]
     fn test_simple_cancel_via_runner() {
         // A --(+1, c0)--> B --(-1, c0)--> C
-        // This path would be eliminated, but the runner expects at least one survivor.
-        // So we add a dummy path that survives.
+        // Path A->B->C should be eliminated by cancellation. Path A->D should survive.
         let god = TestGod::new();
         let a = new_node(&god);
         let b = new_node(&god);
@@ -622,7 +621,7 @@ mod tests {
         add_edge(&god, a, b, ek(1, Some(&[0])));
         add_edge(&god, b, c, ek(-1, Some(&[0])));
         add_edge(&god, a, d, ek(1, None)); // Dummy survivor
-        run_stack_pipeline_test(&god, &[a]);
+        run_trie_vs_stack_comparison_test(&god, &[a]);
     }
 
     #[test]
@@ -637,7 +636,7 @@ mod tests {
         add_edge(&god, a, b, ek(1, Some(&[0])));
         add_edge(&god, b, c, ek(-1, Some(&[1]))); // Mismatching check
         add_edge(&god, a, d, ek(2, Some(&[2])));   // Survivor
-        run_stack_pipeline_test(&god, &[a]);
+        run_trie_vs_stack_comparison_test(&god, &[a]);
     }
 
     #[test]
@@ -649,6 +648,7 @@ mod tests {
         let c = new_node(&god);
         add_edge(&god, a, b, ek(2, Some(&[0])));
         add_edge(&god, b, c, ek(1, Some(&[1])));
-        run_stack_pipeline_test(&god, &[a]);
+        run_trie_vs_stack_comparison_test(&god, &[a]);
     }
 }
+

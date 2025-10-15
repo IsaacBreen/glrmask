@@ -1216,7 +1216,7 @@ local_system:
           }
       }
   prev_file_contents:
-    src/constraint_precompute3_eliminate_negative_pops.rs: |
+    src/constraint_precompute3_eliminate_negative_pops.rs: |+
       // src/constraint_precompute3_eliminate_negative_pops.rs
       //
       // New design: Negative-pop elimination that respects ordering and "stack can change"
@@ -1723,39 +1723,39 @@ local_system:
               harness::add_edge(god, from, to, key, ());
           }
 
-          /// Common test runner for validating the stack-level elimination pipeline.
-          /// It extracts all paths from a given trie, runs them through the full pipeline,
-          /// and asserts that all surviving paths are valid (i.e., have no negative pops).
-          fn run_stack_pipeline_test(god: &TestGod, roots: &[Trie2Index]) {
-              // Extract stacks
-              let stacks = Trie::<TestEK, TestEV, TestT>::get_all_paths(god, roots);
-              assert!(!stacks.is_empty(), "Test setup should produce at least one stack.");
-
-              // Apply the stack pipeline to each stack: internal cancellation + trailing elimination.
-              let mut final_stacks = BTreeSet::new();
-              for s in stacks {
+          /// Test runner that compares the trie-level transformation against the stack-based
+          /// reference implementation.
+          /// This is designed to fail with a `todo!()` panic until the trie-level functions
+          /// are implemented, confirming that the test harness is correctly wired.
+          fn run_trie_vs_stack_comparison_test(god: &TestGod, roots: &[Trie2Index]) {
+              // 1. Calculate EXPECTED stacks from the original trie using the stack-based reference functions.
+              let initial_stacks = Trie::<TestEK, TestEV, TestT>::get_all_paths(god, roots);
+              let mut expected_stacks = BTreeSet::new();
+              for s in initial_stacks {
                   if let Some(mid) =
                       stack_eliminate_internal_negative_pops(s, get_pop, replace_pop, checks_intersect)
                   {
                       let fin = stack_eliminate_trailing_negative_pops(mid, get_pop);
-                      final_stacks.insert(fin);
+                      expected_stacks.insert(fin);
                   }
               }
 
-              // For sanity, we expect at least one surviving stack and all are non-negative-only now.
-              assert!(
-                  !final_stacks.is_empty(),
-                  "Expected some surviving stacks after the elimination pipeline"
+              // 2. Calculate ACTUAL stacks by running the trie-level transform on a clone.
+              let (god_clone, roots_clone, _) = Trie::deep_copy_subtrees(god, roots);
+
+              // This is the call that is expected to panic until implemented.
+              eliminate_negative_pops(
+                  &god_clone,
+                  &roots_clone,
+                  get_pop,
+                  replace_pop,
+                  checks_intersect,
               );
-              for s in &final_stacks {
-                  for ek in s {
-                      assert!(
-                          ek.pop >= 0,
-                          "Final stacks must not contain negative pops: {:?}",
-                          s
-                      );
-                  }
-              }
+
+              let actual_stacks = Trie::get_all_paths(&god_clone, &roots_clone);
+
+              // 3. Compare the results.
+              assert_eq!(expected_stacks, actual_stacks);
           }
 
           /// Validate the stack pipeline on a complex graph by:
@@ -1825,14 +1825,13 @@ local_system:
               add_edge(&god, n32, n34, ek(2, None));
               add_edge(&god, n34, n36, ek(1, Some(&[0]))); // Leaf
 
-              run_stack_pipeline_test(&god, &[n16]);
+              run_trie_vs_stack_comparison_test(&god, &[n16]);
           }
 
           #[test]
           fn test_simple_cancel_via_runner() {
               // A --(+1, c0)--> B --(-1, c0)--> C
-              // This path would be eliminated, but the runner expects at least one survivor.
-              // So we add a dummy path that survives.
+              // Path A->B->C should be eliminated by cancellation. Path A->D should survive.
               let god = TestGod::new();
               let a = new_node(&god);
               let b = new_node(&god);
@@ -1841,7 +1840,7 @@ local_system:
               add_edge(&god, a, b, ek(1, Some(&[0])));
               add_edge(&god, b, c, ek(-1, Some(&[0])));
               add_edge(&god, a, d, ek(1, None)); // Dummy survivor
-              run_stack_pipeline_test(&god, &[a]);
+              run_trie_vs_stack_comparison_test(&god, &[a]);
           }
 
           #[test]
@@ -1856,7 +1855,7 @@ local_system:
               add_edge(&god, a, b, ek(1, Some(&[0])));
               add_edge(&god, b, c, ek(-1, Some(&[1]))); // Mismatching check
               add_edge(&god, a, d, ek(2, Some(&[2])));   // Survivor
-              run_stack_pipeline_test(&god, &[a]);
+              run_trie_vs_stack_comparison_test(&god, &[a]);
           }
 
           #[test]
@@ -1868,9 +1867,10 @@ local_system:
               let c = new_node(&god);
               add_edge(&god, a, b, ek(2, Some(&[0])));
               add_edge(&god, b, c, ek(1, Some(&[1])));
-              run_stack_pipeline_test(&god, &[a]);
+              run_trie_vs_stack_comparison_test(&god, &[a]);
           }
       }
+
     src/trie_test_framework.rs: |
       // src/trie_test_framework.rs
 
@@ -4848,5 +4848,184 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor: Introduce stack pipeline test
       runner and convert complex tests to use it"'
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_eliminate_negative_pops.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/trie_test_framework.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Note that I expect most (all?) of the tests will (should) fail right now as soon as `eliminate_internal_negative_pops_on_trie` or `eliminate_trailing_negative_pops_on_trie` is called.
+      This failure is *desired*.
+      Right now the tests seem to be unexpectedly failing.
+      We're trying to build out the file to be *ready for the implementation of those key two functions*. Ready means that as soon as those functions are implemented, as long as they're implemented correctly, they will be tested, and their correctness will be revealed by tests.
+      Right now it seems they aren't even getting run.
+      Fix this.
+      (Don't attempt to implement the two functions with `todo!()`.)
+    metadata:
+  - assistant: |-
+      You've correctly identified that the current test setup doesn't actually call the trie-level functions we intend to implement, which is why you're not seeing the expected `todo!()` failures. The tests are only validating the stack-based reference logic against itself.
+
+      To fix this, we need to introduce a test runner that compares the output of the reference stack-based implementation against the output of the trie-based implementation. This will ensure that once the trie functions are implemented, they are tested for correctness, and for now, it will correctly fail because the `todo!()` functions will be called.
+
+      Here are the step-by-step instructions to set up the proper test harness.
+
+      ### Step-by-step Instructions
+
+      All changes will be made in the file `src/constraint_precompute3_eliminate_negative_pops.rs`, within the `#[cfg(test)] mod tests { ... }` block.
+
+      1.  **Replace the Test Runner:**
+          Delete the existing `run_stack_pipeline_test` function. In its place, add a new function named `run_trie_vs_stack_comparison_test`. This new runner will:
+          *   First, calculate the "expected" result by getting all paths from the initial trie and running them through the stack-based reference pipeline (`stack_eliminate_internal_negative_pops` and `stack_eliminate_trailing_negative_pops`).
+          *   Second, calculate the "actual" result by cloning the trie and running the real `eliminate_negative_pops` function on it. **This is the step that will call the `todo!()` stubs.**
+          *   Finally, it will extract the paths from the transformed trie and assert that they are equal to the expected paths.
+
+      2.  **Update Test Calls:**
+          In the four graph-based tests (`test_graph_from_complex_stack_trace`, `test_simple_cancel_via_runner`, `test_mismatch_eliminates_one_path_via_runner`, and `test_no_negative_pops_is_noop_via_runner`), change the function call at the end from `run_stack_pipeline_test` to `run_trie_vs_stack_comparison_test`.
+
+      3.  **Update a Test Comment:**
+          In `test_simple_cancel_via_runner`, the comment explaining the need for a "dummy survivor" path is now outdated because the new test runner can handle cases where all paths are eliminated. Update the comment to simply explain the expected outcome.
+
+      After these changes, running the tests will cause a panic with the message `not yet implemented`, which is the desired behavior until you implement the trie-level functions.
+
+      ### Git Diff
+
+      Here is the git diff that applies these changes.
+
+      ```diff
+      diff --git a/src/constraint_precompute3_eliminate_negative_pops.rs b/src/constraint_precompute3_eliminate_negative_pops.rs
+      index 6263884..a606471 100644
+      --- a/src/constraint_precompute3_eliminate_negative_pops.rs
+      +++ b/src/constraint_precompute3_eliminate_negative_pops.rs
+      @@ -406,47 +406,38 @@
+               harness::add_edge(god, from, to, key, ());
+           }
+       
+      -    /// Common test runner for validating the stack-level elimination pipeline.
+      -    /// It extracts all paths from a given trie, runs them through the full pipeline,
+      -    /// and asserts that all surviving paths are valid (i.e., have no negative pops).
+      -    fn run_stack_pipeline_test(god: &TestGod, roots: &[Trie2Index]) {
+      -        // Extract stacks
+      -        let stacks = Trie::<TestEK, TestEV, TestT>::get_all_paths(god, roots);
+      -        assert!(!stacks.is_empty(), "Test setup should produce at least one stack.");
+      -
+      -        // Apply the stack pipeline to each stack: internal cancellation + trailing elimination.
+      -        let mut final_stacks = BTreeSet::new();
+      -        for s in stacks {
+      +    /// Test runner that compares the trie-level transformation against the stack-based
+      +    /// reference implementation.
+      +    /// This is designed to fail with a `todo!()` panic until the trie-level functions
+      +    /// are implemented, confirming that the test harness is correctly wired.
+      +    fn run_trie_vs_stack_comparison_test(god: &TestGod, roots: &[Trie2Index]) {
+      +        // 1. Calculate EXPECTED stacks from the original trie using the stack-based reference functions.
+      +        let initial_stacks = Trie::<TestEK, TestEV, TestT>::get_all_paths(god, roots);
+      +        let mut expected_stacks = BTreeSet::new();
+      +        for s in initial_stacks {
+                   if let Some(mid) =
+                       stack_eliminate_internal_negative_pops(s, get_pop, replace_pop, checks_intersect)
+                   {
+                       let fin = stack_eliminate_trailing_negative_pops(mid, get_pop);
+      -                final_stacks.insert(fin);
+      +                expected_stacks.insert(fin);
+                   }
+               }
+       
+      -        // For sanity, we expect at least one surviving stack and all are non-negative-only now.
+      -        assert!(
+      -            !final_stacks.is_empty(),
+      -            "Expected some surviving stacks after the elimination pipeline"
+      +        // 2. Calculate ACTUAL stacks by running the trie-level transform on a clone.
+      +        let (god_clone, roots_clone, _) = Trie::deep_copy_subtrees(god, roots);
+      +
+      +        // This is the call that is expected to panic until implemented.
+      +        eliminate_negative_pops(
+      +            &god_clone,
+      +            &roots_clone,
+      +            get_pop,
+      +            replace_pop,
+      +            checks_intersect,
+               );
+      -        for s in &final_stacks {
+      -            for ek in s {
+      -                assert!(
+      -                    ek.pop >= 0,
+      -                    "Final stacks must not contain negative pops: {:?}",
+      -                    s
+      -                );
+      -            }
+      -        }
+      +
+      +        let actual_stacks = Trie::get_all_paths(&god_clone, &roots_clone);
+      +
+      +        // 3. Compare the results.
+      +        assert_eq!(expected_stacks, actual_stacks);
+           }
+       
+           /// Validate the stack pipeline on a complex graph by:
+      @@ -529,14 +518,13 @@
+               add_edge(&god, n32, n34, ek(2, None));
+               add_edge(&god, n34, n36, ek(1, Some(&[0]))); // Leaf
+       
+      -        run_stack_pipeline_test(&god, &[n16]);
+      +        run_trie_vs_stack_comparison_test(&god, &[n16]);
+           }
+       
+           #[test]
+           fn test_simple_cancel_via_runner() {
+               // A --(+1, c0)--> B --(-1, c0)--> C
+      -        // This path would be eliminated, but the runner expects at least one survivor.
+      -        // So we add a dummy path that survives.
+      +        // Path A->B->C should be eliminated by cancellation. Path A->D should survive.
+               let god = TestGod::new();
+               let a = new_node(&god);
+               let b = new_node(&god);
+      @@ -545,7 +533,7 @@
+               add_edge(&god, a, b, ek(1, Some(&[0])));
+               add_edge(&god, b, c, ek(-1, Some(&[0])));
+               add_edge(&god, a, d, ek(1, None)); // Dummy survivor
+      -        run_stack_pipeline_test(&god, &[a]);
+      +        run_trie_vs_stack_comparison_test(&god, &[a]);
+           }
+       
+           #[test]
+      @@ -560,7 +548,7 @@
+               add_edge(&god, a, b, ek(1, Some(&[0])));
+               add_edge(&god, b, c, ek(-1, Some(&[1]))); // Mismatching check
+               add_edge(&god, a, d, ek(2, Some(&[2])));   // Survivor
+      -        run_stack_pipeline_test(&god, &[a]);
+      +        run_trie_vs_stack_comparison_test(&god, &[a]);
+           }
+       
+           #[test]
+      @@ -572,7 +560,7 @@
+               let c = new_node(&god);
+               add_edge(&god, a, b, ek(2, Some(&[0])));
+               add_edge(&god, b, c, ek(1, Some(&[1])));
+      -        run_stack_pipeline_test(&god, &[a]);
+      +        run_trie_vs_stack_comparison_test(&god, &[a]);
+           }
+       }
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_eliminate_negative_pops.rs
+      Applying patch to 'src/constraint_precompute3_eliminate_negative_pops.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_eliminate_negative_pops.rs.
+    metadata:
+  - user: 'Changes committed with message: "Test: Switch graph tests to use comparison
+      runner to validate trie stubs"'
     metadata:
 ...
