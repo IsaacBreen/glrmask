@@ -1119,6 +1119,10 @@ impl Display for GLRParser {
             self.format_state_details(f, *sid, "    ")?;
         }
 
+        // Print the hallucinated state.
+        writeln!(f, "  State {} (Hallucinated):", self.hallucinated_state_id.0)?;
+        self.format_state_details(f, self.hallucinated_state_id, "    ")?;
+
         writeln!(f, "\nTerminal Map (name to terminal ID):")?;
         for (terminal, terminal_id) in terminal_map {
             writeln!(f, "  {} -> {}", terminal, terminal_id.0)?;
