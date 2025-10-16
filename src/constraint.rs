@@ -124,32 +124,27 @@ impl Display for IntermediateTrie3EdgeKey {
             if bv.is_empty() {
                 return "[]".to_string();
             }
-            let mut ranges = vec![];
-            let mut current_range: Option<(usize, usize)> = None;
-
-            for val in bv.iter() {
-                if let Some((start, end)) = &mut current_range {
-                    if val == *end + 1 {
-                        *end = val;
-                    } else {
-                        ranges.push((*start, *end));
-                        current_range = Some((val, val));
-                    }
-                } else {
-                    current_range = Some((val, val));
-                }
-            }
-            if let Some((start, end)) = current_range {
-                ranges.push((start, end));
+            if bv.is_all() {
+                return "[ALL]".to_string();
             }
 
-            let parts: Vec<String> = ranges.iter().map(|(start, end)| {
+            const MAX_RANGES_TO_SHOW: usize = 10;
+            let total_ranges = bv.inner().ranges_len();
+
+            let mut parts: Vec<String> = bv.iter_ranges().take(MAX_RANGES_TO_SHOW).map(|(start, end)| {
                 if start == end {
                     format!("{}", start)
+                } else if end == usize::MAX {
+                    format!("{}..", start)
                 } else {
                     format!("{}..={}", start, end)
                 }
             }).collect();
+
+            if total_ranges > MAX_RANGES_TO_SHOW {
+                parts.push(format!("... ({} more ranges)", total_ranges - MAX_RANGES_TO_SHOW));
+            }
+
             parts.join(", ")
         }
 
