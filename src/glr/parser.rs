@@ -1727,9 +1727,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
             if !acc.stored_trie_nodes().is_empty() {
                 any_sources = true;
-                for node in acc.stored_trie_nodes().iter().cloned() {
-                    deep_add_precompute_trie_edges(&mut Arc::new(GSSNode::new(acc.clone())), god, &key, &mut || dest.clone(), &mut PruneAndTransformRecursiveMemo::default());
-                }
+                deep_add_precompute_trie_edges(&mut Arc::new(GSSNode::new(acc.clone())), god, &key, &mut || dest.clone(), &mut PruneAndTransformRecursiveMemo::default());
             }
 
             merged_acc_opt = Some(match merged_acc_opt {
