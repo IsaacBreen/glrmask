@@ -2018,30 +2018,31 @@ impl GrammarConstraint {
         );
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
-        let roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        let paths = IntermediatePrecomputeNode3::get_all_paths(&intermediate_trie3_god, &roots, |node| node.value.end);
-        println!("Paths:");
-        for (_root_value, path_edges) in &paths {
-            let edge_keys_str: Vec<_> = path_edges.iter()
-                .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
-                .map(|(ek, _, _)| format!("{}", ek))
-                .collect();
-            println!("  [{}]", edge_keys_str.join(", "));
-        }
-        let mut processed_paths = BTreeSet::new();
-        for (_root_value, path_edges) in paths {
-            let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
-            if let Some(new_path) = eliminate_pushes_and_pops(edge_keys) {
-                processed_paths.insert(new_path);
+        let mut paths_by_sid = BTreeMap::new();
+        for (sid, root_idx) in &intermediate_precomputed3 {
+            let paths = IntermediatePrecomputeNode3::get_all_paths(&intermediate_trie3_god, &[*root_idx], |node| node.value.end);
+            let mut processed_paths_for_sid = BTreeSet::new();
+            for (_root_value, path_edges) in paths {
+                let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
+                if let Some(new_path) = eliminate_pushes_and_pops(edge_keys) {
+                    processed_paths_for_sid.insert(new_path);
+                }
             }
+            paths_by_sid.insert(*sid, processed_paths_for_sid);
         }
-        println!("Processed paths:");
-        for path in &processed_paths {
-            let edge_keys_str: Vec<_> = path.iter()
-                .filter(|ek| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
-                .map(|ek| format!("{}", ek))
-                .collect();
-            println!("  [{}]", edge_keys_str.join(", "));
+
+        println!("Processed paths after elimination:");
+        for (sid, paths) in &paths_by_sid {
+            println!("  SID {}:", sid.0);
+            for path in paths {
+                let edge_keys_str: Vec<_> = path.iter()
+                    .filter(|ek| !matches!(ek, &IntermediateTrie3EdgeKey::NoOp))
+                    .map(|ek| format!("{}", ek))
+                    .collect();
+                if !edge_keys_str.is_empty() {
+                    println!("    [{}]", edge_keys_str.join(", "));
+                }
+            }
         }
 
         // Rebuild the intermediate trie from the processed paths.
@@ -2056,14 +2057,25 @@ impl GrammarConstraint {
         // Create a single shared leaf node.
         let leaf_node = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
 
-        for root_idx in intermediate_precomputed3.values() {
-            for path in &processed_paths {
+        for (sid, paths) in &paths_by_sid {
+            let root_idx = intermediate_precomputed3.get(sid).unwrap();
+            for path in paths {
                 let mut current_idx = *root_idx;
                 for edge_key in path {
-                    let new_node = IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal());
-                    let new_idx = IntermediatePrecomputeNode3Index::from(intermediate_trie3_god.insert(new_node));
-                    current_idx.write(&intermediate_trie3_god).unwrap().force_insert_to_node(edge_key.clone(), (), new_idx);
-                    current_idx = new_idx;
+                    let next_idx = {
+                        let guard = current_idx.read(&intermediate_trie3_god).unwrap();
+                        if let Some(dest_map) = guard.children().get(edge_key) {
+                            // Path processing should result in deterministic single-destination edges.
+                            *dest_map.keys().next().unwrap()
+                        } else {
+                            drop(guard);
+                            let new_node = IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal());
+                            let new_idx = IntermediatePrecomputeNode3Index::from(intermediate_trie3_god.insert(new_node));
+                            current_idx.write(&intermediate_trie3_god).unwrap().force_insert_to_node(edge_key.clone(), (), new_idx);
+                            new_idx
+                        }
+                    };
+                    current_idx = next_idx;
                 }
                 // After the path is built, connect the last node to the shared leaf.
                 current_idx.write(&intermediate_trie3_god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), leaf_node);
