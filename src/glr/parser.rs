@@ -1856,7 +1856,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             for (_pred_ptr, isolated_parent) in parents_map {
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos", { // ~500 calls
                 let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
-                let mut seen_gotos = HashSet::new();
+                let mut seen_gotos: BTreeSet<(Goto, Option<StateIDBV>)> = BTreeSet::new();
                 let mut nt_queue = VecDeque::new();
                 nt_queue.push_back(nt);
 
@@ -1901,7 +1901,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", { // SLOW POINT, ~5k calls
                     for (goto, maybe_filter) in gotos_with_filters {
-                        if !seen_gotos.insert(goto) {
+                        if !seen_gotos.insert((goto, maybe_filter.clone())) {
                             crate::debug!(5, "Skipping GOTO to state {:?}, accept: {}, filter: {:?}", goto.state_id, goto.accept, maybe_filter);
                             continue;
                         }
