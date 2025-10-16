@@ -57,7 +57,6 @@ pub use crate::constraint_precompute1_utils::Trie1Config;
 pub use crate::constraint_precompute2_utils::Trie2Config;
 pub use crate::constraint_precompute3_utils::Trie3Config;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
-use crate::constraint_precompute3_eliminate_negative_pops::{eliminate_negative_pops};
 use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::EntryApi;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
@@ -1946,14 +1945,15 @@ impl GrammarConstraint {
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         let roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        let paths = IntermediatePrecomputeNode3::get_all_paths(&intermediate_trie3_god, &roots);
+        let paths = IntermediatePrecomputeNode3::get_all_paths(&intermediate_trie3_god, &roots, |node| node.value.end);
         println!("Paths:");
         for path in &paths {
             println!("  {:?}", path);
         }
         let mut processed_paths = BTreeSet::new();
-        for path in paths {
-            if let Some(new_path) = eliminate_pushes_and_pops(path) {
+        for (_root_value, path_edges) in paths {
+            let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
+            if let Some(new_path) = eliminate_pushes_and_pops(edge_keys) {
                 processed_paths.insert(new_path);
             }
         }
