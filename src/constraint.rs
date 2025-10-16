@@ -2694,7 +2694,7 @@ pub struct GrammarConstraintState<'a> {
 }
 
 pub(crate) mod constraint_precompute3_utils {
-    use super::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, PrecomputeNode3Index};
+    use super::{EmptyEdge, IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, PrecomputeNode3Index};
     use crate::constraint::LLMTokenBV;
     use crate::datastructures::trie::{Trie, Trie2Index};
     use std::collections::{HashMap, VecDeque};
