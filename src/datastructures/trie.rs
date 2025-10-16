@@ -11,6 +11,7 @@ use deterministic_hash::DeterministicHasher;
 use kdam::{tqdm, BarExt};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use profiler_macro::time_it;
+use crate::datastructures::EntryApi;
 
 /// Represents statistics about a Trie graph reachable from a set of roots.
 #[derive(Debug, Clone, PartialEq)]
@@ -792,46 +793,80 @@ where
         true
     }
 
-    /// TEST UTILITY: Traverses the graph from the given roots and returns the set of all
-    /// possible paths of edge keys that end in a leaf node.
+    /// TEST UTILITY: Traverses the graph from the given roots and returns all
+    /// possible paths that end in a node satisfying the `is_end` predicate.
     ///
-    /// A "path" is a `Vec<EK>` from a root to any reachable leaf node. If a root is
-    /// itself a leaf, the path is an empty `Vec`. This function correctly handles
-    /// DAGs and cycles.
-    pub fn get_all_paths(
+    /// A "path" is a tuple containing the value of the root node and a vector of
+    /// (edge key, edge value, destination node value) tuples. This function
+    /// correctly handles DAGs and cycles.
+    pub fn get_all_paths<F>(
         arena: &Arena<Self>,
         roots: &[Trie2Index],
-    ) -> std::collections::BTreeSet<Vec<EK>> {
-        let mut all_paths = std::collections::BTreeSet::new();
+        is_end: F,
+    ) -> Vec<(T, Vec<(EK, EV, T)>)>
+    where
+        F: Fn(&Trie<EK, EV, T>) -> bool,
+        T: Clone,
+        EV: Clone,
+    {
+        let mut all_paths = Vec::new();
 
         for &root in roots {
             let mut visiting = std::collections::BTreeSet::new();
-            Self::get_all_paths_recursive(arena, root, vec![], &mut all_paths, &mut visiting);
+            if let Some(root_guard) = root.read(arena) {
+                let root_value = root_guard.value.clone();
+                Self::get_all_paths_recursive(
+                    arena,
+                    root,
+                    vec![],
+                    &mut all_paths,
+                    &mut visiting,
+                    &is_end,
+                    root_value,
+                );
+            }
         }
         all_paths
     }
 
-    fn get_all_paths_recursive(
+    fn get_all_paths_recursive<F>(
         arena: &Arena<Self>,
         node_idx: Trie2Index,
-        current_path: Vec<EK>,
-        all_paths: &mut std::collections::BTreeSet<Vec<EK>>,
+        current_path: Vec<(EK, EV, T)>,
+        all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
         visiting: &mut std::collections::BTreeSet<Trie2Index>,
-    ) {
+        is_end: &F,
+        root_value: T,
+    ) where
+        F: Fn(&Trie<EK, EV, T>) -> bool,
+        T: Clone,
+        EV: Clone,
+    {
         if !visiting.insert(node_idx) {
             // Cycle detected, stop this path.
             return;
         }
 
         if let Some(guard) = node_idx.read(arena) {
-            if guard.is_leaf() {
-                all_paths.insert(current_path);
+            if is_end(&guard) {
+                all_paths.push((root_value, current_path));
             } else {
                 for (edge_key, dest_map) in guard.children() {
-                    for child_idx in dest_map.keys() {
-                        let mut new_path = current_path.clone();
-                        new_path.push(edge_key.clone());
-                        Self::get_all_paths_recursive(arena, *child_idx, new_path, all_paths, visiting);
+                    for (child_idx, edge_value) in dest_map.iter() {
+                        if let Some(child_guard) = child_idx.read(arena) {
+                            let mut new_path = current_path.clone();
+                            let child_value = child_guard.value.clone();
+                            new_path.push((edge_key.clone(), edge_value.clone(), child_value));
+                            Self::get_all_paths_recursive(
+                                arena,
+                                *child_idx,
+                                new_path,
+                                all_paths,
+                                visiting,
+                                is_end,
+                                root_value.clone(),
+                            );
+                        }
                     }
                 }
             }
@@ -2125,5 +2160,30 @@ where
     }
 }
 
+impl<EK, EV, T> Arena<Trie<EK, EV, T>>
+where
+    EK: Ord + Clone,
+    EV: Clone + std::ops::BitOrAssign,
+{
+    /// Inserts an edge from `src` to `dst` with the given `edge_key` and `edge_value`.
+    /// If an edge with the same key to the same destination already exists, the new
+    /// `edge_value` is merged into the existing one using `BitOrAssign` (`|=`).
+    pub fn insert_edge_simple(
+        &self,
+        src: Trie2Index,
+        dst: Trie2Index,
+        edge_key: EK,
+        edge_value: EV,
+    ) {
+        if let Some(mut src_guard) = src.write(self) {
+            src_guard.children.entry(edge_key).or_default()
+                .entry(dst)
+                .and_modify(|ev| *ev |= edge_value.clone())
+                .or_insert(edge_value);
+        }
+    }
+}
+
 pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
+
