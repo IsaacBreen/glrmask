@@ -2365,6 +2365,7 @@ fn test_constraint_indirect_recursion_simplified() {
         token_name_map,
         2, // max_original_llm_token_id
     );
+    constraint.dump_precomputed1();
     constraint.dump_precomputed3();
 
     // Initial state and step
