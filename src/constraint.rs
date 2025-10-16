@@ -65,15 +65,6 @@ use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_a
 use std::iter::FromIterator;
 use crate::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EmptyEdge;
-
-impl std::ops::BitOrAssign for EmptyEdge {
-    fn bitor_assign(&mut self, _rhs: Self) {
-        // No-op
-    }
-}
-
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;
 
@@ -143,9 +134,9 @@ impl IntermediatePrecomputedNodeContents3 {
     }
 }
 
-pub type IntermediatePrecomputeNode3 = Trie<IntermediateTrie3EdgeKey, EmptyEdge, IntermediatePrecomputedNodeContents3>;
+pub type IntermediatePrecomputeNode3 = Trie<IntermediateTrie3EdgeKey, (), IntermediatePrecomputedNodeContents3>;
 pub type IntermediatePrecomputeNode3Index = Trie2Index;
-pub type IntermediateTrie3GodWrapper = GodWrapper<IntermediateTrie3EdgeKey, EmptyEdge, IntermediatePrecomputedNodeContents3>;
+pub type IntermediateTrie3GodWrapper = GodWrapper<IntermediateTrie3EdgeKey, (), IntermediatePrecomputedNodeContents3>;
 
 // Original Trie3 types remain for the final structure
 pub type PrecomputeNode3 = Trie<(isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
@@ -1783,7 +1774,12 @@ impl GrammarConstraint {
             // Create a head node and hook it from all stored trie nodes in this stack's Acc
             let head = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
             for src in acc.stored_trie_nodes().iter() {
-                trie3_god.insert_edge_simple(src.as_arc().clone(), head.clone(), IntermediateTrie3EdgeKey::NoOp, EmptyEdge);
+                let inserter = EdgeInserter::new(
+                    trie3_god,
+                    src.as_arc().clone(),
+                    IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+                );
+                inserter.try_destination(head.clone()).expect("Failed to insert unconditional edge to template head");
             }
 
             // Now walk the stack; items go top->bottom; first item is the hallucinated state: skip it.
@@ -1791,9 +1787,14 @@ impl GrammarConstraint {
             for state_content in items.iter().skip(1) {
                 let mut state_bv = StateIDBV::zeros();
                 state_bv.insert(state_content.state_id.0);
+                let inserter = EdgeInserter::new(
+                    trie3_god,
+                    cur.as_arc().clone(),
+                    IntermediateTrie3EdgeKey::Push(state_bv), (), |_, _| {}, |_, _| {}, |_, _| {},
+                );
                 let next = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                trie3_god.insert_edge_simple(cur.as_arc().clone(), next.clone(), IntermediateTrie3EdgeKey::Push(state_bv), EmptyEdge);
-                cur = next;
+                let actual = inserter.try_destination(next.clone()).expect("Failed to insert (-1) pop edge in template chain");
+                cur = actual;
             }
 
             final_nodes.push(cur);
@@ -1802,7 +1803,12 @@ impl GrammarConstraint {
         // Converge all final nodes into a single shared end node.
         let end = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
         for src in final_nodes {
-            trie3_god.insert_edge_simple(src.as_arc().clone(), end.clone(), IntermediateTrie3EdgeKey::NoOp, EmptyEdge);
+            let inserter = EdgeInserter::new(
+                trie3_god,
+                src.as_arc().clone(),
+                IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+            );
+            inserter.try_destination(end.clone()).expect("Failed to insert final convergence edge to template end");
         }
 
         end
@@ -1859,7 +1865,12 @@ impl GrammarConstraint {
                 // Merge current set into a single node with unconditional edges
                 let merged = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                 for src in current_nodes_set.iter() {
-                    intermediate_trie3_god.insert_edge_simple(src.as_arc().clone(), merged.clone(), IntermediateTrie3EdgeKey::NoOp, EmptyEdge);
+                    let inserter = EdgeInserter::new(
+                        &intermediate_trie3_god,
+                        src.as_arc().clone(),
+                        IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+                    );
+                    inserter.try_destination(merged.clone()).expect("Failed to insert merge edge in Trie3 step");
                 }
 
                 let mut out = Vec::new();
@@ -1871,18 +1882,26 @@ impl GrammarConstraint {
                         let copied_end = id_map.get(templ_end).expect("cloned end missing").clone();
 
                         // Connect merged -> copied_start unconditionally
-                        intermediate_trie3_god.insert_edge_simple(merged.as_arc().clone(), copied_start.clone(), IntermediateTrie3EdgeKey::NoOp, EmptyEdge);
+                        {
+                            let inserter = EdgeInserter::new(
+                                &intermediate_trie3_god,
+                                merged.as_arc().clone(),
+                                IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+                            );
+                            inserter.try_destination(copied_start.clone()).expect("Failed to hook merged node to copied template start");
+                        }
 
                         // For each destination in Trie1, fork a node from copied_end with LLM tokens on the edge.
                         for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                             let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                            intermediate_trie3_god.insert_edge_simple(
+                            let inserter = EdgeInserter::new(
+                                &intermediate_trie3_god,
                                 copied_end.as_arc().clone(),
-                                next.clone(),
-                                IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), EmptyEdge,
+                                IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), (), |_, _| {}, |_, _| {}, |_, _| {},
                             );
+                            let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge after template end");
                             let mut s = BTreeSet::new();
-                            s.insert(next);
+                            s.insert(actual);
                             out.push((dst_node_wrapper.clone(), s));
                         }
                     }
@@ -1890,13 +1909,14 @@ impl GrammarConstraint {
                         // No grammar token on this edge: fan out directly from merged with LLM-token edges.
                         for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                             let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                            intermediate_trie3_god.insert_edge_simple(
+                            let inserter = EdgeInserter::new(
+                                &intermediate_trie3_god,
                                 merged.as_arc().clone(),
-                                next.clone(),
-                                IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), EmptyEdge,
+                                IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), (), |_, _| {}, |_, _| {}, |_, _| {},
                             );
+                            let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge on None-terminal branch");
                             let mut s = BTreeSet::new();
-                            s.insert(next);
+                            s.insert(actual);
                             out.push((dst_node_wrapper.clone(), s));
                         }
                     }
@@ -1911,7 +1931,12 @@ impl GrammarConstraint {
             |precomputed_node_data, nodes_set| {
                 if precomputed_node_data.value.end {
                     for src in nodes_set.iter() {
-                        intermediate_trie3_god.insert_edge_simple(src.as_arc().clone(), trie3_end.clone(), IntermediateTrie3EdgeKey::NoOp, EmptyEdge);
+                        let inserter = EdgeInserter::new(
+                            &intermediate_trie3_god,
+                            src.as_arc().clone(),
+                            IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+                        );
+                        inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge from nodes_set");
                     }
                 }
                 true
@@ -1955,11 +1980,11 @@ impl GrammarConstraint {
                 for edge_key in path {
                     let new_node = IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal());
                     let new_idx = IntermediatePrecomputeNode3Index::from(intermediate_trie3_god.insert(new_node));
-                    intermediate_trie3_god.insert_edge_simple(current_idx, new_idx.clone(), edge_key.clone(), EmptyEdge);
+                    current_idx.write(&intermediate_trie3_god).unwrap().force_insert_to_node(edge_key.clone(), (), new_idx);
                     current_idx = new_idx;
                 }
                 // After the path is built, connect the last node to the shared leaf.
-                intermediate_trie3_god.insert_edge_simple(current_idx, leaf_node, IntermediateTrie3EdgeKey::NoOp, EmptyEdge);
+                current_idx.write(&intermediate_trie3_god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), leaf_node);
             }
         }
 
@@ -2024,7 +2049,8 @@ impl GrammarConstraint {
                         IntermediateTrie3EdgeKey::NoOp => ((0, tokens_all.clone()), states_all.clone()),
                     };
 
-                    trie3_god.insert_edge_simple(new_idx, new_child_idx, final_key, final_value);
+                    let mut new_guard = new_idx.write(&trie3_god).unwrap();
+                    new_guard.force_insert_to_node(final_key, final_value, new_child_idx);
                 }
             }
         }
@@ -2694,7 +2720,7 @@ pub struct GrammarConstraintState<'a> {
 }
 
 pub(crate) mod constraint_precompute3_utils {
-    use super::{EmptyEdge, IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, PrecomputeNode3Index};
+    use super::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, PrecomputeNode3Index};
     use crate::constraint::LLMTokenBV;
     use crate::datastructures::trie::{Trie, Trie2Index};
     use std::collections::{HashMap, VecDeque};
@@ -2719,7 +2745,7 @@ pub(crate) mod constraint_precompute3_utils {
             let old_ptr = old_arc;
             let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
 
-            let children_snapshot: Vec<( super::IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, EmptyEdge)> )> = {
+            let children_snapshot: Vec<( super::IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, ())> )> = {
                 let g = old_arc.read(trie3_god).expect("poison");
                 g.children()
                     .iter()

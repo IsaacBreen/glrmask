@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::constraint::{PrecomputeNode3Index, StateIDBV, IntermediateTrie3GodWrapper, LLMTokenBV, PrecomputedNodeContents, EmptyEdge};
+use crate::constraint::{PrecomputeNode3Index, StateIDBV, IntermediateTrie3GodWrapper, LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::gss_leveled_adapter::{GSSNode, map_trie3_node_ids};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::table::{NonTerminalID, TerminalID};
@@ -178,7 +178,7 @@ fn merge_trie3_nodes_and_get_map_internal(
                             let v_dense = dense_of[v_idx];
                             let dest_class = final_partition[v_dense];
                             if let Some(dest_rep_idx) = representatives[dest_class] {
-                                new_children.entry(ek.clone()).or_insert_with(OrderedHashMap::new).insert(dest_rep_idx, EmptyEdge);
+                                new_children.entry(ek.clone()).or_insert_with(OrderedHashMap::new).insert(dest_rep_idx, ());
                             }
                         }
                     }
