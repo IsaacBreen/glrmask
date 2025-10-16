@@ -145,7 +145,11 @@ impl Display for IntermediateTrie3EdgeKey {
                 parts.push(format!("... ({} more ranges)", total_ranges - MAX_RANGES_TO_SHOW));
             }
 
-            parts.join(", ")
+            if total_ranges > 1 {
+                format!("[{}]", parts.join(", "))
+            } else {
+                parts.join(", ")
+            }
         }
 
         match self {
