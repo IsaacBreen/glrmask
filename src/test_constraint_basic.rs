@@ -2680,7 +2680,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
         token_name_map,
         3,
     );
-    // constraint.dump_precomputed1();
+    constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
 
