@@ -1937,6 +1937,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         ..
                                     }) => {
                                         // Unit reduce chain: continue
+                                        crate::debug!(5, "Unit reduce chain: GOTO to state {} leads to reduce of NT '{}', continuing chain.", goto_state_id.0, self.parser.non_terminal_map.get_by_right(next_nt).unwrap());
                                         if seen_nts.insert(*next_nt) {
                                             nt_queue.push_back(*next_nt);
                                         }
@@ -1970,7 +1971,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     _ => {
                                         // Not a unit reduction path anymore -> emit a single push to goto_state
                                         timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::NonUnit GSS PUSH", {});
-                                        crate::debug!(5, "Pushing GOTO to state {:?}, accept: {}, filter: {:?}", goto_state_id, goto.accept, maybe_filter);
+                                        crate::debug!(5, "GOTO to state {} has a non-unit-reduce action ({:?}). Pushing state.", goto_state_id.0, actions[0].0);
                                         out.push(Arc::new(parent_after_filter.push(
                                             ParseStateEdgeContent {
                                                 state_id: goto_state_id,
@@ -1981,12 +1982,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             } else {
                                 // Not a unit reduction path anymore -> emit a single push to goto_state
                                 timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::MultiAction GSS PUSH", {});
-                                crate::debug!(5, "Pushing GOTO to state {:?}, accept: {}, filter: {:?}", goto_state_id, goto.accept, maybe_filter);
+                                crate::debug!(5, "GOTO to state {} has {} actions, not a unit reduce. Pushing state.", goto_state_id.0, actions.len());
                                 out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
                                     state_id: goto_state_id,
                                 })));
                             }
                         } else {
+                            crate::debug!(5, "No GOTO. We're done.");
                             // No goto target -> we're done.
                         }
                     }
