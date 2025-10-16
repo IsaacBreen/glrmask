@@ -1993,7 +1993,10 @@ impl GrammarConstraint {
         let paths = IntermediatePrecomputeNode3::get_all_paths(&intermediate_trie3_god, &roots, |node| node.value.end);
         println!("Paths:");
         for (_root_value, path_edges) in &paths {
-            let edge_keys_str: Vec<_> = path_edges.iter().map(|(ek, _, _)| format!("{}", ek)).collect();
+            let edge_keys_str: Vec<_> = path_edges.iter()
+                .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+                .map(|(ek, _, _)| format!("{}", ek))
+                .collect();
             println!("  [{}]", edge_keys_str.join(", "));
         }
         let mut processed_paths = BTreeSet::new();
@@ -2005,7 +2008,10 @@ impl GrammarConstraint {
         }
         println!("Processed paths:");
         for path in &processed_paths {
-            let edge_keys_str: Vec<_> = path.iter().map(|ek| format!("{}", ek)).collect();
+            let edge_keys_str: Vec<_> = path.iter()
+                .filter(|ek| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+                .map(|ek| format!("{}", ek))
+                .collect();
             println!("  [{}]", edge_keys_str.join(", "));
         }
 
