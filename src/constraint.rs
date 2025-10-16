@@ -117,6 +117,51 @@ pub enum IntermediateTrie3EdgeKey {
     NoOp,
 }
 
+impl Display for IntermediateTrie3EdgeKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // Helper to format HybridBitset into ranges
+        fn format_bv(bv: &HybridBitset) -> String {
+            if bv.is_empty() {
+                return "[]".to_string();
+            }
+            let mut ranges = vec![];
+            let mut current_range: Option<(usize, usize)> = None;
+
+            for val in bv.iter() {
+                if let Some((start, end)) = &mut current_range {
+                    if val == *end + 1 {
+                        *end = val;
+                    } else {
+                        ranges.push((*start, *end));
+                        current_range = Some((val, val));
+                    }
+                } else {
+                    current_range = Some((val, val));
+                }
+            }
+            if let Some((start, end)) = current_range {
+                ranges.push((start, end));
+            }
+
+            let parts: Vec<String> = ranges.iter().map(|(start, end)| {
+                if start == end {
+                    format!("{}", start)
+                } else {
+                    format!("{}..={}", start, end)
+                }
+            }).collect();
+            parts.join(", ")
+        }
+
+        match self {
+            IntermediateTrie3EdgeKey::Pop(n, bv) => write!(f, "Pop({}, {})", n, format_bv(bv)),
+            IntermediateTrie3EdgeKey::Push(bv) => write!(f, "Push({})", format_bv(bv)),
+            IntermediateTrie3EdgeKey::CheckLLM(bv) => write!(f, "CheckLLM({})", format_bv(bv)),
+            IntermediateTrie3EdgeKey::NoOp => write!(f, "NoOp"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IntermediatePrecomputedNodeContents3 {
     pub end: bool,
@@ -1947,8 +1992,9 @@ impl GrammarConstraint {
         let roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
         let paths = IntermediatePrecomputeNode3::get_all_paths(&intermediate_trie3_god, &roots, |node| node.value.end);
         println!("Paths:");
-        for path in &paths {
-            println!("  {:?}", path);
+        for (_root_value, path_edges) in &paths {
+            let edge_keys_str: Vec<_> = path_edges.iter().map(|(ek, _, _)| format!("{}", ek)).collect();
+            println!("  [{}]", edge_keys_str.join(", "));
         }
         let mut processed_paths = BTreeSet::new();
         for (_root_value, path_edges) in paths {
@@ -1959,7 +2005,8 @@ impl GrammarConstraint {
         }
         println!("Processed paths:");
         for path in &processed_paths {
-            println!("  {:?}", path);
+            let edge_keys_str: Vec<_> = path.iter().map(|ek| format!("{}", ek)).collect();
+            println!("  [{}]", edge_keys_str.join(", "));
         }
 
         // Rebuild the intermediate trie from the processed paths.
