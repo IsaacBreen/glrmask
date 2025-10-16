@@ -5975,6 +5975,39 @@ local_system:
               // Build per-terminal template subgraphs once in this arena.
               let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
 
+              println!("\n--- Terminal Template Paths ---");
+              let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
+              sorted_templates.sort_by_key(|(tid, _)| *tid);
+
+              for (tid, (start_node, end_node)) in sorted_templates {
+                  let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
+                  println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
+
+                  let end_node_guard = end_node.read(&intermediate_trie3_god).unwrap();
+                  let end_node_ref: &IntermediatePrecomputeNode3 = &*end_node_guard;
+
+                  let template_paths = IntermediatePrecomputeNode3::get_all_paths(
+                      &intermediate_trie3_god,
+                      &[start_node.clone()],
+                      |node| std::ptr::eq(node, end_node_ref)
+                  );
+
+                  if template_paths.is_empty() {
+                      println!("  (No paths found to end node)");
+                  }
+
+                  for (_root_value, path_edges) in &template_paths {
+                      let edge_keys_str: Vec<_> = path_edges.iter()
+                          .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+                          .map(|(ek, _, _)| format!("{}", ek))
+                          .collect();
+                      if !edge_keys_str.is_empty() {
+                          println!("  [{}]", edge_keys_str.join(", "));
+                      }
+                  }
+              }
+              println!("--- End Terminal Template Paths ---\n");
+
               // Group tokenizer states by shared Trie1 root
               let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
               for (tokenizer_state_id, trie1_root) in precomputed1.iter() {
@@ -12681,5 +12714,134 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Implement Display for IntermediateTrie3EdgeKey
       and filter NoOp from precompute3 path output"'
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Show the paths for each of the terminal templates.
+      The closure passed to `get_all_paths` shouldn't check `is_end` field on the node; it should check whether the node is the actual end node for the template.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions and the git diff to add the requested logging for terminal template paths.
+
+      ### Step-by-step Instructions
+
+      I will guide you to add a new code block in `src/constraint.rs` that iterates through the generated terminal templates, finds all paths from each template's start node to its end node, and prints them.
+
+      1.  **Open `src/constraint.rs`**.
+
+      2.  **Navigate to the `precompute3` function**.
+
+      3.  **Insert the new logging code**:
+          Locate the line where `terminal_templates` is created, which is around line 1650:
+          ```rust
+          // Build per-terminal template subgraphs once in this arena.
+          let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
+          ```
+          Immediately after this line, insert the following code block. This new block will print the paths for each template. The key part is the closure passed to `get_all_paths`, which now correctly identifies the template's specific end node by comparing memory addresses, as you requested.
+
+          ```rust
+          println!("\n--- Terminal Template Paths ---");
+          let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
+          sorted_templates.sort_by_key(|(tid, _)| *tid);
+
+          for (tid, (start_node, end_node)) in sorted_templates {
+              let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
+              println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
+
+              let end_node_guard = end_node.read(&intermediate_trie3_god).unwrap();
+              let end_node_ref: &IntermediatePrecomputeNode3 = &*end_node_guard;
+
+              let template_paths = IntermediatePrecomputeNode3::get_all_paths(
+                  &intermediate_trie3_god,
+                  &[start_node.clone()],
+                  |node| std::ptr::eq(node, end_node_ref)
+              );
+
+              if template_paths.is_empty() {
+                  println!("  (No paths found to end node)");
+              }
+
+              for (_root_value, path_edges) in &template_paths {
+                  let edge_keys_str: Vec<_> = path_edges.iter()
+                      .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+                      .map(|(ek, _, _)| format!("{}", ek))
+                      .collect();
+                  if !edge_keys_str.is_empty() {
+                      println!("  [{}]", edge_keys_str.join(", "));
+                  }
+              }
+          }
+          println!("--- End Terminal Template Paths ---\n");
+          ```
+
+      This is the only change required. The rest of the function will then proceed with the main Trie 3 construction.
+
+      ### Git Diff
+
+      Here is the git diff to apply this change directly:
+
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1650,6 +1650,41 @@
+               // Build per-terminal template subgraphs once in this arena.
+               let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
+       
+      +        println!("\n--- Terminal Template Paths ---");
+      +        let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
+      +        sorted_templates.sort_by_key(|(tid, _)| *tid);
+      +
+      +        for (tid, (start_node, end_node)) in sorted_templates {
+      +            let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
+      +            println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
+      +
+      +            let end_node_guard = end_node.read(&intermediate_trie3_god).unwrap();
+      +            let end_node_ref: &IntermediatePrecomputeNode3 = &*end_node_guard;
+      +
+      +            let template_paths = IntermediatePrecomputeNode3::get_all_paths(
+      +                &intermediate_trie3_god,
+      +                &[start_node.clone()],
+      +                |node| std::ptr::eq(node, end_node_ref)
+      +            );
+      +
+      +            if template_paths.is_empty() {
+      +                println!("  (No paths found to end node)");
+      +            }
+      +
+      +            for (_root_value, path_edges) in &template_paths {
+      +                let edge_keys_str: Vec<_> = path_edges.iter()
+      +                    .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+      +                    .map(|(ek, _, _)| format!("{}", ek))
+      +                    .collect();
+      +                if !edge_keys_str.is_empty() {
+      +                    println!("  [{}]", edge_keys_str.join(", "));
+      +                }
+      +            }
+      +        }
+      +        println!("--- End Terminal Template Paths ---\n");
+      +
+               // Group tokenizer states by shared Trie1 root
+               let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+               for (tokenizer_state_id, trie1_root) in precomputed1.iter() {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+    metadata:
+  - user: 'Changes committed with message: "Log paths for each terminal template,
+      using pointer equality to find the end node and filtering NoOp steps"'
     metadata:
 ...

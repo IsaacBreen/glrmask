@@ -1881,6 +1881,39 @@ impl GrammarConstraint {
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
 
+        println!("\n--- Terminal Template Paths ---");
+        let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
+        sorted_templates.sort_by_key(|(tid, _)| *tid);
+
+        for (tid, (start_node, end_node)) in sorted_templates {
+            let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
+            println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
+
+            let end_node_guard = end_node.read(&intermediate_trie3_god).unwrap();
+            let end_node_ref: &IntermediatePrecomputeNode3 = &*end_node_guard;
+
+            let template_paths = IntermediatePrecomputeNode3::get_all_paths(
+                &intermediate_trie3_god,
+                &[start_node.clone()],
+                |node| std::ptr::eq(node, end_node_ref)
+            );
+
+            if template_paths.is_empty() {
+                println!("  (No paths found to end node)");
+            }
+
+            for (_root_value, path_edges) in &template_paths {
+                let edge_keys_str: Vec<_> = path_edges.iter()
+                    .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+                    .map(|(ek, _, _)| format!("{}", ek))
+                    .collect();
+                if !edge_keys_str.is_empty() {
+                    println!("  [{}]", edge_keys_str.join(", "));
+                }
+            }
+        }
+        println!("--- End Terminal Template Paths ---\n");
+
         // Group tokenizer states by shared Trie1 root
         let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
         for (tokenizer_state_id, trie1_root) in precomputed1.iter() {
