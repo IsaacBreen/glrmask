@@ -1953,7 +1953,7 @@ impl GrammarConstraint {
                         // Copy the terminal's template and hook it after merged
                         let (templ_start, templ_end) = terminal_templates.get(&tid).expect("template for terminal missing");
                         let (copied_start, id_map) = clone_trie3_graph(templ_start, &intermediate_trie3_god);
-                        let copied_end = id_map.get(templ_end).expect("cloned end missing").clone();
+                        let copied_end = id_map.get(templ_end).unwrap_or(&copied_start).clone();
 
                         // Connect merged -> copied_start unconditionally
                         {
