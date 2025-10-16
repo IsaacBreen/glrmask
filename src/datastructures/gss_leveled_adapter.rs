@@ -726,9 +726,9 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
 
             let edge_key = (0, allowed_tokens.clone());
             let edge_key = crate::constraint::IntermediateTrie3EdgeKey::CheckLLM(allowed_tokens.clone());
-            let edge_value = ();
+            let edge_value = crate::constraint::EmptyEdge;
 
-            stored_trie_god.insert_edge_simple(source_node.as_arc().clone(), dest_node.clone(), edge_key, edge_value);
+            stored_trie_god.insert_edge_simple(source_node.as_arc().clone(), dest_node.clone(), edge_key, edge_value.clone());
             final_nodes.insert(dest_node);
         }
 
@@ -777,7 +777,7 @@ pub(crate) fn deep_add_precompute_trie_edges(
         for source_wrapper in acc.stored_trie_nodes() {
             let source_arc = source_wrapper.as_arc().clone();
 
-            god.insert_edge_simple(source_arc, destination.clone(), edge_key.clone(), ());
+            god.insert_edge_simple(source_arc, destination.clone(), edge_key.clone(), crate::constraint::EmptyEdge);
         }
 
         // destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
@@ -859,8 +859,8 @@ pub(crate) fn merge_stored_trie_nodes(
             .collect();
 
         let tokens_for_edge = acc.llm_tokens_union.clone();
-        let edge_key = crate::constraint::IntermediateTrie3EdgeKey::CheckLLM(tokens_for_edge.clone());
-        let edge_value = ();
+        let edge_key = crate::constraint::IntermediateTrie3EdgeKey::CheckLLM(tokens_for_edge);
+        let edge_value = crate::constraint::EmptyEdge;
 
         for source_node in acc.stored_trie_nodes() {
             let dest_node = source_to_dest_map.get(source_node).unwrap();
