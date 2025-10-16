@@ -1785,6 +1785,7 @@ impl GrammarConstraint {
         let mut acc = Acc::new_fresh();
         acc.stored_trie_nodes_mut().insert(start.clone());
         let mut s = parser.init_parser_state_hallucinated_with_acc(acc).with_god(trie3_god.clone());
+        s._log_gss("Before processing token", tid, false, false);
         let cfg = ProcessTokenAdvancedConfig {
             below_bottom_mode: BelowBottomReductionMode::ContinueFromHallucinateState,
             current_token: Some(tid),
