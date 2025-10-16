@@ -10,6 +10,7 @@ use crate::constraint::StateIDBV;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats, Merge as LGMerge};
 use crate::datastructures::trie::Trie2Index;
 use crate::glr::grammar::Terminal;
 use crate::glr::parser::{GLRParser, ParseStateEdgeContent};

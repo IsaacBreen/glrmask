@@ -65,12 +65,6 @@ use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_a
 use std::iter::FromIterator;
 use crate::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
 
-impl std::ops::BitOrAssign for () {
-    fn bitor_assign(&mut self, _rhs: Self) {
-        // No-op
-    }
-}
-
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;
 
