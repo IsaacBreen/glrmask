@@ -4,17 +4,12 @@ use crate::constraint::{IntermediateTrie3EdgeKey, StateIDBV};
 /// Eliminates adjacent Push/Pop pairs from a stack of intermediate trie edge keys.
 /// This is a core part of simplifying the precompute3 graph.
 ///
-/// The logic is as follows:
-/// - A `Push` looks for the nearest `Pop` to its right.
-/// - If another `Push` is encountered first, the search stops for this `Push`.
-/// - If a `Pop(n, pop_states)` is found:
-///   - If `n == 0` (a state check):
-///     - If the `push_states` and `pop_states` intersect, both operations are removed (they cancel).
-///     - If they do not intersect, the entire stack is invalid (`None` is returned).
-///   - If `n > 0`:
-///     - The `Push` is removed.
-///     - The `Pop` is decremented to `Pop(n - 1, ...)`. If `n` becomes 1, the `Pop` is also removed.
-/// - This process repeats until no more cancellations can be made.
+/// Pairing rules applied when a Push(A) looks to the nearest Pop(n, B) to its right
+/// (stopping if another Push is encountered first):
+/// - n == 0: If A intersects B, remove Pop(0, B) and keep Push(A). If disjoint, the stack is invalid (None).
+/// - n == 1: If A intersects B, both cancel (epsilon). If disjoint, the stack is invalid (None).
+/// - n > 1: Remove Push(A) and replace Pop with Pop(n - 1, B) unconditionally (no intersection check).
+/// The scan repeats until no more changes can be made.
 pub fn eliminate_pushes_and_pops(
     stack: Vec<IntermediateTrie3EdgeKey>,
 ) -> Option<Vec<IntermediateTrie3EdgeKey>> {
@@ -43,14 +38,22 @@ pub fn eliminate_pushes_and_pops(
                     let _push_op = stack.remove(i); // push is at i
 
                     if let IntermediateTrie3EdgeKey::Pop(n, pop_states) = pop_op {
-                        if n == 0 { // State check
-                            if push_states.is_disjoint(&pop_states) {
-                                return None; // Mismatch
+                        match n {
+                            0 => {
+                                if push_states.is_disjoint(&pop_states) {
+                                    return None; // Mismatch on state check
+                                }
+                                // Keep Push(A); only Pop(0, B) is removed.
+                                stack.insert(i, IntermediateTrie3EdgeKey::Push(push_states));
                             }
-                            // Match: both are removed.
-                        } else { // n > 0
-                            // Push is removed. Pop is decremented.
-                            if n > 1 {
+                            1 => {
+                                if push_states.is_disjoint(&pop_states) {
+                                    return None; // Mismatch on single-pop check
+                                }
+                                // Intersection: both cancel -> epsilon (nothing to insert).
+                            }
+                            _ => {
+                                // n > 1: remove Push unconditionally and decrement Pop.
                                 stack.insert(i, IntermediateTrie3EdgeKey::Pop(n - 1, pop_states));
                             }
                         }
