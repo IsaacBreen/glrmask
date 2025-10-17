@@ -1,6 +1,7 @@
 // src/constraint_precompute3_intermediate_utils.rs
 use std::collections::{HashMap, HashSet, VecDeque};
 use crate::constraint::{IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
+use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
 
 pub fn optimize_intermediate_trie3_template(
@@ -10,10 +11,10 @@ pub fn optimize_intermediate_trie3_template(
 ) {
     // A few passes of optimization.
     for _ in 0..2 {
-        let changed1 = prune_nodes_not_reaching_end(start_node, end_node, god);
+        let changed = prune_nodes_not_reaching_end(start_node, end_node, god);
         // GC is needed to remove nodes that become unreachable after pruning edges.
-        let changed2 = Trie::gc(god, &[*start_node]) > 0;
-        if !changed1 && !changed2 {
+        Trie::gc(god, &[*start_node]);
+        if changed {
             break;
         }
     }
