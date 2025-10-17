@@ -22,8 +22,10 @@ pub trait Pop<K, V> {
     fn pop(&mut self) -> Option<(K, V)>;
 }
 
-impl<K, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
     fn pop(&mut self) -> Option<(K, V)> {
-        self.pop_back()
+        self.back()
+            .map(|(k, _)| k.clone())
+            .and_then(|k| self.remove(&k).map(|v| (k, v)))
     }
 }
