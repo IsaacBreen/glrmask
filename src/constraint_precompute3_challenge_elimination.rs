@@ -582,12 +582,13 @@ fn run_trie_based_elimination(
     let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
     let mut work: VecDeque<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>)> = VecDeque::new();
 
-    // Helper to create or fetch destination node for a (source_idx, stack) pair.
-    let mut get_or_create = |src_idx: IntermediatePrecomputeNode3Index, stack: Vec<StateIDBV>| {
-        if let Some(&existing) = pair_cache.get(&(src_idx, stack.clone())) {
-            existing
-        } else {
-            let is_end = src_idx
+    // 4) Initialize new roots as (source_root, empty stack).
+    let mut new_roots: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
+    for (sid, src_root) in sids.into_iter().zip(source_roots.into_iter()) {
+        let stack = Vec::new();
+        let key = (src_root, stack.clone());
+        let new_root = *pair_cache.entry(key).or_insert_with(|| {
+            let is_end = src_root
                 .read(&source)
                 .map(|r| r.value.end)
                 .unwrap_or(false) && stack.is_empty();
@@ -597,16 +598,9 @@ fn run_trie_based_elimination(
                 IntermediatePrecomputedNodeContents3::internal()
             };
             let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
-            pair_cache.insert((src_idx, stack.clone()), dest_idx);
-            work.push_back((src_idx, stack));
+            work.push_back((src_root, stack));
             dest_idx
-        }
-    };
-
-    // 4) Initialize new roots as (source_root, empty stack).
-    let mut new_roots: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
-    for (sid, src_root) in sids.into_iter().zip(source_roots.into_iter()) {
-        let new_root = get_or_create(src_root, Vec::new());
+        });
         new_roots.insert(sid, new_root);
     }
 
@@ -632,6 +626,25 @@ fn run_trie_based_elimination(
         }
         let dest_idx = *pair_cache.get(&(src_idx, stack.clone())).expect("dest exists");
         let src_guard = src_idx.read(&source).expect("source read");
+
+        let mut new_work_items = Vec::new();
+        let mut get_or_create = |src_idx: IntermediatePrecomputeNode3Index, stack: Vec<StateIDBV>| {
+            let key = (src_idx, stack.clone());
+            *pair_cache.entry(key).or_insert_with(|| {
+                let is_end = src_idx
+                    .read(&source)
+                    .map(|r| r.value.end)
+                    .unwrap_or(false) && stack.is_empty();
+                let node_val = if is_end {
+                    IntermediatePrecomputedNodeContents3::leaf()
+                } else {
+                    IntermediatePrecomputedNodeContents3::internal()
+                };
+                let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
+                new_work_items.push((src_idx, stack));
+                dest_idx
+            })
+        };
 
         // If we are on a source leaf (end == true) but with a non-empty pending stack,
         // flush the remaining pushes as a chain of Push edges to the (src_idx, empty) state.
@@ -765,6 +778,7 @@ fn run_trie_based_elimination(
                 }
             }
         }
+        work.extend(new_work_items);
     }
 
     pb.finish_with_message("Done eliminating push/pop pairs");
