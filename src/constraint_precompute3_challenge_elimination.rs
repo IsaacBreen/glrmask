@@ -22,6 +22,15 @@ const DEBUG_MISMATCHES: bool = true;
 const MAX_STACK_DEPTH: usize = 64;
 const MAX_ELIMINATION_PASSES: usize = 16;
 
+/// Mark nodes hot early by visit count; lower is safer to avoid blow-ups.
+const HOT_NODE_VISIT_THRESHOLD: u64 = 2048;
+/// If a node accumulates too many distinct pending stacks, mark it hot.
+/// This is counted when a new (source, stack) pair is first seen.
+const UNIQUE_STACKS_PER_NODE_THRESHOLD: usize = 256;
+/// Global hard cap on distinct product states. Once exceeded, force immediate push emission globally.
+/// This preserves correctness (we just stop deferring pushes everywhere).
+const PAIR_CACHE_HARD_LIMIT: usize = 1_000_000;
+
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
@@ -403,21 +412,15 @@ fn compute_push_cycle_nodes(
         id_of.insert(*ni, i);
     }
 
-    // Build adjacency for the subgraph WITHOUT Pop(0)/Pop(1) edges.
+    // Build adjacency for the FULL subgraph (include all edges).
     let n = nodes.len();
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, node_idx) in nodes.iter().enumerate() {
         if let Some(node_r) = node_idx.read(source) {
             for (ek, dests) in node_r.children().iter() {
-                let include = match ek {
-                    IntermediateTrie3EdgeKey::Pop(k, _) if *k == 0 || *k == 1 => false,
-                    _ => true,
-                };
-                if include {
-                    for (dst_idx, _) in dests.iter() {
-                        if let Some(&j) = id_of.get(dst_idx) {
-                            adj[i].push(j);
-                        }
+                for (dst_idx, _) in dests.iter() {
+                    if let Some(&j) = id_of.get(dst_idx) {
+                        adj[i].push(j);
                     }
                 }
             }
@@ -683,7 +686,6 @@ fn run_trie_based_elimination(
 
 
         // Diagnostic and safety limits
-        const HOT_NODE_THRESHOLD: u64 = 16384;
         const MAX_BFS_ITERATIONS: u64 = 75_000_000; // Failsafe to prevent hangs
 
         // Prepare destination arena (clear existing graph).
@@ -707,6 +709,11 @@ fn run_trie_based_elimination(
         let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, StackID), IntermediatePrecomputeNode3Index> = BTreeMap::new();
         let mut hot_nodes = BTreeSet::new();
         let mut visit_counts: BTreeMap<IntermediatePrecomputeNode3Index, u64> = BTreeMap::new();
+        // Track how many unique stacks were interned per source node; if it crosses a threshold, mark node hot.
+        let mut unique_stack_count_by_node: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
+        // If we exceed a global hard limit on product states, stop deferring pushes globally.
+        let mut force_immediate_push_globally = false;
+        let mut announced_force_immediate = false;
         let mut work: VecDeque<(IntermediatePrecomputeNode3Index, StackID)> = VecDeque::new();
 
 
@@ -728,6 +735,28 @@ fn run_trie_based_elimination(
                         let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
                         pair_cache.insert(key, dest_idx);
                         work.push_back(($src_idx, $stack));
+
+                        // Count unique stacks per source node, mark node hot if it explodes.
+                        let cnt = unique_stack_count_by_node.entry($src_idx).and_modify(|c| *c += 1).or_insert(1);
+                        if !hot_nodes.contains(&$src_idx) && *cnt > UNIQUE_STACKS_PER_NODE_THRESHOLD {
+                            if is_debug_level_enabled(1) {
+                                println!(
+                                    "[Push/Pop Elimination] Node {:?} exceeded unique-stack threshold ({}). Forcing immediate push at this node.",
+                                    $src_idx, UNIQUE_STACKS_PER_NODE_THRESHOLD
+                                );
+                            }
+                            hot_nodes.insert($src_idx);
+                        }
+
+                        // Flip global immediate-push mode if the product state space grows too large.
+                        if !force_immediate_push_globally && pair_cache.len() > PAIR_CACHE_HARD_LIMIT {
+                            force_immediate_push_globally = true;
+                            if !announced_force_immediate && is_debug_level_enabled(1) {
+                                println!("[Push/Pop Elimination] Product-state space exceeded {} states. Forcing immediate push globally to ensure termination with full processing.", PAIR_CACHE_HARD_LIMIT);
+                            }
+                            announced_force_immediate = true;
+                        }
+
                         dest_idx
                     }
                 }
@@ -755,9 +784,9 @@ fn run_trie_based_elimination(
             }
             let count = visit_counts.entry(src_idx).or_insert(0);
             *count += 1;
-            if !hot_nodes.contains(&src_idx) && *count > HOT_NODE_THRESHOLD {
+            if !hot_nodes.contains(&src_idx) && *count > HOT_NODE_VISIT_THRESHOLD {
                 if is_debug_level_enabled(1) {
-                    println!("[WARN] Push/Pop elimination: Node {:?} became hot (visited > {} times). Flushing stacks on subsequent visits to prevent state explosion.", src_idx, HOT_NODE_THRESHOLD);
+                    println!("[WARN] Push/Pop elimination: Node {:?} became hot (visited > {} times). Flushing stacks on subsequent visits to prevent state explosion.", src_idx, HOT_NODE_VISIT_THRESHOLD);
                 }
                 hot_nodes.insert(src_idx);
             }
@@ -818,9 +847,10 @@ fn run_trie_based_elimination(
             for (ek, dests) in src_guard.children().iter() {
                 match ek {
                     IntermediateTrie3EdgeKey::Push(bv_new) => {
-                        let is_hot = hot_nodes.contains(&src_idx);
+                        let is_hot = hot_nodes.contains(&src_idx) || force_immediate_push_globally;
                         // Heuristic: If a source node is part of a pre-calculated "push cycle" OR
                         // if it has become dynamically "hot" (visited too many times), we stop
+                        // or if global force_immediate is on, we stop
                         // deferring its pushes. Instead, we emit them directly into the graph.
                         // This prevents combinatorial explosion of stack states from complex cycles.
                         if push_cycle_nodes.contains(&src_idx) || is_hot {
