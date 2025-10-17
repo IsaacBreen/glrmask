@@ -479,14 +479,9 @@ enum Exit {
         pop_bv: StateIDBV,
         dst: IntermediatePrecomputeNode3Index,
     },
-    // Elimination terminates by reaching a leaf. A new Push edge is created.
-    TerminatedPush {
-        llm: LLMTokenBV,
-        push_bv: StateIDBV,
-        dst: IntermediatePrecomputeNode3Index,
-    },
-    // Elimination is blocked by a nested Push. The outer Push is deferred.
-    BlockedByNestedPush {
+    // Elimination is blocked by a nested Push, or by reaching a leaf with no Pop(n>=1).
+    // We must keep the Push with the possibly-restricted bitset.
+    BlockedPush {
         llm: LLMTokenBV,
         push_bv: StateIDBV,
         dst: IntermediatePrecomputeNode3Index,
@@ -567,7 +562,7 @@ fn compute_push_elim_exits(
         // If this node is an end, then along this branch we can only preserve the Push (blocked).
         if let Some(read_guard) = state.node.read(god) {
             if read_guard.value.end {
-                exits.push(Exit::TerminatedPush {
+                exits.push(Exit::BlockedPush {
                     llm: state.llm_bv.clone(),
                     push_bv: state.push_bv.clone(),
                     dst: state.node,
@@ -608,7 +603,7 @@ fn compute_push_elim_exits(
                         // Important: We DO NOT move the push forward to the nested push's
                         // destination. That would violate the stack semantics used by the
                         // path-based simplifier (which blocks when encountering another push).
-                        exits.push(Exit::BlockedByNestedPush {
+                        exits.push(Exit::BlockedPush {
                             llm: state.llm_bv.clone(),
                             push_bv: state.push_bv.clone(),
                             dst: state.node,
@@ -764,44 +759,12 @@ fn run_trie_based_elimination(
                     e
                 }
             };
-
-            // If the only result of the exploration is to regenerate the exact same push
-            // leading to the same destination node with no LLM checks, it means this push
-            // is irreducible. We should not modify it, to avoid a loop of
-            // removing and re-adding the same edge.
-            if exits.len() == 1 {
-                if let Exit::TerminatedPush {
-                    llm,
-                    push_bv: term_push_bv,
-                    dst: term_dst,
-                } = &exits[0]
-                {
-                    if *term_dst == dst && *term_push_bv == push_bv && *llm == LLMTokenBV::max_ones() {
-                        // This is an irreducible push. Skip it.
-                        continue;
-                    }
-                }
-            }
-
-            // If any path from the push is blocked by a nested push, we must defer this
-            // entire elimination to a later round. This is because we cannot safely remove
-            // the original edge while leaving the blocked path, and we can't selectively
-            // rewrite only some paths emanating from a single edge.
-            if exits
-                .iter()
-                .any(|ex| matches!(ex, Exit::BlockedByNestedPush { .. }))
-            {
-                continue;
-            }
-
-            // Deduplicate exits.
+            // Deduplicate exits and detect any blocked branches.
             let mut cancel_set: BTreeSet<(LLMTokenBV, IntermediatePrecomputeNode3Index)> =
                 BTreeSet::new();
             let mut degrade_set: BTreeSet<(LLMTokenBV, usize, StateIDBV, IntermediatePrecomputeNode3Index)> =
                 BTreeSet::new();
-            let mut terminated_set: BTreeSet<(LLMTokenBV, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                BTreeSet::new();
-
+            let mut saw_blocked = false;
             for ex in exits.iter() {
                 match ex {
                     Exit::Cancel { llm, dst } => {
@@ -810,10 +773,9 @@ fn run_trie_based_elimination(
                     Exit::DegradePop { llm, new_n, pop_bv, dst } => {
                         degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
                     }
-                    Exit::TerminatedPush { llm, push_bv, dst } => {
-                        terminated_set.insert((llm.clone(), push_bv.clone(), *dst));
+                    Exit::BlockedPush { .. } => {
+                        saw_blocked = true;
                     }
-                    Exit::BlockedByNestedPush { .. } => unreachable!("Handled by 'any' check above"),
                 }
             }
             if exits.is_empty() {
@@ -834,6 +796,11 @@ fn run_trie_based_elimination(
                 .entry(src)
                 .or_insert_with(BTreeMap::new);
 
+            // Wire deduplicated exits from src via aggregator nodes.
+            // Important: If any branch is BlockedPush, we preserve the original Push edge
+            // and do NOT insert any new Push edges (to avoid combinatorial blow-up).
+            let mut keep_original_edge = saw_blocked;
+
             for (llm, cancel_dst) in cancel_set {
                 let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                 god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
@@ -847,24 +814,18 @@ fn run_trie_based_elimination(
                     (),
                 );
             }
-            for (llm, term_push_bv, term_dst) in terminated_set {
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                god.insert_edge_simple(
-                    agg,
-                    term_dst,
-                    IntermediateTrie3EdgeKey::Push(term_push_bv),
-                    (),
-                );
-            }
 
             // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
-            if remove_specific_edge(
-                god,
-                src,
-                IntermediateTrie3EdgeKey::Push(push_bv),
-                dst,
-            ) {
-                removed_this_round += 1;
+            // unless we determined it must remain (to avoid deleting the only surviving representation).
+            if !keep_original_edge {
+                if remove_specific_edge(
+                    god,
+                    src,
+                    IntermediateTrie3EdgeKey::Push(push_bv),
+                    dst,
+                ) {
+                    removed_this_round += 1;
+                }
             }
         }
 
