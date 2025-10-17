@@ -2259,6 +2259,19 @@ local_system:
               }
               id
           }
+
+          fn to_string(&self, mut id: StackID) -> String {
+              if self.is_empty(id) {
+                  return "[]".to_string();
+              }
+              let mut items = Vec::new();
+              while id.0 != 0 {
+                  items.push(format!("{:?}", self.nodes[id.0].top));
+                  id = self.nodes[id.0].prev.expect("non-empty must have prev");
+              }
+              items.reverse();
+              format!("[{}]", items.join(", "))
+          }
       }
 
       fn run_trie_based_elimination(
@@ -2345,8 +2358,8 @@ local_system:
                   // --- Diagnostics and Safeguards ---
                   if processed > MAX_BFS_ITERATIONS {
                       panic!(
-                          "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}. Queue size: {}.",
-                          MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), work.len()
+                          "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}, stack: {}. Queue size: {}.",
+                          MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), stack_interner.to_string(stack_id), work.len()
                       );
                   }
                   let count = visit_counts.entry(src_idx).or_insert(0);
@@ -2364,6 +2377,7 @@ local_system:
                   }
                   let dest_idx = *pair_cache.get(&(src_idx, stack_id)).expect("dest exists");
                   let src_guard = src_idx.read(&source).expect("source read");
+                  let is_hot = visit_counts.get(&src_idx).map_or(false, |&c| c > HOT_NODE_THRESHOLD);
 
                   // If this source node is an end, flush the entire pending stack in order.
                   // Note: pending stack bitvectors may already have been narrowed by Pop(0) constraints.
@@ -2383,9 +2397,15 @@ local_system:
                   for (ek, dests) in src_guard.children().iter() {
                       match ek {
                           IntermediateTrie3EdgeKey::Push(bv_new) => {
-                              // Avoid unbounded pending stacks inside SCCs that can push indefinitely without Pop(0/1).
-                              if push_cycle_nodes.contains(&src_idx) {
-                                  // Emit the push directly; do not defer to the pending stack.
+                              // Heuristic: If a source node is part of a pre-calculated "push cycle" OR
+                              // if it has become dynamically "hot" (visited too many times), we stop
+                              // deferring its pushes. Instead, we emit them directly into the graph.
+                              // This prevents combinatorial explosion of stack states from complex cycles.
+                              if push_cycle_nodes.contains(&src_idx) || is_hot {
+                                  if is_hot && !push_cycle_nodes.contains(&src_idx) && is_debug_level_enabled(3) {
+                                      println!("[Push/Pop Elimination] Dynamically forcing immediate push for hot source {:?}.", src_idx);
+                                  }
+
                                   for (dst_src_idx, _) in dests.iter() {
                                       let next_state = get_or_create!(*dst_src_idx, stack_id);
                                       god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Push(bv_new.clone()), ());
@@ -5068,5 +5088,915 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor: Introduce StackInterner, fold
       Pop(0) constraints, and add iteration/hot-node diagnostics to trie elimination"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/public interface of constraint_precompute3_challenge_elimination.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_challenge_elimination.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      python scripts/compile.py \
+          --grammar src/js_simplified0_5.ebnf \
+          --output .cache/test_vocabs/js_constraint.json.gz \
+          --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
+          --from-precompute0 .cache/pc0/js_simplified0_5_gpt2.json.gz
+      Loading vocabulary from cache: .cache/vocabs/vocab.json
+      Temporary vocabulary saved to: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpptuhge96.json
+      Building compiler with 'cargo build --release'...
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+          Finished `release` profile [optimized] target(s) in 29.56s
+      Build successful.
+      Loading from precompute0 cache: .cache/pc0/js_simplified0_5_gpt2.json.gz
+
+      Running compiler: ENABLE_PROGRESS_BAR=1 target/release/grammar-compiler --grammar src/js_simplified0_5.ebnf --vocab /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpptuhge96.json --output .cache/test_vocabs/js_constraint.json.gz --load-precompute0 .cache/pc0/js_simplified0_5_gpt2.json.gz
+      Loading grammar from: "src/js_simplified0_5.ebnf"
+      [DEBUG] 2] src/interface/interface.rs:716: Augmented start_production_name: "start'"
+      Converting grammar expressions to productions: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 58/58 [00:00<00:00, 197195.08it/s]Removing always-null terminals: {}
+      Processing may-be-null terminals: {}
+      Compiling grammar...
+      [DEBUG] 2] src/interface/interface.rs:1080: Building tokenizer from definition
+      [DEBUG] 2] src/interface/interface.rs:1085: Building GLR parser from definition
+      [DEBUG] 2] src/glr/table.rs:1413: Validating initial grammar
+      [DEBUG] 2] src/glr/table.rs:1419: Removing productions with undefined non-terminals
+      [DEBUG] 2] src/glr/analyze.rs:728: Resolving direct right-recursion for 'assignment_expression', creating new non-terminal 'assignment_expression_rr'
+      [DEBUG] 2] src/glr/analyze.rs:736:   Transforming non-recursive rule 'assignment_expression -> arrow_function' -> 'assignment_expression -> assignment_expression_rr arrow_function'
+      [DEBUG] 2] src/glr/analyze.rs:736:   Transforming non-recursive rule 'assignment_expression -> conditional_expression' -> 'assignment_expression -> assignment_expression_rr conditional_expression'
+      [DEBUG] 2] src/glr/analyze.rs:746:   Transforming recursive rule 'assignment_expression -> left_hand_side_expression assignment_expression[0] assignment_expression' -> 'assignment_expression_rr -> assignment_expression_rr left_hand_side_expression assignment_expression[0]'
+      [DEBUG] 2] src/glr/analyze.rs:750:   Adding new epsilon rule: 'assignment_expression_rr ->'
+      [DEBUG] 2] src/glr/analyze.rs:728: Resolving direct right-recursion for 'unary_expression', creating new non-terminal 'unary_expression_rr'
+      [DEBUG] 2] src/glr/analyze.rs:736:   Transforming non-recursive rule 'unary_expression -> postfix_expression' -> 'unary_expression -> unary_expression_rr postfix_expression'
+      [DEBUG] 2] src/glr/analyze.rs:746:   Transforming recursive rule 'unary_expression -> unary_expression[0] unary_expression' -> 'unary_expression_rr -> unary_expression_rr unary_expression[0]'
+      [DEBUG] 2] src/glr/analyze.rs:750:   Adding new epsilon rule: 'unary_expression_rr ->'
+      [DEBUG] 2] src/glr/table.rs:1455: Stage 1
+      [DEBUG] 2] src/glr/table.rs:1458: Stage 2
+      [DEBUG] 2] src/glr/table.rs:1461: Stage 3
+      [DEBUG] 2] src/glr/table.rs:1464: Stage 4
+      [DEBUG] 2] src/glr/table.rs:1467: Stage 5
+      [DEBUG] 2] src/glr/table.rs:1470: Stage 6
+      [DEBUG] 2] src/glr/table.rs:1473: Stage 7
+      [DEBUG] 2] src/glr/table.rs:1476: Stage 8
+      [DEBUG] 2] src/glr/table.rs:1480: Stage 9: Precomputing substring gotos
+      [DEBUG] 2] src/glr/table.rs:1483: Stage 10: Precomputing reduce goto map
+      [DEBUG] 2] src/glr/table.rs:1486: Finalizing table
+
+      --- Combined States Statistics ---
+      Total combined states: 257
+      Sole Shift actions: Total: 1957, Min/Max per state: 0/79, Avg per state: 7.61
+        Distribution (count -> #states): 0: 117, 1: 52, 2: 13, 3: 3, 4: 5, 5: 2, 6: 1, 7: 5, 9: 1, 23: 15, 24: 5, 25: 1, 26: 10, 29: 1, 36: 13, 37: 6, 39: 2, 41: 4, 79: 1
+      Sole Reduce actions: Total: 26794, Min/Max per state: 0/10346, Avg per state: 104.26
+        Distribution (count -> #states): 0: 81, 1: 3, 2: 15, 3: 9, 4: 6, 5: 11, 6: 3, 7: 1, 8: 1, 9: 3, 10: 1, 11: 1, 23: 3, 42: 1, 45: 3, 46: 7, 49: 1, 53: 1, 63: 1, 71: 2, 72: 13, 75: 2, 77: 2, 82: 13, 86: 3, 87: 1, 89: 1, 92: 2, 96: 3, 98: 1, 106: 1, 118: 2, 119: 11, 120: 4, 124: 1, 125: 1, 126: 1, 128: 1, 141: 1, 142: 7, 143: 3, 144: 1, 146: 1, 155: 1, 160: 1, 164: 4, 171: 1, 177: 1, 185: 3, 188: 1, 192: 1, 213: 1, 216: 1, 233: 1, 245: 1, 248: 1, 268: 1, 274: 1, 417: 1, 492: 1, 588: 1, 617: 1, 619: 1, 871: 1, 10346: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 257
+      Goto actions: Total: 2186, Min/Max per state: 0/134, Avg per state: 8.51
+        Distribution (count -> #states): 0: 158, 1: 21, 2: 9, 3: 3, 4: 1, 7: 6, 8: 1, 14: 1, 15: 1, 16: 1, 17: 1, 18: 1, 19: 1, 26: 9, 27: 3, 28: 2, 30: 4, 35: 6, 36: 1, 40: 16, 42: 2, 43: 1, 46: 2, 49: 1, 50: 3, 56: 1, 134: 1
+      ------------------------------------
+      Number of combined states: 257
+      [DEBUG] 2] src/glr/table.rs:1495: Done generating GLR parser
+      Grammar compiled successfully.
+      --- Stored Below-Bottom Cache Statistics ---
+      Cache is empty.
+      Loading vocabulary from: "/var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpptuhge96.json"
+      Vocabulary loaded (50256 tokens, max ID: 50256).
+
+      Constructing GrammarConstraint...
+      Attempting to load precompute0 cache from: ".cache/pc0/js_simplified0_5_gpt2.json.gz"
+      Loaded precompute0 cache successfully.
+      [DEBUG] 2] src/constraint.rs:1141: Building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:200: Merging nodes
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:208: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:210: Done computing reachable IDs
+      [DEBUG] 2] src/constraint.rs:1143: Done building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/constraint.rs:1149: Computing possible_matches for all 298 tokenizer states
+      [DEBUG] 2] src/constraint.rs:1159: Finished computing possible_matches
+      [DEBUG] 2] src/constraint.rs:1162: Building state_map_by_llm and terminal_map_by_llm
+      [DEBUG] 2] src/constraint.rs:1164: Built state_map_by_llm with 50256 entries
+      [DEBUG] 2] src/constraint.rs:1170: Computing terminal follow sets
+      [DEBUG] 2] src/constraint.rs:1190: Computed terminal_follow_map_ids with 78 entries.
+      [DEBUG] 2] src/constraint.rs:1236: Using cached precompute0
+      [DEBUG] 2] src/constraint_extra.rs:962: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1073: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 751 unique nodes, of which
+          - 298 are roots
+          - 453 are non-roots, of which
+              - 442 are internal (non-root, non-leaf)
+              - 11 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 751
+        Total Edges: 6895
+          Edges with None Key: 2904
+          Edges with Some Key: 3991
+        Nodes with Clean End: 2
+        Average edge occupancy for Some-key edges:    1.65
+        Average edge occupancy for None-key edges:    6.56
+        Total ranges in all HybridBitsets: 19872
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:462: Starting Trie1 size optimization...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:464: Initial Trie1 stats:
+      [DEBUG] 2] src/constraint_extra.rs:962: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1073: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 751 unique nodes, of which
+          - 298 are roots
+          - 453 are non-roots, of which
+              - 442 are internal (non-root, non-leaf)
+              - 11 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 751
+        Total Edges: 6895
+          Edges with None Key: 2904
+          Edges with Some Key: 3991
+        Nodes with Clean End: 2
+        Average edge occupancy for Some-key edges:    1.65
+        Average edge occupancy for None-key edges:    6.56
+        Total ranges in all HybridBitsets: 19872
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:542: Simplifying None edges to former end nodes in Trie1...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:611: Done simplifying None edges to former end nodes in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:625: Replacing ignore token edges with None edges in Trie1...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:643: Done replacing ignore token edges in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1491: Flattening None edges in Trie1 via epsilon-closure (keyed-only rewrite)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1611: Done flattening None edges in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1300: Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1355: Trie1 end-reachability: total=457, productive=445, prunable=12
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1391: Finished end-reachability pruning in Trie1.
+      Trie1 Merge Hash Iter 17: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 448/448 [00:00<00:00, 449291.69it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1300: Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1355: Trie1 end-reachability: total=318, productive=317, prunable=1
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1391: Finished end-reachability pruning in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:954: Merging equivalent LLM tokens in Trie1...
+      Trie1 Merge Tokens (Refine): 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1003/1003 [00:00<00:00, 9867.89it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:1038: Trie1: merged LLM tokens. Before: 50256, After: 1483. (48773 merged)
+      Trie1 Merge (Update Vocab):  61%|███████████████████████████████████████████████████████████████████████████████████▍                                                     | 29602/48773 [00:09<00:05, 3282.93it/s]grammar-compiler(63536,0x205f74800) malloc: Failed to allocate segment from range group - out of space
+      Trie1 Reorder (Count Frequencies): 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1003/1003 [00:00<00:00, 1944586.00it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:1205: Done computing frequencies.
+      Trie1 Reorder (Vocab 2): 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 50256/50256 [00:00<00:00, 11318493.00it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:1289: Trie1 reordering complete. Ranges reduced from 290939 to 16894. New max internal token ID: 1482
+      Trie1 Merge Hash Iter 17: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 318/318 [00:00<00:00, 849604.06it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1300: Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1355: Trie1 end-reachability: total=318, productive=317, prunable=1
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1391: Finished end-reachability pruning in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:530: Final Trie1 stats:
+      [DEBUG] 2] src/constraint_extra.rs:962: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1073: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 318 unique nodes, of which
+          - 169 are roots
+          - 149 are non-roots, of which
+              - 148 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 318
+        Total Edges: 3732
+          Edges with None Key: 88
+          Edges with Some Key: 3644
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    1.65
+        Average edge occupancy for None-key edges:    1.44
+        Total ranges in all HybridBitsets: 15352
+      [DEBUG] 2] src/constraint.rs:1899: Precomputing Trie 3 (template-driven)...
+      Traversing edges: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3732/3732 [00:04<00:00, 823.17it/s][DEBUG] 2] src/constraint.rs:2062: Processing and rebuilding trie3 paths...
+      grammar-compiler(63536,0x205f74800) malloc: Failed to allocate segment from range group - out of space
+      ⠒ [00:00:11] states=5157435 queue=375051                                                                                                                                                                          [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 5 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 371179.
+      ⠂ [00:00:14] states=6295916 queue=340028                                                                                                                                                                          [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 5 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 338129.
+      ⠁ [00:00:16] states=7284526 queue=453731                                                                                                                                                                          [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 5 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 450603.
+      ⠒ [00:00:19] states=8619586 queue=575448                                                                                                                                                                          [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 5 } } has been processed 65536 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 572729.
+      ⠚ [00:00:20] states=8836852 queue=533401                                                                                                                                                                          [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 19633 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 19635 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24589 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24621 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1155592 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1158713 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1159072 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1160846 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1163335 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1163612 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1163889 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1164166 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1165442 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1166389 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1167335 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1168282 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1169228 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1170021 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1173243 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1176466 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1176972 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1177477 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1177781 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1181216 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1184652 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1189600 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1194549 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1194779 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 531534.
+      ⠒ [00:00:22] states=9380277 queue=258985                                                                                                                                                                          [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 19634 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255752.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 19636 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255751.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24590 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255751.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24622 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255750.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1155593 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255749.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1158714 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255748.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1159073 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255747.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1160847 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255746.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1163336 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255745.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1163613 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255744.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1163890 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255743.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1164167 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255742.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1165443 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255741.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1166390 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255740.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1167336 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255739.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1168283 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255738.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1169229 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255737.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1170022 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1173244 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1176467 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1176973 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255735.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1177478 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255734.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1177782 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255733.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1181217 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255733.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1184653 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255733.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1189601 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255733.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1194550 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255733.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1194780 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 255732.
+      ⠤ [00:00:23] states=9980735 queue=637081                                                                                                                                                                          [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24640 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24642 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24674 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1119103 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1122224 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1122584 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124358 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124636 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124656 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1125931 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1126878 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1127826 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1128619 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1131841 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1135065 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1135570 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1136075 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1136378 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1139813 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1143249 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1148197 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1153145 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1153375 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 635916.
+      ⠐ [00:00:23] states=10189831 queue=686514                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 5 } } has been processed 81920 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 685977.
+      ⠒ [00:00:25] states=10629425 queue=489621                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24641 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482806.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24643 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482805.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24675 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482804.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1119104 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482803.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1122225 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482802.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1122585 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482801.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124359 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482800.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124637 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482799.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124657 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482798.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1125932 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482797.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1126879 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482796.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1127827 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482795.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1128620 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482794.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1131842 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482794.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1135066 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482794.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1135571 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482793.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1136076 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482792.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1136379 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482791.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1139814 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482791.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1143250 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482791.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1148198 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482791.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1153146 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482791.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1153376 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 3. Queue size: 482790.
+      ⠁ [00:00:28] states=11742806 queue=802855                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24693 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24695 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24727 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1082355 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085476 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085835 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087609 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087887 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1088164 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1089439 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1090387 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1091335 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1092128 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1095350 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1098574 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099079 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099584 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099888 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1103324 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1106760 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1111708 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116656 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116887 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 799466.
+      ⠄ [00:00:28] states=11862812 queue=795073                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 5 } } has been processed 98304 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 794567.
+      ⠴ [00:00:29] states=12586326 queue=595441                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24694 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592357.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24696 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592356.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24728 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592355.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1082356 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592354.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085477 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592353.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085836 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592352.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087610 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592351.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087888 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592350.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1088165 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592349.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1089440 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592348.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1090388 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592347.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1091336 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592346.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1092129 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592345.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1095351 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592345.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1098575 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592345.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099080 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592344.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099585 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592343.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099889 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592342.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1103325 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592342.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1106761 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592342.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1111709 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592342.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116657 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592342.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116888 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 592341.
+      ⠂ [00:00:32] states=13515462 queue=710514                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24746 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24748 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24780 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1042065 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045186 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045547 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047321 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047598 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047875 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048152 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048429 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048706 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048726 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050002 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050950 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1051896 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1052844 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1053790 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1054583 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1055376 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1058599 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1061822 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062328 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062834 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1063139 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1066575 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1070012 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1074961 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1079909 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1080139 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 712026.
+      ⠤ [00:00:33] states=13970818 queue=1051959                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 5 } } has been processed 114688 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1050506.
+      ⠉ [00:00:34] states=14227350 queue=966009                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24747 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959458.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24749 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959457.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24781 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959456.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1042066 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959455.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045187 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959454.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045548 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959453.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047322 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959452.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047599 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959451.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047876 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959450.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048153 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959449.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048430 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959448.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048707 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959447.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048727 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959446.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050003 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959445.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050951 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959444.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1051897 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959443.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1052845 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959442.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1053791 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959441.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1054584 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959440.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1055377 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959439.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1058600 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959439.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1061823 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959439.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062329 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959438.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062835 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959437.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1063140 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959436.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1066576 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959436.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1070013 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959436.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1074962 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959436.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1079910 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959436.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1080140 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 4. Queue size: 959435.
+      ⠄ [00:00:35] states=14737135 queue=794972                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24640 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24642 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24674 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1119103 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1122224 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1122584 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124358 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124636 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124656 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1125931 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1126878 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1127826 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1128619 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1131841 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1135065 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1135570 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1136075 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1136378 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1139813 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1143249 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1148197 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1153145 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1153375 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 793736.
+      ⠴ [00:00:38] states=15530166 queue=436764                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24641 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434194.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24643 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434193.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24675 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434192.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1119104 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434191.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1122225 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434190.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1122585 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434189.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124359 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434188.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124637 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434187.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1124657 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434186.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1125932 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434185.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1126879 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434184.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1127827 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434183.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1128620 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434182.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1131842 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434182.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1135066 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434182.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1135571 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434181.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1136076 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434180.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1136379 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434179.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1139814 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434179.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1143250 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434179.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1148198 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434179.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1153146 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434179.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1153376 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 434178.
+      ⠈ [00:00:40] states=16095919 queue=1057658                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24693 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24695 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24727 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1082355 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085476 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085835 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087609 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087887 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1088164 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1089439 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1090387 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1091335 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1092128 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1095350 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1098574 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099079 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099584 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099888 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1103324 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1106760 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1111708 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116656 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116887 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1053686.
+      ⠁ [00:00:40] states=16417597 queue=1081083                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 5 } } has been processed 131072 times. This may indicate a state explosion. Current stack depth: 7. Queue size: 1088113.
+      ⠂ [00:00:40] states=16552805 queue=1107610                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24799 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24801 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24833 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016233 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016592 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016869 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1018144 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1019090 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1020036 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1023258 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1026482 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1026988 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1027493 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1027797 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1031232 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1034669 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1039617 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1039848 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1120391.
+      ⠴ [00:00:41] states=17077471 queue=1169313                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24746 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24748 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24780 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1042065 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045186 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045547 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047321 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047598 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047875 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048152 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048429 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048706 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048726 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050002 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050950 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1051896 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1052844 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1053790 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1054583 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1055376 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1058599 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1061822 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062328 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062834 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1063139 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1066575 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1070012 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1074961 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1079909 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1080139 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1167871.
+      ⠒ [00:00:41] states=17173561 queue=1136487                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24694 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129012.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24696 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129012.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24728 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129011.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1082356 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129010.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085477 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129009.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085836 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129008.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087610 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129007.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087888 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129006.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1088165 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129005.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1089440 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129004.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1090388 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129003.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1091336 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129002.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1092129 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129001.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1095351 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129001.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1098575 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129001.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099080 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1129000.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099585 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1128999.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099889 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1128998.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1103325 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1128998.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1106761 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1128998.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1111709 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1128998.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116657 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1128998.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116888 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 1128997.
+      ⠠ [00:00:43] states=17699758 queue=836915                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24800 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830156.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24802 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830155.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24834 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830154.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016234 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830153.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016593 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830152.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016870 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830151.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1018145 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830150.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1019091 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830149.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1020037 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830148.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1023259 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830148.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1026483 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830148.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1026989 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830147.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1027494 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830146.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1027798 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830145.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1031233 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830145.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1034670 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830145.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1039618 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830145.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1039849 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 830144.
+      ⠄ [00:00:46] states=18243248 queue=550449                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24747 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543363.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24749 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543362.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24781 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543361.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1042066 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543360.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045187 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543359.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045548 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543358.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047322 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543357.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047599 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543356.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047876 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543355.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048153 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543354.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048430 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543353.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048707 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543352.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048727 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543351.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050003 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543350.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050951 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543349.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1051897 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543348.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1052845 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543347.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1053791 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543346.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1054584 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543345.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1055377 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543344.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1058600 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543344.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1061823 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543344.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062329 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543343.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062835 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543342.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1063140 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543341.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1066576 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543341.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1070013 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543341.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1074962 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543341.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1079910 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543341.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1080140 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 6. Queue size: 543340.
+      ⠁ [00:00:49] states=19928431 queue=1174832                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 5 } } has been processed 147456 times. This may indicate a state explosion. Current stack depth: 7. Queue size: 1174196.
+      ⠒ [00:00:50] states=20311471 queue=1104228                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24693 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24695 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24727 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1082355 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085476 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085835 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087609 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087887 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1088164 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1089439 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1090387 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1091335 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1092128 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1095350 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1098574 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099079 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099584 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099888 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1103324 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1106760 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1111708 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116656 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116887 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1103661.
+      ⠤ [00:00:55] states=21447970 queue=519019                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24694 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517083.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24696 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517082.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24728 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517081.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1082356 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517080.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085477 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517079.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1085836 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517078.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087610 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517077.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1087888 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517076.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1088165 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517075.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1089440 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517074.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1090388 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517073.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1091336 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517072.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1092129 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517071.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1095351 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517071.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1098575 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517071.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099080 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517070.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099585 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517069.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1099889 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517068.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1103325 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517068.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1106761 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517068.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1111709 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517068.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116657 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517068.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1116888 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 517067.
+      ⠠ [00:00:57] states=22096986 queue=935993                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24746 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24748 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24780 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1042065 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045186 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045547 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047321 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047598 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047875 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048152 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048429 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048706 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048726 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050002 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050950 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1051896 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1052844 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1053790 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1054583 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1055376 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1058599 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1061822 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062328 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062834 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1063139 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1066575 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1070012 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1074961 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1079909 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1080139 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 935478.
+      ⠈ [00:00:57] states=22168416 queue=956781                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24799 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24801 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24833 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016233 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016592 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016869 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1018144 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1019090 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1020036 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1023258 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1026482 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1026988 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1027493 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1027797 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1031232 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1034669 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1039617 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1039848 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 956517.
+      ⠙ [00:00:58] states=22581210 queue=1156937                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24852 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24854 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24886 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 990406 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 990765 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 991043 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 992318 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 993264 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 994210 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 997432 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1000656 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1001161 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1001666 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1001969 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1005404 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1008840 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1013788 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1014018 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1154648.
+      ⠂ [00:00:59] states=23035054 queue=1284877                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24747 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281208.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24749 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281207.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24781 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281206.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1042066 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281205.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045187 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281204.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1045548 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281203.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047322 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281202.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047599 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281201.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1047876 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281200.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048153 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281199.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048430 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281198.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048707 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281197.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1048727 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281196.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050003 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281195.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1050951 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281194.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1051897 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281193.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1052845 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281192.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1053791 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281191.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1054584 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281190.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1055377 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281189.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1058600 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281189.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1061823 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281189.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062329 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281188.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1062835 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281187.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1063140 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281186.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1066576 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281186.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1070013 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281186.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1074962 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281186.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1079910 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281186.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1080140 } } has been processed 49152 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1281185.
+      ⠤ [00:00:59] states=23122144 queue=1240768                                                                                                                                                                        [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24800 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235523.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24802 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235522.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24834 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235521.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016234 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235520.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016593 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235519.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1016870 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235518.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1018145 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235517.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1019091 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235516.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1020037 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235515.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1023259 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235515.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1026483 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235515.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1026989 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235514.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1027494 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235513.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1027798 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235512.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1031233 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235512.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1034670 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235512.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1039618 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235512.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1039849 } } has been processed 32768 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 1235511.
+      ⠓ [00:01:01] states=23763270 queue=956108                                                                                                                                                                         [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24853 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953556.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24855 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953555.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 24887 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953554.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 990407 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953553.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 990766 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953552.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 991044 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953551.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 992319 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953550.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 993265 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953549.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 994211 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953548.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 997433 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953548.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1000657 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953548.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1001162 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953547.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1001667 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953546.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1001970 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953545.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1005405 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953545.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1008841 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953545.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1013789 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953545.
+      [WARN] Push/Pop elimination: Source node Trie2Index { index: Index { index: 1014019 } } has been processed 16384 times. This may indicate a state explosion. Current stack depth: 5. Queue size: 953544.
+      ⠄ [00:01:03] states=24256368 queue=755784                                                                                                                                                                         ^C^CCleaned up temporary vocabulary file.
+      Traceback (most recent call last):
+        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/subprocess.py", line 1264, in wait
+          return self._wait(timeout=timeout)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/subprocess.py", line 2046, in _wait
+          (pid, sts) = self._try_wait(0)
+                       ^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/subprocess.py", line 2004, in _try_wait
+          (pid, sts) = os.waitpid(self.pid, wait_flags)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      KeyboardInterrupt
+
+      During handling of the above exception, another exception occurred:
+
+      Traceback (most recent call last):
+        File "/Users/isaacbreen/Projects2/grammars2024/scripts/compile.py", line 227, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/scripts/compile.py", line 211, in main
+          run_compiler(
+        File "/Users/isaacbreen/Projects2/grammars2024/scripts/compile.py", line 128, in run_compiler
+          subprocess.run(command, check=True, env=env)
+        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/subprocess.py", line 550, in run
+          stdout, stderr = process.communicate(input, timeout=timeout)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/subprocess.py", line 1201, in communicate
+          self.wait()
+        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/subprocess.py", line 1277, in wait
+          self._wait(timeout=sigint_timeout)
+        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/subprocess.py", line 2040, in _wait
+          time.sleep(delay)
+      KeyboardInterrupt
+    metadata:
+  - assistant: |-
+      The diagnostic logs are incredibly helpful. They confirm that the issue is a combinatorial state explosion rather than a simple infinite loop. Certain nodes, especially the low-indexed `Trie2Index { index: 5 }`, are being processed tens of thousands of times, each time with a slightly different stack configuration. The stack depth remains low, which rules out simple unbounded stack growth.
+
+      The root cause is likely cycles in the graph containing `Pop(0, ...)` operations. Each traversal of such a cycle intersects the top of the stack with a new bitvector, creating a new stack state. While this process would eventually terminate for any single path (as bits in the bitvector are only ever removed), the number of possible intersection combinations across all paths is exploding.
+
+      Our current `push_cycle_nodes` logic is too static; it can't react to this dynamic state explosion.
+
+      The solution is to use the diagnostic information we're already gathering to change the algorithm's behavior on the fly. When we detect that a source node is "hot" (i.e., it has been processed an excessive number of times), we will stop deferring its outgoing `Push` operations. Instead, we will emit them directly into the graph. This prevents the hot node from further contributing to the combinatorial explosion of stack states.
+
+      This heuristic effectively tells the algorithm: "This part of the graph is causing too much stack complexity. Stop trying to simplify it via the stack and just build the graph out explicitly here." This should break the runaway state creation and allow the process to complete.
+
+      I will also enhance the panic message to print the full stack contents, which will be invaluable if further debugging is needed.
+
+      ### Step-by-step instructions
+
+      #### File: `src/constraint_precompute3_challenge_elimination.rs`
+
+      1.  **Add a `to_string` debug helper to `StackInterner`**: This will allow us to print the contents of a stack given its `StackID`.
+      2.  **Enhance the `panic!` message**: Use the new `to_string` method to include the full stack contents in the `MAX_BFS_ITERATIONS` panic message.
+      3.  **Implement the hot-node heuristic**:
+          *   Inside the main BFS loop, determine if the current `src_idx` is hot based on `visit_counts`.
+          *   In the `match` statement for `IntermediateTrie3EdgeKey::Push(...)`, add a condition: if the source node is hot OR it's in the pre-computed `push_cycle_nodes` set, emit the `Push` edge directly instead of deferring it to the stack.
+          *   Add a debug print message for when this dynamic heuristic is triggered.
+
+      ### Git Diffs
+
+      Here is the patch to apply these changes.
+
+      ```diff
+      diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
+      index 1111111..1938189 100644
+      --- a/src/constraint_precompute3_challenge_elimination.rs
+      +++ b/src/constraint_precompute3_challenge_elimination.rs
+      @@ -515,6 +515,19 @@
+               id
+           }
+       
+      +    fn to_string(&self, mut id: StackID) -> String {
+      +        if self.is_empty(id) {
+      +            return "[]".to_string();
+      +        }
+      +        let mut items = Vec::new();
+      +        while id.0 != 0 {
+      +            items.push(format!("{:?}", self.nodes[id.0].top));
+      +            id = self.nodes[id.0].prev.expect("non-empty must have prev");
+      +        }
+      +        items.reverse();
+      +        format!("[{}]", items.join(", "))
+      +    }
+       }
+       
+       fn run_trie_based_elimination(
+      @@ -563,8 +576,8 @@
+                   // --- Diagnostics and Safeguards ---
+                   if processed > MAX_BFS_ITERATIONS {
+                       panic!(
+      -                    "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}. Queue size: {}.",
+      -                    MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), work.len()
+      +                    "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}, stack: {}. Queue size: {}.",
+      +                    MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), stack_interner.to_string(stack_id), work.len()
+                       );
+                   }
+                   let count = visit_counts.entry(src_idx).or_insert(0);
+      @@ -582,6 +595,7 @@
+                   }
+                   let dest_idx = *pair_cache.get(&(src_idx, stack_id)).expect("dest exists");
+                   let src_guard = src_idx.read(&source).expect("source read");
+      +            let is_hot = visit_counts.get(&src_idx).map_or(false, |&c| c > HOT_NODE_THRESHOLD);
+       
+                   // If this source node is an end, flush the entire pending stack in order.
+                   // Note: pending stack bitvectors may already have been narrowed by Pop(0) constraints.
+      @@ -600,10 +614,16 @@
+       
+                   for (ek, dests) in src_guard.children().iter() {
+                       match ek {
+      -                    IntermediateTrie3EdgeKey::Push(bv_new) => {
+      -                        // Avoid unbounded pending stacks inside SCCs that can push indefinitely without Pop(0/1).
+      -                        if push_cycle_nodes.contains(&src_idx) {
+      -                            // Emit the push directly; do not defer to the pending stack.
+      +                    IntermediateTrie3EdgeKey::Push(bv_new) => {
+      +                        // Heuristic: If a source node is part of a pre-calculated "push cycle" OR
+      +                        // if it has become dynamically "hot" (visited too many times), we stop
+      +                        // deferring its pushes. Instead, we emit them directly into the graph.
+      +                        // This prevents combinatorial explosion of stack states from complex cycles.
+      +                        if push_cycle_nodes.contains(&src_idx) || is_hot {
+      +                            if is_hot && !push_cycle_nodes.contains(&src_idx) && is_debug_level_enabled(3) {
+      +                                println!("[Push/Pop Elimination] Dynamically forcing immediate push for hot source {:?}.", src_idx);
+      +                            }
+      +
+                                   for (dst_src_idx, _) in dests.iter() {
+                                       let next_state = get_or_create!(*dst_src_idx, stack_id);
+                                       god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Push(bv_new.clone()), ());
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_challenge_elimination.rs
+      Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor: Implement StackInterner, fold
+      Pop(0) constraints, and add hot-node heuristic to trie elimination"'
     metadata:
 ...

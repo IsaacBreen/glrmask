@@ -646,6 +646,19 @@ impl StackInterner {
         }
         id
     }
+
+    fn to_string(&self, mut id: StackID) -> String {
+        if self.is_empty(id) {
+            return "[]".to_string();
+        }
+        let mut items = Vec::new();
+        while id.0 != 0 {
+            items.push(format!("{:?}", self.nodes[id.0].top));
+            id = self.nodes[id.0].prev.expect("non-empty must have prev");
+        }
+        items.reverse();
+        format!("[{}]", items.join(", "))
+    }
 }
 
 fn run_trie_based_elimination(
@@ -732,8 +745,8 @@ fn run_trie_based_elimination(
             // --- Diagnostics and Safeguards ---
             if processed > MAX_BFS_ITERATIONS {
                 panic!(
-                    "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}. Queue size: {}.",
-                    MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), work.len()
+                    "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}, stack: {}. Queue size: {}.",
+                    MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), stack_interner.to_string(stack_id), work.len()
                 );
             }
             let count = visit_counts.entry(src_idx).or_insert(0);
@@ -751,6 +764,7 @@ fn run_trie_based_elimination(
             }
             let dest_idx = *pair_cache.get(&(src_idx, stack_id)).expect("dest exists");
             let src_guard = src_idx.read(&source).expect("source read");
+            let is_hot = visit_counts.get(&src_idx).map_or(false, |&c| c > HOT_NODE_THRESHOLD);
 
             // If this source node is an end, flush the entire pending stack in order.
             // Note: pending stack bitvectors may already have been narrowed by Pop(0) constraints.
@@ -770,9 +784,15 @@ fn run_trie_based_elimination(
             for (ek, dests) in src_guard.children().iter() {
                 match ek {
                     IntermediateTrie3EdgeKey::Push(bv_new) => {
-                        // Avoid unbounded pending stacks inside SCCs that can push indefinitely without Pop(0/1).
-                        if push_cycle_nodes.contains(&src_idx) {
-                            // Emit the push directly; do not defer to the pending stack.
+                        // Heuristic: If a source node is part of a pre-calculated "push cycle" OR
+                        // if it has become dynamically "hot" (visited too many times), we stop
+                        // deferring its pushes. Instead, we emit them directly into the graph.
+                        // This prevents combinatorial explosion of stack states from complex cycles.
+                        if push_cycle_nodes.contains(&src_idx) || is_hot {
+                            if is_hot && !push_cycle_nodes.contains(&src_idx) && is_debug_level_enabled(3) {
+                                println!("[Push/Pop Elimination] Dynamically forcing immediate push for hot source {:?}.", src_idx);
+                            }
+
                             for (dst_src_idx, _) in dests.iter() {
                                 let next_state = get_or_create!(*dst_src_idx, stack_id);
                                 god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Push(bv_new.clone()), ());
