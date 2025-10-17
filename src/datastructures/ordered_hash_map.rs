@@ -22,11 +22,15 @@ pub trait Pop<K, V> {
     fn pop(&mut self) -> Option<(K, V)>;
 }
 
-impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+impl<K: Clone + Eq + Hash, V: Clone> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
     fn pop(&mut self) -> Option<(K, V)> {
-        self.back()
-            .map(|(k, _)| k.clone())
-            .and_then(|k| self.remove_entry(&k))
+        // Get the last key-value pair by iterating to the end
+        if let Some((k, v)) = self.iter().last().map(|(k, v)| (k.clone(), v.clone())) {
+            // Remove the entry we found
+            self.remove(&k);
+            Some((k, v))
+        } else {
+            None
+        }
     }
 }
-
