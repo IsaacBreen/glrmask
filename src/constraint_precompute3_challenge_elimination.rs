@@ -166,6 +166,12 @@ mod tests {
         input_god: &IntermediateTrie3GodWrapper,
         input_roots: &[IntermediatePrecomputeNode3Index],
     ) {
+        // NOTE: This test harness works by comparing the set of all paths from root to leaf
+        // before and after simplification. The `get_all_paths` helper function stops traversing
+        // when it detects a cycle to avoid infinite loops. Therefore, this harness cannot
+        // validate simplifications that occur *within* a cycle. A true trie-based
+        // elimination algorithm would need a different testing strategy for cyclic graphs.
+
         // 1. Run new trie-based elimination (which currently calls the path-based one)
         let (eliminated_god, eliminated_roots, _) = Trie::deep_copy_subtrees(input_god, input_roots);
         let mut eliminated_roots_map = BTreeMap::new();
@@ -422,6 +428,66 @@ mod tests {
 
         root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv), (), end);
 
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_challenging_gauntlet() {
+        // This test combines iterative cancellation, branching, and path invalidation.
+        // Path X should simplify over multiple passes.
+        // Path Y should be invalidated because Push(B) blocks Push(A), and then Push(B)
+        // mismatches with Pop(1, A), killing the path.
+        let god = IntermediateTrie3GodWrapper::new();
+
+        // --- Nodes ---
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v3x = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v4x = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v5x = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v3y = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let merge = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        // --- State & LLM Bitsets ---
+        let mut bv_a = StateIDBV::zeros();
+        bv_a.insert(1);
+        let mut bv_b = StateIDBV::zeros();
+        bv_b.insert(2);
+        let mut bv_c = StateIDBV::zeros();
+        bv_c.insert(3);
+
+        let mut llm_x = LLMTokenBV::zeros();
+        llm_x.insert(100);
+        let mut llm_y = LLMTokenBV::zeros();
+        llm_y.insert(200);
+
+        // --- Graph Structure ---
+        // Common prefix
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_a.clone()), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_b.clone()), (), v2);
+
+        // Branching
+        v2.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_x), (), v3x);
+        v2.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_y), (), v3y);
+
+        // Path X (iterative cancellation)
+        v3x.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_c.clone()), (), v4x);
+        v4x.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_c.clone()), (), v5x);
+        v5x.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_b.clone()), (), merge);
+
+        // Path Y (blocking and invalidation)
+        v3y.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), merge);
+
+        // Common suffix
+        merge.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
+
+        // The expected outcome is that Path Y is completely eliminated.
+        // Path X simplifies: Push(C)/Pop(C) cancel, then Push(B)/Pop(B) cancel.
+        // The remaining path is Push(A) -> CheckLLM(X) -> merge -> Pop(1, A) -> end.
+        // Then Push(A)/Pop(A) cancel.
+        // The final path should be just CheckLLM(X).
         run_test(&god, &[root]);
     }
 }
