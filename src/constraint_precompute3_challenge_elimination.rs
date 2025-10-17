@@ -717,8 +717,26 @@ fn run_trie_based_elimination(
         new_roots.insert(sid, new_root);
     }
 
+    // Setup progress bar
+    let pb = ProgressBar::new(0);
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} [{elapsed_precise}] states={pos} {msg}")
+            .expect("progress-bar"),
+    );
+    if !PROGRESS_BAR_ENABLED {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+    pb.set_message("Eliminating push/pop pairs");
+
     // 5) BFS loop.
+    let mut processed: u64 = 0;
     while let Some((src_idx, stack_id)) = work.pop_front() {
+        processed += 1;
+        pb.set_position(processed);
+        if processed & 0xfff == 0 {
+            pb.set_message(format!("queue={}", work.len()));
+        }
         let dest_idx = *pair_cache.get(&(src_idx, stack_id)).expect("dest exists");
         let src_guard = src_idx.read(&source).expect("source read");
 
@@ -856,6 +874,8 @@ fn run_trie_based_elimination(
             }
         }
     }
+
+    pb.finish_with_message("Done eliminating push/pop pairs");
 
     // 6) Replace input roots with new roots (pending stack is empty at roots).
     *roots = new_roots;
