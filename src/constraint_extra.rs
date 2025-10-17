@@ -729,7 +729,7 @@ pub fn calculate_intermediate_stats3(
     stats: &mut PrecomputeStats,
     trie3_god: &IntermediateTrie3GodWrapper,
 ) {
-    crate::debug!(2, "Calculating intermediate precompute3 statistics...");
+    crate::debug!(5, "Calculating intermediate precompute3 statistics...");
 
     let mut all_reachable_nodes: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = BTreeMap::new();
     let mut queue: VecDeque<IntermediatePrecomputeNode3Index> = precomputed_roots.iter().cloned().collect();
@@ -798,7 +798,7 @@ pub fn calculate_intermediate_stats3(
         }
         if node_guard.value.end { stats.final_nodes_with_clean_end += 1; }
     }
-    crate::debug!(2, "Finished calculating intermediate precompute3 statistics.");
+    crate::debug!(5, "Finished calculating intermediate precompute3 statistics.");
 }
 
 // Add this struct definition before impl GrammarConstraint
