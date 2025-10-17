@@ -159,6 +159,15 @@ pub fn eliminate_pushes_and_pops_path_based(
     if all_root_indices.is_empty() {
         return;
     }
+    // Path-based elimination is not safe for cyclic graphs as it can lead to infinite paths.
+    if Trie::has_cycle(god, all_root_indices.clone()) {
+        // The trie-based elimination is designed to handle cycles correctly.
+        // Since this function is only called in a debug/testing context where
+        // it's compared against the trie-based one, we can simply return.
+        // The caller (`eliminate_pushes_and_pops`) already has a cycle check
+        // and will avoid calling this, but this is an extra safeguard.
+        return;
+    }
     let all_paths =
         IntermediatePrecomputeNode3::get_all_paths(god, &all_root_indices, |n| n.value.end);
 
