@@ -765,6 +765,24 @@ fn run_trie_based_elimination(
                 }
             };
 
+            // If the only result of the exploration is to regenerate the exact same push
+            // leading to the same destination node with no LLM checks, it means this push
+            // is irreducible. We should not modify it, to avoid a loop of
+            // removing and re-adding the same edge.
+            if exits.len() == 1 {
+                if let Exit::TerminatedPush {
+                    llm,
+                    push_bv: term_push_bv,
+                    dst: term_dst,
+                } = &exits[0]
+                {
+                    if *term_dst == dst && *term_push_bv == push_bv && *llm == LLMTokenBV::max_ones() {
+                        // This is an irreducible push. Skip it.
+                        continue;
+                    }
+                }
+            }
+
             // If any path from the push is blocked by a nested push, we must defer this
             // entire elimination to a later round. This is because we cannot safely remove
             // the original edge while leaving the blocked path, and we can't selectively
