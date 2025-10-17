@@ -702,11 +702,13 @@ fn run_trie_based_elimination(
         pb.set_message("Eliminating push/pop pairs");
 
         // Memoization: (source_idx, pending_stack) -> dest_idx
+        // Memoization: (source_idx, pending_stack) -> dest_idx
         let mut stack_interner = StackInterner::new();
         let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, StackID), IntermediatePrecomputeNode3Index> = BTreeMap::new();
         let mut hot_nodes = BTreeSet::new();
         let mut visit_counts: BTreeMap<IntermediatePrecomputeNode3Index, u64> = BTreeMap::new();
         let mut work: VecDeque<(IntermediatePrecomputeNode3Index, StackID)> = VecDeque::new();
+
 
         macro_rules! get_or_create {
             ($src_idx:expr, $stack:expr) => {
@@ -771,15 +773,28 @@ fn run_trie_based_elimination(
                 // This node is hot and has a pending stack. Flush the stack to the graph
                 // and then let the re-queued (src_idx, empty_stack) state handle propagation.
                 // This converts stack complexity into graph complexity locally, containing the explosion.
-                let mut from_idx = dest_idx;
+                let empty_stack_id = stack_interner.empty();
+                let final_dest_idx = get_or_create!(src_idx, empty_stack_id);
+
                 let items = stack_interner.to_vec_bottom_up(stack_id);
-                for i in 0..items.len() {
-                    let label = IntermediateTrie3EdgeKey::Push(items[i].clone());
-                    let next_stack_id = stack_interner.from_bottom_slice(&items[i+1..]);
-                    let to_idx = get_or_create!(src_idx, next_stack_id);
-                    god.insert_edge_simple(from_idx, to_idx, label, ());
+                let mut from_idx = dest_idx;
+
+                // Create a chain of intermediate nodes for all but the last push.
+                for i in 0..(items.len().saturating_sub(1)) {
+                    let new_intermediate_node = Trie::new(IntermediatePrecomputedNodeContents3::internal());
+                    let to_idx = god.insert(new_intermediate_node).into();
+                    god.insert_edge_simple(from_idx, to_idx, IntermediateTrie3EdgeKey::Push(items[i].clone()), ());
                     from_idx = to_idx;
                 }
+
+                // The last push connects to the final destination.
+                if let Some(last_item) = items.last() {
+                    god.insert_edge_simple(from_idx, final_dest_idx, IntermediateTrie3EdgeKey::Push(last_item.clone()), ());
+                } else {
+                    // This case (empty stack) is already handled by the `if` condition, but for completeness:
+                    god.insert_edge_simple(from_idx, final_dest_idx, IntermediateTrie3EdgeKey::NoOp, ());
+                }
+
                 continue; // Stop processing this complex state; the empty-stack version will take over.
             }
 
@@ -803,10 +818,15 @@ fn run_trie_based_elimination(
             for (ek, dests) in src_guard.children().iter() {
                 match ek {
                     IntermediateTrie3EdgeKey::Push(bv_new) => {
-                        // Deferral is the default. However, if a node is in a pre-computed push-cycle,
-                        // we emit the push directly to avoid unbounded stack growth. The hot-node
-                        // heuristic above handles state-explosion cycles dynamically.
-                        if push_cycle_nodes.contains(&src_idx) {
+                        // Heuristic: If a source node is part of a pre-calculated "push cycle" OR
+                        // if it has become dynamically "hot" (visited too many times), we stop
+                        // deferring its pushes. Instead, we emit them directly into the graph.
+                        // This prevents combinatorial explosion of stack states from complex cycles.
+                        if push_cycle_nodes.contains(&src_idx) || is_hot {
+                            if is_hot && !push_cycle_nodes.contains(&src_idx) && is_debug_level_enabled(3) {
+                                println!("[Push/Pop Elimination] Dynamically forcing immediate push for hot source {:?}.", src_idx);
+                            }
+
                             for (dst_src_idx, _) in dests.iter() {
                                 let next_state = get_or_create!(*dst_src_idx, stack_id);
                                 god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Push(bv_new.clone()), ());

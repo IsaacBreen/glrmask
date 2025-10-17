@@ -812,7 +812,7 @@ where
         let mut all_paths = Vec::new();
 
         for &root in roots {
-            let mut visiting = std::collections::BTreeSet::new();
+            let mut visiting = std::collections::HashSet::new();
             if let Some(root_guard) = root.read(arena) {
                 let root_value = root_guard.value.clone();
                 Self::get_all_paths_recursive(
@@ -834,7 +834,7 @@ where
         node_idx: Trie2Index,
         current_path: Vec<(EK, EV, T)>,
         all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
-        visiting: &mut std::collections::BTreeSet<Trie2Index>,
+        visiting: &mut std::collections::HashSet<Trie2Index>,
         is_end: &F,
         root_value: T,
     ) where
