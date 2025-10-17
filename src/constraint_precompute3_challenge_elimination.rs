@@ -868,4 +868,62 @@ mod tests {
         // The final path should be just CheckLLM(X).
         run_test(&god, &[root]);
     }
+
+    #[test]
+    fn test_mismatch_from_log() {
+        // This test case is derived from a real-world mismatch found during development.
+        // The trie-based elimination correctly prunes this path as invalid, while the
+        // path-based simplification incorrectly simplifies it to a non-empty path.
+        // The key interaction is a Pop(0, bv_5) that should invalidate a path when a
+        // Push(bv_1) is on the stack, but the path-based logic overlooks this.
+        let god = IntermediateTrie3GodWrapper::new();
+
+        let nodes: Vec<_> = (0..12)
+            .map(|i| {
+                let content = if i == 11 {
+                    IntermediatePrecomputedNodeContents3::leaf()
+                } else {
+                    IntermediatePrecomputedNodeContents3::internal()
+                };
+                Trie2Index::from(god.insert(Trie::new(content)))
+            })
+            .collect();
+        let root = nodes[0];
+
+        let mut llm_0 = LLMTokenBV::zeros();
+        llm_0.insert(0);
+
+        let mut bv_1 = StateIDBV::zeros();
+        bv_1.insert(1);
+        let mut bv_2 = StateIDBV::zeros();
+        bv_2.insert(2);
+        let mut bv_4 = StateIDBV::zeros();
+        bv_4.insert(4);
+        let mut bv_5 = StateIDBV::zeros();
+        bv_5.insert(5);
+        let bv_max = StateIDBV::max_ones();
+
+        let path = vec![
+            IntermediateTrie3EdgeKey::CheckLLM(llm_0),
+            IntermediateTrie3EdgeKey::Pop(0, bv_4.clone()),
+            IntermediateTrie3EdgeKey::Pop(2, bv_max.clone()),
+            IntermediateTrie3EdgeKey::Pop(0, bv_5.clone()),
+            IntermediateTrie3EdgeKey::Push(bv_1.clone()),
+            IntermediateTrie3EdgeKey::Push(bv_4.clone()),
+            IntermediateTrie3EdgeKey::Pop(0, bv_4.clone()),
+            IntermediateTrie3EdgeKey::Pop(2, bv_max.clone()),
+            IntermediateTrie3EdgeKey::Pop(0, bv_5.clone()),
+            IntermediateTrie3EdgeKey::Push(bv_1.clone()),
+            IntermediateTrie3EdgeKey::Push(bv_2.clone()),
+        ];
+
+        let mut current_node = root;
+        for (i, edge) in path.into_iter().enumerate() {
+            let next_node = nodes[i + 1];
+            current_node.write(&god).unwrap().force_insert_to_node(edge, (), next_node);
+            current_node = next_node;
+        }
+
+        run_test(&god, &[root]);
+    }
 }
