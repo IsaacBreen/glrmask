@@ -78,10 +78,6 @@ pub fn eliminate_pushes_and_pops_path_based(
     Some(stack)
 }
 
-/// Placeholder for a future, more efficient trie-based implementation of push/pop elimination.
-/// Currently, it uses the path-based approach internally by flattening the trie,
-/// processing paths, and rebuilding the trie. This maintains the correct logic while
-/// providing the desired API for a true trie-based replacement.
 pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
