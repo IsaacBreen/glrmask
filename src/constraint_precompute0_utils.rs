@@ -7,6 +7,8 @@ use crate::tokenizer::TokenizerStateID;
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
 use crate::datastructures::ordered_hash_map::Retain;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use crate::profiler::PROGRESS_BAR_ENABLED;
 use kdam::tqdm;
 
 #[derive(Debug, Clone)]
@@ -90,17 +92,30 @@ impl<'r> Precomputer0<'r> {
 
     pub(crate) fn break_structural_cycles(&mut self) {
         crate::debug!(2, "Breaking structural cycles...");
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .expect("progress bar style"),
+        );
+        if !PROGRESS_BAR_ENABLED {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        pb.set_message("Breaking structural cycles...");
+
         let mut clones: HashMap<PrecomputeNode0Index, PrecomputeNode0Index> = HashMap::new();
 
         for i in 0.. {
             let back_edges = self.find_back_edges();
             if back_edges.is_empty() {
+                pb.finish_with_message(format!("Broke structural cycles after {} iterations.", i));
                 crate::debug!(2, "No more structural cycles found after {} iterations.", i);
                 break;
             }
             if i > 100 { // Sanity check
                 panic!("Cycle breaking seems to be in an infinite loop.");
             }
+            pb.set_message(format!("Breaking structural cycles (iter {}, {} back-edges)...", i, back_edges.len()));
             crate::debug!(3, "Found {} back edges in iteration {}.", back_edges.len(), i);
 
             let mut changes = Vec::new();
