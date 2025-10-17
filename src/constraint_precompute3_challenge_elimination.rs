@@ -729,7 +729,7 @@ fn run_trie_based_elimination(
             let items = stack_interner.to_vec_bottom_up(stack_id);
             if !items.is_empty() {
                 let mut cur = dest_idx;
-                for (i, bv) in items.clone().into_iter().enumerate() {
+                for (i, bv) in items.iter().enumerate() {
                     let next = if i == items.len() - 1 {
                         final_dest_idx
                     } else {
@@ -737,7 +737,7 @@ fn run_trie_based_elimination(
                             god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())),
                         )
                     };
-                    god.insert_edge_simple(cur, next, IntermediateTrie3EdgeKey::Push(bv), ());
+                    god.insert_edge_simple(cur, next, IntermediateTrie3EdgeKey::Push(bv.clone()), ());
                     cur = next;
                 }
             }
