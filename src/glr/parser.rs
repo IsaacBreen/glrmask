@@ -2029,6 +2029,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut final_shifted = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
             timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
+self.below_bottom_cache.clear(); // TEMP
             for gss_arc in out {
                 timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
                 let simple_gss_info = is_simple_gss(&gss_arc, self.parser.combined_start_state_id)
@@ -2056,55 +2057,56 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let cached_dest = occupied.get().clone();
                             let edge_key = (0, tokens_all.clone());
                             let edge_value = StateIDBV::max_ones();
-                            let memo_for_dest = cached_dest_memos.entry(cached_dest.clone()).or_default();
                             deep_add_precompute_trie_edges(
                                 &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                &mut || cached_dest.clone(), memo_for_dest,
+                                &mut || cached_dest.clone(), &mut PruneAndTransformRecursiveMemo::default(),
                             );
+                            // final_out.push(new_gss_arc);
+                            println!("Declining to push new_gss_arc to final_out for {}", new_gss_arc.print());
                         }
                         std::collections::hash_map::Entry::Vacant(vacant) => {
                             // --- CACHE MISS on below_bottom_cache ---
                             if let Some(cur_tok) = config.current_token {
                                 // 1. Check runtime cache.
-                                if let Some((runtime_root, runtime_gss)) = self.runtime_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
-                                    hit!("GLRParserState::reduce_and_goto::RuntimeCacheHit");
-                                    vacant.insert(runtime_root.clone());
-                                    let edge_key = (0, tokens_all.clone());
-                                    let edge_value = StateIDBV::max_ones();
-                                    let memo_for_dest = cached_dest_memos.entry(runtime_root.clone()).or_default();
-                                    deep_add_precompute_trie_edges(
-                                        &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                        &mut || runtime_root.clone(), memo_for_dest,
-                                    );
-                                    final_shifted.push(runtime_gss);
-                                    continue;
-                                }
+                                // if let Some((runtime_root, runtime_gss)) = self.runtime_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
+                                //     hit!("GLRParserState::reduce_and_goto::RuntimeCacheHit");
+                                //     vacant.insert(runtime_root.clone());
+                                //     let edge_key = (0, tokens_all.clone());
+                                //     let edge_value = StateIDBV::max_ones();
+                                //     let memo_for_dest = cached_dest_memos.entry(runtime_root.clone()).or_default();
+                                //     deep_add_precompute_trie_edges(
+                                //         &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                //         &mut || runtime_root.clone(), memo_for_dest,
+                                //     );
+                                //     final_shifted.push(runtime_gss);
+                                //     continue;
+                                // }
                                 // 2. Check stored cache.
-                                else if let Some(dest_god) = self.active_state.trie2_god.as_ref() {
-                                    if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
-                                        // --- STORED REUSE on MISS ---
-                                        hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
-                                        let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
-                                            &self.parser.stored_trie_god, dest_god, &[stored_root.clone().into()],
-                                        );
-                                        let new_root = new_roots[0];
-                                        vacant.insert(new_root.clone());
-
-                                        let mut mapped_gss = stored_gss.clone();
-                                        map_trie3_node_ids(&mut mapped_gss, &id_map);
-
-                                        let edge_key = (0, tokens_all.clone());
-                                        let edge_value = StateIDBV::max_ones();
-                                        let memo_for_dest = cached_dest_memos.entry(new_root.clone()).or_default();
-                                        deep_add_precompute_trie_edges(
-                                            &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                            &mut || new_root.clone(), memo_for_dest,
-                                        );
-
-                                        final_shifted.push(mapped_gss);
-                                        continue;
-                                    }
-                                }
+                                // else if let Some(dest_god) = self.active_state.trie2_god.as_ref() {
+                                //     if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
+                                //         // --- STORED REUSE on MISS ---
+                                //         hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
+                                //         let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+                                //             &self.parser.stored_trie_god, dest_god, &[stored_root.clone().into()],
+                                //         );
+                                //         let new_root = new_roots[0];
+                                //         vacant.insert(new_root.clone());
+                                //
+                                //         let mut mapped_gss = stored_gss.clone();
+                                //         map_trie3_node_ids(&mut mapped_gss, &id_map);
+                                //
+                                //         let edge_key = (0, tokens_all.clone());
+                                //         let edge_value = StateIDBV::max_ones();
+                                //         let memo_for_dest = cached_dest_memos.entry(new_root.clone()).or_default();
+                                //         deep_add_precompute_trie_edges(
+                                //             &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
+                                //             &mut || new_root.clone(), memo_for_dest,
+                                //         );
+                                //
+                                //         final_shifted.push(mapped_gss);
+                                //         continue;
+                                //     }
+                                // }
                             }
 
                             // --- PURE MISS ---
@@ -2115,13 +2117,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             );
                             let edge_key = (0, tokens_all.clone());
                             let edge_value = StateIDBV::max_ones();
-                            let memo_for_dest = cached_dest_memos.entry(new_dest.clone()).or_default();
                             deep_add_precompute_trie_edges(
                                 &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                &mut || new_dest.clone(), memo_for_dest,
+                                &mut || new_dest.clone(), &mut PruneAndTransformRecursiveMemo::default(),
                             );
                             vacant.insert(new_dest);
-                            final_out.push(new_gss_arc);
+                            final_out.push(new_gss_arc.clone());
+                            println!("Pushed new_gss_arc to final_out for {}", new_gss_arc.print());
                         }
                     }
                 } else {
@@ -2156,6 +2158,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut config = config.clone();
         config.current_token = Some(token_id);
 
+        self.below_bottom_cache.clear(); // TEMP
         if config.reset_cache {
             self.below_bottom_cache.clear();
         }
