@@ -2029,8 +2029,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut final_shifted = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
             timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
-self.below_bottom_cache.clear(); // TEMP
-            println!("CLEARED BELOW BOTTOM CACHE");
             for gss_arc in out {
                 timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
                 let simple_gss_info = is_simple_gss(&gss_arc, self.parser.combined_start_state_id)
