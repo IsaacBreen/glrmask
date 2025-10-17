@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode1, PrecomputeNode1Index, PrecomputeNode2Index, Trie1GodWrapper, Trie2GodWrapper, PrecomputeNode2, PrecomputeNode3Index, Trie3GodWrapper, PrecomputeNode0Index, Trie0GodWrapper};
+use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode1, PrecomputeNode1Index, PrecomputeNode2Index, Trie1GodWrapper, Trie2GodWrapper, PrecomputeNode2, PrecomputeNode3Index, Trie3GodWrapper, PrecomputeNode0Index, Trie0GodWrapper, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey};
 use crate::types::{TerminalID as GrammarTokenID};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
@@ -724,6 +724,83 @@ pub fn calculate_final_stats3(
     crate::debug!(2, "Finished calculating final precompute3 statistics.");
 }
 
+pub fn calculate_intermediate_stats3(
+    precomputed_roots: &[IntermediatePrecomputeNode3Index],
+    stats: &mut PrecomputeStats,
+    trie3_god: &IntermediateTrie3GodWrapper,
+) {
+    crate::debug!(2, "Calculating intermediate precompute3 statistics...");
+
+    let mut all_reachable_nodes: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = BTreeMap::new();
+    let mut queue: VecDeque<IntermediatePrecomputeNode3Index> = precomputed_roots.iter().cloned().collect();
+    let mut visited_data_ptrs: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+
+    while let Some(node_arc) = queue.pop_front() {
+        let (children_to_queue, node_ptr) = {
+            let node_guard = node_arc.read(trie3_god).unwrap();
+            let ptr = node_arc;
+            let children = node_guard.children()
+                .values()
+                .flat_map(|dest_map| {
+                    dest_map.keys().map(|wrapper| {
+                        wrapper.as_arc().clone()
+                    })
+                })
+                .collect::<Vec<_>>();
+            (children, ptr)
+        };
+
+        if visited_data_ptrs.insert(node_ptr) {
+            all_reachable_nodes.insert(node_ptr, node_arc.clone());
+            for child_arc in children_to_queue {
+                queue.push_back(child_arc);
+            }
+        }
+    }
+
+    *stats = PrecomputeStats::default();
+    stats.final_unique_nodes_count = all_reachable_nodes.len();
+
+    let root_node_pointers: HashSet<IntermediatePrecomputeNode3Index> = precomputed_roots
+        .iter()
+        .map(|arc| {
+            let guard = arc.read(trie3_god).unwrap();
+            arc.clone()
+        })
+        .collect();
+    stats.final_root_nodes_count = root_node_pointers.len();
+
+    for (node_ptr, node_arc) in &all_reachable_nodes {
+        let node_guard = node_arc.read(trie3_god).expect("RwLock poisoned during final stats calculation");
+
+        if !root_node_pointers.contains(node_ptr) {
+            if node_guard.children().is_empty() {
+                stats.final_leaf_nodes_count += 1;
+            } else {
+                stats.final_non_root_internal_nodes_count += 1;
+            }
+        }
+
+        for (edge_key, dest_map) in node_guard.children() {
+            let num_edges_for_this_key = dest_map.len();
+            stats.final_edges_count += num_edges_for_this_key;
+            stats.final_edges_with_some_key += num_edges_for_this_key;
+            if num_edges_for_this_key > 0 {
+                stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key;
+                stats.final_num_occupied_some_edge_keys += 1;
+            }
+            match edge_key {
+                IntermediateTrie3EdgeKey::Pop(_, bv) => { stats.final_total_ranges_in_bvs += bv.inner().ranges_len(); }
+                IntermediateTrie3EdgeKey::Push(bv) => { stats.final_total_ranges_in_bvs += bv.inner().ranges_len(); }
+                IntermediateTrie3EdgeKey::CheckLLM(bv) => { stats.final_total_ranges_in_bvs += bv.inner().ranges_len(); }
+                IntermediateTrie3EdgeKey::NoOp => {}
+            }
+        }
+        if node_guard.value.end { stats.final_nodes_with_clean_end += 1; }
+    }
+    crate::debug!(2, "Finished calculating intermediate precompute3 statistics.");
+}
+
 // Add this struct definition before impl GrammarConstraint
 #[derive(Default, Debug)]
 pub struct PrecomputeStats {
@@ -1341,6 +1418,34 @@ pub fn print_precompute_stats3(
     println!("  Nodes with End Marker: {}", stats.final_nodes_with_clean_end);
     println!("  Average edge fanout:    {:.2}", avg_fanout);
     println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
+    println!("---------------------------------");
+}
+
+pub fn print_intermediate_stats3(
+    stats: &PrecomputeStats,
+    trie3_god: &IntermediateTrie3GodWrapper,
+) {
+    let avg_fanout = if stats.final_num_occupied_some_edge_keys > 0 {
+        stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
+    } else { 0.0 };
+
+    println!("--- Intermediate Precomputation 3 Statistics (Before Optimization) ---");
+    
+    println!("\nNode Counts Breakdown:");
+    println!("  There are:");
+    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+    println!("    - {} are roots", stats.final_root_nodes_count);
+    let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count);
+    println!("    - {} are non-roots, of which", non_root_count);
+    println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
+    println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
+
+    println!("\nGraph Structure:");
+    println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
+    println!("  Total Edges: {}", stats.final_edges_count);
+    println!("  Nodes with End Marker: {}", stats.final_nodes_with_clean_end);
+    println!("  Average edge fanout:    {:.2}", avg_fanout);
+    println!("  Total ranges in all HybridBitsets (in edge keys): {}", stats.final_total_ranges_in_bvs);
     println!("---------------------------------");
 }
 

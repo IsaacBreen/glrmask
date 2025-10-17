@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::constraint::{IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
+use crate::r#macro::is_debug_level_enabled;
 
 pub fn optimize_intermediate_trie3_template(
     start_node: &IntermediatePrecomputeNode3Index,
@@ -27,6 +28,11 @@ pub fn optimize_intermediate_trie3(
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) {
+    if is_debug_level_enabled(2) {
+        let mut stats = crate::constraint_extra::PrecomputeStats::default();
+        crate::constraint_extra::calculate_intermediate_stats3(roots, &mut stats, god);
+        crate::constraint_extra::print_intermediate_stats3(&stats, god);
+    }
     for _ in 0..2 {
         let changed = prune_unproductive_nodes(roots, end_node, god);
         if !changed {
