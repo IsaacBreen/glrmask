@@ -479,16 +479,9 @@ enum Exit {
         pop_bv: StateIDBV,
         dst: IntermediatePrecomputeNode3Index,
     },
-    // A path reached a leaf without being cancelled. The push is preserved,
-    // possibly with a modified bitset and past some CheckLLMs. This is a simplification.
-    SimplifiedBlockedPush {
-        llm: LLMTokenBV,
-        push_bv: StateIDBV,
-        dst: IntermediatePrecomputeNode3Index,
-    },
-    // A path was blocked by a nested push. This is not a simplification.
-    // The original push must be preserved as-is.
-    HardBlockedPush {
+    // Elimination is blocked by a nested Push, or by reaching a leaf with no Pop(n>=1).
+    // We must keep the Push with the possibly-restricted bitset.
+    BlockedPush {
         llm: LLMTokenBV,
         push_bv: StateIDBV,
         dst: IntermediatePrecomputeNode3Index,
@@ -569,7 +562,7 @@ fn compute_push_elim_exits(
         // If this node is an end, then along this branch we can only preserve the Push (blocked).
         if let Some(read_guard) = state.node.read(god) {
             if read_guard.value.end {
-                exits.push(Exit::SimplifiedBlockedPush {
+                exits.push(Exit::BlockedPush {
                     llm: state.llm_bv.clone(),
                     push_bv: state.push_bv.clone(),
                     dst: state.node,
@@ -610,7 +603,7 @@ fn compute_push_elim_exits(
                         // Important: We DO NOT move the push forward to the nested push's
                         // destination. That would violate the stack semantics used by the
                         // path-based simplifier (which blocks when encountering another push).
-                        exits.push(Exit::HardBlockedPush {
+                        exits.push(Exit::BlockedPush {
                             llm: state.llm_bv.clone(),
                             push_bv: state.push_bv.clone(),
                             dst: state.node,
@@ -766,14 +759,12 @@ fn run_trie_based_elimination(
                     e
                 }
             };
-            // Deduplicate exits and classify them.
+            // Deduplicate exits and detect any blocked branches.
             let mut cancel_set: BTreeSet<(LLMTokenBV, IntermediatePrecomputeNode3Index)> =
                 BTreeSet::new();
             let mut degrade_set: BTreeSet<(LLMTokenBV, usize, StateIDBV, IntermediatePrecomputeNode3Index)> =
                 BTreeSet::new();
-            let mut simplified_push_set: BTreeSet<(LLMTokenBV, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                BTreeSet::new();
-            let mut saw_hard_block = false;
+            let mut saw_blocked = false;
             for ex in exits.iter() {
                 match ex {
                     Exit::Cancel { llm, dst } => {
@@ -782,11 +773,8 @@ fn run_trie_based_elimination(
                     Exit::DegradePop { llm, new_n, pop_bv, dst } => {
                         degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
                     }
-                    Exit::SimplifiedBlockedPush { llm, push_bv, dst } => {
-                        simplified_push_set.insert((llm.clone(), push_bv.clone(), *dst));
-                    }
-                    Exit::HardBlockedPush { .. } => {
-                        saw_hard_block = true;
+                    Exit::BlockedPush { .. } => {
+                        saw_blocked = true;
                     }
                 }
             }
@@ -808,11 +796,11 @@ fn run_trie_based_elimination(
                 .entry(src)
                 .or_insert_with(BTreeMap::new);
 
-            // If any path resulted in a hard block (e.g. by a nested push), we must
-            // preserve the original push edge to preserve that path.
-            let keep_original_edge = saw_hard_block;
+            // Wire deduplicated exits from src via aggregator nodes.
+            // Important: If any branch is BlockedPush, we preserve the original Push edge
+            // and do NOT insert any new Push edges (to avoid combinatorial blow-up).
+            let mut keep_original_edge = saw_blocked;
 
-            // Wire all simplified exits.
             for (llm, cancel_dst) in cancel_set {
                 let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                 god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
@@ -823,15 +811,6 @@ fn run_trie_based_elimination(
                     agg,
                     degrade_dst,
                     IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
-                    (),
-                );
-            }
-            for (llm, exit_push_bv, exit_dst) in simplified_push_set {
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                god.insert_edge_simple(
-                    agg,
-                    exit_dst,
-                    IntermediateTrie3EdgeKey::Push(exit_push_bv),
                     (),
                 );
             }
