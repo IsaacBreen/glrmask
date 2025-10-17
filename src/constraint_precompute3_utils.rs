@@ -1328,6 +1328,12 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
                 }
             }
 
+            // Recompute live tokens from the new merged edges.
+            let mut new_live_tokens = LLMTokenBV::zeros();
+            for ((_, llm_bv), _) in &new_children {
+                new_live_tokens |= llm_bv;
+            }
+
             let mut guard = rep_idx.write(trie3_god).unwrap();
             *guard.children_mut() = new_children;
             guard.value.live_tokens = new_live_tokens;
