@@ -5,11 +5,19 @@ use crate::constraint::{
     IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV,
 };
 use crate::datastructures::trie::Trie;
+use crate::r#macro::is_debug_level_enabled;
 use crate::tokenizer::TokenizerStateID;
 use std::collections::{BTreeMap, BTreeSet};
 
 use std::collections::VecDeque;
 use std::collections::btree_map::Entry;
+
+/// If true, runs both trie-based and path-based elimination, compares them,
+/// and if a mismatch is found, attempts to find a minimal failing input graph.
+/// This adds significant overhead and should only be used for debugging the
+/// elimination logic itself.
+const DEBUG_MISMATCHES: bool = true;
+
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
@@ -185,6 +193,263 @@ pub fn eliminate_pushes_and_pops_path_based(
     for (_, root_idx) in roots.iter_mut() {
         *root_idx = new_root;
     }
+}
+
+pub fn eliminate_pushes_and_pops(
+    roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+    god: &IntermediateTrie3GodWrapper,
+) {
+    if !DEBUG_MISMATCHES {
+        run_trie_based_elimination(roots, god);
+        return;
+    }
+
+    // --- DEBUG MODE ---
+    // 1. Snapshot original graph
+    let old_root_vec: Vec<_> = roots.values().cloned().collect();
+    if old_root_vec.is_empty() {
+        run_trie_based_elimination(roots, god); // Handle empty case, should do nothing.
+        return;
+    }
+
+    // Check for cycles. The path-based comparison is only valid for acyclic graphs,
+    // as get_all_paths would not terminate on a cyclic graph.
+    if Trie::has_cycle(god, old_root_vec.clone()) {
+        if is_debug_level_enabled(3) {
+            println!("[Push/Pop Elimination] Skipping debug comparison for cyclic graph.");
+        }
+        run_trie_based_elimination(roots, god);
+        return;
+    }
+
+    let (source_god, source_roots_vec, _) = Trie::deep_copy_subtrees(god, &old_root_vec);
+    let mut source_roots_map = BTreeMap::new();
+    for (sid, r_idx) in roots.keys().zip(source_roots_vec.iter()) {
+        source_roots_map.insert(*sid, *r_idx);
+    }
+
+    // 2. Compare both implementations
+    if check_mismatch(&source_god, &source_roots_map) {
+        println!("!!! MISMATCH DETECTED BETWEEN TRIE-BASED AND PATH-BASED ELIMINATION !!!");
+        println!("Starting refinement of failing input graph...");
+
+        let (minimal_god, minimal_roots_map) = refine_mismatch(&source_god, &source_roots_map);
+
+        // Rerun on minimal failing input to get the differing outputs for printing
+        let (min_trie_paths, _, _) = {
+            let (god_copy, roots_vec_copy, _) = Trie::deep_copy_subtrees(
+                &minimal_god,
+                &minimal_roots_map.values().cloned().collect::<Vec<_>>(),
+            );
+            let mut roots_map_copy = BTreeMap::new();
+            for (sid, r_idx) in minimal_roots_map.keys().zip(roots_vec_copy.iter()) {
+                roots_map_copy.insert(*sid, *r_idx);
+            }
+            run_trie_based_elimination(&mut roots_map_copy, &god_copy);
+            (
+                get_normalized_paths(&roots_map_copy, &god_copy),
+                god_copy,
+                roots_map_copy,
+            )
+        };
+
+        let (min_path_paths, _, _) = {
+            let (god_copy, roots_vec_copy, _) = Trie::deep_copy_subtrees(
+                &minimal_god,
+                &minimal_roots_map.values().cloned().collect::<Vec<_>>(),
+            );
+            let mut roots_map_copy = BTreeMap::new();
+            for (sid, r_idx) in minimal_roots_map.keys().zip(roots_vec_copy.iter()) {
+                roots_map_copy.insert(*sid, *r_idx);
+            }
+            eliminate_pushes_and_pops_path_based(&mut roots_map_copy, &god_copy);
+            (
+                get_normalized_paths(&roots_map_copy, &god_copy),
+                god_copy,
+                roots_map_copy,
+            )
+        };
+
+        let minimal_input_paths = get_normalized_paths(&minimal_roots_map, &minimal_god);
+        println!(
+            "\n--- MINIMAL FAILING INPUT ({} paths) ---",
+            minimal_input_paths.len()
+        );
+        for (i, path) in minimal_input_paths.iter().enumerate() {
+            println!("  Path {}: {:?}", i, path);
+        }
+
+        println!(
+            "\n--- TRIE-BASED OUTPUT ({} paths) ---",
+            min_trie_paths.len()
+        );
+        for (i, path) in min_trie_paths.iter().enumerate() {
+            println!("  Path {}: {:?}", i, path);
+        }
+        println!(
+            "\n--- PATH-BASED OUTPUT ({} paths) ---",
+            min_path_paths.len()
+        );
+        for (i, path) in min_path_paths.iter().enumerate() {
+            println!("  Path {}: {:?}", i, path);
+        }
+
+        panic!("Push/Pop elimination mismatch detected. See logs for details.");
+    }
+
+    // 5. If no mismatch, run the trie-based version on the actual input `god` to modify it.
+    run_trie_based_elimination(roots, god);
+}
+
+/// Compute the final set of normalized paths from a graph, for comparison.
+fn get_normalized_paths(
+    roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+    god: &IntermediateTrie3GodWrapper,
+) -> BTreeSet<Vec<IntermediateTrie3EdgeKey>> {
+    let root_indices: Vec<_> = roots.values().cloned().collect();
+    IntermediatePrecomputeNode3::get_all_paths(god, &root_indices, |n| n.value.end)
+        .into_iter()
+        .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+        .collect()
+}
+
+/// Runs both elimination algorithms on a graph and returns true if their outputs differ.
+fn check_mismatch(
+    god: &IntermediateTrie3GodWrapper,
+    roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+) -> bool {
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    if roots_vec.is_empty() {
+        return false;
+    }
+
+    let (trie_paths, _, _) = {
+        let (god_copy, roots_vec_copy, _) = Trie::deep_copy_subtrees(god, &roots_vec);
+        let mut roots_map_copy = BTreeMap::new();
+        for (sid, r_idx) in roots.keys().zip(roots_vec_copy.iter()) {
+            roots_map_copy.insert(*sid, *r_idx);
+        }
+        run_trie_based_elimination(&mut roots_map_copy, &god_copy);
+        (
+            get_normalized_paths(&roots_map_copy, &god_copy),
+            god_copy,
+            roots_map_copy,
+        )
+    };
+
+    let (path_paths, _, _) = {
+        let (god_copy, roots_vec_copy, _) = Trie::deep_copy_subtrees(god, &roots_vec);
+        let mut roots_map_copy = BTreeMap::new();
+        for (sid, r_idx) in roots.keys().zip(roots_vec_copy.iter()) {
+            roots_map_copy.insert(*sid, *r_idx);
+        }
+        eliminate_pushes_and_pops_path_based(&mut roots_map_copy, &god_copy);
+        (
+            get_normalized_paths(&roots_map_copy, &god_copy),
+            god_copy,
+            roots_map_copy,
+        )
+    };
+
+    trie_paths != path_paths
+}
+
+/// Given a failing graph, iteratively removes edges and roots to find a smaller subgraph that still fails.
+fn refine_mismatch(
+    initial_god: &IntermediateTrie3GodWrapper,
+    initial_roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+) -> (
+    IntermediateTrie3GodWrapper,
+    BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+) {
+    let (mut minimal_god, minimal_roots_vec, old_to_new) = Trie::deep_copy_subtrees(
+        initial_god,
+        &initial_roots.values().cloned().collect::<Vec<_>>(),
+    );
+    let mut minimal_roots = BTreeMap::new();
+    for (sid, old_root) in initial_roots {
+        minimal_roots.insert(*sid, *old_to_new.get(old_root).unwrap());
+    }
+
+    let mut changed_in_pass = true;
+    while changed_in_pass {
+        changed_in_pass = false;
+
+        // --- Pass 1: Try to remove edge groups systematically ---
+        let current_roots_vec: Vec<_> = minimal_roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(&minimal_god, &current_roots_vec);
+
+        let mut all_edge_groups = Vec::new();
+        for node_idx in all_nodes {
+            if let Some(node_r) = node_idx.read(&minimal_god) {
+                for ek in node_r.children().keys() {
+                    all_edge_groups.push((node_idx, ek.clone()));
+                }
+            }
+        }
+
+        for (source_idx, edge_key) in all_edge_groups {
+            let (candidate_god, candidate_roots_vec, old_to_new) =
+                Trie::deep_copy_subtrees(&minimal_god, &current_roots_vec);
+            let mut candidate_roots = BTreeMap::new();
+            for (sid, old_root) in &minimal_roots {
+                candidate_roots.insert(*sid, *old_to_new.get(old_root).unwrap());
+            }
+
+            let mapped_source_idx = *old_to_new.get(&source_idx).unwrap();
+
+            if let Some(mut node_w) = mapped_source_idx.write(&candidate_god) {
+                node_w.children_mut().remove(&edge_key);
+            }
+
+            Trie::gc(&candidate_god, &candidate_roots_vec);
+
+            if check_mismatch(&candidate_god, &candidate_roots) {
+                minimal_god = candidate_god;
+                minimal_roots = candidate_roots;
+                changed_in_pass = true;
+                let new_size = Trie::all_nodes(
+                    &minimal_god,
+                    &minimal_roots.values().cloned().collect::<Vec<_>>(),
+                )
+                .len();
+                println!(
+                    "... Refined mismatch by removing edge group. New size: {} nodes.",
+                    new_size
+                );
+                break; // Restart the whole process with the smaller graph
+            }
+        }
+
+        if changed_in_pass {
+            continue; // Restart the while loop
+        }
+
+        // --- Pass 2: Try to remove roots (if more than one) ---
+        if minimal_roots.len() > 1 {
+            let root_sids_to_try: Vec<_> = minimal_roots.keys().cloned().collect();
+            for sid_to_remove in root_sids_to_try {
+                let mut candidate_roots = minimal_roots.clone();
+                candidate_roots.remove(&sid_to_remove);
+
+                if candidate_roots.is_empty() {
+                    continue;
+                }
+
+                if check_mismatch(&minimal_god, &candidate_roots) {
+                    minimal_roots = candidate_roots;
+                    changed_in_pass = true;
+                    println!(
+                        "... Refined mismatch by removing a root. New root count: {}.",
+                        minimal_roots.len()
+                    );
+                    break; // Restart the while loop
+                }
+            }
+        }
+    }
+
+    (minimal_god, minimal_roots)
 }
 
 #[derive(Clone, Debug)]
@@ -402,7 +667,7 @@ fn remove_specific_edge(
     false
 }
 
-pub fn eliminate_pushes_and_pops(
+fn run_trie_based_elimination(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
@@ -548,14 +813,14 @@ mod tests {
         // validate simplifications that occur *within* a cycle. A true trie-based
         // elimination algorithm would need a different testing strategy for cyclic graphs.
 
-        // 1. Run path-based elimination
+        // 1. Run new trie-based elimination (which currently calls the path-based one)
         let (eliminated_god, eliminated_roots, _) =
             Trie::deep_copy_subtrees(input_god, input_roots);
         let mut eliminated_roots_map = BTreeMap::new();
         for (i, r) in eliminated_roots.iter().enumerate() {
             eliminated_roots_map.insert(TokenizerStateID(i), *r); // Use dummy TokenizerStateID
         }
-        eliminate_pushes_and_pops_path_based(&mut eliminated_roots_map, &eliminated_god);
+        eliminate_pushes_and_pops(&mut eliminated_roots_map, &eliminated_god);
 
         // 2. Flatten result to paths
         let final_roots_from_trie_elim: Vec<_> = eliminated_roots_map.values().cloned().collect();
