@@ -9052,9 +9052,14 @@ local_system:
               let mut visited = HashSet::new();
               let mut recursion_stack = HashSet::new();
               let roots: Vec<_> = self.roots.values().cloned().collect();
+              let all_nodes = Trie::all_nodes(&self.trie0_god, &roots);
 
-              for root in roots {
-                  self.find_back_edges_dfs(root, &mut visited, &mut recursion_stack, &mut back_edges);
+              for node in all_nodes {
+                  // The visited check is important here to avoid re-starting DFS from nodes
+                  // that have already been fully explored as part of another node's traversal.
+                  if !visited.contains(&node) {
+                      self.find_back_edges_dfs(node, &mut visited, &mut recursion_stack, &mut back_edges);
+                  }
               }
 
               back_edges
@@ -14506,9 +14511,7 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute0_utils.rs
-  - user: Modify this so we have a progress bar in 'Breaking structural cycles'. Use
-      the same style of defining the progress bar as in the rest of the code, ie using
-      cfg.
+  - user: We seem to be getting a deadlock while 'Breaking structural cycles'.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -14527,150 +14530,82 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add a progress bar, followed by the corresponding git diff.
+      I understand you're encountering a deadlock during the "Breaking structural cycles" step of the precomputation. This is often caused by subtle issues in graph traversal, especially when dealing with cycles and shared nodes. The cycle detection logic in `find_back_edges` can be made more robust. By ensuring we traverse every node in the graph, we can prevent scenarios where cycles are missed, which can lead to an inconsistent state that causes deadlocks or hangs in subsequent processing.
+
+      Here are the step-by-step instructions to fix the issue, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      I will modify `src/constraint_precompute0_utils.rs` to add a progress bar to the `break_structural_cycles` function.
+      1.  **Open the file `src/constraint_precompute0_utils.rs`**.
 
-      #### File: `src/constraint_precompute0_utils.rs`
+      2.  **Navigate to the `find_back_edges` function** inside the `impl<'r> Precomputer0<'r>` block.
 
-      1.  **Add Imports:**
-          At the top of the file, add the following `use` statements to import the necessary components for the `indicatif` progress bar and to check if it should be enabled.
+      3.  **Modify the function body**. The current implementation starts its search for cycles only from the root nodes. This can be insufficient for complex graphs. We will change it to discover all nodes in the trie first and then run the cycle detection on every component of the graph.
 
+          Replace this code block:
           ```rust
-          use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-          use crate::profiler::PROGRESS_BAR_ENABLED;
+              let mut back_edges = Vec::new();
+              let mut visited = HashSet::new();
+              let mut recursion_stack = HashSet::new();
+              let roots: Vec<_> = self.roots.values().cloned().collect();
+
+              for root in roots {
+                  self.find_back_edges_dfs(root, &mut visited, &mut recursion_stack, &mut back_edges);
+              }
+
+              back_edges
           ```
 
-      2.  **Update `break_structural_cycles` function:**
-          Modify the `break_structural_cycles` function to set up, update, and finish a spinner-style progress bar that shows the status of the cycle-breaking process.
-
-          Replace the existing `break_structural_cycles` function with the following code:
-
+          With this new implementation:
           ```rust
-          pub(crate) fn break_structural_cycles(&mut self) {
-              crate::debug!(2, "Breaking structural cycles...");
-              let pb = ProgressBar::new_spinner();
-              pb.set_style(
-                  ProgressStyle::default_spinner()
-                      .template("{spinner:.green} {msg}")
-                      .expect("progress bar style"),
-              );
-              if !PROGRESS_BAR_ENABLED {
-                  pb.set_draw_target(ProgressDrawTarget::hidden());
-              }
-              pb.set_message("Breaking structural cycles...");
+              let mut back_edges = Vec::new();
+              let mut visited = HashSet::new();
+              let mut recursion_stack = HashSet::new();
+              let roots: Vec<_> = self.roots.values().cloned().collect();
+              let all_nodes = Trie::all_nodes(&self.trie0_god, &roots);
 
-              let mut clones: HashMap<PrecomputeNode0Index, PrecomputeNode0Index> = HashMap::new();
-
-              for i in 0.. {
-                  let back_edges = self.find_back_edges();
-                  if back_edges.is_empty() {
-                      pb.finish_with_message(format!("Broke structural cycles after {} iterations.", i));
-                      crate::debug!(2, "No more structural cycles found after {} iterations.", i);
-                      break;
-                  }
-                  if i > 100 { // Sanity check
-                      panic!("Cycle breaking seems to be in an infinite loop.");
-                  }
-                  pb.set_message(format!("Breaking structural cycles (iter {}, {} back-edges)...", i, back_edges.len()));
-                  crate::debug!(3, "Found {} back edges in iteration {}.", back_edges.len(), i);
-
-                  let mut changes = Vec::new();
-                  for (src_idx, key, old_dest_idx) in back_edges {
-                      let new_dest_idx = clones.entry(old_dest_idx.clone()).or_insert_with(|| {
-                          let new_node = self.trie0_god.insert(old_dest_idx.read(&self.trie0_god).unwrap().clone());
-                          PrecomputeNode0Index::new(new_node)
-                      }).clone();
-                      changes.push((src_idx, key, old_dest_idx, new_dest_idx));
-                  }
-
-                  for (src_idx, key, old_dest_idx, new_dest_idx) in changes {
-                      let mut src_guard = src_idx.write(&self.trie0_god).unwrap();
-                      if let Some(dest_map) = src_guard.children_mut().get_mut(&key) {
-                          if let Some(bv) = dest_map.remove(&old_dest_idx) {
-                              dest_map.insert(new_dest_idx, bv);
-                          }
-                      }
+              for node in all_nodes {
+                  // The visited check is important here to avoid re-starting DFS from nodes
+                  // that have already been fully explored as part of another node's traversal.
+                  if !visited.contains(&node) {
+                      self.find_back_edges_dfs(node, &mut visited, &mut recursion_stack, &mut back_edges);
                   }
               }
-              crate::debug!(2, "Finished breaking structural cycles.");
-          }
+
+              back_edges
           ```
 
-      ---
+      This change ensures that the cycle detection is comprehensive, which should resolve the deadlock.
 
-      ### Git Diffs
+      ### Git Diff
 
-      Here is the git diff to apply the changes described above.
+      Here is the git patch for the change described above.
 
       ```diff
       diff --git a/src/constraint_precompute0_utils.rs b/src/constraint_precompute0_utils.rs
-      index 9111111..2222222 100644
+      index 2411188..1111111 100644
       --- a/src/constraint_precompute0_utils.rs
       +++ b/src/constraint_precompute0_utils.rs
-      @@ -5,6 +5,8 @@
-       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-       use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
-       use crate::datastructures::ordered_hash_map::Retain;
-      +use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-      +use crate::profiler::PROGRESS_BAR_ENABLED;
-       use kdam::tqdm;
+      @@ -120,12 +120,17 @@
+           fn find_back_edges(&self) -> Vec<(PrecomputeNode0Index, Option<(GrammarTokenID, Option<TokenizerStateID>)>, PrecomputeNode0Index)> {
+               let mut back_edges = Vec::new();
+               let mut visited = HashSet::new();
+               let mut recursion_stack = HashSet::new();
+               let roots: Vec<_> = self.roots.values().cloned().collect();
+      +        let all_nodes = Trie::all_nodes(&self.trie0_god, &roots);
        
-       #[derive(Debug, Clone)]
-      @@ -80,36 +82,49 @@
-           }
-       
-           pub(crate) fn break_structural_cycles(&mut self) {
-               crate::debug!(2, "Breaking structural cycles...");
-      +        let pb = ProgressBar::new_spinner();
-      +        pb.set_style(
-      +            ProgressStyle::default_spinner()
-      +                .template("{spinner:.green} {msg}")
-      +                .expect("progress bar style"),
-      +        );
-      +        if !PROGRESS_BAR_ENABLED {
-      +            pb.set_draw_target(ProgressDrawTarget::hidden());
-      +        }
-      +        pb.set_message("Breaking structural cycles...");
-      +
-               let mut clones: HashMap<PrecomputeNode0Index, PrecomputeNode0Index> = HashMap::new();
-       
-               for i in 0.. {
-                   let back_edges = self.find_back_edges();
-                   if back_edges.is_empty() {
-      +                pb.finish_with_message(format!("Broke structural cycles after {} iterations.", i));
-                       crate::debug!(2, "No more structural cycles found after {} iterations.", i);
-                       break;
-                   }
-                   if i > 100 { // Sanity check
-                       panic!("Cycle breaking seems to be in an infinite loop.");
-                   }
-      +            pb.set_message(format!("Breaking structural cycles (iter {}, {} back-edges)...", i, back_edges.len()));
-                   crate::debug!(3, "Found {} back edges in iteration {}.", back_edges.len(), i);
-       
-                   let mut changes = Vec::new();
-                   for (src_idx, key, old_dest_idx) in back_edges {
-                       let new_dest_idx = clones.entry(old_dest_idx.clone()).or_insert_with(|| {
-                           let new_node = self.trie0_god.insert(old_dest_idx.read(&self.trie0_god).unwrap().clone());
-                           PrecomputeNode0Index::new(new_node)
-                       }).clone();
-                       changes.push((src_idx, key, old_dest_idx, new_dest_idx));
-                   }
-       
-                   for (src_idx, key, old_dest_idx, new_dest_idx) in changes {
-                       let mut src_guard = src_idx.write(&self.trie0_god).unwrap();
-                       if let Some(dest_map) = src_guard.children_mut().get_mut(&key) {
-                           if let Some(bv) = dest_map.remove(&old_dest_idx) {
-                               dest_map.insert(new_dest_idx, bv);
-                           }
-                       }
-                   }
+      -        for root in roots {
+      -            self.find_back_edges_dfs(root, &mut visited, &mut recursion_stack, &mut back_edges);
+      +        for node in all_nodes {
+      +            // The visited check is important here to avoid re-starting DFS from nodes
+      +            // that have already been fully explored as part of another node's traversal.
+      +            if !visited.contains(&node) {
+      +                self.find_back_edges_dfs(node, &mut visited, &mut recursion_stack, &mut back_edges);
+      +            }
                }
-               crate::debug!(2, "Finished breaking structural cycles.");
-           }
        
+               back_edges
+           }
 
       ```
     metadata:
@@ -14683,7 +14618,7 @@ messages:
       Applying patch to 'src/constraint_precompute0_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute0_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "feat(precompute0): Add progress bar to
-      structural cycle breaking"'
+  - user: 'Changes committed with message: "Fix: Ensure all nodes are checked for
+      cycles during structural break and add progress bar to cycle breaking."'
     metadata:
 ...

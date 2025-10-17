@@ -144,9 +144,14 @@ impl<'r> Precomputer0<'r> {
         let mut visited = HashSet::new();
         let mut recursion_stack = HashSet::new();
         let roots: Vec<_> = self.roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(&self.trie0_god, &roots);
 
-        for root in roots {
-            self.find_back_edges_dfs(root, &mut visited, &mut recursion_stack, &mut back_edges);
+        for node in all_nodes {
+            // The visited check is important here to avoid re-starting DFS from nodes
+            // that have already been fully explored as part of another node's traversal.
+            if !visited.contains(&node) {
+                self.find_back_edges_dfs(node, &mut visited, &mut recursion_stack, &mut back_edges);
+            }
         }
 
         back_edges
