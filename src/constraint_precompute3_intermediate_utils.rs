@@ -11,7 +11,7 @@ pub fn optimize_intermediate_trie3_template(
 ) {
     // A few passes of optimization.
     for _ in 0..2 {
-        let changed = prune_nodes_not_reaching_end(start_node, end_node, god);
+        let changed = prune_unproductive_nodes(&[*start_node], end_node, god);
         // GC is needed to remove nodes that become unreachable after pruning edges.
         // NOTE: GC is disabled here because it was causing issues with multiple templates
         // in the same arena. Dangling nodes are acceptable for now.
@@ -22,14 +22,27 @@ pub fn optimize_intermediate_trie3_template(
     }
 }
 
-/// Prunes nodes in a template subgraph that cannot reach the specified `end_node`.
+pub fn optimize_intermediate_trie3(
+    roots: &[IntermediatePrecomputeNode3Index],
+    end_node: &IntermediatePrecomputeNode3Index,
+    god: &IntermediateTrie3GodWrapper,
+) {
+    for _ in 0..2 {
+        let changed = prune_unproductive_nodes(roots, end_node, god);
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Prunes nodes in a graph that cannot reach the specified `end_node`.
 /// Returns true if any edges were pruned.
-fn prune_nodes_not_reaching_end(
-    start_node: &IntermediatePrecomputeNode3Index,
+fn prune_unproductive_nodes(
+    start_nodes: &[IntermediatePrecomputeNode3Index],
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
-    let all_nodes_vec = Trie::all_nodes(god, &[*start_node]);
+    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
     if all_nodes_vec.is_empty() {
         return false;
     }
