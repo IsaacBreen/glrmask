@@ -514,6 +514,7 @@ impl GLRParser {
     }
 
     fn initialize_synthetic_and_stored_cache(mut self) -> Self {
+        return self;
         // Reset caches
         self.stored_trie_god = IntermediateTrie3GodWrapper::new();
         self.stored_below_bottom_cache.clear();
