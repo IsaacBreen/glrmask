@@ -1372,7 +1372,7 @@ mod tests {
         god: &IntermediateTrie3GodWrapper,
         path: Vec<IntermediateTrie3EdgeKey>,
     ) -> IntermediatePrecomputeNode3Index {
-        let root = god
+        let root: IntermediatePrecomputeNode3Index = god
             .insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))
             .into();
         if path.is_empty() {
@@ -1381,7 +1381,7 @@ mod tests {
         }
 
         let mut current_node = root;
-        for (i, edge) in path.into_iter().enumerate() {
+        for (i, edge) in path.iter().enumerate() {
             let is_last = i == path.len() - 1;
             let content = if is_last {
                 IntermediatePrecomputedNodeContents3::leaf()
@@ -1392,7 +1392,7 @@ mod tests {
             current_node
                 .write(god)
                 .unwrap()
-                .force_insert_to_node(edge, (), next_node);
+                .force_insert_to_node(edge.clone(), (), next_node);
             current_node = next_node;
         }
         root
