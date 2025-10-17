@@ -16,7 +16,20 @@ use std::collections::btree_map::Entry;
 /// and if a mismatch is found, attempts to find a minimal failing input graph.
 /// This adds significant overhead and should only be used for debugging the
 /// elimination logic itself.
-const DEBUG_MISMATCHES: bool = true;
+const DEBUG_MISMATCHES: bool = false;
+
+fn debug_mismatches_enabled() -> bool {
+    if DEBUG_MISMATCHES {
+        return true;
+    }
+    match std::env::var("GRAMMARS_DEBUG_MISMATCHES").or_else(|_| std::env::var("DEBUG_MISMATCHES")) {
+        Ok(v) => {
+            let v = v.to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        }
+        Err(_) => false,
+    }
+}
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -199,7 +212,7 @@ pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    if !DEBUG_MISMATCHES {
+    if !debug_mismatches_enabled() {
         run_trie_based_elimination(roots, god);
         return;
     }
@@ -721,6 +734,9 @@ fn run_trie_based_elimination(
             BTreeMap<LLMTokenBV, IntermediatePrecomputeNode3Index>,
         > = BTreeMap::new();
 
+        // Cache exits per (dst, push_bv) to avoid repeated BFS work in this round.
+        let mut exit_cache: BTreeMap<(usize, StateIDBV), Vec<Exit>> = BTreeMap::new();
+
         let mut removed_this_round: usize = 0;
 
         for (src, push_bv, dst) in push_edges {
@@ -734,7 +750,34 @@ fn run_trie_based_elimination(
                 next_mark += 10;
             }
 
-            let exits = compute_push_elim_exits(dst, &push_bv, god);
+            // Compute or reuse exits for this (dst, push_bv)
+            let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
+                Some(v) => v.clone(),
+                None => {
+                    let e = compute_push_elim_exits(dst, &push_bv, god);
+                    exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
+                    e
+                }
+            };
+            // Deduplicate exits and detect any blocked branches.
+            let mut cancel_set: BTreeSet<(LLMTokenBV, IntermediatePrecomputeNode3Index)> =
+                BTreeSet::new();
+            let mut degrade_set: BTreeSet<(LLMTokenBV, usize, StateIDBV, IntermediatePrecomputeNode3Index)> =
+                BTreeSet::new();
+            let mut saw_blocked = false;
+            for ex in exits.iter() {
+                match ex {
+                    Exit::Cancel { llm, dst } => {
+                        cancel_set.insert((llm.clone(), *dst));
+                    }
+                    Exit::DegradePop { llm, new_n, pop_bv, dst } => {
+                        degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
+                    }
+                    Exit::BlockedPush { .. } => {
+                        saw_blocked = true;
+                    }
+                }
+            }
             if exits.is_empty() {
                 // No viable continuations were found for this push under the stack semantics
                 // (e.g., every branch mismatched). This path is dead; remove the original push.
@@ -753,47 +796,23 @@ fn run_trie_based_elimination(
                 .entry(src)
                 .or_insert_with(BTreeMap::new);
 
-            // Wire exits from src via aggregator nodes.
-            // Important: Avoid deleting the original edge if an exit says to keep an identical Push
-            // (same dst, no LLM aggregation). Otherwise we'd insert a duplicate and then remove it.
-            let mut keep_original_edge = false;
-            for exit in exits {
-                match exit {
-                    Exit::Cancel { llm, dst } => {
-                        let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                        god.insert_edge_simple(agg, dst, IntermediateTrie3EdgeKey::NoOp, ());
-                    }
-                    Exit::DegradePop {
-                        llm,
-                        new_n,
-                        pop_bv,
-                        dst,
-                    } => {
-                        let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                        god.insert_edge_simple(
-                            agg,
-                            dst,
-                            IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
-                            (),
-                        );
-                    }
-                    Exit::BlockedPush { llm, push_bv: exit_push_bv, dst: exit_dst } => {
-                        // If this BlockedPush exactly matches the original edge (no LLM aggregation,
-                        // identical destination, identical push bitset), keep the original edge and
-                        // do NOT insert a duplicate. Otherwise, rewire via aggregator.
-                        if llm == LLMTokenBV::max_ones() && exit_dst == dst && exit_push_bv == push_bv {
-                            keep_original_edge = true;
-                        } else {
-                            let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                            god.insert_edge_simple(
-                                agg,
-                                exit_dst,
-                                IntermediateTrie3EdgeKey::Push(exit_push_bv),
-                                (),
-                            );
-                        }
-                    }
-                }
+            // Wire deduplicated exits from src via aggregator nodes.
+            // Important: If any branch is BlockedPush, we preserve the original Push edge
+            // and do NOT insert any new Push edges (to avoid combinatorial blow-up).
+            let mut keep_original_edge = saw_blocked;
+
+            for (llm, cancel_dst) in cancel_set {
+                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
+            }
+            for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
+                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                god.insert_edge_simple(
+                    agg,
+                    degrade_dst,
+                    IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
+                    (),
+                );
             }
 
             // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
