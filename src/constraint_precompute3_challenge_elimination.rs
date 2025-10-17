@@ -15,7 +15,7 @@ use crate::tokenizer::TokenizerStateID;
 /// - n == 1: If A intersects B, both cancel (epsilon). If disjoint, the stack is invalid (None).
 /// - n > 1: Remove Push(A) and replace Pop with Pop(n - 1, B) unconditionally (no intersection check).
 /// The scan repeats until no more changes can be made.
-pub fn eliminate_pushes_and_pops_path_based(
+fn simplify_path(
     stack: Vec<IntermediateTrie3EdgeKey>,
 ) -> Option<Vec<IntermediateTrie3EdgeKey>> {
     let mut stack = stack;
@@ -76,6 +76,73 @@ pub fn eliminate_pushes_and_pops_path_based(
         }
     }
     Some(stack)
+}
+
+pub fn eliminate_pushes_and_pops_path_based(
+    roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+    god: &IntermediateTrie3GodWrapper,
+) {
+    // 1. Get all paths from the original graph.
+    let all_root_indices: Vec<_> = roots.values().cloned().collect();
+    if all_root_indices.is_empty() {
+        return;
+    }
+    let all_paths = IntermediatePrecomputeNode3::get_all_paths(god, &all_root_indices, |n| n.value.end);
+
+    // 2. Simplify them.
+    let mut simplified_paths = BTreeSet::new();
+    for (_root_value, path_edges) in all_paths {
+        let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
+        if let Some(new_path) = simplify_path(edge_keys) {
+            simplified_paths.insert(new_path);
+        }
+    }
+
+    // 3. Clear the graph and rebuild a single trie from all simplified paths.
+    god.clear();
+
+    if simplified_paths.is_empty() {
+        // If all paths were eliminated, clear the roots.
+        roots.clear();
+        return;
+    }
+
+    // Create a single root for the new trie.
+    let has_only_empty_path = simplified_paths.len() == 1 && simplified_paths.iter().next().unwrap().is_empty();
+    let root_content = if has_only_empty_path {
+        IntermediatePrecomputedNodeContents3::leaf()
+    } else {
+        IntermediatePrecomputedNodeContents3::internal()
+    };
+    let new_root = god.insert(Trie::new(root_content)).into();
+
+    let mut node_cache: BTreeMap<Vec<IntermediateTrie3EdgeKey>, IntermediatePrecomputeNode3Index> = BTreeMap::new();
+    node_cache.insert(vec![], new_root);
+
+    for path in simplified_paths {
+        if path.is_empty() {
+            continue; // Handled by root node creation
+        }
+        let mut current_node_idx = new_root;
+        for i in 0..path.len() {
+            let edge = &path[i];
+            let prefix = &path[0..=i];
+
+            let next_node_idx = *node_cache.entry(prefix.to_vec()).or_insert_with(|| {
+                let is_leaf = i == path.len() - 1;
+                let content = if is_leaf { IntermediatePrecomputedNodeContents3::leaf() } else { IntermediatePrecomputedNodeContents3::internal() };
+                god.insert(Trie::new(content)).into()
+            });
+
+            god.insert_edge_simple(current_node_idx, next_node_idx, edge.clone(), ());
+            current_node_idx = next_node_idx;
+        }
+    }
+
+    // 4. Update all roots to point to the new single root.
+    for (_, root_idx) in roots.iter_mut() {
+        *root_idx = new_root;
+    }
 }
 
 pub fn eliminate_pushes_and_pops(
@@ -298,7 +365,7 @@ mod tests {
         let mut paths_from_path_elim = BTreeSet::new();
         for (_root_value, path_edges) in initial_paths {
             let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
-            if let Some(new_path) = eliminate_pushes_and_pops_path_based(edge_keys) {
+            if let Some(new_path) = simplify_path(edge_keys) {
                 paths_from_path_elim.insert(normalize_path(new_path));
             }
         }
