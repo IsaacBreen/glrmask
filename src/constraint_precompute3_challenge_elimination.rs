@@ -583,16 +583,16 @@ fn compute_push_elim_exits(
                         }
                     }
                     IntermediateTrie3EdgeKey::Push(_nested) => {
-                        // Blocked by a nested push. Re-emit our push pointing to the node
-                        // that has this nested push as an outgoing edge.
-                        exits.push(Exit::BlockedPush {
-                            llm: state.llm_bv.clone(),
-                            push_bv: state.push_bv.clone(),
-                            dst: state.node,
-                        });
+                        // Blocked by a nested push: re-emit our (possibly intersected) push
+                        // immediately before this nested push destination.
+                        for (dst_idx, _ev) in dsts.iter() {
+                            exits.push(Exit::BlockedPush {
+                                llm: state.llm_bv.clone(),
+                                push_bv: state.push_bv.clone(),
+                                dst: *dst_idx,
+                            });
+                        }
                         // Do not traverse past a nested push for this elimination.
-                        // We continue the outer loop to check other edge types from this node.
-                        continue;
                     }
                     IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
                         let n_val = *n;
@@ -732,6 +732,11 @@ fn run_trie_based_elimination(
             }
 
             let exits = compute_push_elim_exits(dst, &push_bv, god);
+            if exits.is_empty() {
+                // No way to eliminate or even move this push (e.g., dead cycles only).
+                // Keep the original push edge as-is.
+                continue;
+            }
 
             let cache = per_src_agg_cache
                 .entry(src)
