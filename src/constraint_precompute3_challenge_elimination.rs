@@ -21,10 +21,6 @@ const DEBUG_MISMATCHES: bool = true;
 /// on graphs with cycles that contain unbalanced Push operations.
 const MAX_STACK_DEPTH: usize = 64;
 const MAX_ELIMINATION_PASSES: usize = 16;
-/// Maximum stack depth for deferred pushes within a single elimination pass.
-/// This bounds the complexity of one pass; deeper cancellations are resolved
-/// across multiple passes of the fixpoint loop.
-const PASS_MAX_DEFERRED_DEPTH: usize = 16;
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -743,21 +739,19 @@ fn run_trie_based_elimination(
                 }
             }
 
-
             for (ek, dests) in src_guard.children().iter() {
                 match ek {
                     IntermediateTrie3EdgeKey::Push(bv_new) => {
-                        // Decide whether to defer this push or emit it directly.
-                        // We defer if we're not in a known push-cycle SCC and the stack is not too deep.
-                        // Otherwise, we emit the Push directly, limiting the state space of the BFS,
-                        // and rely on the outer fixpoint loop to solve further cancellations.
-                        let should_defer = !push_cycle_nodes.contains(&src_idx)
-                            && (stack_interner.depth(stack_id) < PASS_MAX_DEFERRED_DEPTH);
-
-                        if should_defer {
-                            // Defer: push onto the stack and carry via NoOp.
+                        // Avoid unbounded pending stacks inside SCCs that can push indefinitely without Pop(0/1).
+                        if push_cycle_nodes.contains(&src_idx) {
+                            // Emit the push directly; do not defer to the pending stack.
+                            for (dst_src_idx, _) in dests.iter() {
+                                let next_state = get_or_create!(*dst_src_idx, stack_id);
+                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Push(bv_new.clone()), ());
+                            }
+                        } else {
+                            // Default: defer emission by pushing onto the stack and carrying via NoOp.
                             let new_stack_id = stack_interner.push(stack_id, bv_new.clone());
-
                             if stack_interner.depth(new_stack_id) > MAX_STACK_DEPTH {
                                 if is_debug_level_enabled(1) {
                                     println!(
@@ -771,12 +765,6 @@ fn run_trie_based_elimination(
                             for (dst_src_idx, _) in dests.iter() {
                                 let next_state = get_or_create!(*dst_src_idx, new_stack_id);
                                 god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
-                            }
-                        } else {
-                            // Emit directly: add a Push edge to the destination graph.
-                            for (dst_src_idx, _) in dests.iter() {
-                                let next_state = get_or_create!(*dst_src_idx, stack_id);
-                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Push(bv_new.clone()), ());
                             }
                         }
                     }
