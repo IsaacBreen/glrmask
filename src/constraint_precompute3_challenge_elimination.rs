@@ -78,31 +78,6 @@ pub fn eliminate_pushes_and_pops_path_based(
     Some(stack)
 }
 
-fn get_or_create_node(
-    src_idx: IntermediatePrecomputeNode3Index,
-    pending: Option<StateIDBV>,
-    pair_cache: &mut BTreeMap<(IntermediatePrecomputeNode3Index, Option<StateIDBV>), IntermediatePrecomputeNode3Index>,
-    work: &mut VecDeque<(IntermediatePrecomputeNode3Index, Option<StateIDBV>)>,
-    god: &IntermediateTrie3GodWrapper,
-    source: &IntermediateTrie3GodWrapper,
-) -> IntermediatePrecomputeNode3Index {
-    if let Some(existing) = pair_cache.get(&(src_idx, pending.clone())) {
-        return *existing;
-    }
-    let src_guard = src_idx.read(source).expect("source read");
-    let is_end = src_guard.value.end && pending.is_none();
-    drop(src_guard);
-    let node_val = if is_end {
-        IntermediatePrecomputedNodeContents3::leaf()
-    } else {
-        IntermediatePrecomputedNodeContents3::internal()
-    };
-    let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
-    pair_cache.insert((src_idx, pending.clone()), dest_idx);
-    work.push_back((src_idx, pending));
-    dest_idx
-}
-
 /// Placeholder for a future, more efficient trie-based implementation of push/pop elimination.
 /// Currently, it uses the path-based approach internally by flattening the trie,
 /// processing paths, and rebuilding the trie. This maintains the correct logic while
@@ -133,15 +108,34 @@ pub fn eliminate_pushes_and_pops(
     let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Option<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
     let mut work: VecDeque<(IntermediatePrecomputeNode3Index, Option<StateIDBV>)> = VecDeque::new();
 
-    // Helper to create or fetch a product-state node in the destination graph. (Refactored to get_or_create_node)
-    let mut get_or_create = |src_idx: IntermediatePrecomputeNode3Index, pending: Option<StateIDBV>| -> IntermediatePrecomputeNode3Index {
-        get_or_create_node(src_idx, pending, &mut pair_cache, &mut work, god, &source)
-    };
+    macro_rules! get_or_create {
+        ($src_idx:expr, $pending:expr) => {
+            {
+                let key = ($src_idx, $pending);
+                if let Some(&existing) = pair_cache.get(&key) {
+                    existing
+                } else {
+                    let src_guard = key.0.read(&source).expect("source read");
+                    let is_end = src_guard.value.end && key.1.is_none();
+                    drop(src_guard);
+                    let node_val = if is_end {
+                        IntermediatePrecomputedNodeContents3::leaf()
+                    } else {
+                        IntermediatePrecomputedNodeContents3::internal()
+                    };
+                    let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
+                    pair_cache.insert(key.clone(), dest_idx);
+                    work.push_back(key);
+                    dest_idx
+                }
+            }
+        };
+    }
 
     // 4) Create new roots at (source_root, None)
     let mut new_roots: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
     for (sid, src_root) in sids.into_iter().zip(source_roots.into_iter()) {
-        let new_root = get_or_create(src_root, None);
+        let new_root = get_or_create!(src_root, None);
         new_roots.insert(sid, new_root);
     }
 
@@ -154,7 +148,7 @@ pub fn eliminate_pushes_and_pops(
         // commit it before termination: emit Push(A) to (src_idx, None).
         if src_guard.value.end {
             if let Some(a_pending) = pending.clone() {
-                let none_state = get_or_create_node(src_idx, None, &mut pair_cache, &mut work, god, &source);
+                let none_state = get_or_create!(src_idx, None);
                 god.insert_edge_simple(dest_idx, none_state, IntermediateTrie3EdgeKey::Push(a_pending.clone()), ());
             }
         }
@@ -167,17 +161,17 @@ pub fn eliminate_pushes_and_pops(
                     //   (src, Some(A)) --Push(A)--> (src, None)
                     // then follow the actual Push(B) via NoOp to (dst, Some(B)).
                     if let Some(a_pending) = pending.clone() {
-                        let none_state = get_or_create_node(src_idx, None, &mut pair_cache, &mut work, god, &source);
+                        let none_state = get_or_create!(src_idx, None);
                         god.insert_edge_simple(dest_idx, none_state, IntermediateTrie3EdgeKey::Push(a_pending.clone()), ());
                         // Now process the Push(B) from the none_state
                         for (dst_src_idx, _) in dests.iter() {
-                            let next_state = get_or_create_node(*dst_src_idx, Some(bv_new.clone()), &mut pair_cache, &mut work, god, &source);
+                            let next_state = get_or_create!(*dst_src_idx, Some(bv_new.clone()));
                             god.insert_edge_simple(none_state, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                         }
                     } else {
                         // No pending: defer emission by using NoOp to carry pending=Some(B)
                         for (dst_src_idx, _) in dests.iter() {
-                            let next_state = get_or_create_node(*dst_src_idx, Some(bv_new.clone()), &mut pair_cache, &mut work, god, &source);
+                            let next_state = get_or_create!(*dst_src_idx, Some(bv_new.clone()));
                             god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                         }
                     }
@@ -187,7 +181,7 @@ pub fn eliminate_pushes_and_pops(
                         None => {
                             // No pending: forward Pop as-is.
                             for (dst_src_idx, _) in dests.iter() {
-                                let next_state = get_or_create_node(*dst_src_idx, None, &mut pair_cache, &mut work, god, &source);
+                                let next_state = get_or_create!(*dst_src_idx, None);
                                 god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Pop(*n, pop_bv.clone()), ());
                             }
                         }
@@ -199,7 +193,7 @@ pub fn eliminate_pushes_and_pops(
                                 }
                                 // Intersect: remove Pop(0), keep pending A.
                                 for (dst_src_idx, _) in dests.iter() {
-                                    let next_state = get_or_create_node(*dst_src_idx, Some(a_pending.clone()), &mut pair_cache, &mut work, god, &source);
+                                    let next_state = get_or_create!(*dst_src_idx, Some(a_pending.clone()));
                                     god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                                 }
                             } else if *n == 1 {
@@ -209,13 +203,13 @@ pub fn eliminate_pushes_and_pops(
                                 }
                                 // Intersect: both cancel -> epsilon, clear pending.
                                 for (dst_src_idx, _) in dests.iter() {
-                                    let next_state = get_or_create_node(*dst_src_idx, None, &mut pair_cache, &mut work, god, &source);
+                                    let next_state = get_or_create!(*dst_src_idx, None);
                                     god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                                 }
                             } else {
                                 // n > 1: drop pending Push unconditionally and decrement Pop.
                                 for (dst_src_idx, _) in dests.iter() {
-                                    let next_state = get_or_create_node(*dst_src_idx, None, &mut pair_cache, &mut work, god, &source);
+                                    let next_state = get_or_create!(*dst_src_idx, None);
                                     god.insert_edge_simple(
                                         dest_idx,
                                         next_state,
@@ -230,7 +224,7 @@ pub fn eliminate_pushes_and_pops(
                 // Non-push/pop edges (e.g., CheckLLM, NoOp) just forward; pending unchanged.
                 other => {
                     for (dst_src_idx, _) in dests.iter() {
-                        let next_state = get_or_create_node(*dst_src_idx, pending.clone(), &mut pair_cache, &mut work, god, &source);
+                        let next_state = get_or_create!(*dst_src_idx, pending.clone());
                         god.insert_edge_simple(dest_idx, next_state, other.clone(), ());
                     }
                 }
