@@ -1393,7 +1393,11 @@ impl GrammarConstraint {
         Self::has_llm_compatible_cycle0(&helper.trie0_god, &roots_before, internal_max_llm_token);
         if config.trie0.enabled {
             helper.optimize(&config.trie0);
+        } else {
+            helper.break_structural_cycles();
         }
+        helper.assert_no_structural_cycles();
+
         let (precomputed0, trie0_god) = helper.finish();
         let roots_after: Vec<_> = precomputed0.values().cloned().collect();
         Self::has_llm_compatible_cycle0(&trie0_god, &roots_after, internal_max_llm_token);

@@ -88,7 +88,7 @@ impl<'r> Precomputer0<'r> {
         print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
     }
 
-    fn break_structural_cycles(&mut self) {
+    pub(crate) fn break_structural_cycles(&mut self) {
         crate::debug!(2, "Breaking structural cycles...");
         let mut clones: HashMap<PrecomputeNode0Index, PrecomputeNode0Index> = HashMap::new();
 
@@ -166,7 +166,7 @@ impl<'r> Precomputer0<'r> {
         visited.insert(node_idx.clone());
     }
 
-    fn assert_no_structural_cycles(&self) {
+    pub(crate) fn assert_no_structural_cycles(&self) {
         let back_edges = self.find_back_edges();
         if !back_edges.is_empty() {
             let mut report = String::from("Structural cycles detected after attempting to break them:\n");
