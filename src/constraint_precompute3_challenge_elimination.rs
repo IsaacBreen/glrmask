@@ -1415,12 +1415,8 @@ mod tests {
     }
 
     #[test]
-    fn test_minimal_failures_from_logs() {
-        // This test suite is composed of the minimal failing cases discovered
-        // by the debug harness in a failing test run. Each one targets a
-        // specific bug or edge case in the trie-based elimination logic.
-
-        // From test_blocked_push and test_multiple_cancellations_in_sequence
+    fn test_minimal_push_push_pop_cancel() {
+        // Path: Push(1) -> Push(2) -> Pop(1, 2). Should simplify to Push(1).
         let god = IntermediateTrie3GodWrapper::new();
         let mut bv1 = StateIDBV::zeros();
         bv1.insert(1);
@@ -1429,48 +1425,76 @@ mod tests {
         let root = build_graph_from_path(
             &god,
             vec![
-                IntermediateTrie3EdgeKey::Push(bv1.clone()),
+                IntermediateTrie3EdgeKey::Push(bv1),
                 IntermediateTrie3EdgeKey::Push(bv2.clone()),
-                IntermediateTrie3EdgeKey::Pop(1, bv2.clone()),
+                IntermediateTrie3EdgeKey::Pop(1, bv2),
             ],
         );
         run_test(&god, &[root]);
+    }
 
-        // From test_mismatch_invalidates_path
+    #[test]
+    fn test_minimal_push_pop_mismatch_invalidates() {
+        // Path: Push(1) -> Pop(1, 2). Should invalidate the path (empty result).
         let god = IntermediateTrie3GodWrapper::new();
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2);
+        let root = build_graph_from_path(
+            &god,
+            vec![
+                IntermediateTrie3EdgeKey::Push(bv1),
+                IntermediateTrie3EdgeKey::Pop(1, bv2),
+            ],
+        );
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_minimal_push_pop_zero_keeps_push() {
+        // Path: Push(1) -> Pop(0, 1). Should simplify to Push(1).
+        let god = IntermediateTrie3GodWrapper::new();
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
         let root = build_graph_from_path(
             &god,
             vec![
                 IntermediateTrie3EdgeKey::Push(bv1.clone()),
-                IntermediateTrie3EdgeKey::Pop(1, bv2.clone()),
+                IntermediateTrie3EdgeKey::Pop(0, bv1),
             ],
         );
         run_test(&god, &[root]);
+    }
 
-        // From test_pop_zero_keeps_push
+    #[test]
+    fn test_minimal_push_pop_zero_mismatch_invalidates() {
+        // Path: Push(1) -> Pop(0, 2). Should invalidate the path (empty result).
         let god = IntermediateTrie3GodWrapper::new();
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2);
         let root = build_graph_from_path(
             &god,
             vec![
-                IntermediateTrie3EdgeKey::Push(bv1.clone()),
-                IntermediateTrie3EdgeKey::Pop(0, bv1.clone()),
+                IntermediateTrie3EdgeKey::Push(bv1),
+                IntermediateTrie3EdgeKey::Pop(0, bv2),
             ],
         );
         run_test(&god, &[root]);
+    }
 
-        // From test_pop_zero_mismatch_invalidates_path
+    #[test]
+    fn test_minimal_challenging_gauntlet_failure() {
+        // A minimal failing case derived from the challenging gauntlet.
+        // Path: CheckLLM(200) -> Push(1) -> Push(2) -> Pop(1, 1) -> Pop(1, 1).
+        // Should be invalidated because Push(2) is blocked by Pop(1, 1) which mismatches.
         let god = IntermediateTrie3GodWrapper::new();
-        let root = build_graph_from_path(
-            &god,
-            vec![
-                IntermediateTrie3EdgeKey::Push(bv1.clone()),
-                IntermediateTrie3EdgeKey::Pop(0, bv2.clone()),
-            ],
-        );
-        run_test(&god, &[root]);
-
-        // From test_challenging_gauntlet
-        let god = IntermediateTrie3GodWrapper::new();
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2);
         let mut llm200 = LLMTokenBV::zeros();
         llm200.insert(200);
         let root = build_graph_from_path(
@@ -1478,9 +1502,9 @@ mod tests {
             vec![
                 IntermediateTrie3EdgeKey::CheckLLM(llm200),
                 IntermediateTrie3EdgeKey::Push(bv1.clone()),
-                IntermediateTrie3EdgeKey::Push(bv2.clone()),
+                IntermediateTrie3EdgeKey::Push(bv2),
                 IntermediateTrie3EdgeKey::Pop(1, bv1.clone()),
-                IntermediateTrie3EdgeKey::Pop(1, bv1.clone()),
+                IntermediateTrie3EdgeKey::Pop(1, bv1),
             ],
         );
         run_test(&god, &[root]);
