@@ -754,6 +754,8 @@ fn run_trie_based_elimination(
             let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
                 Some(v) => v.clone(),
                 None => {
+                    // BFS exploration to compute exits for (dst, push_bv)
+                    // Results are memoized per round to avoid repetition.
                     let e = compute_push_elim_exits(dst, &push_bv, god);
                     exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
                     e
@@ -764,6 +766,8 @@ fn run_trie_based_elimination(
                 BTreeSet::new();
             let mut degrade_set: BTreeSet<(LLMTokenBV, usize, StateIDBV, IntermediatePrecomputeNode3Index)> =
                 BTreeSet::new();
+            let mut blocked_set: BTreeSet<(LLMTokenBV, StateIDBV, IntermediatePrecomputeNode3Index)> =
+                BTreeSet::new();
             let mut saw_blocked = false;
             for ex in exits.iter() {
                 match ex {
@@ -773,8 +777,9 @@ fn run_trie_based_elimination(
                     Exit::DegradePop { llm, new_n, pop_bv, dst } => {
                         degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
                     }
-                    Exit::BlockedPush { .. } => {
+                    Exit::BlockedPush { llm, push_bv: exit_push_bv, dst } => {
                         saw_blocked = true;
+                        blocked_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
                     }
                 }
             }
@@ -797,9 +802,12 @@ fn run_trie_based_elimination(
                 .or_insert_with(BTreeMap::new);
 
             // Wire deduplicated exits from src via aggregator nodes.
-            // Important: If any branch is BlockedPush, we preserve the original Push edge
-            // and do NOT insert any new Push edges (to avoid combinatorial blow-up).
-            let mut keep_original_edge = saw_blocked;
+            // - For Cancel/Degrade: wire via aggregator nodes (deduplicated).
+            // - For BlockedPush: by default, preserve the original Push edge (to avoid blow-up),
+            //   EXCEPT for the safe Pop(0)-only case that ends at a leaf with no LLM aggregation:
+            //     we rewire src --Push(restricted_bv)--> leaf and drop the original edge.
+            //   If any blocked branch is not rewired, we must keep the original edge.
+            let mut must_keep_original_edge = false;
 
             for (llm, cancel_dst) in cancel_set {
                 let agg = get_or_create_aggregator_node(src, &llm, god, cache);
@@ -814,6 +822,35 @@ fn run_trie_based_elimination(
                     (),
                 );
             }
+
+            // Handle BlockedPush exits conservatively:
+            // - If llm == max and exit_dst is a leaf, we can safely "skip" Pop(0) chains by
+            //   rewiring the push directly to the leaf with the restricted push_bv.
+            // - Otherwise, we keep the original edge to preserve the blocked branch.
+            for (llm, exit_push_bv, exit_dst) in blocked_set {
+                let mut rewired = false;
+                if llm == LLMTokenBV::max_ones() {
+                    if let Some(dst_guard) = exit_dst.read(god) {
+                        if dst_guard.value.end {
+                            // Directly wire src --Push(exit_push_bv)--> leaf,
+                            // effectively removing the Pop(0) that was folded into the push.
+                            god.insert_edge_simple(
+                                src,
+                                exit_dst,
+                                IntermediateTrie3EdgeKey::Push(exit_push_bv),
+                                (),
+                            );
+                            rewired = true;
+                        }
+                    }
+                }
+                if !rewired {
+                    // We did not rewire this blocked branch (e.g., nested Push or LLM-aggregated path),
+                    // so we must keep the original Push edge to preserve semantics.
+                    must_keep_original_edge = true;
+                }
+            }
+            let keep_original_edge = must_keep_original_edge;
 
             // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
             // unless we determined it must remain (to avoid deleting the only surviving representation).
