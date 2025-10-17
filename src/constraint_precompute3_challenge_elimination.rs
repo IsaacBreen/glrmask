@@ -97,7 +97,6 @@ pub fn eliminate_pushes_and_pops(
     let (source, source_roots, _map) = Trie::deep_copy_subtrees(god, &old_root_vec);
 
     // 2) Prepare destination arena (clear existing graph).
-    crate::debug!(2, "Building trie-native elimination (product graph)...");
     god.clear();
 
     // 3) Memoization: (source_idx, pending) -> dest_idx
