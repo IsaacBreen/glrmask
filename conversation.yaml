@@ -2655,16 +2655,12 @@ local_system:
               let total = push_edges.len().max(1);
               let mut processed = 0usize;
               let mut next_mark = 10usize;
-              
 
               // For each src, memoize aggregator nodes by LLM BV to avoid node blowup.
               let mut per_src_agg_cache: BTreeMap<
                   IntermediatePrecomputeNode3Index,
                   BTreeMap<LLMTokenBV, IntermediatePrecomputeNode3Index>,
               > = BTreeMap::new();
-
-              // Cache exits per (dst, push_bv) to avoid repeated BFS work in this round.
-              let mut exit_cache: BTreeMap<(usize, StateIDBV), Vec<Exit>> = BTreeMap::new();
 
               let mut removed_this_round: usize = 0;
 
@@ -2679,25 +2675,15 @@ local_system:
                       next_mark += 10;
                   }
 
-                  // Shortcut: if this push already targets a leaf, nothing to eliminate.
+                  // Shortcut: if this push already targets a leaf, nothing to eliminate (prevents oscillation).
                   if let Some(dst_r) = dst.read(god) {
                       if dst_r.value.end {
-                          // Leave push->leaf edges stable to avoid oscillation across rounds.
                           continue;
                       }
                   }
 
-                  // Compute or reuse exits for this (dst, push_bv)
-                  let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
-                      Some(v) => v.clone(),
-                      None => {
-                          // BFS exploration to compute exits for (dst, push_bv)
-                          // Results are memoized per round to avoid repetition.
-                          let e = compute_push_elim_exits(dst, &push_bv, god);
-                          exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
-                          e
-                      }
-                  };
+                  // Compute exits fresh for this (dst, push_bv). Do not cache: the graph mutates during the round.
+                  let exits = compute_push_elim_exits(dst, &push_bv, god);
                   // Deduplicate exits and detect any blocked branches.
                   if exits.is_empty() {
                       // No viable continuations were found for this push under the stack semantics
@@ -8394,5 +8380,111 @@ messages:
   - user: 'Changes committed with message: "Refactor push elimination: remove expensive
       exit set deduplication, add exit caching, stabilize leaf pushes, and disable
       debug by default"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/public interface of constraint_precompute3_challenge_elimination.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_challenge_elimination.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: It's STILL looping infinitely! WTF??
+    metadata:
+  - assistant: |-
+      Below are focused edits to fix the hang you’re seeing, while keeping correctness and avoiding the previous blow-ups. The root cause of the non-terminating behavior in these minimal tests is the per-round exit_cache: it can return stale exits after the graph has been mutated within the same round, causing repeated rewiring/removal decisions that never stabilize in specific small patterns. We’ll remove that cache, but keep all other optimizations:
+
+      - Keep: BlockedPush anti-explosion (only rewire to leaf when llm is max).
+      - Keep: Skip processing push->leaf edges in subsequent rounds (prevents oscillation).
+      - Keep: Direct per-exit processing (no expensive set dedup).
+      - Keep: Cancel/Degrade rewiring via aggregator nodes.
+      - Remove: Per-round exit_cache (recompute exits fresh per push edge).
+
+      Step-by-step instructions
+
+      1) Remove the per-round exit_cache
+      - File: src/constraint_precompute3_challenge_elimination.rs
+      - In run_trie_based_elimination:
+        - Delete the declaration of exit_cache.
+        - Replace the cached lookup-and-insert logic with a direct call to compute_push_elim_exits(dst, &push_bv, god).
+
+      2) Leave the leaf-shortcut and BlockedPush leaf rewiring intact
+      - The “skip push->leaf” guard is required to ensure we don’t oscillate in later rounds.
+      - The special-case BlockedPush leaf rewiring guarantees the Pop(0) case matches the path-based simplifier exactly.
+
+      3) Keep DEBUG_MISMATCHES default off
+      - You can still enable via GRAMMARS_DEBUG_MISMATCHES=1 or DEBUG_MISMATCHES=1 at runtime if needed. But the fix is independent of the debug toggle; removing exit_cache is what eliminates the loop.
+
+      Git diffs
+
+      ```diff
+      diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
+      index a1aeea4..8b6a3b9 100644
+      --- a/src/constraint_precompute3_challenge_elimination.rs
+      +++ b/src/constraint_precompute3_challenge_elimination.rs
+      @@ -722,13 +722,9 @@ fn run_trie_based_elimination(
+               let total = push_edges.len().max(1);
+               let mut processed = 0usize;
+               let mut next_mark = 10usize;
+      -        
+       
+               // For each src, memoize aggregator nodes by LLM BV to avoid node blowup.
+               let mut per_src_agg_cache: BTreeMap<
+                   IntermediatePrecomputeNode3Index,
+                   BTreeMap<LLMTokenBV, IntermediatePrecomputeNode3Index>,
+               > = BTreeMap::new();
+      -
+      -        // Cache exits per (dst, push_bv) to avoid repeated BFS work in this round.
+      -        let mut exit_cache: BTreeMap<(usize, StateIDBV), Vec<Exit>> = BTreeMap::new();
+       
+               let mut removed_this_round: usize = 0;
+       
+      @@ -751,22 +747,10 @@ fn run_trie_based_elimination(
+                       next_mark += 10;
+                   }
+       
+      -            // Shortcut: if this push already targets a leaf, nothing to eliminate.
+      +            // Shortcut: if this push already targets a leaf, nothing to eliminate (prevents oscillation).
+                   if let Some(dst_r) = dst.read(god) {
+                       if dst_r.value.end {
+      -                    // Leave push->leaf edges stable to avoid oscillation across rounds.
+                           continue;
+                       }
+                   }
+       
+      -            // Compute or reuse exits for this (dst, push_bv)
+      -            let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
+      -                Some(v) => v.clone(),
+      -                None => {
+      -                    // BFS exploration to compute exits for (dst, push_bv)
+      -                    // Results are memoized per round to avoid repetition.
+      -                    let e = compute_push_elim_exits(dst, &push_bv, god);
+      -                    exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
+      -                    e
+      -                }
+      -            };
+      +            // Compute exits fresh for this (dst, push_bv). Do not cache: the graph mutates during the round.
+      +            let exits = compute_push_elim_exits(dst, &push_bv, god);
+                   // Deduplicate exits and detect any blocked branches.
+                   if exits.is_empty() {
+                       // No viable continuations were found for this push under the stack semantics
+                       // (e.g., every branch mismatched). This path is dead; remove the original push.
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_challenge_elimination.rs
+      Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix elimination loop by removing exit
+      caching, skipping push->leaf edges, and simplifying exit processing logic"'
     metadata:
 ...

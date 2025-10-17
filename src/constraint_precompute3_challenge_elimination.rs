@@ -727,16 +727,12 @@ fn run_trie_based_elimination(
         let total = push_edges.len().max(1);
         let mut processed = 0usize;
         let mut next_mark = 10usize;
-        
 
         // For each src, memoize aggregator nodes by LLM BV to avoid node blowup.
         let mut per_src_agg_cache: BTreeMap<
             IntermediatePrecomputeNode3Index,
             BTreeMap<LLMTokenBV, IntermediatePrecomputeNode3Index>,
         > = BTreeMap::new();
-
-        // Cache exits per (dst, push_bv) to avoid repeated BFS work in this round.
-        let mut exit_cache: BTreeMap<(usize, StateIDBV), Vec<Exit>> = BTreeMap::new();
 
         let mut removed_this_round: usize = 0;
 
@@ -751,25 +747,15 @@ fn run_trie_based_elimination(
                 next_mark += 10;
             }
 
-            // Shortcut: if this push already targets a leaf, nothing to eliminate.
+            // Shortcut: if this push already targets a leaf, nothing to eliminate (prevents oscillation).
             if let Some(dst_r) = dst.read(god) {
                 if dst_r.value.end {
-                    // Leave push->leaf edges stable to avoid oscillation across rounds.
                     continue;
                 }
             }
 
-            // Compute or reuse exits for this (dst, push_bv)
-            let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
-                Some(v) => v.clone(),
-                None => {
-                    // BFS exploration to compute exits for (dst, push_bv)
-                    // Results are memoized per round to avoid repetition.
-                    let e = compute_push_elim_exits(dst, &push_bv, god);
-                    exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
-                    e
-                }
-            };
+            // Compute exits fresh for this (dst, push_bv). Do not cache: the graph mutates during the round.
+            let exits = compute_push_elim_exits(dst, &push_bv, god);
             // Deduplicate exits and detect any blocked branches.
             if exits.is_empty() {
                 // No viable continuations were found for this push under the stack semantics
