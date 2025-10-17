@@ -96,24 +96,21 @@ fn prune_unproductive_nodes(
     let mut changed = false;
     // Remove any edge pointing to a non-productive destination
     for n in &all_nodes_in_subgraph {
+        if !productive.contains(n) {
+            continue; // This node will be GC'd anyway, no need to edit its edges.
+        }
         if let Some(mut w) = n.write(god) {
             let original_edge_count: usize = w.children().values().map(|dm| dm.len()).sum();
-            if productive.contains(n) {
-                // Productive node: only keep edges to other productive nodes.
-                w.children_mut().retain(|_ek, dm| {
-                    dm.retain(|dst, _| productive.contains(dst));
-                    !dm.is_empty()
-                });
-            } else {
-                // Non-productive node: prune all outgoing edges.
-                // This is important because GC is disabled.
-                w.children_mut().clear();
-            }
+            w.children_mut().retain(|_ek, dm| {
+                dm.retain(|dst, _| productive.contains(dst));
+                !dm.is_empty()
+            });
             let new_edge_count: usize = w.children().values().map(|dm| dm.len()).sum();
             if new_edge_count < original_edge_count {
                 changed = true;
             }
         }
     }
+
     changed
 }
