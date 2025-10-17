@@ -1882,7 +1882,7 @@ impl GrammarConstraint {
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
 
-        if is_debug_level_enabled(2) {
+        if is_debug_level_enabled(3) {
             println!("\n--- Terminal Template Paths ---");
             let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
             sorted_templates.sort_by_key(|(tid, _)| *tid);
@@ -2038,7 +2038,7 @@ impl GrammarConstraint {
             paths_by_sid.insert(*sid, processed_paths_for_sid);
         }
 
-        if is_debug_level_enabled(2) {
+        if is_debug_level_enabled(3) {
             println!("Processed paths after elimination:");
             for (sid, paths) in &paths_by_sid {
                 println!("  SID {}:", sid.0);
