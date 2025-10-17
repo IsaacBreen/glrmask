@@ -20,6 +20,7 @@ const DEBUG_MISMATCHES: bool = true;
 /// Maximum stack depth during trie-based elimination. Prevents infinite loops
 /// on graphs with cycles that contain unbalanced Push operations.
 const MAX_STACK_DEPTH: usize = 64;
+const MAX_ELIMINATION_PASSES: usize = 16;
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -381,213 +382,405 @@ fn refine_mismatch(
     (minimal_god, minimal_roots)
 }
 
+/// Compute nodes that lie in SCCs (subgraph without Pop(0)/Pop(1)) that contain at least one Push edge internally.
+/// Deferring Push in such SCCs can cause unbounded growth of the pending stack. We will therefore not defer Push
+/// at those nodes – instead we emit Push edges immediately.
+fn compute_push_cycle_nodes(
+    source: &IntermediateTrie3GodWrapper,
+    source_roots: &[IntermediatePrecomputeNode3Index],
+) -> BTreeSet<IntermediatePrecomputeNode3Index> {
+    let nodes = Trie::all_nodes(source, source_roots);
+    if nodes.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut id_of: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
+    for (i, ni) in nodes.iter().enumerate() {
+        id_of.insert(*ni, i);
+    }
+
+    // Build adjacency for the subgraph WITHOUT Pop(0)/Pop(1) edges.
+    let n = nodes.len();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, node_idx) in nodes.iter().enumerate() {
+        if let Some(node_r) = node_idx.read(source) {
+            for (ek, dests) in node_r.children().iter() {
+                let include = match ek {
+                    IntermediateTrie3EdgeKey::Pop(k, _) if *k == 0 || *k == 1 => false,
+                    _ => true,
+                };
+                if include {
+                    for (dst_idx, _) in dests.iter() {
+                        if let Some(&j) = id_of.get(dst_idx) {
+                            adj[i].push(j);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Tarjan's SCC
+    let mut index: usize = 0;
+    let mut indices: Vec<Option<usize>> = vec![None; n];
+    let mut lowlink: Vec<usize> = vec![0; n];
+    let mut on_stack: Vec<bool> = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut scc_id: Vec<usize> = vec![usize::MAX; n];
+    let mut scc_count: usize = 0;
+
+    fn strongconnect(
+        v: usize,
+        index: &mut usize,
+        indices: &mut [Option<usize>],
+        lowlink: &mut [usize],
+        on_stack: &mut [bool],
+        stack: &mut Vec<usize>,
+        scc_id: &mut [usize],
+        scc_count: &mut usize,
+        adj: &Vec<Vec<usize>>,
+    ) {
+        indices[v] = Some(*index);
+        lowlink[v] = *index;
+        *index += 1;
+        stack.push(v);
+        on_stack[v] = true;
+
+        for &w in &adj[v] {
+            if indices[w].is_none() {
+                strongconnect(
+                    w, index, indices, lowlink, on_stack, stack, scc_id, scc_count, adj,
+                );
+                lowlink[v] = lowlink[v].min(lowlink[w]);
+            } else if on_stack[w] {
+                lowlink[v] = lowlink[v].min(indices[w].unwrap());
+            }
+        }
+
+        if Some(lowlink[v]) == indices[v] {
+            loop {
+                let w = stack.pop().expect("stack not empty");
+                on_stack[w] = false;
+                scc_id[w] = *scc_count;
+                if w == v {
+                    break;
+                }
+            }
+            *scc_count += 1;
+        }
+    }
+
+    for v in 0..n {
+        if indices[v].is_none() {
+            strongconnect(
+                v,
+                &mut index,
+                &mut indices,
+                &mut lowlink,
+                &mut on_stack,
+                &mut stack,
+                &mut scc_id,
+                &mut scc_count,
+                &adj,
+            );
+        }
+    }
+
+    // For each SCC, check if there's an internal Push edge (source and destination both in SCC).
+    let mut scc_has_internal_push: Vec<bool> = vec![false; scc_count.max(1)];
+    for (i, node_idx) in nodes.iter().enumerate() {
+        if let Some(node_r) = node_idx.read(source) {
+            for (ek, dests) in node_r.children().iter() {
+                if matches!(ek, IntermediateTrie3EdgeKey::Push(_)) {
+                    for (dst_idx, _) in dests.iter() {
+                        if let (Some(&from), Some(&to)) = (id_of.get(node_idx), id_of.get(dst_idx))
+                        {
+                            if scc_id[from] == scc_id[to] {
+                                scc_has_internal_push[scc_id[from]] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut result = BTreeSet::new();
+    for (i, node_idx) in nodes.iter().enumerate() {
+        if scc_id[i] != usize::MAX && scc_has_internal_push[scc_id[i]] {
+            result.insert(*node_idx);
+        }
+    }
+    result
+}
+
+/// Cheap signature of the reachable graph, used to detect fixpoint across passes.
+fn compute_graph_signature(
+    god: &IntermediateTrie3GodWrapper,
+    roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+) -> (u64, u64, u64, u64, u64, u64) {
+    let root_indices: Vec<_> = roots.values().cloned().collect();
+    if root_indices.is_empty() {
+        return (0, 0, 0, 0, 0, 0);
+    }
+    let nodes = Trie::all_nodes(god, &root_indices);
+    let mut pushes = 0u64;
+    let mut pop0 = 0u64;
+    let mut pop1 = 0u64;
+    let mut popgt = 0u64;
+    let mut popgt_sum_n = 0u64;
+    let mut others = 0u64;
+    for idx in nodes {
+        if let Some(nr) = idx.read(god) {
+            for (ek, dests) in nr.children().iter() {
+                let multiplicity = dests.len() as u64;
+                match ek {
+                    IntermediateTrie3EdgeKey::Push(_) => pushes += multiplicity,
+                    IntermediateTrie3EdgeKey::Pop(n, _) => {
+                        if *n == 0 {
+                            pop0 += multiplicity;
+                        } else if *n == 1 {
+                            pop1 += multiplicity;
+                        } else {
+                            popgt += multiplicity;
+                            popgt_sum_n += (*n as u64) * multiplicity;
+                        }
+                    }
+                    _ => others += multiplicity,
+                }
+            }
+        }
+    }
+    (pushes, pop0, pop1, popgt, popgt_sum_n, others)
+}
+
 fn run_trie_based_elimination(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    // We build a new graph directly in `god` by traversing a read-only snapshot (`source`)
-    // of the original reachable subgraph, using a product over (node, pending_stack).
-    // pending_stack is a Vec<StateIDBV> that behaves like a stack of Pushes seen so far but not yet
-    // materialized or canceled. This enables nested cancellations like:
-    //   Push(A), Push(B), Pop(1, B), Pop(1, A)  -> epsilon
-    //
-    // The transition rules mirror eliminate_pushes_and_pops_path_based but operate locally:
-    // - Push(X): push X onto the stack; propagate via NoOp.
-    // - Pop(0, B): if top intersects B, drop Pop (NoOp), keep stack; else branch dies.
-    // - Pop(1, B): if top intersects B, pop stack and NoOp; else branch dies.
-    // - Pop(n>1, B): unconditionally pop stack and forward Pop(n-1, B).
-    // - Other edges: forward unchanged with the same stack.
-    // When at an end node, flush remaining stack by emitting Push edges in original order.
+    // Outer fixpoint loop: iterate passes to converge even when we avoid deferring pushes in “push-cycling” SCCs.
+    for pass in 0..MAX_ELIMINATION_PASSES {
+        // Snapshot the reachable subgraph from the provided roots.
+        let mut sids: Vec<TokenizerStateID> = Vec::with_capacity(roots.len());
+        let mut old_root_vec: Vec<IntermediatePrecomputeNode3Index> = Vec::with_capacity(roots.len());
+        for (sid, idx) in roots.iter() {
+            sids.push(*sid);
+            old_root_vec.push(*idx);
+        }
+        let before_sig = compute_graph_signature(god, roots);
+        let (source, source_roots, _map) = Trie::deep_copy_subtrees(god, &old_root_vec);
 
-    // 1) Snapshot the reachable subgraph from the provided roots.
-    let mut sids: Vec<TokenizerStateID> = Vec::with_capacity(roots.len());
-    let mut old_root_vec: Vec<IntermediatePrecomputeNode3Index> = Vec::with_capacity(roots.len());
-    for (sid, idx) in roots.iter() {
-        sids.push(*sid);
-        old_root_vec.push(*idx);
-    }
-    let (source, source_roots, _map) = Trie::deep_copy_subtrees(god, &old_root_vec);
+        // Precompute push-cycling nodes to avoid unbounded pending stacks in SCCs that can keep pushing without encountering Pop(0/1).
+        let push_cycle_nodes: BTreeSet<IntermediatePrecomputeNode3Index> =
+            compute_push_cycle_nodes(&source, &source_roots);
 
-    // 2) Prepare destination arena (clear existing graph).
-    god.clear();
+        // Prepare destination arena (clear existing graph).
+        god.clear();
 
-    // Setup progress bar
-    let pb = ProgressBar::new(0);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) {msg}")
-            .expect("progress-bar"),
-    );
-    if !PROGRESS_BAR_ENABLED {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
-    pb.set_message("Eliminating push/pop pairs");
+        // Setup progress bar (spinner, no moving denominator).
+        let pb = ProgressBar::new(0);
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] states={pos} {msg}")
+                .expect("progress-bar"),
+        );
+        if !PROGRESS_BAR_ENABLED {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        pb.set_message("Eliminating push/pop pairs");
 
-    // 3) Memoization: (source_idx, pending_stack) -> dest_idx
-    let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
-    let mut work: VecDeque<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>)> = VecDeque::new();
+        // Memoization: (source_idx, pending_stack) -> dest_idx
+        let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
+        let mut work: VecDeque<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>)> = VecDeque::new();
 
-    macro_rules! get_or_create {
-        ($src_idx:expr, $stack:expr) => {
-            {
-                let key = ($src_idx, $stack.clone());
-                if let Some(&existing) = pair_cache.get(&key) {
-                    existing
-                } else {
-                    let src_guard = key.0.read(&source).expect("source read");
-                    let is_end = src_guard.value.end && key.1.is_empty();
-                    drop(src_guard);
-                    let node_val = if is_end {
-                        IntermediatePrecomputedNodeContents3::leaf()
+        macro_rules! get_or_create {
+            ($src_idx:expr, $stack:expr) => {
+                {
+                    let key = ($src_idx, $stack.clone());
+                    if let Some(&existing) = pair_cache.get(&key) {
+                        existing
                     } else {
-                        IntermediatePrecomputedNodeContents3::internal()
-                    };
-                    let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
-                    pair_cache.insert(key.clone(), dest_idx);
-                    work.push_back(key);
-                    dest_idx
+                        let src_guard = key.0.read(&source).expect("source read");
+                        let is_end = src_guard.value.end && key.1.is_empty();
+                        drop(src_guard);
+                        let node_val = if is_end {
+                            IntermediatePrecomputedNodeContents3::leaf()
+                        } else {
+                            IntermediatePrecomputedNodeContents3::internal()
+                        };
+                        let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
+                        pair_cache.insert(key.clone(), dest_idx);
+                        work.push_back(key);
+                        dest_idx
+                    }
                 }
-            }
-        };
-    }
-
-    // 4) Create new roots at (source_root, empty stack)
-    let mut new_roots: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
-    for (sid, src_root) in sids.into_iter().zip(source_roots.into_iter()) {
-        let new_root = get_or_create!(src_root, Vec::<StateIDBV>::new());
-        new_roots.insert(sid, new_root);
-    }
-
-    // 5) BFS over product states
-    while let Some((src_idx, stack)) = work.pop_front() {
-        pb.set_length(pair_cache.len() as u64);
-        pb.inc(1);
-        let dest_idx = *pair_cache.get(&(src_idx, stack.clone())).expect("dest exists");
-        let src_guard = src_idx.read(&source).expect("source read");
-
-        // If this source node is an end, flush the entire pending stack in order:
-        // (src, [A, B, C]) --Push(A)--> (src, [B, C]) --Push(B)--> (src, [C]) --Push(C)--> (src, [])
-        if src_guard.value.end && !stack.is_empty() {
-            let mut from_idx = dest_idx;
-            // Emit pushes in original encounter order (bottom-to-top).
-            for i in 0..stack.len() {
-                let label = IntermediateTrie3EdgeKey::Push(stack[i].clone());
-                let next_stack = stack[i+1..].to_vec();
-                let to_idx = get_or_create!(src_idx, next_stack);
-                god.insert_edge_simple(from_idx, to_idx, label, ());
-                from_idx = to_idx;
-            }
+            };
         }
 
-        for (ek, dests) in src_guard.children().iter() {
-            match ek {
-                IntermediateTrie3EdgeKey::Push(bv_new) => {
-                    // Push: defer emission by pushing onto the stack and carrying via NoOp.
-                    let mut new_stack = stack.clone();
-                    new_stack.push(bv_new.clone());
+        // Create new roots at (source_root, empty stack)
+        let mut new_roots: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
+        for (sid, src_root) in sids.into_iter().zip(source_roots.into_iter()) {
+            let new_root = get_or_create!(src_root, Vec::<StateIDBV>::new());
+            new_roots.insert(sid, new_root);
+        }
 
-                    if new_stack.len() > MAX_STACK_DEPTH {
-                        if is_debug_level_enabled(1) {
-                            println!(
-                                "[WARN] Push/Pop elimination: stack depth > {} exceeded. Path dropped.",
-                                MAX_STACK_DEPTH
-                            );
-                        }
-                        continue;
-                    }
+        // BFS over product states
+        let mut processed: u64 = 0;
+        while let Some((src_idx, stack)) = work.pop_front() {
+            processed += 1;
+            pb.set_position(processed);
+            if processed & 0xfff == 0 {
+                pb.set_message(format!("queue={}", work.len()));
+            }
+            let dest_idx = *pair_cache.get(&(src_idx, stack.clone())).expect("dest exists");
+            let src_guard = src_idx.read(&source).expect("source read");
 
-                    for (dst_src_idx, _) in dests.iter() {
-                        let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
-                        god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
-                    }
+            // If this source node is an end, flush the entire pending stack in order.
+            if src_guard.value.end && !stack.is_empty() {
+                let mut from_idx = dest_idx;
+                for i in 0..stack.len() {
+                    let label = IntermediateTrie3EdgeKey::Push(stack[i].clone());
+                    let next_stack = stack[i+1..].to_vec();
+                    let to_idx = get_or_create!(src_idx, next_stack);
+                    god.insert_edge_simple(from_idx, to_idx, label, ());
+                    from_idx = to_idx;
                 }
-                IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
-                    if stack.is_empty() {
-                        // No pending: forward Pop as-is.
-                        for (dst_src_idx, _) in dests.iter() {
-                            let next_state = get_or_create!(*dst_src_idx, Vec::<StateIDBV>::new());
-                            god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Pop(*n, pop_bv.clone()), ());
-                        }
-                    } else {
-                        if *n == 0 {
-                            let top = stack.last().expect("non-empty").clone();
-                            if top.is_disjoint(pop_bv) {
-                                // Invalid path; drop this branch (no edge emitted).
-                                continue;
-                            }
-                            // Intersect: remove Pop(0), keep stack unchanged.
+            }
+
+            for (ek, dests) in src_guard.children().iter() {
+                match ek {
+                    IntermediateTrie3EdgeKey::Push(bv_new) => {
+                        // Avoid unbounded pending stacks inside SCCs that can push indefinitely without Pop(0/1).
+                        if push_cycle_nodes.contains(&src_idx) {
+                            // Emit the push directly; do not defer to the pending stack.
                             for (dst_src_idx, _) in dests.iter() {
                                 let next_state = get_or_create!(*dst_src_idx, stack.clone());
-                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Push(bv_new.clone()), ());
                             }
                         } else {
-                            // Consume as many pops as possible immediately.
-                            // For k > 1, we can pop unconditionally; for the final k == 1,
-                            // we must check intersection against the current top.
-                            let mut k = *n;
+                            // Default: defer emission by pushing onto the stack and carrying via NoOp.
                             let mut new_stack = stack.clone();
+                            new_stack.push(bv_new.clone());
 
-                            // Unconditional pops for k > 1 while we have a stack.
-                            while k > 1 && !new_stack.is_empty() {
-                                new_stack.pop();
-                                k -= 1;
+                            if new_stack.len() > MAX_STACK_DEPTH {
+                                if is_debug_level_enabled(1) {
+                                    println!(
+                                        "[WARN] Push/Pop elimination: stack depth > {} exceeded. Path dropped.",
+                                        MAX_STACK_DEPTH
+                                    );
+                                }
+                                continue;
                             }
 
-                            if k == 1 {
-                                if let Some(top2) = new_stack.last() {
-                                    if top2.is_disjoint(pop_bv) {
-                                        // Invalid path; drop this branch.
-                                        continue;
-                                    }
-                                    // Intersection: pop the remaining top and emit NoOp.
-                                    let mut final_stack = new_stack.clone();
-                                    final_stack.pop();
-                                    for (dst_src_idx, _) in dests.iter() {
-                                        let next_state = get_or_create!(*dst_src_idx, final_stack.clone());
-                                        god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                            for (dst_src_idx, _) in dests.iter() {
+                                let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
+                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                            }
+                        }
+                    }
+                    IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
+                        if stack.is_empty() {
+                            // No pending: forward Pop as-is.
+                            for (dst_src_idx, _) in dests.iter() {
+                                let next_state = get_or_create!(*dst_src_idx, Vec::<StateIDBV>::new());
+                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Pop(*n, pop_bv.clone()), ());
+                            }
+                        } else {
+                            if *n == 0 {
+                                let top = stack.last().expect("non-empty").clone();
+                                if top.is_disjoint(pop_bv) {
+                                    // Invalid path; drop this branch (no edge emitted).
+                                    continue;
+                                }
+                                // Intersect: remove Pop(0), keep stack unchanged.
+                                for (dst_src_idx, _) in dests.iter() {
+                                    let next_state = get_or_create!(*dst_src_idx, stack.clone());
+                                    god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                                }
+                            } else {
+                                // Consume as many pops as possible immediately.
+                                // For k > 1, we can pop unconditionally; for the final k == 1,
+                                // we must check intersection against the current top.
+                                let mut k = *n;
+                                let mut new_stack = stack.clone();
+
+                                // Unconditional pops for k > 1 while we have a stack.
+                                while k > 1 && !new_stack.is_empty() {
+                                    new_stack.pop();
+                                    k -= 1;
+                                }
+
+                                if k == 1 {
+                                    if let Some(top2) = new_stack.last() {
+                                        if top2.is_disjoint(pop_bv) {
+                                            // Invalid path; drop this branch.
+                                            continue;
+                                        }
+                                        // Intersection: pop the remaining top and emit NoOp.
+                                        let mut final_stack = new_stack.clone();
+                                        final_stack.pop();
+                                        for (dst_src_idx, _) in dests.iter() {
+                                            let next_state = get_or_create!(*dst_src_idx, final_stack.clone());
+                                            god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                                        }
+                                    } else {
+                                        // No pushes left to match k == 1; forward Pop(1, ...) as-is.
+                                        for (dst_src_idx, _) in dests.iter() {
+                                            let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
+                                            god.insert_edge_simple(
+                                                dest_idx,
+                                                next_state,
+                                                IntermediateTrie3EdgeKey::Pop(1, pop_bv.clone()),
+                                                (),
+                                            );
+                                        }
                                     }
                                 } else {
-                                    // No pushes left to match k == 1; forward Pop(1, ...) as-is.
+                                    // k > 1 and stack is empty: forward the remaining Pop(k, ...) as-is.
                                     for (dst_src_idx, _) in dests.iter() {
                                         let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
                                         god.insert_edge_simple(
                                             dest_idx,
                                             next_state,
-                                            IntermediateTrie3EdgeKey::Pop(1, pop_bv.clone()),
+                                            IntermediateTrie3EdgeKey::Pop(k, pop_bv.clone()),
                                             (),
                                         );
                                     }
                                 }
-                            } else {
-                                // k > 1 and stack is empty: forward the remaining Pop(k, ...) as-is.
-                                for (dst_src_idx, _) in dests.iter() {
-                                    let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
-                                    god.insert_edge_simple(
-                                        dest_idx,
-                                        next_state,
-                                        IntermediateTrie3EdgeKey::Pop(k, pop_bv.clone()),
-                                        (),
-                                    );
-                                }
                             }
                         }
                     }
-                }
-                // Non-push/pop edges (e.g., CheckLLM, NoOp) just forward; pending unchanged.
-                other => {
-                    for (dst_src_idx, _) in dests.iter() {
-                        let next_state = get_or_create!(*dst_src_idx, stack.clone());
-                        god.insert_edge_simple(dest_idx, next_state, other.clone(), ());
+                    // Non-push/pop edges (e.g., CheckLLM, NoOp) just forward; pending unchanged.
+                    other => {
+                        for (dst_src_idx, _) in dests.iter() {
+                            let next_state = get_or_create!(*dst_src_idx, stack.clone());
+                            god.insert_edge_simple(dest_idx, next_state, other.clone(), ());
+                        }
                     }
                 }
             }
         }
+
+        pb.finish_with_message("Done eliminating push/pop pairs");
+
+        // Replace input roots with new roots (pending_stack is empty).
+        *roots = new_roots;
+
+        // Fixpoint check: if the signature did not change, we converged.
+        let after_sig = compute_graph_signature(god, roots);
+        if after_sig == before_sig {
+            if is_debug_level_enabled(2) {
+                println!("[Push/Pop Elimination] Converged after {} pass(es).", pass + 1);
+            }
+            break;
+        } else if is_debug_level_enabled(3) {
+            println!(
+                "[Push/Pop Elimination] Pass {} changed signature: before={:?} after={:?}",
+                pass + 1,
+                before_sig,
+                after_sig
+            );
+        }
     }
-
-    pb.finish_with_message("Done eliminating push/pop pairs");
-
-    // 6) Replace input roots with new roots (pending_stack is empty).
-    *roots = new_roots;
 }
 
 fn get_normalized_paths(
