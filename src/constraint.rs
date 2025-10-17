@@ -1905,6 +1905,33 @@ impl GrammarConstraint {
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
 
+        if is_debug_level_enabled(2) {
+            println!("\n--- Intermediate Trie3 Template Statistics ---");
+            println!("{:<25} {:<5} {:>10} {:>10}", "Terminal Name", "ID", "Nodes", "Edges");
+            println!("{:-<25} {:-<5} {:-<10} {:-<10}", "", "", "", "");
+
+            let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
+            sorted_templates.sort_by_key(|(tid, _)| *tid);
+
+            for (tid, (start_node, _end_node)) in sorted_templates {
+                let mut stats = crate::constraint_extra::PrecomputeStats::default();
+                crate::constraint_extra::calculate_intermediate_stats3(
+                    &[*start_node],
+                    &mut stats,
+                    &intermediate_trie3_god,
+                );
+                let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
+                println!(
+                    "{:<25} {:<5} {:>10} {:>10}",
+                    format!("'{}'", terminal_name),
+                    tid.0,
+                    stats.final_unique_nodes_count,
+                    stats.final_edges_count
+                );
+            }
+            println!("--------------------------------------------\n");
+        }
+
         if is_debug_level_enabled(3) {
             println!("\n--- Terminal Template Paths ---");
             let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
