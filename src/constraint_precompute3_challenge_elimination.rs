@@ -159,6 +159,7 @@ pub fn eliminate_pushes_and_pops(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constraint::LLMTokenBV;
     use crate::datastructures::trie::Trie2Index;
 
     fn run_test(
@@ -214,6 +215,212 @@ mod tests {
 
         root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv.clone()), (), v1);
         v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv), (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_mismatch_invalidates_path() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2);
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv1), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv2), (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_pop_zero_keeps_push() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv = StateIDBV::zeros();
+        bv.insert(1);
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv.clone()), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv), (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_pop_zero_mismatch_invalidates_path() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2);
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv1), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv2), (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_pop_n_decrements() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2); // Note: disjoint, but should not matter for n>1
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv1), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(3, bv2), (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_blocked_push() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2);
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv1), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv2.clone()), (), v2);
+        v2.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv2), (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_multiple_cancellations_in_sequence() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v3 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2);
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv1.clone()), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv2.clone()), (), v2);
+        v2.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv2), (), v3);
+        v3.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv1), (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_interleaved_ops() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut llm_bv = LLMTokenBV::zeros();
+        llm_bv.insert(100);
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv1.clone()), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_bv), (), v2);
+        v2.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv1), (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_branching_and_merging() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v3 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv_a = StateIDBV::zeros();
+        bv_a.insert(1);
+        let mut llm_x = LLMTokenBV::zeros();
+        llm_x.insert(100);
+        let mut llm_y = LLMTokenBV::zeros();
+        llm_y.insert(200);
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_a.clone()), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_x), (), v2);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_y), (), v3);
+        v2.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
+        v3.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_cycle_simplification() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv_a = StateIDBV::zeros();
+        bv_a.insert(1);
+
+        // Path to end
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), end);
+        // Path with cycle
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_a.clone()), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), root);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_no_pushes_or_pops() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut llm_bv = LLMTokenBV::zeros();
+        llm_bv.insert(100);
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_bv), (), v1);
+        v1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), end);
+
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_dangling_pop() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv = StateIDBV::zeros();
+        bv.insert(1);
+
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv), (), end);
 
         run_test(&god, &[root]);
     }
