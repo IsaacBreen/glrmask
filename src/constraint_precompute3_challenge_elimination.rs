@@ -49,6 +49,7 @@ fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3E
     other_ops
 }
 /// Eliminates adjacent Push/Pop pairs from a stack of intermediate trie edge keys.
+/// Additionally, Pop(0, B) constraints are folded into the preceding Push via intersection.
 /// This is a core part of simplifying the precompute3 graph.
 ///
 /// Pairing rules applied when a Push(A) looks to the nearest Pop(n, B) to its right
@@ -90,8 +91,12 @@ fn simplify_path(
                                 if push_states.is_disjoint(&pop_states) {
                                     return None; // Mismatch on state check
                                 }
-                                // Keep Push(A); only Pop(0, B) is removed.
-                                stack.insert(i, IntermediateTrie3EdgeKey::Push(push_states));
+                                // Fold Pop(0, B) constraint into preceding Push(A) as A := A ∩ B.
+                                // This preserves semantics and reduces the state space.
+                                let mut new_push_bv = push_states.clone();
+                                new_push_bv &= pop_states;
+                                // If intersection is empty we'd have returned None above.
+                                stack.insert(i, IntermediateTrie3EdgeKey::Push(new_push_bv));
                             }
                             1 => {
                                 if push_states.is_disjoint(&pop_states) {
@@ -726,6 +731,7 @@ fn run_trie_based_elimination(
             let src_guard = src_idx.read(&source).expect("source read");
 
             // If this source node is an end, flush the entire pending stack in order.
+            // Note: pending stack bitvectors may already have been narrowed by Pop(0) constraints.
             if src_guard.value.end && !stack_interner.is_empty(stack_id) {
                 let mut from_idx = dest_idx;
                 // Bottom-to-top order
@@ -782,9 +788,16 @@ fn run_trie_based_elimination(
                                     // Invalid path; drop this branch (no edge emitted).
                                     continue;
                                 }
-                                // Intersect: remove Pop(0), keep stack unchanged.
+                                // Intersect: fold Pop(0, B) into the top-of-stack A := A ∩ B (non-consuming).
+                                // Replace the top-of-stack with the narrowed bitvector.
+                                let mut narrowed = top.clone();
+                                narrowed &= pop_bv.clone();
+                                // If intersection is empty we'd have continued above.
+                                let suffix = stack_interner.pop(stack_id).expect("non-empty");
+                                let new_stack_id = stack_interner.push(suffix, narrowed);
+
                                 for (dst_src_idx, _) in dests.iter() {
-                                    let next_state = get_or_create!(*dst_src_idx, stack_id);
+                                    let next_state = get_or_create!(*dst_src_idx, new_stack_id);
                                     god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                                 }
                             } else {
