@@ -2160,14 +2160,26 @@ where
     }
 }
 
+/// A trait for edge values that can be merged.
+pub trait MergeableEdgeValue: Sized {
+    /// Merges another value into this one.
+    fn merge(&mut self, other: Self);
+}
+
+impl MergeableEdgeValue for () {
+    fn merge(&mut self, _other: Self) {
+        // Nothing to do for unit type.
+    }
+}
+
 impl<EK, EV, T> Arena<Trie<EK, EV, T>>
 where
     EK: Ord + Clone,
-    EV: Clone + std::ops::BitOrAssign,
+    EV: Clone + MergeableEdgeValue,
 {
     /// Inserts an edge from `src` to `dst` with the given `edge_key` and `edge_value`.
     /// If an edge with the same key to the same destination already exists, the new
-    /// `edge_value` is merged into the existing one using `BitOrAssign` (`|=`).
+    /// `edge_value` is merged into the existing one using the `MergeableEdgeValue` trait.
     pub fn insert_edge_simple(
         &self,
         src: Trie2Index,
@@ -2178,7 +2190,7 @@ where
         if let Some(mut src_guard) = src.write(self) {
             src_guard.children.entry(edge_key).or_default()
                 .entry(dst)
-                .and_modify(|ev| *ev |= edge_value.clone())
+                .and_modify(|ev| ev.merge(edge_value.clone()))
                 .or_insert(edge_value);
         }
     }
