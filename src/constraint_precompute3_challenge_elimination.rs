@@ -1,16 +1,14 @@
 // src/constraint_precompute3_challenge_elimination.rs
-use std::time::{Duration, Instant};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, StateIDBV};
+use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV};
 use crate::constraint::IntermediatePrecomputedNodeContents3;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
 use crate::tokenizer::TokenizerStateID;
 
-/// If true, runs a much slower path-based elimination algorithm and compares its output
-/// against the trie-based algorithm. If they mismatch, it attempts to find a minimal
-/// failing subgraph and prints it.
-const DEBUG_CHALLENGE_ELIMINATION: bool = true;
+/// When enabled (e.g. in debug builds), this runs the path-based elimination as a cross-check.
+const DEBUG: bool = cfg!(debug_assertions);
+
 /// Eliminates adjacent Push/Pop pairs from a stack of intermediate trie edge keys.
 /// This is a core part of simplifying the precompute3 graph.
 ///
@@ -146,10 +144,50 @@ pub fn eliminate_pushes_and_pops_path_based(
     *roots = new_roots;
 }
 
-fn eliminate_pushes_and_pops_trie_based(
+/// Normalizes a path for comparison purposes.
+/// - Removes NoOp edges.
+/// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
+fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
+    let mut combined_llm_bv = LLMTokenBV::max_ones();
+    let mut has_llm_check = false;
+
+    let mut other_ops: Vec<IntermediateTrie3EdgeKey> = path
+        .into_iter()
+        .filter(|ek| {
+            if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek {
+                combined_llm_bv &= bv;
+                has_llm_check = true;
+                false // remove from path
+            } else {
+                !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
+            }
+        })
+        .collect();
+
+    if has_llm_check {
+        other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
+    }
+
+    other_ops
+}
+
+pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
+    // If in debug mode, clone the initial state for later comparison against the path-based version.
+    let initial_state_for_debug = if DEBUG {
+        let sids: Vec<_> = roots.keys().cloned().collect();
+        let old_root_vec: Vec<_> = sids.iter().map(|sid| roots[sid]).collect();
+        let (cloned_god, new_root_indices, _) = Trie::deep_copy_subtrees(god, &old_root_vec);
+        let cloned_roots = sids.into_iter().zip(new_root_indices.into_iter()).collect();
+        Some((cloned_god, cloned_roots))
+    } else {
+        None
+    };
+
+    // We build a new graph directly in `god` by traversing a read-only snapshot (`source`)
+    // of the original reachable subgraph, using a product over (node, pending_stack).
     // pending_stack is a Vec<StateIDBV> that behaves like a stack of Pushes seen so far but not yet
     // materialized or canceled. This enables nested cancellations like:
     //   Push(A), Push(B), Pop(1, B), Pop(1, A)  -> epsilon
@@ -299,192 +337,45 @@ fn eliminate_pushes_and_pops_trie_based(
 
     // 6) Replace input roots with new roots (pending_stack is empty).
     *roots = new_roots;
-}
 
-/// Normalizes a path for comparison purposes.
-/// - Removes NoOp edges.
-/// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
-fn normalize_path_for_test(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
-    let mut combined_llm_bv = crate::constraint::LLMTokenBV::max_ones();
-    let mut has_llm_check = false;
+    // After main logic, if in debug mode, run path-based version and compare.
+    if let Some((path_god, mut path_roots_map)) = initial_state_for_debug {
+        // 1. Get paths from the trie-based result (the one we just computed).
+        let final_roots_from_trie_elim: Vec<_> = roots.values().cloned().collect();
+        let paths_from_trie_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(god, &final_roots_from_trie_elim, |n| n.value.end)
+            .into_iter()
+            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+            .collect();
 
-    let mut other_ops: Vec<IntermediateTrie3EdgeKey> = path
-        .into_iter()
-        .filter(|ek| {
-            if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek {
-                combined_llm_bv &= bv;
-                has_llm_check = true;
-                false // remove from path
-            } else {
-                !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
-            }
-        })
-        .collect();
+        // 2. Run path-based elimination on the cloned initial state.
+        eliminate_pushes_and_pops_path_based(&mut path_roots_map, &path_god);
 
-    if has_llm_check {
-        other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
-    }
+        // 3. Get paths from the path-based result.
+        let final_roots_from_path_elim: Vec<_> = path_roots_map.values().cloned().collect();
+        let paths_from_path_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&path_god, &final_roots_from_path_elim, |n| n.value.end)
+            .into_iter()
+            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+            .collect();
 
-    other_ops
-}
+        // 4. Compare and panic on mismatch.
+        if paths_from_trie_elim != paths_from_path_elim {
+            let trie_only: Vec<_> = paths_from_trie_elim.difference(&paths_from_path_elim).collect();
+            let path_only: Vec<_> = paths_from_path_elim.difference(&paths_from_trie_elim).collect();
 
-fn get_normalized_paths(
-    god: &IntermediateTrie3GodWrapper,
-    roots: &[IntermediatePrecomputeNode3Index],
-) -> BTreeSet<Vec<IntermediateTrie3EdgeKey>> {
-    IntermediatePrecomputeNode3::get_all_paths(god, roots, |n| n.value.end)
-        .into_iter()
-        .map(|(_r, p)| normalize_path_for_test(p.into_iter().map(|(ek, _, _)| ek).collect()))
-        .collect()
-}
-
-fn get_all_edges(god: &IntermediateTrie3GodWrapper, roots: &[IntermediatePrecomputeNode3Index]) -> Vec<(IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediatePrecomputeNode3Index)> {
-    let mut edges = Vec::new();
-    let mut visited = BTreeSet::new();
-    let mut work: VecDeque<_> = roots.to_vec().into();
-
-    while let Some(idx) = work.pop_front() {
-        if !visited.insert(idx) {
-            continue;
+            panic!(
+                "Push/pop elimination mismatch between trie-based and path-based algorithms!\n\
+                 Paths only in trie-based result: {:#?}\n\
+                 Paths only in path-based result: {:#?}\n",
+                trie_only,
+                path_only
+            );
         }
-        let guard = idx.read(god).unwrap();
-        for (ek, dests) in guard.children().iter() {
-            for (dest_idx, _) in dests.iter() {
-                edges.push((idx, ek.clone(), *dest_idx));
-                work.push_back(*dest_idx);
-            }
-        }
-    }
-    edges
-}
-
-fn remove_edge(god: &IntermediateTrie3GodWrapper, from: IntermediatePrecomputeNode3Index, ek: &IntermediateTrie3EdgeKey, to: IntermediatePrecomputeNode3Index) {
-    let mut guard = from.write(god).unwrap();
-    // NOTE: This assumes a `children_mut()` method or similar exists on the Trie write guard.
-    // Based on `force_insert_to_node`, mutable access to children is expected to be possible.
-    // If the Trie API is different, this part will need adjustment.
-    if let Some(dests) = guard.children_mut().get_mut(ek) {
-        dests.retain(|(dest_idx, _)| *dest_idx != to);
-        if dests.is_empty() {
-            guard.children_mut().remove(ek);
-        }
-    }
-}
-
-fn check_consistency(
-    god: &IntermediateTrie3GodWrapper,
-    roots_map: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-) -> bool {
-    let roots_vec: Vec<_> = roots_map.values().cloned().collect();
-
-    // Path-based
-    let (path_god, path_roots_vec, _) = Trie::deep_copy_subtrees(god, &roots_vec);
-    let mut path_roots_map_copy: BTreeMap<_,_> = roots_map.keys().cloned().zip(path_roots_vec.into_iter()).collect();
-    eliminate_pushes_and_pops_path_based(&mut path_roots_map_copy, &path_god);
-    let expected_paths = get_normalized_paths(&path_god, &path_roots_map_copy.values().cloned().collect::<Vec<_>>());
-
-    // Trie-based
-    let (trie_god, trie_roots_vec, _) = Trie::deep_copy_subtrees(god, &roots_vec);
-    let mut trie_roots_map_copy: BTreeMap<_,_> = roots_map.keys().cloned().zip(trie_roots_vec.into_iter()).collect();
-    eliminate_pushes_and_pops_trie_based(&mut trie_roots_map_copy, &trie_god);
-    let actual_paths = get_normalized_paths(&trie_god, &trie_roots_map_copy.values().cloned().collect::<Vec<_>>());
-
-    expected_paths == actual_paths
-}
-
-pub fn eliminate_pushes_and_pops(
-    roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-    god: &IntermediateTrie3GodWrapper,
-) {
-    if !DEBUG_CHALLENGE_ELIMINATION {
-        eliminate_pushes_and_pops_trie_based(roots, god);
-        return;
-    }
-
-    // --- PRE-COMPUTATION (for debugging) ---
-    // 1. Get expected paths from the slower, path-based implementation.
-    let (path_god, path_roots_vec, _) = Trie::deep_copy_subtrees(god, &roots.values().cloned().collect::<Vec<_>>());
-    let mut path_roots_map: BTreeMap<_, _> = roots.keys().cloned().zip(path_roots_vec.into_iter()).collect();
-    eliminate_pushes_and_pops_path_based(&mut path_roots_map, &path_god);
-    let final_roots_from_path_elim: Vec<_> = path_roots_map.values().cloned().collect();
-    let expected_paths = get_normalized_paths(&path_god, &final_roots_from_path_elim);
-
-    // 2. Keep a pristine copy of the original graph for refinement on mismatch.
-    let (original_god, original_roots_vec, _) = Trie::deep_copy_subtrees(god, &roots.values().cloned().collect::<Vec<_>>());
-    let original_roots_map: BTreeMap<_, _> = roots.keys().cloned().zip(original_roots_vec.into_iter()).collect();
-
-    // --- MAIN IMPLEMENTATION (TRIE-BASED) ---
-    eliminate_pushes_and_pops_trie_based(roots, god);
-
-    // --- POST-COMPUTATION (DEBUG CHECK) ---
-    let actual_paths = get_normalized_paths(god, &roots.values().cloned().collect::<Vec<_>>());
-
-    if actual_paths != expected_paths {
-        println!("\n!!! MISMATCH DETECTED in eliminate_pushes_and_pops !!!");
-        println!("Expected (path-based) != Actual (trie-based)");
-
-        let mut min_god = original_god;
-        let mut min_roots_map = original_roots_map;
-        let mut changed = true;
-
-        let start_time = Instant::now();
-        let timeout = Duration::from_secs(1);
-        let mut last_progress_time = Instant::now();
-        let no_progress_timeout = Duration::from_millis(200);
-
-        while changed && start_time.elapsed() < timeout && last_progress_time.elapsed() < no_progress_timeout {
-            changed = false;
-            let min_roots_vec: Vec<_> = min_roots_map.values().cloned().collect();
-            let edges = get_all_edges(&min_god, &min_roots_vec);
-
-            for (from, ek, to) in edges {
-                if start_time.elapsed() >= timeout { break; }
-
-                let (smaller_god, smaller_roots_vec, map) = Trie::deep_copy_subtrees(&min_god, &min_roots_vec);
-                let mut smaller_roots_map: BTreeMap<_, _> = min_roots_map.keys().cloned().zip(smaller_roots_vec.into_iter()).collect();
-
-                let new_from = *map.get(&from).unwrap();
-                let new_to = *map.get(&to).unwrap();
-
-                remove_edge(&smaller_god, new_from, &ek, new_to);
-
-                if !check_consistency(&smaller_god, &smaller_roots_map) {
-                    min_god = smaller_god;
-                    min_roots_map = smaller_roots_map;
-                    changed = true;
-                    last_progress_time = Instant::now();
-                    break; // Restart with the smaller graph
-                }
-            }
-        }
-
-        println!("\n--- Minimal Failing Graph Found (or timeout reached) ---");
-        let final_failing_roots: Vec<_> = min_roots_map.values().cloned().collect();
-        let paths_before = IntermediatePrecomputeNode3::get_all_paths(&min_god, &final_failing_roots, |n| n.value.end);
-        println!("\nPaths in minimal failing graph (BEFORE simplification):");
-        for (root, path) in &paths_before {
-            println!("  Root {:?}: {:?}", root.idx, path.iter().map(|(ek,_,_)| ek).collect::<Vec<_>>());
-        }
-
-        let (path_god_min, path_roots_vec_min, _) = Trie::deep_copy_subtrees(&min_god, &final_failing_roots);
-        let mut path_roots_map_min: BTreeMap<_,_> = min_roots_map.keys().cloned().zip(path_roots_vec_min.into_iter()).collect();
-        eliminate_pushes_and_pops_path_based(&mut path_roots_map_min, &path_god_min);
-        let expected_paths_min = get_normalized_paths(&path_god_min, &path_roots_map_min.values().cloned().collect::<Vec<_>>());
-        println!("\nMinimal failing graph, EXPECTED paths (path-based): {:#?}", expected_paths_min);
-
-        let (trie_god_min, trie_roots_vec_min, _) = Trie::deep_copy_subtrees(&min_god, &final_failing_roots);
-        let mut trie_roots_map_min: BTreeMap<_,_> = min_roots_map.keys().cloned().zip(trie_roots_vec_min.into_iter()).collect();
-        eliminate_pushes_and_pops_trie_based(&mut trie_roots_map_min, &trie_god_min);
-        let actual_paths_min = get_normalized_paths(&trie_god_min, &trie_roots_map_min.values().cloned().collect::<Vec<_>>());
-        println!("\nMinimal failing graph, ACTUAL paths (trie-based): {:#?}", actual_paths_min);
-        println!("\n--- End of Mismatch Report ---\n");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constraint::LLMTokenBV;
     use crate::datastructures::trie::Trie2Index;
 
     fn run_test(
@@ -507,19 +398,25 @@ mod tests {
 
         // 2. Flatten trie-based result to paths
         let final_roots_from_trie_elim: Vec<_> = trie_roots_map.values().cloned().collect();
-        let paths_from_trie_elim = get_normalized_paths(&trie_god, &final_roots_from_trie_elim);
+        let paths_from_trie_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&trie_god, &final_roots_from_trie_elim, |n| n.value.end)
+            .into_iter()
+            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+            .collect();
 
         // 3. Run path-based elimination
         let (path_god, path_roots, _) = Trie::deep_copy_subtrees(input_god, input_roots);
         let mut path_roots_map = BTreeMap::new();
         for (i, r) in path_roots.iter().enumerate() {
-            path_roots_map.insert(TokenizerStateID(i), *r);
+            path_roots_map.insert(TokenizerStateID(i), *r); // Use dummy TokenizerStateID
         }
         eliminate_pushes_and_pops_path_based(&mut path_roots_map, &path_god);
 
         // 4. Flatten path-based result to paths
         let final_roots_from_path_elim: Vec<_> = path_roots_map.values().cloned().collect();
-        let paths_from_path_elim = get_normalized_paths(&path_god, &final_roots_from_path_elim);
+        let paths_from_path_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&path_god, &final_roots_from_path_elim, |n| n.value.end)
+            .into_iter()
+            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+            .collect();
 
         // 5. Compare
         assert_eq!(paths_from_trie_elim, paths_from_path_elim);
