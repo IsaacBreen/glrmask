@@ -175,7 +175,15 @@ mod tests {
 
         // 2. Flatten result to paths
         let final_roots_from_trie_elim: Vec<_> = eliminated_roots_map.values().cloned().collect();
-        let paths_from_trie_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&eliminated_god, &final_roots_from_trie_elim, |n| n.value.end).into_iter().map(|(_r, p)| p.into_iter().map(|(ek, _, _)| ek).collect::<Vec<_>>()).collect();
+        let paths_from_trie_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&eliminated_god, &final_roots_from_trie_elim, |n| n.value.end)
+            .into_iter()
+            .map(|(_r, p)| {
+                p.into_iter()
+                    .map(|(ek, _, _)| ek)
+                    .filter(|ek| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
 
         // 3. Run old path-based elimination directly
         let initial_paths = IntermediatePrecomputeNode3::get_all_paths(input_god, input_roots, |node| node.value.end);
@@ -183,7 +191,10 @@ mod tests {
         for (_root_value, path_edges) in initial_paths {
             let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
             if let Some(new_path) = eliminate_pushes_and_pops_path_based(edge_keys) {
-                paths_from_path_elim.insert(new_path);
+                let normalized_path: Vec<_> = new_path.into_iter()
+                    .filter(|ek| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+                    .collect();
+                paths_from_path_elim.insert(normalized_path);
             }
         }
 
