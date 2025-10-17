@@ -969,4 +969,39 @@ mod tests {
 
         run_test(&god, &[root]);
     }
+
+    #[test]
+    fn test_complex_cycle_simplification() {
+        // This test features a cycle that should be simplified away,
+        // nested within a larger Push/Pop pair that should also be simplified.
+        // The structure is:
+        // root -> Push(A) -> c1 -> CheckLLM(X) -> c2
+        // c2 -> Push(B) -> c3 -> Pop(1, B) -> c2  (inner cycle)
+        // c2 -> Pop(1, A) -> end                   (exit path)
+        // The expected simplified path is just CheckLLM(X).
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let c1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let c2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let c3 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        let mut bv_a = StateIDBV::zeros();
+        bv_a.insert(1);
+        let mut bv_b = StateIDBV::zeros();
+        bv_b.insert(2);
+        let mut llm_x = LLMTokenBV::zeros();
+        llm_x.insert(100);
+
+        // Path structure
+        root.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_a.clone()), (), c1);
+        c1.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_x), (), c2);
+        // Inner cycle
+        c2.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_b.clone()), (), c3);
+        c3.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_b.clone()), (), c2);
+        // Exit path
+        c2.write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
+
+        run_test(&god, &[root]);
+    }
 }
