@@ -1935,7 +1935,8 @@ impl GrammarConstraint {
         }
 
         // Create Trie3 roots and seed initial sets
-        let mut initial_values_for_map: Vec<(PrecomputeNode1Index, BTreeSet<IntermediatePrecomputeNode3Index>)> = Vec::new();
+        let mut initial_values_for_map: Vec<(PrecomputeNode1Index, (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>))> = Vec::new();
+        let all_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
         for (trie1_root, tokenizer_state_ids) in &trie1_roots_to_tokenizer_states {
             let trie3_root = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
             for tokenizer_state_id in tokenizer_state_ids {
@@ -1943,17 +1944,17 @@ impl GrammarConstraint {
             }
             let mut seed = BTreeSet::new();
             seed.insert(trie3_root.clone());
-            initial_values_for_map.push((trie1_root.clone(), seed));
+            initial_values_for_map.push((trie1_root.clone(), (all_tokens.clone(), seed)));
         }
 
         // Shared end node for Trie1-end positions
         let trie3_end = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
 
-        Trie::special_map_grouped(
+        Trie::special_map_grouped( // TODO: fix this
             &trie1_god,
             initial_values_for_map,
             // step: merge current set into a single node, then attach the terminal template or direct LLM edges
-            |current_nodes_set, edge_grammar_token_opt, destinations_map| {
+            |(current_tokens, current_nodes_set), edge_grammar_token_opt, destinations_map| {
                 // Merge current set into a single node with unconditional edges
                 let merged = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                 for src in current_nodes_set.iter() {
@@ -1985,6 +1986,9 @@ impl GrammarConstraint {
 
                         // For each destination in Trie1, fork a node from copied_end with LLM tokens on the edge.
                         for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+                            let next_tokens = &*current_tokens & edge_bv;
+                            if next_tokens.is_empty() { continue; }
+
                             let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                             let inserter = EdgeInserter::new(
                                 &intermediate_trie3_god,
@@ -1994,12 +1998,15 @@ impl GrammarConstraint {
                             let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge after template end");
                             let mut s = BTreeSet::new();
                             s.insert(actual);
-                            out.push((dst_node_wrapper.clone(), s));
+                            out.push((dst_node_wrapper.clone(), (next_tokens, s)));
                         }
                     }
                     None => {
                         // No grammar token on this edge: fan out directly from merged with LLM-token edges.
                         for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+                            let next_tokens = &*current_tokens & edge_bv;
+                            if next_tokens.is_empty() { continue; }
+
                             let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                             let inserter = EdgeInserter::new(
                                 &intermediate_trie3_god,
@@ -2009,18 +2016,22 @@ impl GrammarConstraint {
                             let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge on None-terminal branch");
                             let mut s = BTreeSet::new();
                             s.insert(actual);
-                            out.push((dst_node_wrapper.clone(), s));
+                            out.push((dst_node_wrapper.clone(), (next_tokens, s)));
                         }
                     }
                 }
                 out
             },
             // merge sets
-            |s1: &mut BTreeSet<IntermediatePrecomputeNode3Index>, s2: BTreeSet<IntermediatePrecomputeNode3Index>| {
-                s1.extend(s2.into_iter());
+            |s1: &mut (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>), s2: (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>)| {
+                s1.0 |= &s2.0;
+                s1.1.extend(s2.1.into_iter());
             },
             // process: when we reach Trie1 end, attach nodes to a shared trie3_end node and continue
-            |precomputed_node_data, nodes_set| {
+            |precomputed_node_data, (tokens, nodes_set)| {
+                if tokens.is_empty() {
+                    return false;
+                }
                 if precomputed_node_data.value.end {
                     for src in nodes_set.iter() {
                         let inserter = EdgeInserter::new(
