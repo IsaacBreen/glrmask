@@ -2053,6 +2053,7 @@ impl GrammarConstraint {
         );
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
+        crate::debug!(2, "Processing and rebuilding trie3 paths...");
         Self::_process_and_rebuild_trie3_paths(
             &mut intermediate_precomputed3,
             &intermediate_trie3_god,
