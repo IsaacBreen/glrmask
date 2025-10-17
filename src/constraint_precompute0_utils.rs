@@ -121,14 +121,9 @@ impl<'r> Precomputer0<'r> {
             let mut changes = Vec::new();
             for (src_idx, key, old_dest_idx) in back_edges {
                 let new_dest_idx = clones.entry(old_dest_idx.clone()).or_insert_with(|| {
-                    // When breaking a cycle, we clone the destination node but without its children.
-                    // This turns the back-edge into an edge to a new "leaf" node (in the context
-                    // of the cycle), effectively breaking the cycle instead of just displacing it.
-                    // A full clone would copy the children, which would just recreate the cycle
-                    // with the cloned node, leading to an infinite loop.
-                    let new_node_content = PrecomputeNode0::new(old_dest_idx.read(&self.trie0_god).unwrap().value.clone());
-                    let new_node_arc = self.trie0_god.insert(new_node_content);
-                    PrecomputeNode0Index::new(new_node_arc)
+                    let cloned_node = old_dest_idx.read(&self.trie0_god).unwrap().clone();
+                    let new_node_idx = self.trie0_god.insert(cloned_node);
+                    PrecomputeNode0Index::new(new_node_idx)
                 }).clone();
                 changes.push((src_idx, key, old_dest_idx, new_dest_idx));
             }
