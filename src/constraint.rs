@@ -2025,6 +2025,7 @@ impl GrammarConstraint {
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         let mut paths_by_sid = BTreeMap::new();
+        crate::debug!(2, "Processing paths for each intermediate trie3 state...");
         for (sid, root_idx) in &intermediate_precomputed3 {
             let paths = IntermediatePrecomputeNode3::get_all_paths(&intermediate_trie3_god, &[*root_idx], |node| node.value.end);
             let mut processed_paths_for_sid = BTreeSet::new();
@@ -2054,6 +2055,7 @@ impl GrammarConstraint {
         }
 
         // Rebuild the intermediate trie from the processed paths.
+        crate::debug!(2, "Rebuilding intermediate trie3 from processed paths...");
         intermediate_trie3_god.clear();
         let mut new_root_map: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
         for (sid, _old_root) in &intermediate_precomputed3 {
@@ -2091,6 +2093,7 @@ impl GrammarConstraint {
         }
 
         // --- Convert intermediate trie to final Trie3 format ---
+        crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");
         let (mut precomputed3, trie3_god) = Self::convert_intermediate_trie3_to_final(
             &intermediate_precomputed3,
             &intermediate_trie3_god,
