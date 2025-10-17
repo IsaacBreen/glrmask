@@ -709,6 +709,42 @@ fn run_trie_based_elimination(
         let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, StackID), IntermediatePrecomputeNode3Index> = BTreeMap::new();
         let mut hot_nodes = BTreeSet::new();
         let mut visit_counts: BTreeMap<IntermediatePrecomputeNode3Index, u64> = BTreeMap::new();
+        // Share "push chains" to empty-stack destination across all origins for the same (src_idx, stack suffix).
+        // Keyed by (source node in source graph, bottom-to-top push-sequence), returns the canonical
+        // destination node reached after the first push in that sequence. That node has the remainder
+        // of the chain already wired behind it towards the final empty-stack pair node.
+        let mut chain_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
+
+        // Build or reuse the chain nodes for a given bottom-to-top push-sequence:
+        // Returns the node that should be the destination of the first Push(items[0]) edge.
+        // The returned node already contains the rest of the chain (Push(items[1]), Push(items[2]), ...)
+        // towards final_dest_idx. For a single-item sequence, the head destination is final_dest_idx.
+        let mut get_chain_destination = |src_node: IntermediatePrecomputeNode3Index,
+                                         final_dest_idx: IntermediatePrecomputeNode3Index,
+                                         items: &[StateIDBV]|
+                                         -> IntermediatePrecomputeNode3Index {
+            if items.is_empty() { return final_dest_idx; }
+            // Build from tail to head and cache each suffix.
+            let mut dest = final_dest_idx;
+            for start in (0..items.len()).rev() {
+                let slice = &items[start..];
+                let key = (src_node, slice.to_vec());
+                if let Some(&mapped) = chain_cache.get(&key) {
+                    dest = mapped;
+                    continue;
+                }
+                let head = if slice.len() == 1 {
+                    final_dest_idx
+                } else {
+                    let head_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+                    god.insert_edge_simple(head_idx, dest, IntermediateTrie3EdgeKey::Push(slice[1].clone()), ());
+                    head_idx
+                };
+                chain_cache.insert(key, head);
+                dest = head;
+            }
+            dest
+        };
         // Track how many unique stacks were interned per source node; if it crosses a threshold, mark node hot.
         let mut unique_stack_count_by_node: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
         // If we exceed a global hard limit on product states, stop deferring pushes globally.
@@ -799,29 +835,20 @@ fn run_trie_based_elimination(
 
             // --- Hot Node Stack Flushing Heuristic ---
             if hot_nodes.contains(&src_idx) && !stack_interner.is_empty(stack_id) {
-                // This node is hot and has a pending stack. Flush the stack to the graph
-                // and then let the re-queued (src_idx, empty_stack) state handle propagation.
-                // This converts stack complexity into graph complexity locally, containing the explosion.
+                // This node is hot and has a pending stack. Flush the stack into the graph using a shared chain
+                // and then let the (src_idx, empty_stack) product state handle propagation.
                 let empty_stack_id = stack_interner.empty();
                 let final_dest_idx = get_or_create!(src_idx, empty_stack_id);
 
                 let items = stack_interner.to_vec_bottom_up(stack_id);
-                let mut from_idx = dest_idx;
-
-                // Create a chain of intermediate nodes for all but the last push.
-                for i in 0..(items.len().saturating_sub(1)) {
-                    let new_intermediate_node = Trie::new(IntermediatePrecomputedNodeContents3::internal());
-                    let to_idx = god.insert(new_intermediate_node).into();
-                    god.insert_edge_simple(from_idx, to_idx, IntermediateTrie3EdgeKey::Push(items[i].clone()), ());
-                    from_idx = to_idx;
-                }
-
-                // The last push connects to the final destination.
-                if let Some(last_item) = items.last() {
-                    god.insert_edge_simple(from_idx, final_dest_idx, IntermediateTrie3EdgeKey::Push(last_item.clone()), ());
-                } else {
-                    // This case (empty stack) is already handled by the `if` condition, but for completeness:
-                    god.insert_edge_simple(from_idx, final_dest_idx, IntermediateTrie3EdgeKey::NoOp, ());
+                if !items.is_empty() {
+                    // Reuse a canonical chain head for (src_idx, items) towards final_dest_idx.
+                    let head_dest = get_chain_destination(src_idx, final_dest_idx, &items);
+                    // Connect the first push from this origin to the shared chain head.
+                    god.insert_edge_simple(
+                        dest_idx, head_dest,
+                        IntermediateTrie3EdgeKey::Push(items[0].clone()), ()
+                    );
                 }
 
                 continue; // Stop processing this complex state; the empty-stack version will take over.
@@ -832,15 +859,17 @@ fn run_trie_based_elimination(
             // If this source node is an end, flush the entire pending stack in order.
             // Note: pending stack bitvectors may already have been narrowed by Pop(0) constraints.
             if src_guard.value.end && !stack_interner.is_empty(stack_id) {
-                let mut from_idx = dest_idx;
-                // Bottom-to-top order
                 let items = stack_interner.to_vec_bottom_up(stack_id);
-                for i in 0..items.len() {
-                    let label = IntermediateTrie3EdgeKey::Push(items[i].clone());
-                    let next_stack_id = stack_interner.from_bottom_slice(&items[i+1..]);
-                    let to_idx = get_or_create!(src_idx, next_stack_id);
-                    god.insert_edge_simple(from_idx, to_idx, label, ());
-                    from_idx = to_idx;
+                if !items.is_empty() {
+                    // Ensure the final empty-stack pair exists and will be scheduled for propagation.
+                    let final_dest_idx = get_or_create!(src_idx, stack_interner.empty());
+                    // Reuse a canonical chain leading to final_dest_idx.
+                    let head_dest = get_chain_destination(src_idx, final_dest_idx, &items);
+                    // Connect a single Push(items[0]) from the current node to the shared chain head.
+                    god.insert_edge_simple(
+                        dest_idx, head_dest,
+                        IntermediateTrie3EdgeKey::Push(items[0].clone()), ()
+                    );
                 }
             }
 
