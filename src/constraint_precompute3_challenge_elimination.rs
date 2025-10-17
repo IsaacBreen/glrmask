@@ -478,8 +478,8 @@ fn run_trie_based_elimination(
                             god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Pop(*n, pop_bv.clone()), ());
                         }
                     } else {
-                        let top = stack.last().expect("non-empty").clone();
                         if *n == 0 {
+                            let top = stack.last().expect("non-empty").clone();
                             if top.is_disjoint(pop_bv) {
                                 // Invalid path; drop this branch (no edge emitted).
                                 continue;
@@ -489,30 +489,55 @@ fn run_trie_based_elimination(
                                 let next_state = get_or_create!(*dst_src_idx, stack.clone());
                                 god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                             }
-                        } else if *n == 1 {
-                            if top.is_disjoint(pop_bv) {
-                                // Invalid path; drop this branch.
-                                continue;
-                            }
-                            // Intersect: both cancel -> epsilon, pop top of stack.
-                            let mut new_stack = stack.clone();
-                            new_stack.pop();
-                            for (dst_src_idx, _) in dests.iter() {
-                                let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
-                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
-                            }
                         } else {
-                            // n > 1: drop top Push unconditionally and decrement Pop.
+                            // Consume as many pops as possible immediately.
+                            // For k > 1, we can pop unconditionally; for the final k == 1,
+                            // we must check intersection against the current top.
+                            let mut k = *n;
                             let mut new_stack = stack.clone();
-                            new_stack.pop();
-                            for (dst_src_idx, _) in dests.iter() {
-                                let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
-                                god.insert_edge_simple(
-                                    dest_idx,
-                                    next_state,
-                                    IntermediateTrie3EdgeKey::Pop(n - 1, pop_bv.clone()),
-                                    (),
-                                );
+
+                            // Unconditional pops for k > 1 while we have a stack.
+                            while k > 1 && !new_stack.is_empty() {
+                                new_stack.pop();
+                                k -= 1;
+                            }
+
+                            if k == 1 {
+                                if let Some(top2) = new_stack.last() {
+                                    if top2.is_disjoint(pop_bv) {
+                                        // Invalid path; drop this branch.
+                                        continue;
+                                    }
+                                    // Intersection: pop the remaining top and emit NoOp.
+                                    let mut final_stack = new_stack.clone();
+                                    final_stack.pop();
+                                    for (dst_src_idx, _) in dests.iter() {
+                                        let next_state = get_or_create!(*dst_src_idx, final_stack.clone());
+                                        god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                                    }
+                                } else {
+                                    // No pushes left to match k == 1; forward Pop(1, ...) as-is.
+                                    for (dst_src_idx, _) in dests.iter() {
+                                        let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
+                                        god.insert_edge_simple(
+                                            dest_idx,
+                                            next_state,
+                                            IntermediateTrie3EdgeKey::Pop(1, pop_bv.clone()),
+                                            (),
+                                        );
+                                    }
+                                }
+                            } else {
+                                // k > 1 and stack is empty: forward the remaining Pop(k, ...) as-is.
+                                for (dst_src_idx, _) in dests.iter() {
+                                    let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
+                                    god.insert_edge_simple(
+                                        dest_idx,
+                                        next_state,
+                                        IntermediateTrie3EdgeKey::Pop(k, pop_bv.clone()),
+                                        (),
+                                    );
+                                }
                             }
                         }
                     }
