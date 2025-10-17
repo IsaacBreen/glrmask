@@ -241,7 +241,7 @@ mod tests {
     /// - Removes NoOp edges.
     /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
     fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
-        let mut combined_llm_bv = LLMTokenBV::ones();
+        let mut combined_llm_bv = LLMTokenBV::max_ones();
         let mut has_llm_check = false;
 
         let mut other_ops: Vec<IntermediateTrie3EdgeKey> = path
