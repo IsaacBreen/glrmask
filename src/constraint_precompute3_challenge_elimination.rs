@@ -771,27 +771,6 @@ fn run_trie_based_elimination(
                 }
             };
             // Deduplicate exits and detect any blocked branches.
-            let mut cancel_set: BTreeSet<(LLMTokenBV, IntermediatePrecomputeNode3Index)> =
-                BTreeSet::new();
-            let mut degrade_set: BTreeSet<(LLMTokenBV, usize, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                BTreeSet::new();
-            let mut blocked_set: BTreeSet<(LLMTokenBV, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                BTreeSet::new();
-            let mut saw_blocked = false;
-            for ex in exits.iter() {
-                match ex {
-                    Exit::Cancel { llm, dst } => {
-                        cancel_set.insert((llm.clone(), *dst));
-                    }
-                    Exit::DegradePop { llm, new_n, pop_bv, dst } => {
-                        degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
-                    }
-                    Exit::BlockedPush { llm, push_bv: exit_push_bv, dst } => {
-                        saw_blocked = true;
-                        blocked_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
-                    }
-                }
-            }
             if exits.is_empty() {
                 // No viable continuations were found for this push under the stack semantics
                 // (e.g., every branch mismatched). This path is dead; remove the original push.
@@ -810,53 +789,45 @@ fn run_trie_based_elimination(
                 .entry(src)
                 .or_insert_with(BTreeMap::new);
 
-            // Wire deduplicated exits from src via aggregator nodes.
-            // - For Cancel/Degrade: wire via aggregator nodes (deduplicated).
-            // - For BlockedPush: by default, preserve the original Push edge (to avoid blow-up),
-            //   EXCEPT for the safe Pop(0)-only case that ends at a leaf with no LLM aggregation:
-            //     we rewire src --Push(restricted_bv)--> leaf and drop the original edge.
-            //   If any blocked branch is not rewired, we must keep the original edge.
+            // Wire exits from src via aggregator nodes, without set-based dedup.
+            // insert_edge_simple will merge duplicates when they occur, so per-exit
+            // dedup is unnecessary and can be expensive for complex bitsets.
             let mut must_keep_original_edge = false;
-
-            for (llm, cancel_dst) in cancel_set {
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
-            }
-            for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                god.insert_edge_simple(
-                    agg,
-                    degrade_dst,
-                    IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
-                    (),
-                );
-            }
-
-            // Handle BlockedPush exits conservatively:
-            // - If llm == max and exit_dst is a leaf, we can safely "skip" Pop(0) chains by
-            //   rewiring the push directly to the leaf with the restricted push_bv.
-            // - Otherwise, we keep the original edge to preserve the blocked branch.
-            for (llm, exit_push_bv, exit_dst) in blocked_set {
-                let mut rewired = false;
-                if llm == LLMTokenBV::max_ones() {
-                    if let Some(dst_guard) = exit_dst.read(god) {
-                        if dst_guard.value.end {
-                            // Directly wire src --Push(exit_push_bv)--> leaf,
-                            // effectively removing the Pop(0) that was folded into the push.
-                            god.insert_edge_simple(
-                                src,
-                                exit_dst,
-                                IntermediateTrie3EdgeKey::Push(exit_push_bv),
-                                (),
-                            );
-                            rewired = true;
-                        }
+            for ex in exits.iter() {
+                match ex {
+                    Exit::Cancel { llm, dst: cancel_dst } => {
+                        let agg = get_or_create_aggregator_node(src, llm, god, cache);
+                        god.insert_edge_simple(agg, *cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
                     }
-                }
-                if !rewired {
-                    // We did not rewire this blocked branch (e.g., nested Push or LLM-aggregated path),
-                    // so we must keep the original Push edge to preserve semantics.
-                    must_keep_original_edge = true;
+                    Exit::DegradePop { llm, new_n, pop_bv, dst: degrade_dst } => {
+                        let agg = get_or_create_aggregator_node(src, llm, god, cache);
+                        god.insert_edge_simple(
+                            agg,
+                            *degrade_dst,
+                            IntermediateTrie3EdgeKey::Pop(*new_n, pop_bv.clone()),
+                            (),
+                        );
+                    }
+                    Exit::BlockedPush { llm, push_bv: exit_push_bv, dst: exit_dst } => {
+                        // Conservative policy to avoid explosion:
+                        // Only rewire for leaf endpoints with no LLM aggregation.
+                        if *llm == LLMTokenBV::max_ones() {
+                            if let Some(dst_guard) = exit_dst.read(god) {
+                                if dst_guard.value.end {
+                                    // Wire src --Push(restricted_bv)--> leaf, effectively folding Pop(0).
+                                    god.insert_edge_simple(
+                                        src,
+                                        *exit_dst,
+                                        IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
+                                        (),
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        // For non-leaf or aggregated LLM cases, keep the original Push edge.
+                        must_keep_original_edge = true;
+                    }
                 }
             }
             let keep_original_edge = must_keep_original_edge;
