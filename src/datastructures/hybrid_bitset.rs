@@ -403,10 +403,7 @@ impl<'a> Iterator for Iter<'a> {
         if self.is_all {
             self.count += 1;
             if self.count == FULL_ITER_WARNING_THRESHOLD {
-                // eprintln!(
-                //     "Warning: Iterating over a full HybridBitset. This may take a very long time."
-                // );
-                panic!(
+                eprintln!(
                     "Warning: Iterating over a full HybridBitset. This may take a very long time."
                 );
             }

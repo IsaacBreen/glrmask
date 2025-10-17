@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
-use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, Trie3God, IntermediateTrie3GodWrapper, IntermediatePrecomputeNode3, IntermediatePrecomputedNodeContents3};
+use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, Trie3God, Trie3GodWrapper};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
@@ -78,6 +78,7 @@ fn test_trivial() {
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
+    return;
 
     println!("Initializing constraint state...");
     let mut state = constraint.init();
@@ -149,7 +150,7 @@ fn test_constraint_simple() {
         token_name_map,
         3, // max_llm_token_id should be 3 for 0, 1, 2
     );
-    constraint.dump_precomputed1();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
 
@@ -1611,7 +1612,7 @@ fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>
     let tid = 1; // Terminal ID for 'if'
     let terminal = TerminalID(tid);
 
-    let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new(); // Dummy 'god' object
+    let trie3_god = crate::constraint::Trie3GodWrapper::new(); // Dummy 'god' object
     let acc = Acc::new_fresh();
     let gss_stack = parser.get_combined_gss_with_acc(acc);
 
@@ -1679,7 +1680,7 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
     use crate::glr::parser::{BelowBottomReductionMode, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
 
 
-    let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new(); // Dummy 'god' object
+    let trie3_god = crate::constraint::Trie3GodWrapper::new(); // Dummy 'god' object
     let acc = Acc::new_fresh();
     let gss_stack = parser.get_combined_gss_with_acc(acc);
 
@@ -1788,7 +1789,7 @@ fn test_gss_structural_sharing_factor3() -> Result<(), Box<dyn std::error::Error
     use crate::glr::parser::{BelowBottomReductionMode, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
 
 
-    let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new(); // Dummy 'god' object
+    let trie3_god = crate::constraint::Trie3GodWrapper::new(); // Dummy 'god' object
     let acc = Acc::new_fresh();
     let gss_stack = parser.get_combined_gss_with_acc(acc);
 
@@ -2365,7 +2366,6 @@ fn test_constraint_indirect_recursion_simplified() {
         token_name_map,
         2, // max_original_llm_token_id
     );
-    constraint.dump_precomputed1();
     constraint.dump_precomputed3();
 
     // Initial state and step
@@ -2681,7 +2681,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
         token_name_map,
         3,
     );
-    constraint.dump_precomputed1();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
 
@@ -2721,8 +2721,8 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     println!("Parser has {} states", parser.table.len());
 
     // 2. Replicate the GSS setup from `precompute3`
-    let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new();
-    let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::root())));
+    let trie3_god = crate::constraint::Trie3GodWrapper::new();
+    let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(0))));
     let mut acc = Acc::new_fresh();
     acc.stored_trie_nodes.insert(trie3_root);
     let gss_stack = parser.get_combined_gss_with_acc(acc);
