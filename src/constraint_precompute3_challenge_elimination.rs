@@ -754,6 +754,9 @@ fn run_trie_based_elimination(
                 .or_insert_with(BTreeMap::new);
 
             // Wire exits from src via aggregator nodes.
+            // Important: Avoid deleting the original edge if an exit says to keep an identical Push
+            // (same dst, no LLM aggregation). Otherwise we'd insert a duplicate and then remove it.
+            let mut keep_original_edge = false;
             for exit in exits {
                 match exit {
                     Exit::Cancel { llm, dst } => {
