@@ -182,10 +182,8 @@ impl<'r> Precomputer0<'r> {
             for (child_idx, _edge_val) in dest_map.iter() {
                 if recursion_stack.contains(child_idx) {
                     back_edges.push((node_idx.clone(), edge_key.clone(), child_idx.clone()));
-                } else if !visited.contains(child_idx) {
-                    self.find_back_edges_dfs(child_idx.clone(), visited, recursion_stack, back_edges);
                 } else {
-                    // Child is in visited but not recursion_stack, so it's a cross-edge to an already completed subtree. Do nothing.
+                    self.find_back_edges_dfs(child_idx.clone(), visited, recursion_stack, back_edges);
                 }
             }
         }
