@@ -7,6 +7,7 @@ use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
 use crate::tokenizer::TokenizerStateID;
 use rand::Rng;
+use crate::datastructures::ordered_hash_map::Pop;
 
 /// If true, runs both trie-based and path-based elimination, compares them,
 /// and if a mismatch is found, attempts to find a minimal failing input graph.

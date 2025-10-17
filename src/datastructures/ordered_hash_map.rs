@@ -16,3 +16,14 @@ impl<K: Clone + Eq + Hash, V: Clone> Retain<K, V> for ordered_hash_map::OrderedH
         *self = retained;
     }
 }
+
+pub trait Pop<K, V> {
+    /// Removes the last key-value pair from the map and returns it, or `None` if the map is empty.
+    fn pop(&mut self) -> Option<(K, V)>;
+}
+
+impl<K, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+    fn pop(&mut self) -> Option<(K, V)> {
+        self.pop()
+    }
+}
