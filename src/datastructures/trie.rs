@@ -11,6 +11,7 @@ use deterministic_hash::DeterministicHasher;
 use kdam::{tqdm, BarExt};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use profiler_macro::time_it;
+use crate::datastructures::EntryApi;
 
 /// Represents statistics about a Trie graph reachable from a set of roots.
 #[derive(Debug, Clone, PartialEq)]
@@ -790,6 +791,217 @@ where
         }
 
         true
+    }
+
+    /// TEST UTILITY: Traverses the graph from the given roots and returns all
+    /// possible paths that end in a node satisfying the `is_end` predicate.
+    ///
+    /// A "path" is a tuple containing the value of the root node and a vector of
+    /// (edge key, edge value, destination node value) tuples. This function
+    /// correctly handles DAGs and cycles.
+    pub fn get_all_paths<F>(
+        arena: &Arena<Self>,
+        roots: &[Trie2Index],
+        is_end: F,
+    ) -> Vec<(T, Vec<(EK, EV, T)>)>
+    where
+        F: Fn(&Trie<EK, EV, T>) -> bool,
+        T: Clone,
+        EV: Clone,
+    {
+        let mut all_paths = Vec::new();
+
+        for &root in roots {
+            let mut visiting = std::collections::BTreeSet::new();
+            if let Some(root_guard) = root.read(arena) {
+                let root_value = root_guard.value.clone();
+                Self::get_all_paths_recursive(
+                    arena,
+                    root,
+                    vec![],
+                    &mut all_paths,
+                    &mut visiting,
+                    &is_end,
+                    root_value,
+                );
+            }
+        }
+        all_paths
+    }
+
+    fn get_all_paths_recursive<F>(
+        arena: &Arena<Self>,
+        node_idx: Trie2Index,
+        current_path: Vec<(EK, EV, T)>,
+        all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
+        visiting: &mut std::collections::BTreeSet<Trie2Index>,
+        is_end: &F,
+        root_value: T,
+    ) where
+        F: Fn(&Trie<EK, EV, T>) -> bool,
+        T: Clone,
+        EV: Clone,
+    {
+        if !visiting.insert(node_idx) {
+            // Cycle detected, stop this path.
+            return;
+        }
+
+        if let Some(guard) = node_idx.read(arena) {
+            if is_end(&guard) {
+                all_paths.push((root_value, current_path));
+            } else {
+                for (edge_key, dest_map) in guard.children() {
+                    for (child_idx, edge_value) in dest_map.iter() {
+                        if let Some(child_guard) = child_idx.read(arena) {
+                            let mut new_path = current_path.clone();
+                            let child_value = child_guard.value.clone();
+                            new_path.push((edge_key.clone(), edge_value.clone(), child_value));
+                            Self::get_all_paths_recursive(
+                                arena,
+                                *child_idx,
+                                new_path,
+                                all_paths,
+                                visiting,
+                                is_end,
+                                root_value.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        visiting.remove(&node_idx);
+    }
+}
+
+// Add this impl block for pretty-printing functionality
+impl<EK, EV, T> Trie<EK, EV, T>
+where
+    EK: Ord + Clone + Debug,
+    EV: Clone + Debug,
+    T: Debug,
+{
+    /// Pretty-prints the trie structure starting from the given roots into a String.
+    /// Handles shared subtrees and cycles to avoid infinite loops and redundant output.
+    pub fn pretty_print(arena: &Arena<Self>, roots: &[Trie2Index]) -> String {
+        let mut output = String::new();
+        let mut printed_nodes = HashSet::new();
+
+        for (i, &root) in roots.iter().enumerate() {
+            if i > 0 {
+                output.push_str("\n");
+            }
+            output.push_str(&format!("[Root {}]\n", i));
+            let mut visiting = HashSet::new();
+            Self::pretty_print_recursive(root, arena, "", true, &mut visiting, &mut printed_nodes, &mut output);
+        }
+        output
+    }
+
+    /// Pretty-prints the entire trie structure in the arena.
+    /// It automatically identifies root nodes (those with an in-degree of 0)
+    /// and prints from there. If no roots are found (e.g., a graph of only cycles),
+    /// it will print from all nodes.
+    pub fn pretty_print_arena(arena: &Arena<Self>) -> String {
+        let all_node_indices: Vec<Trie2Index> =
+            arena.indices().into_iter().map(Trie2Index::from).collect();
+        if all_node_indices.is_empty() {
+            return "[Arena is empty]\n".to_string();
+        }
+
+        let mut in_degrees: std::collections::HashMap<Trie2Index, usize> =
+            all_node_indices.iter().map(|&idx| (idx, 0)).collect();
+
+        for &node_idx in &all_node_indices {
+            if let Some(guard) = node_idx.read(arena) {
+                for dest_map in guard.children.values() {
+                    for &child_idx in dest_map.keys() {
+                        if let Some(degree) = in_degrees.get_mut(&child_idx) {
+                            *degree += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut roots: Vec<Trie2Index> = in_degrees
+            .iter()
+            .filter(|(_, &degree)| degree == 0)
+            .map(|(&idx, _)| idx)
+            .collect();
+
+        roots.sort();
+
+        if roots.is_empty() {
+            // This case handles graphs with no nodes of in-degree 0 (e.g., all nodes are in cycles).
+            let mut output = String::from("[Warning: No nodes with in-degree 0 found. Graph may contain only cycles.]\n[Printing from all nodes as roots.]\n\n");
+            let mut sorted_nodes = all_node_indices;
+            sorted_nodes.sort(); // Sort for deterministic output
+            output.push_str(&Self::pretty_print(arena, &sorted_nodes));
+            return output;
+        }
+
+        Self::pretty_print(arena, &roots)
+    }
+
+    fn pretty_print_recursive(
+        node_idx: Trie2Index,
+        arena: &Arena<Self>,
+        prefix: &str,
+        is_last: bool,
+        visiting: &mut HashSet<usize>,
+        printed_nodes: &mut HashSet<usize>,
+        output: &mut String,
+    ) {
+        let node_guard = match node_idx.read(arena) {
+            Some(guard) => guard,
+            None => {
+                let connector = if is_last { "└── " } else { "├── " };
+                output.push_str(&format!("{}{}[Invalid Node Index: {}]\n", prefix, connector, node_idx.as_usize()));
+                return;
+            }
+        };
+
+        let connector = if is_last { "└── " } else { "├── " };
+        output.push_str(&format!(
+            "{}{}[Node {}] (max_depth: {}, value: {:?})",
+            prefix,
+            connector,
+            node_idx.as_usize(),
+            node_guard.max_depth,
+            &node_guard.value
+        ));
+
+        if visiting.contains(&node_idx.as_usize()) {
+            output.push_str(" (Cycle detected)\n");
+            return;
+        }
+
+        if printed_nodes.contains(&node_idx.as_usize()) {
+            output.push_str(" (Shared, already shown)\n");
+            return;
+        }
+        output.push_str("\n");
+
+        visiting.insert(node_idx.as_usize());
+        printed_nodes.insert(node_idx.as_usize());
+
+        let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+
+        let children_edges: Vec<_> = node_guard.children.iter().flat_map(|(ek, dest_map)| dest_map.iter().map(move |(child_idx, ev)| (ek, ev, *child_idx))).collect();
+
+        let num_children = children_edges.len();
+        for (i, (ek, ev, child_idx)) in children_edges.iter().enumerate() {
+            let is_last_child = i == num_children - 1;
+            let child_connector = if is_last_child { "└── " } else { "├── " };
+            output.push_str(&format!("{}{}Edge: {:?} (value: {:?})\n", &new_prefix, child_connector, ek, ev));
+            let recursive_prefix = format!("{}{}", &new_prefix, if is_last_child { "    " } else { "│   " });
+            Self::pretty_print_recursive(*child_idx, arena, &recursive_prefix, true, visiting, printed_nodes, output);
+        }
+
+        visiting.remove(&node_idx.as_usize());
     }
 }
 
@@ -1948,5 +2160,30 @@ where
     }
 }
 
+impl<EK, EV, T> Arena<Trie<EK, EV, T>>
+where
+    EK: Ord + Clone,
+    EV: Clone + std::ops::BitOrAssign,
+{
+    /// Inserts an edge from `src` to `dst` with the given `edge_key` and `edge_value`.
+    /// If an edge with the same key to the same destination already exists, the new
+    /// `edge_value` is merged into the existing one using `BitOrAssign` (`|=`).
+    pub fn insert_edge_simple(
+        &self,
+        src: Trie2Index,
+        dst: Trie2Index,
+        edge_key: EK,
+        edge_value: EV,
+    ) {
+        if let Some(mut src_guard) = src.write(self) {
+            src_guard.children.entry(edge_key).or_default()
+                .entry(dst)
+                .and_modify(|ev| *ev |= edge_value.clone())
+                .or_insert(edge_value);
+        }
+    }
+}
+
 pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
+
