@@ -73,6 +73,10 @@ impl<'r> Precomputer0<'r> {
         if config.merge_nodes {
             self.merge_nodes();
         }
+
+        self.break_structural_cycles();
+        self.assert_no_structural_cycles();
+
         if config.gc {
             self.gc();
         }
@@ -82,6 +86,96 @@ impl<'r> Precomputer0<'r> {
         let mut stats = PrecomputeStats::default();
         calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
         print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
+    }
+
+    fn break_structural_cycles(&mut self) {
+        crate::debug!(2, "Breaking structural cycles...");
+        let mut clones: HashMap<PrecomputeNode0Index, PrecomputeNode0Index> = HashMap::new();
+
+        for i in 0.. {
+            let back_edges = self.find_back_edges();
+            if back_edges.is_empty() {
+                crate::debug!(2, "No more structural cycles found after {} iterations.", i);
+                break;
+            }
+            if i > 100 { // Sanity check
+                panic!("Cycle breaking seems to be in an infinite loop.");
+            }
+            crate::debug!(3, "Found {} back edges in iteration {}.", back_edges.len(), i);
+
+            let mut changes = Vec::new();
+            for (src_idx, key, old_dest_idx) in back_edges {
+                let new_dest_idx = clones.entry(old_dest_idx.clone()).or_insert_with(|| {
+                    let new_node = self.trie0_god.insert(old_dest_idx.read(&self.trie0_god).unwrap().clone());
+                    PrecomputeNode0Index::new(new_node)
+                }).clone();
+                changes.push((src_idx, key, old_dest_idx, new_dest_idx));
+            }
+
+            for (src_idx, key, old_dest_idx, new_dest_idx) in changes {
+                let mut src_guard = src_idx.write(&self.trie0_god).unwrap();
+                if let Some(dest_map) = src_guard.children_mut().get_mut(&key) {
+                    if let Some(bv) = dest_map.remove(&old_dest_idx) {
+                        dest_map.insert(new_dest_idx, bv);
+                    }
+                }
+            }
+        }
+        crate::debug!(2, "Finished breaking structural cycles.");
+    }
+
+    fn find_back_edges(&self) -> Vec<(PrecomputeNode0Index, Option<(GrammarTokenID, Option<TokenizerStateID>)>, PrecomputeNode0Index)> {
+        let mut back_edges = Vec::new();
+        let mut visited = HashSet::new();
+        let mut recursion_stack = HashSet::new();
+        let roots: Vec<_> = self.roots.values().cloned().collect();
+
+        for root in roots {
+            self.find_back_edges_dfs(root, &mut visited, &mut recursion_stack, &mut back_edges);
+        }
+
+        back_edges
+    }
+
+    fn find_back_edges_dfs(
+        &self,
+        node_idx: PrecomputeNode0Index,
+        visited: &mut HashSet<PrecomputeNode0Index>,
+        recursion_stack: &mut HashSet<PrecomputeNode0Index>,
+        back_edges: &mut Vec<(PrecomputeNode0Index, Option<(GrammarTokenID, Option<TokenizerStateID>)>, PrecomputeNode0Index)>,
+    ) {
+        if visited.contains(&node_idx) {
+            return;
+        }
+
+        recursion_stack.insert(node_idx.clone());
+
+        let children_to_visit = node_idx.read(&self.trie0_god).unwrap().children().clone();
+
+        for (edge_key, dest_map) in children_to_visit.iter() {
+            for (child_idx, _edge_val) in dest_map.iter() {
+                if recursion_stack.contains(child_idx) {
+                    back_edges.push((node_idx.clone(), edge_key.clone(), child_idx.clone()));
+                } else {
+                    self.find_back_edges_dfs(child_idx.clone(), visited, recursion_stack, back_edges);
+                }
+            }
+        }
+
+        recursion_stack.remove(&node_idx);
+        visited.insert(node_idx.clone());
+    }
+
+    fn assert_no_structural_cycles(&self) {
+        let back_edges = self.find_back_edges();
+        if !back_edges.is_empty() {
+            let mut report = String::from("Structural cycles detected after attempting to break them:\n");
+            for (src, key, dest) in back_edges.iter().take(5) {
+                report.push_str(&format!("  Back edge from {} to {} with key {:?}\n", src, dest, key));
+            }
+            panic!("{}", report);
+        }
+        crate::debug!(2, "Assertion passed: no structural cycles found.");
     }
 
     fn replace_ignore_token_edges_with_none_edges(&mut self) {
