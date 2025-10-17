@@ -583,15 +583,18 @@ fn compute_push_elim_exits(
                         }
                     }
                     IntermediateTrie3EdgeKey::Push(_nested) => {
-                        // Blocked by a nested push: re-emit our (possibly intersected) push
-                        // immediately before this nested push destination.
-                        for (dst_idx, _ev) in dsts.iter() {
-                            exits.push(Exit::BlockedPush {
-                                llm: state.llm_bv.clone(),
-                                push_bv: state.push_bv.clone(),
-                                dst: *dst_idx,
-                            });
-                        }
+                        // Blocked by a nested push: keep our (possibly intersected) push
+                        // anchored at the current node (after any aggregated CheckLLM),
+                        // and do not traverse past the nested push for this elimination.
+                        //
+                        // Important: We DO NOT move the push forward to the nested push's
+                        // destination. That would violate the stack semantics used by the
+                        // path-based simplifier (which blocks when encountering another push).
+                        exits.push(Exit::BlockedPush {
+                            llm: state.llm_bv.clone(),
+                            push_bv: state.push_bv.clone(),
+                            dst: state.node,
+                        });
                         // Do not traverse past a nested push for this elimination.
                     }
                     IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
@@ -733,8 +736,16 @@ fn run_trie_based_elimination(
 
             let exits = compute_push_elim_exits(dst, &push_bv, god);
             if exits.is_empty() {
-                // No way to eliminate or even move this push (e.g., dead cycles only).
-                // Keep the original push edge as-is.
+                // No viable continuations were found for this push under the stack semantics
+                // (e.g., every branch mismatched). This path is dead; remove the original push.
+                if remove_specific_edge(
+                    god,
+                    src,
+                    IntermediateTrie3EdgeKey::Push(push_bv.clone()),
+                    dst,
+                ) {
+                    removed_this_round += 1;
+                }
                 continue;
             }
 
