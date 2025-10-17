@@ -171,15 +171,15 @@ impl ParseState {
             stack,
             accepted_state: None,
             prev_accepted_state: Arc::new(GSSNode::new_dead()),
-            trie2_god: None, // TODO: rename
+            trie2_god: None,
         }
     }
 
     pub(crate) fn with_god(mut self, trie2_god: Trie3GodWrapper) -> Self {
         self.trie2_god = Some(trie2_god);
         self
-    } 
-    
+    }
+
     pub(crate) fn with_maybe_god(mut self, maybe_god: Option<Trie3GodWrapper>) -> Self {
         self.trie2_god = maybe_god;
         self
@@ -1125,10 +1125,6 @@ impl Display for GLRParser {
             self.format_state_details(f, *sid, "    ")?;
         }
 
-        // Print the hallucinated state.
-        writeln!(f, "  State {} (Hallucinated):", self.hallucinated_state_id.0)?;
-        self.format_state_details(f, self.hallucinated_state_id, "    ")?;
-
         writeln!(f, "\nTerminal Map (name to terminal ID):")?;
         for (terminal, terminal_id) in terminal_map {
             writeln!(f, "  {} -> {}", terminal, terminal_id.0)?;
@@ -1212,8 +1208,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn with_god(mut self, trie2_god: Trie3GodWrapper) -> GLRParserState<'a> {
         self.active_state.trie2_god = Some(trie2_god);
         self
-    } 
-    
+    }
+
     pub fn set_runtime_cache(&mut self, cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>) {
         self.runtime_below_bottom_cache = cache;
     }
@@ -1697,12 +1693,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
 
         for (k, accs_by_edge) in popper.below_bottom() {
-            let final_acc = accs_by_edge.values().map(|arc| arc).fold(Acc::new_fresh(), |a, b| Acc::merge(&a, b));
+            let final_acc = accs_by_edge
+                .values()
+                .map(|arc| arc)
+                .fold(Acc::new_fresh(), |a, b| Acc::merge(&a, b));
             // Do not mutate stored_trie_nodes here; handled later.
             result.insert(*k, final_acc);
         }
+
         result
     }
+
     #[time_it]
     fn handle_below_bottom(
         &self,
@@ -1719,7 +1720,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return Vec::new();
         }
 
-        let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing"); // TODO: rename
+        let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
 
         let mut merged_acc_opt: Option<Acc> = None;
         let mut any_sources = false;
@@ -1864,7 +1865,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             for (_pred_ptr, isolated_parent) in parents_map {
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos", { // ~500 calls
                 let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
-                let mut seen_gotos: BTreeSet<(Goto, Option<StateIDBV>)> = BTreeSet::new();
+                let mut seen_gotos = HashSet::new();
                 let mut nt_queue = VecDeque::new();
                 nt_queue.push_back(nt);
 
@@ -1909,8 +1910,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", { // SLOW POINT, ~5k calls
                     for (goto, maybe_filter) in gotos_with_filters {
-                        if !seen_gotos.insert((goto, maybe_filter.clone())) {
-                            crate::debug!(5, "Skipping GOTO to state {:?}, accept: {}, filter: {:?}", goto.state_id, goto.accept, maybe_filter);
+                        if !seen_gotos.insert(goto) {
                             continue;
                         }
                         // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
@@ -1948,7 +1948,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         ..
                                     }) => {
                                         // Unit reduce chain: continue
-                                        crate::debug!(5, "Unit reduce chain: GOTO to state {} leads to reduce of NT '{}', continuing chain.", goto_state_id.0, self.parser.non_terminal_map.get_by_right(next_nt).unwrap());
                                         if seen_nts.insert(*next_nt) {
                                             nt_queue.push_back(*next_nt);
                                         }
@@ -1962,7 +1961,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                 .map_or(false, |r| r.0.len != 1)
                                         {
                                             timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::DefaultNonUnit GSS PUSH", {});
-                                            crate::debug!(5, "Pushing GOTO to state {:?}, accept: {}, filter: {:?}", goto_state_id, goto.accept, maybe_filter);
                                             out.push(Arc::new(parent_after_filter.push(
                                                 ParseStateEdgeContent {
                                                     state_id: goto_state_id,
@@ -1982,7 +1980,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     _ => {
                                         // Not a unit reduction path anymore -> emit a single push to goto_state
                                         timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::NonUnit GSS PUSH", {});
-                                        crate::debug!(5, "GOTO to state {} has a non-unit-reduce action ({:?}). Pushing state.", goto_state_id.0, actions[0].0);
                                         out.push(Arc::new(parent_after_filter.push(
                                             ParseStateEdgeContent {
                                                 state_id: goto_state_id,
@@ -1993,13 +1990,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             } else {
                                 // Not a unit reduction path anymore -> emit a single push to goto_state
                                 timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::MultiAction GSS PUSH", {});
-                                crate::debug!(5, "GOTO to state {} has {} actions, not a unit reduce. Pushing state.", goto_state_id.0, actions.len());
                                 out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
                                     state_id: goto_state_id,
                                 })));
                             }
                         } else {
-                            crate::debug!(5, "No GOTO. We're done.");
                             // No goto target -> we're done.
                         }
                     }
@@ -2120,11 +2115,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         let mut config = config.clone();
         config.current_token = Some(token_id);
-
-        if *self.parser.terminal_map.get_by_right(&token_id).unwrap() == Terminal::RegexName("EOF".to_string()) {
-            println!("here");
-        }
-        crate::debug!(4, "Processing token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
 
         if config.reset_cache {
             self.below_bottom_cache.clear();
