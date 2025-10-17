@@ -311,7 +311,7 @@ fn refine_mismatch(
     let mut last_improvement = Instant::now();
 
     'refine: loop {
-        if start_time.elapsed().as_secs() >= 2 || last_improvement.elapsed().as_millis() > 250 {
+        if start_time.elapsed().as_secs() >= 10 || last_improvement.elapsed().as_millis() > 1000 {
             break 'refine;
         }
 
@@ -329,14 +329,11 @@ fn refine_mismatch(
         
         let mut removed_an_edge = false;
         if let Some(mut node_w) = random_node_idx.write(&candidate_god) {
-            if let Some(ek) = node_w.children().keys().next().cloned() {
-                if let Some(dest_map) = node_w.children_mut().get_mut(&ek) {
-                    if dest_map.pop().is_some() {
-                        removed_an_edge = true;
-                    }
-                }
-                if node_w.children().get(&ek).map_or(false, |m| m.is_empty()) {
-                    node_w.children_mut().remove(&ek);
+            if !node_w.children().is_empty() {
+                let keys: Vec<_> = node_w.children().keys().cloned().collect();
+                let key_to_remove = &keys[rand::thread_rng().gen_range(0..keys.len())];
+                if node_w.children_mut().remove(key_to_remove).is_some() {
+                    removed_an_edge = true;
                 }
             }
         }
