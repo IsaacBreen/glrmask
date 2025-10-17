@@ -761,7 +761,6 @@ fn run_trie_based_elimination(
                 }
                 hot_nodes.insert(src_idx);
             }
-            let is_hot = hot_nodes.contains(&src_idx);
 
             pb.set_position(processed);
             if processed & 0xfff == 0 {
@@ -770,7 +769,7 @@ fn run_trie_based_elimination(
             let dest_idx = *pair_cache.get(&(src_idx, stack_id)).expect("dest exists");
 
             // --- Hot Node Stack Flushing Heuristic ---
-            if is_hot && !stack_interner.is_empty(stack_id) {
+            if hot_nodes.contains(&src_idx) && !stack_interner.is_empty(stack_id) {
                 // This node is hot and has a pending stack. Flush the stack to the graph
                 // and then let the re-queued (src_idx, empty_stack) state handle propagation.
                 // This converts stack complexity into graph complexity locally, containing the explosion.
@@ -819,6 +818,7 @@ fn run_trie_based_elimination(
             for (ek, dests) in src_guard.children().iter() {
                 match ek {
                     IntermediateTrie3EdgeKey::Push(bv_new) => {
+                        let is_hot = hot_nodes.contains(&src_idx);
                         // Heuristic: If a source node is part of a pre-calculated "push cycle" OR
                         // if it has become dynamically "hot" (visited too many times), we stop
                         // deferring its pushes. Instead, we emit them directly into the graph.
