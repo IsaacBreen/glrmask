@@ -4,8 +4,10 @@ use std::time::Instant;
 use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV};
 use crate::constraint::IntermediatePrecomputedNodeContents3;
 use crate::datastructures::trie::Trie;
+use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::r#macro::is_debug_level_enabled;
 use crate::tokenizer::TokenizerStateID;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::Rng;
 use crate::datastructures::ordered_hash_map::Pop;
 
@@ -405,6 +407,18 @@ fn run_trie_based_elimination(
     // 2) Prepare destination arena (clear existing graph).
     god.clear();
 
+    // Setup progress bar
+    let pb = ProgressBar::new(0);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) {msg}")
+            .expect("progress-bar"),
+    );
+    if !PROGRESS_BAR_ENABLED {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+    pb.set_message("Eliminating push/pop pairs");
+
     // 3) Memoization: (source_idx, pending_stack) -> dest_idx
     let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
     let mut work: VecDeque<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>)> = VecDeque::new();
@@ -442,6 +456,8 @@ fn run_trie_based_elimination(
 
     // 5) BFS over product states
     while let Some((src_idx, stack)) = work.pop_front() {
+        pb.set_length(pair_cache.len() as u64);
+        pb.inc(1);
         let dest_idx = *pair_cache.get(&(src_idx, stack.clone())).expect("dest exists");
         let src_guard = src_idx.read(&source).expect("source read");
 
@@ -552,6 +568,8 @@ fn run_trie_based_elimination(
             }
         }
     }
+
+    pb.finish_with_message("Done eliminating push/pop pairs");
 
     // 6) Replace input roots with new roots (pending_stack is empty).
     *roots = new_roots;
