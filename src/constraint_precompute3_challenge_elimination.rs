@@ -688,17 +688,15 @@ fn run_trie_based_elimination(
     god: &IntermediateTrie3GodWrapper,
 ) {
     // Fixpoint elimination. We never exit early; we iterate until a whole round removes none.
-    let root_indices: Vec<_> = roots.values().cloned().collect();
-    if root_indices.is_empty() {
-        return;
-    }
-
     let mut round: usize = 0;
     loop {
         round += 1;
-        // Collect all reachable nodes for this round.
+        let root_indices: Vec<_> = roots.values().cloned().collect();
+        if root_indices.is_empty() {
+            return;
+        }
+
         let nodes = Trie::all_nodes(god, &root_indices);
-        // Collect all push edges in the current snapshot.
         let mut push_edges: Vec<(IntermediatePrecomputeNode3Index, StateIDBV, IntermediatePrecomputeNode3Index)> =
             Vec::new();
         for src in &nodes {
@@ -714,7 +712,6 @@ fn run_trie_based_elimination(
         }
 
         if push_edges.is_empty() {
-            eprintln!("[challenge_elim] No pushes found; done.");
             break;
         }
 
@@ -723,10 +720,6 @@ fn run_trie_based_elimination(
             round,
             push_edges.len()
         );
-        // Simple progress bar: print at 10% increments
-        let total = push_edges.len().max(1);
-        let mut processed = 0usize;
-        let mut next_mark = 10usize;
 
         // For each src, memoize aggregator nodes by LLM BV to avoid node blowup.
         let mut per_src_agg_cache: BTreeMap<
@@ -734,19 +727,9 @@ fn run_trie_based_elimination(
             BTreeMap<LLMTokenBV, IntermediatePrecomputeNode3Index>,
         > = BTreeMap::new();
 
-        let mut removed_this_round: usize = 0;
+        let mut changed_this_round = false;
 
         for (src, push_bv, dst) in push_edges {
-            processed += 1;
-            let pct = (processed * 100) / total;
-            if pct >= next_mark {
-                eprintln!(
-                    "[challenge_elim] Round {} progress: {}/{} ({}%)",
-                    round, processed, total, pct
-                );
-                next_mark += 10;
-            }
-
             // Shortcut: if this push already targets a leaf, nothing to eliminate (prevents oscillation).
             if let Some(dst_r) = dst.read(god) {
                 if dst_r.value.end {
@@ -754,9 +737,7 @@ fn run_trie_based_elimination(
                 }
             }
 
-            // Compute exits fresh for this (dst, push_bv). Do not cache: the graph mutates during the round.
             let exits = compute_push_elim_exits(dst, &push_bv, god);
-            // Deduplicate exits and detect any blocked branches.
             if exits.is_empty() {
                 // No viable continuations were found for this push under the stack semantics
                 // (e.g., every branch mismatched). This path is dead; remove the original push.
@@ -766,7 +747,8 @@ fn run_trie_based_elimination(
                     IntermediateTrie3EdgeKey::Push(push_bv.clone()),
                     dst,
                 ) {
-                    removed_this_round += 1;
+                    changed_this_round = true;
+                    break; // Rescan after change
                 }
                 continue;
             }
@@ -827,26 +809,27 @@ fn run_trie_based_elimination(
                     IntermediateTrie3EdgeKey::Push(push_bv),
                     dst,
                 ) {
-                    removed_this_round += 1;
+                    changed_this_round = true;
                 }
+            }
+            if changed_this_round {
+                break; // Rescan after any change
             }
         }
 
-        eprintln!(
-            "[challenge_elim] Round {} removed {} push edge(s).",
-            round, removed_this_round
-        );
-
         Trie::gc(god, &root_indices);
 
-        if removed_this_round == 0 {
+        if !changed_this_round {
             // Fixpoint reached: no more eliminations possible.
             break;
         }
     }
 
     // Optional: recompute depths for diagnostics or downstream heuristics.
-    Trie::recompute_all_max_depths(god, &root_indices);
+    let final_roots: Vec<_> = roots.values().cloned().collect();
+    if !final_roots.is_empty() {
+        Trie::recompute_all_max_depths(god, &final_roots);
+    }
 }
 
 #[cfg(test)]
