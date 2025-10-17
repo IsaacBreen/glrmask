@@ -8,8 +8,6 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::r#macro::is_debug_level_enabled;
 use crate::tokenizer::TokenizerStateID;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use rand::Rng;
-use crate::datastructures::ordered_hash_map::Pop;
 
 /// If true, runs both trie-based and path-based elimination, compares them,
 /// and if a mismatch is found, attempts to find a minimal failing input graph.
@@ -561,109 +559,6 @@ fn compute_graph_signature(
     (pushes, pop0, pop1, popgt, popgt_sum_n, others)
 }
 
-/// Persistent, interned stack representation for pending StateIDBV pushes.
-/// This replaces cloning large Vec<StateIDBV> everywhere.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-struct StackID(usize);
-
-#[derive(Clone)]
-struct StackNode {
-    prev: Option<StackID>,
-    top: StateIDBV,
-    depth: usize,
-}
-
-struct StackInterner {
-    nodes: Vec<StackNode>,
-    // Intern map: (prev_stack_id, top_item) -> new_stack_id
-    // Use BTreeMap to avoid requiring Hash on StateIDBV (it should implement Ord already,
-    // since it participates in ordered keys via IntermediateTrie3EdgeKey).
-    map: BTreeMap<(StackID, StateIDBV), StackID>,
-}
-
-impl StackInterner {
-    fn new() -> Self {
-        // Index 0 is the empty stack sentinel.
-        let mut nodes = Vec::new();
-        nodes.push(StackNode {
-            prev: None,
-            top: StateIDBV::zeros(), // unused for sentinel
-            depth: 0,
-        });
-        Self {
-            nodes,
-            map: BTreeMap::new(),
-        }
-    }
-
-    #[inline]
-    fn empty(&self) -> StackID {
-        StackID(0)
-    }
-
-    #[inline]
-    fn is_empty(&self, id: StackID) -> bool {
-        id.0 == 0
-    }
-
-    #[inline]
-    fn depth(&self, id: StackID) -> usize {
-        self.nodes[id.0].depth
-    }
-
-    #[inline]
-    fn top(&self, id: StackID) -> Option<&StateIDBV> {
-        if id.0 == 0 { None } else { Some(&self.nodes[id.0].top) }
-    }
-
-    #[inline]
-    fn pop(&self, id: StackID) -> Option<StackID> {
-        if id.0 == 0 { None } else { self.nodes[id.0].prev }
-    }
-
-    fn push(&mut self, id: StackID, bv: StateIDBV) -> StackID {
-        if let Some(&existing) = self.map.get(&(id, bv.clone())) {
-            return existing;
-        }
-        let new_id = StackID(self.nodes.len());
-        let depth = self.nodes[id.0].depth + 1;
-        self.nodes.push(StackNode { prev: Some(id), top: bv.clone(), depth });
-        self.map.insert((id, bv), new_id);
-        new_id
-    }
-
-    fn to_vec_bottom_up(&self, mut id: StackID) -> Vec<StateIDBV> {
-        let mut rev: Vec<StateIDBV> = Vec::with_capacity(self.depth(id));
-        while id.0 != 0 {
-            rev.push(self.nodes[id.0].top.clone());
-            id = self.nodes[id.0].prev.expect("non-empty must have prev");
-        }
-        rev.reverse();
-        rev
-    }
-
-    fn from_bottom_slice(&mut self, slice: &[StateIDBV]) -> StackID {
-        let mut id = self.empty();
-        for bv in slice {
-            id = self.push(id, bv.clone());
-        }
-        id
-    }
-
-    fn to_string(&self, mut id: StackID) -> String {
-        if self.is_empty(id) {
-            return "[]".to_string();
-        }
-        let mut items = Vec::new();
-        while id.0 != 0 {
-            items.push(format!("{:?}", self.nodes[id.0].top));
-            id = self.nodes[id.0].prev.expect("non-empty must have prev");
-        }
-        items.reverse();
-        format!("[{}]", items.join(", "))
-    }
-}
-
 fn run_trie_based_elimination(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
@@ -683,37 +578,35 @@ fn run_trie_based_elimination(
     // 2) Prepare destination arena (clear, we'll rebuild).
     god.clear();
 
-    // 3) Exact product-graph BFS over (source_node, pending_stack).
-    let mut stack_interner = StackInterner::new();
-    let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, StackID), IntermediatePrecomputeNode3Index> = BTreeMap::new();
-    let mut work: VecDeque<(IntermediatePrecomputeNode3Index, StackID)> = VecDeque::new();
+    // 3) Exact product-graph BFS over (source_node, pending_stack as Vec<StateIDBV>).
+    let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
+    let mut work: VecDeque<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>)> = VecDeque::new();
 
-    macro_rules! get_or_create {
-        ($src_idx:expr, $stack:expr) => {{
-            let key = ($src_idx, $stack);
-            if let Some(&existing) = pair_cache.get(&key) {
-                existing
+    // Helper to create or fetch destination node for a (source_idx, stack) pair.
+    let mut get_or_create = |src_idx: IntermediatePrecomputeNode3Index, stack: Vec<StateIDBV>| {
+        if let Some(&existing) = pair_cache.get(&(src_idx, stack.clone())) {
+            existing
+        } else {
+            let is_end = src_idx
+                .read(&source)
+                .map(|r| r.value.end)
+                .unwrap_or(false) && stack.is_empty();
+            let node_val = if is_end {
+                IntermediatePrecomputedNodeContents3::leaf()
             } else {
-                let src_guard = key.0.read(&source).expect("source read");
-                let is_end = src_guard.value.end && stack_interner.is_empty(key.1);
-                drop(src_guard);
-                let node_val = if is_end {
-                    IntermediatePrecomputedNodeContents3::leaf()
-                } else {
-                    IntermediatePrecomputedNodeContents3::internal()
-                };
-                let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
-                pair_cache.insert(key, dest_idx);
-                work.push_back(($src_idx, $stack));
-                dest_idx
-            }
-        }};
-    }
+                IntermediatePrecomputedNodeContents3::internal()
+            };
+            let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
+            pair_cache.insert((src_idx, stack.clone()), dest_idx);
+            work.push_back((src_idx, stack));
+            dest_idx
+        }
+    };
 
     // 4) Initialize new roots as (source_root, empty stack).
     let mut new_roots: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
     for (sid, src_root) in sids.into_iter().zip(source_roots.into_iter()) {
-        let new_root = get_or_create!(src_root, stack_interner.empty());
+        let new_root = get_or_create(src_root, Vec::new());
         new_roots.insert(sid, new_root);
     }
 
@@ -731,33 +624,31 @@ fn run_trie_based_elimination(
 
     // 5) BFS loop.
     let mut processed: u64 = 0;
-    while let Some((src_idx, stack_id)) = work.pop_front() {
+    while let Some((src_idx, stack)) = work.pop_front() {
         processed += 1;
         pb.set_position(processed);
         if processed & 0xfff == 0 {
             pb.set_message(format!("queue={}", work.len()));
         }
-        let dest_idx = *pair_cache.get(&(src_idx, stack_id)).expect("dest exists");
+        let dest_idx = *pair_cache.get(&(src_idx, stack.clone())).expect("dest exists");
         let src_guard = src_idx.read(&source).expect("source read");
 
         // If we are on a source leaf (end == true) but with a non-empty pending stack,
         // flush the remaining pushes as a chain of Push edges to the (src_idx, empty) state.
-        if src_guard.value.end && !stack_interner.is_empty(stack_id) {
-            let final_dest_idx = get_or_create!(src_idx, stack_interner.empty());
-            let items = stack_interner.to_vec_bottom_up(stack_id);
-            if !items.is_empty() {
-                let mut cur = dest_idx;
-                for (i, bv) in items.iter().enumerate() {
-                    let next = if i == items.len() - 1 {
-                        final_dest_idx
-                    } else {
-                        IntermediatePrecomputeNode3Index::new(
-                            god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())),
-                        )
-                    };
-                    god.insert_edge_simple(cur, next, IntermediateTrie3EdgeKey::Push(bv.clone()), ());
-                    cur = next;
-                }
+        if src_guard.value.end && !stack.is_empty() {
+            let final_dest_idx = get_or_create(src_idx, Vec::new());
+            let items = &stack; // bottom -> top
+            let mut cur = dest_idx;
+            for (i, bv) in items.iter().enumerate() {
+                let next = if i == items.len() - 1 {
+                    final_dest_idx
+                } else {
+                    IntermediatePrecomputeNode3Index::new(
+                        god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())),
+                    )
+                };
+                god.insert_edge_simple(cur, next, IntermediateTrie3EdgeKey::Push(bv.clone()), ());
+                cur = next;
             }
         }
 
@@ -766,22 +657,23 @@ fn run_trie_based_elimination(
             match ek {
                 IntermediateTrie3EdgeKey::Push(bv_new) => {
                     // Defer push by stacking and carrying via NoOp.
-                    let new_stack_id = stack_interner.push(stack_id, bv_new.clone());
-                    if stack_interner.depth(new_stack_id) > MAX_STACK_DEPTH {
+                    let mut new_stack = stack.clone();
+                    if new_stack.len() + 1 > MAX_STACK_DEPTH {
                         // Safety cap: drop too-deep paths.
                         continue;
                     }
+                    new_stack.push(bv_new.clone());
                     for (dst_src_idx, _) in dests.iter() {
-                        let next_state = get_or_create!(*dst_src_idx, new_stack_id);
+                        let next_state = get_or_create(*dst_src_idx, new_stack.clone());
                         god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                     }
                 }
                 IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
                     if *n == 0 {
                         // Non-consuming: intersect with top if present; otherwise forward as-is.
-                        if stack_interner.is_empty(stack_id) {
+                        if stack.is_empty() {
                             for (dst_src_idx, _) in dests.iter() {
-                                let next_state = get_or_create!(*dst_src_idx, stack_interner.empty());
+                                let next_state = get_or_create(*dst_src_idx, Vec::new());
                                 god.insert_edge_simple(
                                     dest_idx,
                                     next_state,
@@ -790,26 +682,26 @@ fn run_trie_based_elimination(
                                 );
                             }
                         } else {
-                            let top = stack_interner.top(stack_id).expect("non-empty");
+                            let mut new_stack = stack.clone();
+                            let top = new_stack.last().expect("non-empty").clone();
                             if top.is_disjoint(pop_bv) {
                                 // Invalid branch: filtered out.
                                 continue;
                             }
-                            let mut narrowed = top.clone();
+                            let mut narrowed = top;
                             narrowed &= pop_bv.clone();
-                            let suffix = stack_interner.pop(stack_id).expect("non-empty");
-                            let new_stack_id = stack_interner.push(suffix, narrowed);
+                            *new_stack.last_mut().expect("non-empty") = narrowed;
                             for (dst_src_idx, _) in dests.iter() {
-                                let next_state = get_or_create!(*dst_src_idx, new_stack_id);
+                                let next_state = get_or_create(*dst_src_idx, new_stack.clone());
                                 god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                             }
                         }
                     } else {
                         // n >= 1
-                        if stack_interner.is_empty(stack_id) {
+                        if stack.is_empty() {
                             // No pending pushes: forward the Pop(n, ...) unchanged.
                             for (dst_src_idx, _) in dests.iter() {
-                                let next_state = get_or_create!(*dst_src_idx, stack_interner.empty());
+                                let next_state = get_or_create(*dst_src_idx, Vec::new());
                                 god.insert_edge_simple(
                                     dest_idx,
                                     next_state,
@@ -820,27 +712,27 @@ fn run_trie_based_elimination(
                         } else {
                             // Consume as many as possible from the stack.
                             let mut k = *n;
-                            let mut sid2 = stack_id;
-                            while k > 1 && !stack_interner.is_empty(sid2) {
-                                sid2 = stack_interner.pop(sid2).expect("non-empty");
+                            let mut new_stack = stack.clone();
+                            while k > 1 && !new_stack.is_empty() {
+                                new_stack.pop();
                                 k -= 1;
                             }
                             if k == 1 {
-                                if let Some(top2) = stack_interner.top(sid2) {
+                                if let Some(top2) = new_stack.last() {
                                     if top2.is_disjoint(pop_bv) {
                                         // Invalid branch
                                         continue;
                                     }
                                     // Pop the remaining top (consuming).
-                                    let final_sid = stack_interner.pop(sid2).expect("non-empty");
+                                    new_stack.pop();
                                     for (dst_src_idx, _) in dests.iter() {
-                                        let next_state = get_or_create!(*dst_src_idx, final_sid);
+                                        let next_state = get_or_create(*dst_src_idx, new_stack.clone());
                                         god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                                     }
                                 } else {
                                     // No pushes left to match: forward Pop(1, ...) as-is.
                                     for (dst_src_idx, _) in dests.iter() {
-                                        let next_state = get_or_create!(*dst_src_idx, sid2);
+                                        let next_state = get_or_create(*dst_src_idx, new_stack.clone());
                                         god.insert_edge_simple(
                                             dest_idx,
                                             next_state,
@@ -852,7 +744,7 @@ fn run_trie_based_elimination(
                             } else {
                                 // k > 1 and stack empty: forward the remaining Pop(k, ...) as-is.
                                 for (dst_src_idx, _) in dests.iter() {
-                                    let next_state = get_or_create!(*dst_src_idx, sid2);
+                                    let next_state = get_or_create(*dst_src_idx, new_stack.clone());
                                     god.insert_edge_simple(
                                         dest_idx,
                                         next_state,
@@ -867,7 +759,7 @@ fn run_trie_based_elimination(
                 // NoOp and CheckLLM (and any other non-Push/Pop edges) are forwarded unchanged with the same pending stack.
                 other => {
                     for (dst_src_idx, _) in dests.iter() {
-                        let next_state = get_or_create!(*dst_src_idx, stack_id);
+                        let next_state = get_or_create(*dst_src_idx, stack.clone());
                         god.insert_edge_simple(dest_idx, next_state, other.clone(), ());
                     }
                 }
