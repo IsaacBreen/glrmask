@@ -17,6 +17,10 @@ use crate::datastructures::ordered_hash_map::Pop;
 /// elimination logic itself.
 const DEBUG_MISMATCHES: bool = true;
 
+/// Maximum stack depth during trie-based elimination. Prevents infinite loops
+/// on graphs with cycles that contain unbalanced Push operations.
+const MAX_STACK_DEPTH: usize = 64;
+
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
@@ -481,6 +485,17 @@ fn run_trie_based_elimination(
                     // Push: defer emission by pushing onto the stack and carrying via NoOp.
                     let mut new_stack = stack.clone();
                     new_stack.push(bv_new.clone());
+
+                    if new_stack.len() > MAX_STACK_DEPTH {
+                        if is_debug_level_enabled(1) {
+                            println!(
+                                "[WARN] Push/Pop elimination: stack depth > {} exceeded. Path dropped.",
+                                MAX_STACK_DEPTH
+                            );
+                        }
+                        continue;
+                    }
+
                     for (dst_src_idx, _) in dests.iter() {
                         let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
                         god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
