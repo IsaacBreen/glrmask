@@ -22,10 +22,12 @@ pub trait Pop<K, V> {
     fn pop(&mut self) -> Option<(K, V)>;
 }
 
-impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+impl<K: Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
     fn pop(&mut self) -> Option<(K, V)> {
-        self.back()
-            .map(|(k, _)| k.clone())
-            .and_then(|k| self.remove(&k).map(|v| (k, v)))
+        // We use the fully qualified path to call the inherent `pop` method
+        // on the `OrderedHashMap` type, avoiding the recursive call to the
+        // trait method we are implementing.
+        ordered_hash_map::OrderedHashMap::pop(self)
     }
 }
+

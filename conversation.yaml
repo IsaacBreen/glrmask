@@ -242,7 +242,7 @@ local_system:
               OrderedMapEntry { map: self, key }
           }
       }
-    src/datastructures/ordered_hash_map.rs: |
+    src/datastructures/ordered_hash_map.rs: |+
       use std::hash::Hash;
       use ordered_hash_map::OrderedHashMap;
 
@@ -267,13 +267,15 @@ local_system:
           fn pop(&mut self) -> Option<(K, V)>;
       }
 
-      impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+      impl<K: Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
           fn pop(&mut self) -> Option<(K, V)> {
-              self.back()
-                  .map(|(k, _)| k.clone())
-                  .and_then(|k| self.remove(&k).map(|v| (k, v)))
+              // We use the fully qualified path to call the inherent `pop` method
+              // on the `OrderedHashMap` type, avoiding the recursive call to the
+              // trait method we are implementing.
+              ordered_hash_map::OrderedHashMap::pop(self)
           }
       }
+
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -621,5 +623,113 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Implement Pop::pop correctly using
       back() and remove() for OrderedHashMap"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/entry_api.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/ordered_hash_map.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      error[E0308]: mismatched types
+        --> src/datastructures/ordered_hash_map.rs:28:19
+         |
+      25 | impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+         |                            - expected this type parameter
+      ...
+      28 |             .map(|(k, _)| k.clone())
+         |                   ^^^^^^
+         |                   |
+         |                   expected type parameter `V`, found `(_, _)`
+         |                   expected due to this
+         |
+         = note: expected type parameter `V`
+                             found tuple `(_, _)`
+
+    metadata:
+  - assistant: |-
+      You are right, my apologies. The previous solution was overly complex and resulted in a confusing compiler error. The fundamental issue is simpler than the path I led you down.
+
+      The original problem was that our trait method `fn pop` has the same name as the inherent method on `OrderedHashMap`. When you call `self.pop()` inside the trait implementation, it calls itself, leading to infinite recursion. My attempt to fix this by using `back()` and `remove()` was incorrect and, as you saw, produced a misleading error from the compiler.
+
+      The correct and much simpler solution is to explicitly tell the compiler to call the `pop` method that belongs to the `OrderedHashMap` struct, not the one from our `Pop` trait. We can do this using a fully qualified path. This also has the benefit of not requiring the `K: Clone` trait bound.
+
+      Here are the corrected instructions.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `src/datastructures/ordered_hash_map.rs`**.
+
+      2.  **Locate the `Pop` trait implementation.**
+          This is the block of code that is currently causing the error:
+          ```rust
+          impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+              fn pop(&mut self) -> Option<(K, V)> {
+                  self.back()
+                      .map(|(k, _)| k.clone())
+                      .and_then(|k| self.remove(&k).map(|v| (k, v)))
+              }
+          }
+          ```
+
+      3.  **Replace the entire implementation.**
+          Replace the block above with the following corrected code. This version calls the map's inherent `pop` method directly, avoiding recursion, and removes the unnecessary `K: Clone` bound.
+
+          ```rust
+          impl<K: Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+              fn pop(&mut self) -> Option<(K, V)> {
+                  // We use the fully qualified path to call the inherent `pop` method
+                  // on the `OrderedHashMap` type, avoiding the recursive call to the
+                  // trait method we are implementing.
+                  ordered_hash_map::OrderedHashMap::pop(self)
+              }
+          }
+          ```
+
+      ### Git Diff
+
+      Here is the git diff for the required change:
+
+      ```diff
+      diff --git a/src/datastructures/ordered_hash_map.rs b/src/datastructures/ordered_hash_map.rs
+      --- a/src/datastructures/ordered_hash_map.rs
+      +++ b/src/datastructures/ordered_hash_map.rs
+      @@ -24,11 +24,11 @@
+           fn pop(&mut self) -> Option<(K, V)>;
+       }
+       
+      -impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+      +impl<K: Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+           fn pop(&mut self) -> Option<(K, V)> {
+      -        self.back()
+      -            .map(|(k, _)| k.clone())
+      -            .and_then(|k| self.remove(&k).map(|v| (k, v)))
+      +        // We use the fully qualified path to call the inherent `pop` method
+      +        // on the `OrderedHashMap` type, avoiding the recursive call to the
+      +        // trait method we are implementing.
+      +        ordered_hash_map::OrderedHashMap::pop(self)
+           }
+       }
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/ordered_hash_map.rs
+      Applying patch to 'src/datastructures/ordered_hash_map.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/ordered_hash_map.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Resolve infinite recursion in Pop::pop
+      by calling inherent method via fully qualified path"'
     metadata:
 ...
