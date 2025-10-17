@@ -583,16 +583,16 @@ fn compute_push_elim_exits(
                         }
                     }
                     IntermediateTrie3EdgeKey::Push(_nested) => {
-                        // Blocked by a nested push: re-emit our (possibly intersected) push
-                        // immediately before this nested push destination.
-                        for (dst_idx, _ev) in dsts.iter() {
-                            exits.push(Exit::BlockedPush {
-                                llm: state.llm_bv.clone(),
-                                push_bv: state.push_bv.clone(),
-                                dst: *dst_idx,
-                            });
-                        }
+                        // Blocked by a nested push. Re-emit our push pointing to the node
+                        // that has this nested push as an outgoing edge.
+                        exits.push(Exit::BlockedPush {
+                            llm: state.llm_bv.clone(),
+                            push_bv: state.push_bv.clone(),
+                            dst: state.node,
+                        });
                         // Do not traverse past a nested push for this elimination.
+                        // We continue the outer loop to check other edge types from this node.
+                        continue;
                     }
                     IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
                         let n_val = *n;
@@ -732,11 +732,6 @@ fn run_trie_based_elimination(
             }
 
             let exits = compute_push_elim_exits(dst, &push_bv, god);
-            if exits.is_empty() {
-                // No way to eliminate or even move this push (e.g., dead cycles only).
-                // Keep the original push edge as-is.
-                continue;
-            }
 
             let cache = per_src_agg_cache
                 .entry(src)
@@ -1369,6 +1364,109 @@ mod tests {
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
 
+        run_test(&god, &[root]);
+    }
+
+    /// Helper to build a simple graph with a single path for testing.
+    fn build_graph_from_path(
+        god: &IntermediateTrie3GodWrapper,
+        path: Vec<IntermediateTrie3EdgeKey>,
+    ) -> IntermediatePrecomputeNode3Index {
+        let root = god
+            .insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))
+            .into();
+        if path.is_empty() {
+            root.write(god).unwrap().value.end = true;
+            return root;
+        }
+
+        let mut current_node = root;
+        for (i, edge) in path.into_iter().enumerate() {
+            let is_last = i == path.len() - 1;
+            let content = if is_last {
+                IntermediatePrecomputedNodeContents3::leaf()
+            } else {
+                IntermediatePrecomputedNodeContents3::internal()
+            };
+            let next_node = god.insert(Trie::new(content)).into();
+            current_node
+                .write(god)
+                .unwrap()
+                .force_insert_to_node(edge, (), next_node);
+            current_node = next_node;
+        }
+        root
+    }
+
+    #[test]
+    fn test_minimal_failures_from_logs() {
+        // This test suite is composed of the minimal failing cases discovered
+        // by the debug harness in a failing test run. Each one targets a
+        // specific bug or edge case in the trie-based elimination logic.
+
+        // From test_blocked_push and test_multiple_cancellations_in_sequence
+        let god = IntermediateTrie3GodWrapper::new();
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2);
+        let root = build_graph_from_path(
+            &god,
+            vec![
+                IntermediateTrie3EdgeKey::Push(bv1.clone()),
+                IntermediateTrie3EdgeKey::Push(bv2.clone()),
+                IntermediateTrie3EdgeKey::Pop(1, bv2.clone()),
+            ],
+        );
+        run_test(&god, &[root]);
+
+        // From test_mismatch_invalidates_path
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = build_graph_from_path(
+            &god,
+            vec![
+                IntermediateTrie3EdgeKey::Push(bv1.clone()),
+                IntermediateTrie3EdgeKey::Pop(1, bv2.clone()),
+            ],
+        );
+        run_test(&god, &[root]);
+
+        // From test_pop_zero_keeps_push
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = build_graph_from_path(
+            &god,
+            vec![
+                IntermediateTrie3EdgeKey::Push(bv1.clone()),
+                IntermediateTrie3EdgeKey::Pop(0, bv1.clone()),
+            ],
+        );
+        run_test(&god, &[root]);
+
+        // From test_pop_zero_mismatch_invalidates_path
+        let god = IntermediateTrie3GodWrapper::new();
+        let root = build_graph_from_path(
+            &god,
+            vec![
+                IntermediateTrie3EdgeKey::Push(bv1.clone()),
+                IntermediateTrie3EdgeKey::Pop(0, bv2.clone()),
+            ],
+        );
+        run_test(&god, &[root]);
+
+        // From test_challenging_gauntlet
+        let god = IntermediateTrie3GodWrapper::new();
+        let mut llm200 = LLMTokenBV::zeros();
+        llm200.insert(200);
+        let root = build_graph_from_path(
+            &god,
+            vec![
+                IntermediateTrie3EdgeKey::CheckLLM(llm200),
+                IntermediateTrie3EdgeKey::Push(bv1.clone()),
+                IntermediateTrie3EdgeKey::Push(bv2.clone()),
+                IntermediateTrie3EdgeKey::Pop(1, bv1.clone()),
+                IntermediateTrie3EdgeKey::Pop(1, bv1.clone()),
+            ],
+        );
         run_test(&god, &[root]);
     }
 }
