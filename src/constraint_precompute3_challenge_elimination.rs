@@ -243,8 +243,12 @@ pub fn eliminate_pushes_and_pops(
             (paths, god_copy, roots_map_copy)
         };
 
-        println!("\n--- MINIMAL FAILING INPUT ---");
-        println!("{}", Trie::pretty_print_arena(&minimal_god));
+        let minimal_input_paths = get_normalized_paths(&minimal_roots_map, &minimal_god);
+        println!("\n--- MINIMAL FAILING INPUT ({} paths) ---", minimal_input_paths.len());
+        for (i, path) in minimal_input_paths.iter().enumerate() {
+            println!("  Path {}: {:?}", i, path);
+        }
+
         println!("\n--- TRIE-BASED OUTPUT ({} paths) ---", min_trie_paths.len());
         for (i, path) in min_trie_paths.iter().enumerate() {
             println!("  Path {}: {:?}", i, path);
