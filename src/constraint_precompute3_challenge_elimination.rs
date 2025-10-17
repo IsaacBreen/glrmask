@@ -83,9 +83,18 @@ pub fn eliminate_pushes_and_pops(
     god: &IntermediateTrie3GodWrapper,
 ) {
     // We build a new graph directly in `god` by traversing a read-only snapshot (`source`)
-    // of the original reachable subgraph, using a product over (node, pending_push).
-    // pending_push is Option<StateIDBV>: None means no pending; Some(A) means a Push(A) is pending
-    // and eligible to be canceled by the next Pop encountered before any subsequent Push.
+    // of the original reachable subgraph, using a product over (node, pending_stack).
+    // pending_stack is a Vec<StateIDBV> that behaves like a stack of Pushes seen so far but not yet
+    // materialized or canceled. This enables nested cancellations like:
+    //   Push(A), Push(B), Pop(1, B), Pop(1, A)  -> epsilon
+    //
+    // The transition rules mirror eliminate_pushes_and_pops_path_based but operate locally:
+    // - Push(X): push X onto the stack; propagate via NoOp.
+    // - Pop(0, B): if top intersects B, drop Pop (NoOp), keep stack; else branch dies.
+    // - Pop(1, B): if top intersects B, pop stack and NoOp; else branch dies.
+    // - Pop(n>1, B): unconditionally pop stack and forward Pop(n-1, B).
+    // - Other edges: forward unchanged with the same stack.
+    // When at an end node, flush remaining stack by emitting Push edges in original order.
 
     // 1) Snapshot the reachable subgraph from the provided roots.
     let mut sids: Vec<TokenizerStateID> = Vec::with_capacity(roots.len());
@@ -99,19 +108,19 @@ pub fn eliminate_pushes_and_pops(
     // 2) Prepare destination arena (clear existing graph).
     god.clear();
 
-    // 3) Memoization: (source_idx, pending) -> dest_idx
-    let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Option<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
-    let mut work: VecDeque<(IntermediatePrecomputeNode3Index, Option<StateIDBV>)> = VecDeque::new();
+    // 3) Memoization: (source_idx, pending_stack) -> dest_idx
+    let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
+    let mut work: VecDeque<(IntermediatePrecomputeNode3Index, Vec<StateIDBV>)> = VecDeque::new();
 
     macro_rules! get_or_create {
-        ($src_idx:expr, $pending:expr) => {
+        ($src_idx:expr, $stack:expr) => {
             {
-                let key = ($src_idx, $pending);
+                let key = ($src_idx, $stack.clone());
                 if let Some(&existing) = pair_cache.get(&key) {
                     existing
                 } else {
                     let src_guard = key.0.read(&source).expect("source read");
-                    let is_end = src_guard.value.end && key.1.is_none();
+                    let is_end = src_guard.value.end && key.1.is_empty();
                     drop(src_guard);
                     let node_val = if is_end {
                         IntermediatePrecomputedNodeContents3::leaf()
@@ -127,91 +136,86 @@ pub fn eliminate_pushes_and_pops(
         };
     }
 
-    // 4) Create new roots at (source_root, None)
+    // 4) Create new roots at (source_root, empty stack)
     let mut new_roots: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
     for (sid, src_root) in sids.into_iter().zip(source_roots.into_iter()) {
-        let new_root = get_or_create!(src_root, None);
+        let new_root = get_or_create!(src_root, Vec::<StateIDBV>::new());
         new_roots.insert(sid, new_root);
     }
 
     // 5) BFS over product states
-    while let Some((src_idx, pending)) = work.pop_front() {
-        let dest_idx = *pair_cache.get(&(src_idx, pending.clone())).expect("dest exists");
+    while let Some((src_idx, stack)) = work.pop_front() {
+        let dest_idx = *pair_cache.get(&(src_idx, stack.clone())).expect("dest exists");
         let src_guard = src_idx.read(&source).expect("source read");
 
-        // If this source node is an end, and we still have a pending push, we must
-        // commit it before termination: emit Push(A) to (src_idx, None).
-        if src_guard.value.end {
-            if let Some(a_pending) = pending.clone() {
-                let none_state = get_or_create!(src_idx, None);
-                god.insert_edge_simple(dest_idx, none_state, IntermediateTrie3EdgeKey::Push(a_pending.clone()), ());
+        // If this source node is an end, flush the entire pending stack in order:
+        // (src, [A, B, C]) --Push(A)--> (src, [B, C]) --Push(B)--> (src, [C]) --Push(C)--> (src, [])
+        if src_guard.value.end && !stack.is_empty() {
+            let mut from_idx = dest_idx;
+            // Emit pushes in original encounter order (bottom-to-top).
+            for i in 0..stack.len() {
+                let label = IntermediateTrie3EdgeKey::Push(stack[i].clone());
+                let next_stack = stack[i+1..].to_vec();
+                let to_idx = get_or_create!(src_idx, next_stack);
+                god.insert_edge_simple(from_idx, to_idx, label, ());
+                from_idx = to_idx;
             }
         }
 
         for (ek, dests) in src_guard.children().iter() {
             match ek {
                 IntermediateTrie3EdgeKey::Push(bv_new) => {
-                    // A new Push blocks any earlier pending Push.
-                    // If we have a pending A, commit it now at this position:
-                    //   (src, Some(A)) --Push(A)--> (src, None)
-                    // then follow the actual Push(B) via NoOp to (dst, Some(B)).
-                    if let Some(a_pending) = pending.clone() {
-                        let none_state = get_or_create!(src_idx, None);
-                        god.insert_edge_simple(dest_idx, none_state, IntermediateTrie3EdgeKey::Push(a_pending.clone()), ());
-                        // Now process the Push(B) from the none_state
-                        for (dst_src_idx, _) in dests.iter() {
-                            let next_state = get_or_create!(*dst_src_idx, Some(bv_new.clone()));
-                            god.insert_edge_simple(none_state, next_state, IntermediateTrie3EdgeKey::NoOp, ());
-                        }
-                    } else {
-                        // No pending: defer emission by using NoOp to carry pending=Some(B)
-                        for (dst_src_idx, _) in dests.iter() {
-                            let next_state = get_or_create!(*dst_src_idx, Some(bv_new.clone()));
-                            god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
-                        }
+                    // Push: defer emission by pushing onto the stack and carrying via NoOp.
+                    let mut new_stack = stack.clone();
+                    new_stack.push(bv_new.clone());
+                    for (dst_src_idx, _) in dests.iter() {
+                        let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
+                        god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
                     }
                 }
                 IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
-                    match &pending {
-                        None => {
-                            // No pending: forward Pop as-is.
-                            for (dst_src_idx, _) in dests.iter() {
-                                let next_state = get_or_create!(*dst_src_idx, None);
-                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Pop(*n, pop_bv.clone()), ());
-                            }
+                    if stack.is_empty() {
+                        // No pending: forward Pop as-is.
+                        for (dst_src_idx, _) in dests.iter() {
+                            let next_state = get_or_create!(*dst_src_idx, Vec::<StateIDBV>::new());
+                            god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Pop(*n, pop_bv.clone()), ());
                         }
-                        Some(a_pending) => {
-                            if *n == 0 {
-                                if a_pending.is_disjoint(pop_bv) {
-                                    // Invalid path; drop this branch (no edge emitted).
-                                    continue;
-                                }
-                                // Intersect: remove Pop(0), keep pending A.
-                                for (dst_src_idx, _) in dests.iter() {
-                                    let next_state = get_or_create!(*dst_src_idx, Some(a_pending.clone()));
-                                    god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
-                                }
-                            } else if *n == 1 {
-                                if a_pending.is_disjoint(pop_bv) {
-                                    // Invalid path; drop this branch.
-                                    continue;
-                                }
-                                // Intersect: both cancel -> epsilon, clear pending.
-                                for (dst_src_idx, _) in dests.iter() {
-                                    let next_state = get_or_create!(*dst_src_idx, None);
-                                    god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
-                                }
-                            } else {
-                                // n > 1: drop pending Push unconditionally and decrement Pop.
-                                for (dst_src_idx, _) in dests.iter() {
-                                    let next_state = get_or_create!(*dst_src_idx, None);
-                                    god.insert_edge_simple(
-                                        dest_idx,
-                                        next_state,
-                                        IntermediateTrie3EdgeKey::Pop(n - 1, pop_bv.clone()),
-                                        (),
-                                    );
-                                }
+                    } else {
+                        let top = stack.last().expect("non-empty").clone();
+                        if *n == 0 {
+                            if top.is_disjoint(pop_bv) {
+                                // Invalid path; drop this branch (no edge emitted).
+                                continue;
+                            }
+                            // Intersect: remove Pop(0), keep stack unchanged.
+                            for (dst_src_idx, _) in dests.iter() {
+                                let next_state = get_or_create!(*dst_src_idx, stack.clone());
+                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                            }
+                        } else if *n == 1 {
+                            if top.is_disjoint(pop_bv) {
+                                // Invalid path; drop this branch.
+                                continue;
+                            }
+                            // Intersect: both cancel -> epsilon, pop top of stack.
+                            let mut new_stack = stack.clone();
+                            new_stack.pop();
+                            for (dst_src_idx, _) in dests.iter() {
+                                let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
+                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                            }
+                        } else {
+                            // n > 1: drop top Push unconditionally and decrement Pop.
+                            let mut new_stack = stack.clone();
+                            new_stack.pop();
+                            for (dst_src_idx, _) in dests.iter() {
+                                let next_state = get_or_create!(*dst_src_idx, new_stack.clone());
+                                god.insert_edge_simple(
+                                    dest_idx,
+                                    next_state,
+                                    IntermediateTrie3EdgeKey::Pop(n - 1, pop_bv.clone()),
+                                    (),
+                                );
                             }
                         }
                     }
@@ -219,7 +223,7 @@ pub fn eliminate_pushes_and_pops(
                 // Non-push/pop edges (e.g., CheckLLM, NoOp) just forward; pending unchanged.
                 other => {
                     for (dst_src_idx, _) in dests.iter() {
-                        let next_state = get_or_create!(*dst_src_idx, pending.clone());
+                        let next_state = get_or_create!(*dst_src_idx, stack.clone());
                         god.insert_edge_simple(dest_idx, next_state, other.clone(), ());
                     }
                 }
@@ -227,7 +231,7 @@ pub fn eliminate_pushes_and_pops(
         }
     }
 
-    // 6) Replace input roots with new roots (pending == None states).
+    // 6) Replace input roots with new roots (pending_stack is empty).
     *roots = new_roots;
 }
 
