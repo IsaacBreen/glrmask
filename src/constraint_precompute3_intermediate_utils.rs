@@ -12,9 +12,10 @@ pub fn optimize_intermediate_trie3_template(
     // A few passes of optimization.
     for _ in 0..2 {
         let changed = prune_nodes_not_reaching_end(start_node, end_node, god);
-        // GC is needed to remove nodes that become unreachable after pruning edges.
-        Trie::gc(god, &[*start_node]);
-        if changed {
+        // Do not GC here. All templates are in the same `god`, and GC would remove
+        // nodes belonging to other templates. Pruned nodes will be left dangling,
+        // which is fine as they are unreachable from the start_node.
+        if !changed {
             break;
         }
     }
