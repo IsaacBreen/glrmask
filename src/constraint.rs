@@ -64,6 +64,7 @@ use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use std::iter::FromIterator;
 use crate::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
+use crate::r#macro::is_debug_level_enabled;
 
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;
@@ -1881,38 +1882,40 @@ impl GrammarConstraint {
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
 
-        println!("\n--- Terminal Template Paths ---");
-        let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
-        sorted_templates.sort_by_key(|(tid, _)| *tid);
+        if is_debug_level_enabled(2) {
+            println!("\n--- Terminal Template Paths ---");
+            let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
+            sorted_templates.sort_by_key(|(tid, _)| *tid);
 
-        for (tid, (start_node, end_node)) in sorted_templates {
-            let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
-            println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
+            for (tid, (start_node, end_node)) in sorted_templates {
+                let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
+                println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
 
-            let end_node_guard = end_node.read(&intermediate_trie3_god).unwrap();
-            let end_node_ref: &IntermediatePrecomputeNode3 = &*end_node_guard;
+                let end_node_guard = end_node.read(&intermediate_trie3_god).unwrap();
+                let end_node_ref: &IntermediatePrecomputeNode3 = &*end_node_guard;
 
-            let template_paths = IntermediatePrecomputeNode3::get_all_paths(
-                &intermediate_trie3_god,
-                &[start_node.clone()],
-                |node| std::ptr::eq(node, end_node_ref)
-            );
+                let template_paths = IntermediatePrecomputeNode3::get_all_paths(
+                    &intermediate_trie3_god,
+                    &[start_node.clone()],
+                    |node| std::ptr::eq(node, end_node_ref)
+                );
 
-            if template_paths.is_empty() {
-                println!("  (No paths found to end node)");
-            }
+                if template_paths.is_empty() {
+                    println!("  (No paths found to end node)");
+                }
 
-            for (_root_value, path_edges) in &template_paths {
-                let edge_keys_str: Vec<_> = path_edges.iter()
-                    .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
-                    .map(|(ek, _, _)| format!("{}", ek))
-                    .collect();
-                if !edge_keys_str.is_empty() {
-                    println!("  [{}]", edge_keys_str.join(", "));
+                for (_root_value, path_edges) in &template_paths {
+                    let edge_keys_str: Vec<_> = path_edges.iter()
+                        .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+                        .map(|(ek, _, _)| format!("{}", ek))
+                        .collect();
+                    if !edge_keys_str.is_empty() {
+                        println!("  [{}]", edge_keys_str.join(", "));
+                    }
                 }
             }
+            println!("--- End Terminal Template Paths ---\n");
         }
-        println!("--- End Terminal Template Paths ---\n");
 
         // Group tokenizer states by shared Trie1 root
         let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
@@ -2035,16 +2038,18 @@ impl GrammarConstraint {
             paths_by_sid.insert(*sid, processed_paths_for_sid);
         }
 
-        println!("Processed paths after elimination:");
-        for (sid, paths) in &paths_by_sid {
-            println!("  SID {}:", sid.0);
-            for path in paths {
-                let edge_keys_str: Vec<_> = path.iter()
-                    .filter(|ek| !matches!(ek, &IntermediateTrie3EdgeKey::NoOp))
-                    .map(|ek| format!("{}", ek))
-                    .collect();
-                if !edge_keys_str.is_empty() {
-                    println!("    [{}]", edge_keys_str.join(", "));
+        if is_debug_level_enabled(2) {
+            println!("Processed paths after elimination:");
+            for (sid, paths) in &paths_by_sid {
+                println!("  SID {}:", sid.0);
+                for path in paths {
+                    let edge_keys_str: Vec<_> = path.iter()
+                        .filter(|ek| !matches!(ek, &IntermediateTrie3EdgeKey::NoOp))
+                        .map(|ek| format!("{}", ek))
+                        .collect();
+                    if !edge_keys_str.is_empty() {
+                        println!("    [{}]", edge_keys_str.join(", "));
+                    }
                 }
             }
         }
