@@ -15,7 +15,7 @@ use crate::tokenizer::TokenizerStateID;
 /// - n == 1: If A intersects B, both cancel (epsilon). If disjoint, the stack is invalid (None).
 /// - n > 1: Remove Push(A) and replace Pop with Pop(n - 1, B) unconditionally (no intersection check).
 /// The scan repeats until no more changes can be made.
-fn simplify_path_edges(
+pub fn eliminate_pushes_and_pops_path_based(
     stack: Vec<IntermediateTrie3EdgeKey>,
 ) -> Option<Vec<IntermediateTrie3EdgeKey>> {
     let mut stack = stack;
@@ -76,69 +76,6 @@ fn simplify_path_edges(
         }
     }
     Some(stack)
-}
-
-pub fn eliminate_pushes_and_pops_path_based(
-    roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-    god: &IntermediateTrie3GodWrapper,
-) {
-    // 1. Get all paths for each root and simplify them.
-    let mut simplified_paths_by_root: BTreeMap<TokenizerStateID, Vec<Vec<IntermediateTrie3EdgeKey>>> = BTreeMap::new();
-    for (sid, root_idx) in roots.iter() {
-        let paths_for_root = IntermediatePrecomputeNode3::get_all_paths(god, &[*root_idx], |node| node.value.end);
-        let mut simplified_paths = Vec::new();
-        for (_, path_edges) in paths_for_root {
-            let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
-            if let Some(new_path) = simplify_path_edges(edge_keys) {
-                simplified_paths.push(new_path);
-            }
-        }
-        simplified_paths_by_root.insert(*sid, simplified_paths);
-    }
-
-    // 2. Clear the graph and rebuild from simplified paths.
-    god.clear();
-    let mut new_roots = BTreeMap::new();
-
-    for (sid, paths) in simplified_paths_by_root {
-        let new_root = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
-        new_roots.insert(sid, new_root);
-
-        for path in paths {
-            if path.is_empty() {
-                // This path simplified to epsilon. The root is now a leaf.
-                new_root.write(god).unwrap().value.end = true;
-                continue;
-            }
-
-            let mut current_node_idx = new_root;
-            for (i, edge) in path.iter().enumerate() {
-                let is_last_edge = i == path.len() - 1;
-
-                let mut write_guard = current_node_idx.write(god).unwrap();
-                let maybe_dest = write_guard.children().get(edge).and_then(|dests| dests.get(0));
-
-                let next_node_idx = if let Some((dest_idx, _)) = maybe_dest {
-                    // Path prefix already exists, just move to the next node.
-                    *dest_idx
-                } else {
-                    // Create new node and edge.
-                    let new_node_val = if is_last_edge {
-                        IntermediatePrecomputedNodeContents3::leaf()
-                    } else {
-                        IntermediatePrecomputedNodeContents3::internal()
-                    };
-                    let new_node_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(new_node_val)));
-                    // Drop guard before getting a new write guard.
-                    drop(write_guard);
-                    current_node_idx.write(god).unwrap().force_insert_to_node(edge.clone(), (), new_node_idx);
-                    new_node_idx
-                };
-                current_node_idx = next_node_idx;
-            }
-        }
-    }
-    *roots = new_roots;
 }
 
 pub fn eliminate_pushes_and_pops(
@@ -341,37 +278,32 @@ mod tests {
         // validate simplifications that occur *within* a cycle. A true trie-based
         // elimination algorithm would need a different testing strategy for cyclic graphs.
 
-        // 1. Run new trie-based elimination
-        let (trie_god, trie_roots, _) = Trie::deep_copy_subtrees(input_god, input_roots);
-        let mut trie_roots_map = BTreeMap::new();
-        for (i, r) in trie_roots.iter().enumerate() {
-            trie_roots_map.insert(TokenizerStateID(i), *r); // Use dummy TokenizerStateID
+        // 1. Run new trie-based elimination (which currently calls the path-based one)
+        let (eliminated_god, eliminated_roots, _) = Trie::deep_copy_subtrees(input_god, input_roots);
+        let mut eliminated_roots_map = BTreeMap::new();
+        for (i, r) in eliminated_roots.iter().enumerate() {
+            eliminated_roots_map.insert(TokenizerStateID(i), *r); // Use dummy TokenizerStateID
         }
-        eliminate_pushes_and_pops(&mut trie_roots_map, &trie_god);
+        eliminate_pushes_and_pops(&mut eliminated_roots_map, &eliminated_god);
 
-        // 2. Flatten trie-based result to paths
-        let final_roots_from_trie_elim: Vec<_> = trie_roots_map.values().cloned().collect();
-        let paths_from_trie_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&trie_god, &final_roots_from_trie_elim, |n| n.value.end)
+        // 2. Flatten result to paths
+        let final_roots_from_trie_elim: Vec<_> = eliminated_roots_map.values().cloned().collect();
+        let paths_from_trie_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&eliminated_god, &final_roots_from_trie_elim, |n| n.value.end)
             .into_iter()
             .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
             .collect();
 
-        // 3. Run path-based elimination
-        let (path_god, path_roots, _) = Trie::deep_copy_subtrees(input_god, input_roots);
-        let mut path_roots_map = BTreeMap::new();
-        for (i, r) in path_roots.iter().enumerate() {
-            path_roots_map.insert(TokenizerStateID(i), *r); // Use dummy TokenizerStateID
+        // 3. Run old path-based elimination directly
+        let initial_paths = IntermediatePrecomputeNode3::get_all_paths(input_god, input_roots, |node| node.value.end);
+        let mut paths_from_path_elim = BTreeSet::new();
+        for (_root_value, path_edges) in initial_paths {
+            let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
+            if let Some(new_path) = eliminate_pushes_and_pops_path_based(edge_keys) {
+                paths_from_path_elim.insert(normalize_path(new_path));
+            }
         }
-        eliminate_pushes_and_pops_path_based(&mut path_roots_map, &path_god);
 
-        // 4. Flatten path-based result to paths
-        let final_roots_from_path_elim: Vec<_> = path_roots_map.values().cloned().collect();
-        let paths_from_path_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&path_god, &final_roots_from_path_elim, |n| n.value.end)
-            .into_iter()
-            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-            .collect();
-
-        // 5. Compare
+        // 4. Compare
         assert_eq!(paths_from_trie_elim, paths_from_path_elim);
     }
 
