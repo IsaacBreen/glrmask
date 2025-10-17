@@ -24,6 +24,6 @@ pub trait Pop<K, V> {
 
 impl<K, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
     fn pop(&mut self) -> Option<(K, V)> {
-        self.pop()
+        self.pop_back()
     }
 }
