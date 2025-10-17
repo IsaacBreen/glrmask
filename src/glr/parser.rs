@@ -1,4 +1,4 @@
-use crate::constraint::{PrecomputeNode3Index, IntermediateTrie3EdgeKey, LLMTokenBV, LLMVocab, PrecomputedNodeContents, StateIDBV, Trie3God, IntermediateTrie3GodWrapper, IntermediatePrecomputedNodeContents3, IntermediatePrecomputeNode3};
+use crate::constraint::{PrecomputeNode3Index, IntermediateTrie3EdgeKey, LLMTokenBV, LLMVocab, StateIDBV, Trie3God, IntermediateTrie3GodWrapper, IntermediatePrecomputedNodeContents3, IntermediatePrecomputeNode3};
 use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
 use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
@@ -1724,7 +1724,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut merged_acc_opt: Option<Acc> = None;
         let mut any_sources = false;
         // Eagerly create a destination node. It will be used for any source nodes found.
-        let dest = StoredPrecomputeNodeIndex::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents { end: false })));
+        let dest = PrecomputeNode3Index::new(
+            god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+        );
 
         for (k, acc) in below {
             // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
@@ -1801,7 +1803,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Memoize deep_add across identical filters and reuse a single destination per filter for this call.
         // This drastically reduces trie insertions and GSS rewrites.
         let god_opt = self.active_state.trie2_god.as_ref();
-        let mut filter_ctxs: HashMap<StateIDBV, (StoredPrecomputeNodeIndex, PruneAndTransformRecursiveMemo)> = HashMap::new();
+        let mut filter_ctxs: HashMap<StateIDBV, (PrecomputeNode3Index, PruneAndTransformRecursiveMemo)> = HashMap::new();
 
         // Also memoize deep_add calls performed during the "simple GSS" caching for each cached destination.
         let mut cached_dest_memos: BTreeMap<PrecomputeNode3Index, PruneAndTransformRecursiveMemo> = BTreeMap::new();
@@ -1916,7 +1918,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) {
                             // Reuse a single destination per unique state filter BV and memoize the transformation.
                             let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
-                                let new_dest = StoredPrecomputeNodeIndex::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents { end: false })));
+                                let new_dest = PrecomputeNode3Index::new(
+                                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                                );
                                 (new_dest, PruneAndTransformRecursiveMemo::default())
                             });
                             let key = IntermediateTrie3EdgeKey::Pop(0, bv.clone());
