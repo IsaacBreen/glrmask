@@ -479,14 +479,9 @@ enum Exit {
         pop_bv: StateIDBV,
         dst: IntermediatePrecomputeNode3Index,
     },
-    // Elimination terminates by reaching a leaf. A new Push edge is created.
-    TerminatedPush {
-        llm: LLMTokenBV,
-        push_bv: StateIDBV,
-        dst: IntermediatePrecomputeNode3Index,
-    },
-    // Elimination is blocked by a nested Push. The outer Push is deferred.
-    BlockedByNestedPush {
+    // Elimination is blocked by a nested Push, or by reaching a leaf with no Pop(n>=1).
+    // We must keep the Push with the possibly-restricted bitset.
+    BlockedPush {
         llm: LLMTokenBV,
         push_bv: StateIDBV,
         dst: IntermediatePrecomputeNode3Index,
@@ -567,7 +562,7 @@ fn compute_push_elim_exits(
         // If this node is an end, then along this branch we can only preserve the Push (blocked).
         if let Some(read_guard) = state.node.read(god) {
             if read_guard.value.end {
-                exits.push(Exit::TerminatedPush {
+                exits.push(Exit::BlockedPush {
                     llm: state.llm_bv.clone(),
                     push_bv: state.push_bv.clone(),
                     dst: state.node,
@@ -608,7 +603,7 @@ fn compute_push_elim_exits(
                         // Important: We DO NOT move the push forward to the nested push's
                         // destination. That would violate the stack semantics used by the
                         // path-based simplifier (which blocks when encountering another push).
-                        exits.push(Exit::BlockedByNestedPush {
+                        exits.push(Exit::BlockedPush {
                             llm: state.llm_bv.clone(),
                             push_bv: state.push_bv.clone(),
                             dst: state.node,
@@ -693,17 +688,15 @@ fn run_trie_based_elimination(
     god: &IntermediateTrie3GodWrapper,
 ) {
     // Fixpoint elimination. We never exit early; we iterate until a whole round removes none.
-    let root_indices: Vec<_> = roots.values().cloned().collect();
-    if root_indices.is_empty() {
-        return;
-    }
-
     let mut round: usize = 0;
     loop {
         round += 1;
-        // Collect all reachable nodes for this round.
+        let root_indices: Vec<_> = roots.values().cloned().collect();
+        if root_indices.is_empty() {
+            return;
+        }
+
         let nodes = Trie::all_nodes(god, &root_indices);
-        // Collect all push edges in the current snapshot.
         let mut push_edges: Vec<(IntermediatePrecomputeNode3Index, StateIDBV, IntermediatePrecomputeNode3Index)> =
             Vec::new();
         for src in &nodes {
@@ -719,7 +712,6 @@ fn run_trie_based_elimination(
         }
 
         if push_edges.is_empty() {
-            eprintln!("[challenge_elim] No pushes found; done.");
             break;
         }
 
@@ -728,10 +720,6 @@ fn run_trie_based_elimination(
             round,
             push_edges.len()
         );
-        // Simple progress bar: print at 10% increments
-        let total = push_edges.len().max(1);
-        let mut processed = 0usize;
-        let mut next_mark = 10usize;
 
         // For each src, memoize aggregator nodes by LLM BV to avoid node blowup.
         let mut per_src_agg_cache: BTreeMap<
@@ -739,83 +727,17 @@ fn run_trie_based_elimination(
             BTreeMap<LLMTokenBV, IntermediatePrecomputeNode3Index>,
         > = BTreeMap::new();
 
-        // Cache exits per (dst, push_bv) to avoid repeated BFS work in this round.
-        let mut exit_cache: BTreeMap<(usize, StateIDBV), Vec<Exit>> = BTreeMap::new();
-
-        let mut removed_this_round: usize = 0;
+        let mut changed_this_round = false;
 
         for (src, push_bv, dst) in push_edges {
-            processed += 1;
-            let pct = (processed * 100) / total;
-            if pct >= next_mark {
-                eprintln!(
-                    "[challenge_elim] Round {} progress: {}/{} ({}%)",
-                    round, processed, total, pct
-                );
-                next_mark += 10;
-            }
-
-            // Compute or reuse exits for this (dst, push_bv)
-            let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
-                Some(v) => v.clone(),
-                None => {
-                    let e = compute_push_elim_exits(dst, &push_bv, god);
-                    exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
-                    e
-                }
-            };
-
-            // If the only result of the exploration is to regenerate the exact same push
-            // leading to the same destination node with no LLM checks, it means this push
-            // is irreducible. We should not modify it, to avoid a loop of
-            // removing and re-adding the same edge.
-            if exits.len() == 1 {
-                if let Exit::TerminatedPush {
-                    llm,
-                    push_bv: term_push_bv,
-                    dst: term_dst,
-                } = &exits[0]
-                {
-                    if *term_dst == dst && *term_push_bv == push_bv && *llm == LLMTokenBV::max_ones() {
-                        // This is an irreducible push. Skip it.
-                        continue;
-                    }
+            // Shortcut: if this push already targets a leaf, nothing to eliminate (prevents oscillation).
+            if let Some(dst_r) = dst.read(god) {
+                if dst_r.value.end {
+                    continue;
                 }
             }
 
-            // If any path from the push is blocked by a nested push, we must defer this
-            // entire elimination to a later round. This is because we cannot safely remove
-            // the original edge while leaving the blocked path, and we can't selectively
-            // rewrite only some paths emanating from a single edge.
-            if exits
-                .iter()
-                .any(|ex| matches!(ex, Exit::BlockedByNestedPush { .. }))
-            {
-                continue;
-            }
-
-            // Deduplicate exits.
-            let mut cancel_set: BTreeSet<(LLMTokenBV, IntermediatePrecomputeNode3Index)> =
-                BTreeSet::new();
-            let mut degrade_set: BTreeSet<(LLMTokenBV, usize, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                BTreeSet::new();
-            let mut terminated_set: BTreeSet<(LLMTokenBV, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                BTreeSet::new();
-
-            for ex in exits.iter() {
-                match ex {
-                    Exit::Cancel { llm, dst } => {
-                        cancel_set.insert((llm.clone(), *dst));
-                    }
-                    Exit::DegradePop { llm, new_n, pop_bv, dst } => {
-                        degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
-                    }
-                    Exit::TerminatedPush { llm, push_bv, dst } => {
-                        terminated_set.insert((llm.clone(), push_bv.clone(), *dst));
-                    }
-                    Exit::BlockedByNestedPush { .. } => unreachable!("Handled by 'any' check above"),
-                }
-            }
+            let exits = compute_push_elim_exits(dst, &push_bv, god);
             if exits.is_empty() {
                 // No viable continuations were found for this push under the stack semantics
                 // (e.g., every branch mismatched). This path is dead; remove the original push.
@@ -825,7 +747,8 @@ fn run_trie_based_elimination(
                     IntermediateTrie3EdgeKey::Push(push_bv.clone()),
                     dst,
                 ) {
-                    removed_this_round += 1;
+                    changed_this_round = true;
+                    break; // Rescan after change
                 }
                 continue;
             }
@@ -834,55 +757,79 @@ fn run_trie_based_elimination(
                 .entry(src)
                 .or_insert_with(BTreeMap::new);
 
-            for (llm, cancel_dst) in cancel_set {
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
+            // Wire exits from src via aggregator nodes, without set-based dedup.
+            // insert_edge_simple will merge duplicates when they occur, so per-exit
+            // dedup is unnecessary and can be expensive for complex bitsets.
+            let mut must_keep_original_edge = false;
+            for ex in exits.iter() {
+                match ex {
+                    Exit::Cancel { llm, dst: cancel_dst } => {
+                        let agg = get_or_create_aggregator_node(src, llm, god, cache);
+                        god.insert_edge_simple(agg, *cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
+                    }
+                    Exit::DegradePop { llm, new_n, pop_bv, dst: degrade_dst } => {
+                        let agg = get_or_create_aggregator_node(src, llm, god, cache);
+                        god.insert_edge_simple(
+                            agg,
+                            *degrade_dst,
+                            IntermediateTrie3EdgeKey::Pop(*new_n, pop_bv.clone()),
+                            (),
+                        );
+                    }
+                    Exit::BlockedPush { llm, push_bv: exit_push_bv, dst: exit_dst } => {
+                        // Conservative policy to avoid explosion:
+                        // Only rewire for leaf endpoints with no LLM aggregation.
+                        if *llm == LLMTokenBV::max_ones() {
+                            if let Some(dst_guard) = exit_dst.read(god) {
+                                if dst_guard.value.end {
+                                    // Wire src --Push(restricted_bv)--> leaf, effectively folding Pop(0).
+                                    god.insert_edge_simple(
+                                        src,
+                                        *exit_dst,
+                                        IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
+                                        (),
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        // For non-leaf or aggregated LLM cases, keep the original Push edge.
+                        must_keep_original_edge = true;
+                    }
+                }
             }
-            for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                god.insert_edge_simple(
-                    agg,
-                    degrade_dst,
-                    IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
-                    (),
-                );
-            }
-            for (llm, term_push_bv, term_dst) in terminated_set {
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                god.insert_edge_simple(
-                    agg,
-                    term_dst,
-                    IntermediateTrie3EdgeKey::Push(term_push_bv),
-                    (),
-                );
-            }
+            let keep_original_edge = must_keep_original_edge;
 
             // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
-            if remove_specific_edge(
-                god,
-                src,
-                IntermediateTrie3EdgeKey::Push(push_bv),
-                dst,
-            ) {
-                removed_this_round += 1;
+            // unless we determined it must remain (to avoid deleting the only surviving representation).
+            if !keep_original_edge {
+                if remove_specific_edge(
+                    god,
+                    src,
+                    IntermediateTrie3EdgeKey::Push(push_bv),
+                    dst,
+                ) {
+                    changed_this_round = true;
+                }
+            }
+            if changed_this_round {
+                break; // Rescan after any change
             }
         }
 
-        eprintln!(
-            "[challenge_elim] Round {} removed {} push edge(s).",
-            round, removed_this_round
-        );
-
         Trie::gc(god, &root_indices);
 
-        if removed_this_round == 0 {
+        if !changed_this_round {
             // Fixpoint reached: no more eliminations possible.
             break;
         }
     }
 
     // Optional: recompute depths for diagnostics or downstream heuristics.
-    Trie::recompute_all_max_depths(god, &root_indices);
+    let final_roots: Vec<_> = roots.values().cloned().collect();
+    if !final_roots.is_empty() {
+        Trie::recompute_all_max_depths(god, &final_roots);
+    }
 }
 
 #[cfg(test)]
