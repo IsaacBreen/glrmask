@@ -1,5 +1,5 @@
 // src/constraint_precompute3_challenge_elimination.rs
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, StateIDBV};
 use crate::constraint::IntermediatePrecomputedNodeContents3;
 use crate::datastructures::trie::Trie;
@@ -86,74 +86,149 @@ pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    // --- Path extraction, elimination, and trie rebuilding ---
-    let mut paths_by_sid = BTreeMap::new();
-    crate::debug!(2, "Processing paths for each intermediate trie3 state...");
-    for (sid, root_idx) in &*roots {
-        let paths = IntermediatePrecomputeNode3::get_all_paths(god, &[*root_idx], |node| node.value.end);
-        let mut processed_paths_for_sid = BTreeSet::new();
-        for (_root_value, path_edges) in paths {
-            let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
-            if let Some(new_path) = eliminate_pushes_and_pops_path_based(edge_keys) {
-                processed_paths_for_sid.insert(new_path);
-            }
+    // We build a new graph directly in `god` by traversing a read-only snapshot (`source`)
+    // of the original reachable subgraph, using a product over (node, pending_push).
+    // pending_push is Option<StateIDBV>: None means no pending; Some(A) means a Push(A) is pending
+    // and eligible to be canceled by the next Pop encountered before any subsequent Push.
+
+    // 1) Snapshot the reachable subgraph from the provided roots.
+    let mut sids: Vec<TokenizerStateID> = Vec::with_capacity(roots.len());
+    let mut old_root_vec: Vec<IntermediatePrecomputeNode3Index> = Vec::with_capacity(roots.len());
+    for (sid, idx) in roots.iter() {
+        sids.push(*sid);
+        old_root_vec.push(*idx);
+    }
+    let (source, source_roots, _map) = Trie::deep_copy_subtrees(god, &old_root_vec);
+
+    // 2) Prepare destination arena (clear existing graph).
+    crate::debug!(2, "Building trie-native elimination (product graph)...");
+    god.clear();
+
+    // 3) Memoization: (source_idx, pending) -> dest_idx
+    let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, Option<StateIDBV>), IntermediatePrecomputeNode3Index> = BTreeMap::new();
+    let mut work: VecDeque<(IntermediatePrecomputeNode3Index, Option<StateIDBV>)> = VecDeque::new();
+
+    // Helper to create or fetch a product-state node in the destination graph.
+    let mut get_or_create = |src_idx: IntermediatePrecomputeNode3Index, pending: Option<StateIDBV>| -> IntermediatePrecomputeNode3Index {
+        if let Some(existing) = pair_cache.get(&(src_idx, pending.clone())) {
+            return *existing;
         }
-        paths_by_sid.insert(*sid, processed_paths_for_sid);
+        let src_guard = src_idx.read(&source).expect("source read");
+        let is_end = src_guard.value.end && pending.is_none();
+        drop(src_guard);
+        let node_val = if is_end {
+            IntermediatePrecomputedNodeContents3::leaf()
+        } else {
+            IntermediatePrecomputedNodeContents3::internal()
+        };
+        let dest_idx = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(node_val)));
+        pair_cache.insert((src_idx, pending.clone()), dest_idx);
+        work.push_back((src_idx, pending));
+        dest_idx
+    };
+
+    // 4) Create new roots at (source_root, None)
+    let mut new_roots: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
+    for (sid, src_root) in sids.into_iter().zip(source_roots.into_iter()) {
+        let new_root = get_or_create(src_root, None);
+        new_roots.insert(sid, new_root);
     }
 
-    if is_debug_level_enabled(3) {
-        println!("Processed paths after elimination:");
-        for (sid, paths) in &paths_by_sid {
-            println!("  SID {}:", sid.0);
-            for path in paths {
-                let edge_keys_str: Vec<_> = path.iter()
-                    .filter(|ek| !matches!(ek, &IntermediateTrie3EdgeKey::NoOp))
-                    .map(|ek| format!("{}", ek))
-                    .collect();
-                if !edge_keys_str.is_empty() {
-                    println!("    [{}]", edge_keys_str.join(", "));
+    // 5) BFS over product states
+    while let Some((src_idx, pending)) = work.pop_front() {
+        let dest_idx = *pair_cache.get(&(src_idx, pending.clone())).expect("dest exists");
+        let src_guard = src_idx.read(&source).expect("source read");
+
+        // If this source node is an end, and we still have a pending push, we must
+        // commit it before termination: emit Push(A) to (src_idx, None).
+        if src_guard.value.end {
+            if let Some(a_pending) = pending.clone() {
+                let none_state = get_or_create(src_idx, None);
+                god.insert_edge_simple(dest_idx, none_state, IntermediateTrie3EdgeKey::Push(a_pending.clone()), ());
+            }
+        }
+
+        for (ek, dests) in src_guard.children().iter() {
+            match ek {
+                IntermediateTrie3EdgeKey::Push(bv_new) => {
+                    // A new Push blocks any earlier pending Push.
+                    // If we have a pending A, commit it now at this position:
+                    //   (src, Some(A)) --Push(A)--> (src, None)
+                    // then follow the actual Push(B) via NoOp to (dst, Some(B)).
+                    if let Some(a_pending) = pending.clone() {
+                        let none_state = get_or_create(src_idx, None);
+                        god.insert_edge_simple(dest_idx, none_state, IntermediateTrie3EdgeKey::Push(a_pending.clone()), ());
+                        // Now process the Push(B) from the none_state
+                        for (dst_src_idx, _) in dests.iter() {
+                            let next_state = get_or_create(*dst_src_idx, Some(bv_new.clone()));
+                            god.insert_edge_simple(none_state, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                        }
+                    } else {
+                        // No pending: defer emission by using NoOp to carry pending=Some(B)
+                        for (dst_src_idx, _) in dests.iter() {
+                            let next_state = get_or_create(*dst_src_idx, Some(bv_new.clone()));
+                            god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                        }
+                    }
+                }
+                IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
+                    match &pending {
+                        None => {
+                            // No pending: forward Pop as-is.
+                            for (dst_src_idx, _) in dests.iter() {
+                                let next_state = get_or_create(*dst_src_idx, None);
+                                god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Pop(*n, pop_bv.clone()), ());
+                            }
+                        }
+                        Some(a_pending) => {
+                            if *n == 0 {
+                                if a_pending.is_disjoint(pop_bv) {
+                                    // Invalid path; drop this branch (no edge emitted).
+                                    continue;
+                                }
+                                // Intersect: remove Pop(0), keep pending A.
+                                for (dst_src_idx, _) in dests.iter() {
+                                    let next_state = get_or_create(*dst_src_idx, Some(a_pending.clone()));
+                                    god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                                }
+                            } else if *n == 1 {
+                                if a_pending.is_disjoint(pop_bv) {
+                                    // Invalid path; drop this branch.
+                                    continue;
+                                }
+                                // Intersect: both cancel -> epsilon, clear pending.
+                                for (dst_src_idx, _) in dests.iter() {
+                                    let next_state = get_or_create(*dst_src_idx, None);
+                                    god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::NoOp, ());
+                                }
+                            } else {
+                                // n > 1: drop pending Push unconditionally and decrement Pop.
+                                for (dst_src_idx, _) in dests.iter() {
+                                    let next_state = get_or_create(*dst_src_idx, None);
+                                    god.insert_edge_simple(
+                                        dest_idx,
+                                        next_state,
+                                        IntermediateTrie3EdgeKey::Pop(n - 1, pop_bv.clone()),
+                                        (),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // Non-push/pop edges (e.g., CheckLLM, NoOp) just forward; pending unchanged.
+                other => {
+                    for (dst_src_idx, _) in dests.iter() {
+                        let next_state = get_or_create(*dst_src_idx, pending.clone());
+                        god.insert_edge_simple(dest_idx, next_state, other.clone(), ());
+                    }
                 }
             }
         }
     }
 
-    // Rebuild the intermediate trie from the processed paths.
-    crate::debug!(2, "Rebuilding intermediate trie3 from processed paths...");
-    god.clear();
-    let mut new_root_map: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
-    for (sid, _old_root) in &*roots {
-        let new_root = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
-        new_root_map.insert(*sid, new_root);
-    }
-    *roots = new_root_map;
-
-    // Create a single shared leaf node.
-    let leaf_node = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
-
-    for (sid, paths) in &paths_by_sid {
-        let root_idx = roots.get(sid).unwrap();
-        for path in paths {
-            let mut current_idx = *root_idx;
-            for edge_key in path {
-                let next_idx = {
-                    let guard = current_idx.read(god).unwrap();
-                    if let Some(dest_map) = guard.children().get(edge_key) {
-                        // Path processing should result in deterministic single-destination edges.
-                        *dest_map.keys().next().unwrap()
-                    } else {
-                        drop(guard);
-                        let new_node = Trie::new(IntermediatePrecomputedNodeContents3::internal());
-                        let new_idx = IntermediatePrecomputeNode3Index::from(god.insert(new_node));
-                        current_idx.write(god).unwrap().force_insert_to_node(edge_key.clone(), (), new_idx);
-                        new_idx
-                    }
-                };
-                current_idx = next_idx;
-            }
-            // After the path is built, connect the last node to the shared leaf.
-            current_idx.write(god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), leaf_node);
-        }
-    }
+    // 6) Replace input roots with new roots (pending == None states).
+    *roots = new_roots;
 }
 
 #[cfg(test)]
