@@ -402,6 +402,9 @@ pub fn merge_equivalent_llm_tokens_trie3(
     let it = all_nodes.iter();
     for n in it {
         let g = n.read(trie3_god).expect("read");
+        if !g.value.live_tokens.is_empty() {
+            all_bvs.insert(g.value.live_tokens.clone());
+        }
         for ((_, llm_bv), _dm) in g.children() {
             if !llm_bv.is_empty() {
                 all_bvs.insert(llm_bv.clone());
@@ -515,6 +518,21 @@ pub fn merge_equivalent_llm_tokens_trie3(
 
         let mut w = n.write(trie3_god).expect("write");
 
+        // Remap live_tokens if needed
+        if !w.value.live_tokens.is_empty() {
+            if w.value.live_tokens == LLMTokenBV::max_ones() {
+                w.value.live_tokens = mapped_universe.clone();
+            } else {
+                let lv_ptr = Arc::as_ptr(&w.value.live_tokens.inner);
+                if affected_ptrs.contains(&lv_ptr) {
+                    let original_bv = w.value.live_tokens.clone();
+                    w.value.live_tokens = memo.entry(original_bv)
+                        .or_insert_with_key(|bv| remap_llm_bv_many_to_one(bv, &old_to_new, max_tok))
+                        .clone();
+                }
+            }
+        }
+
         // Remap edge keys (pop, LLMTokenBV)
         let old_children = std::mem::take(w.children_mut());
         let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
@@ -542,13 +560,6 @@ pub fn merge_equivalent_llm_tokens_trie3(
             }
 		}
 		*w.children_mut() = new_children;
-
-		// Recompute live tokens from the new children
-		let mut new_live = LLMTokenBV::zeros();
-		for ((_, llm_bv), _) in w.children() {
-			new_live |= llm_bv;
-		}
-		w.value.live_tokens = new_live;
 	}
 	// 5) Update StageVocab
 	#[cfg(not(rustrover))]
@@ -589,6 +600,9 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     let it = all_nodes.iter();
     for n in it {
         let g = n.read(trie3_god).expect("read");
+        if !g.value.live_tokens.is_empty() {
+            *bv_counts.entry(g.value.live_tokens.clone()).or_default() += 1;
+        }
         for ((_, llm_bv), _dm) in g.children() {
             if !llm_bv.is_empty() {
                 *bv_counts.entry(llm_bv.clone()).or_default() += 1;
@@ -635,6 +649,13 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     let it = all_nodes.iter();
     for n in it {
         let r = n.read(trie3_god).expect("read");
+        let new_live_tokens = if r.value.live_tokens.is_empty() {
+            r.value.live_tokens.clone()
+        } else {
+            memo.entry(r.value.live_tokens.clone())
+                .or_insert_with_key(|bv| remap_llm_bv_permutation(bv, &old_to_new, max_tok))
+                .clone()
+        };
         let mut new_children = BTreeMap::new();
         for ((pop, llm_bv), dm) in r.children() {
             let mapped_key_bv = memo.entry(llm_bv.clone())
@@ -646,7 +667,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
                 entry.entry(dst.clone()).and_modify(|e| *e |= sid_bv).or_insert_with(|| sid_bv.clone());
             }
         }
-        new_states.push(new_children);
+        new_states.push((new_live_tokens, new_children));
     }
     #[cfg(not(rustrover))]
     let it = tqdm!(all_nodes.iter().enumerate(), desc = "Trie3 Reorder (Remap Write)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
@@ -654,12 +675,8 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     let it = all_nodes.iter().enumerate();
     for (i, n) in it {
         let mut w = n.write(trie3_god).expect("write");
-        let children = &new_states[i];
-        let mut new_live = LLMTokenBV::zeros();
-        for ((_, llm_bv), _) in children {
-            new_live |= llm_bv;
-        }
-        w.value.live_tokens = new_live;
+        let (live_tokens, children) = &new_states[i];
+        w.value.live_tokens = live_tokens.clone();
         *w.children_mut() = children.clone();
     }
 	let ranges_after = count_total_ranges_trie3(&all_nodes, trie3_god);
@@ -716,12 +733,7 @@ fn simplify_llm_token_bvs_trie3(
             continue;
         }
 
-        // Recompute live_tokens on the fly to ensure it's accurate for this pass.
-        let live_u = {
-            let mut u = LLMTokenBV::zeros();
-            for ((_, llm_bv), _) in w.children() { u |= llm_bv; }
-            u
-        };
+        let live_u = w.value.live_tokens.clone();
         if live_u.is_all() { // If all tokens are live, no simplification is possible.
             continue;
         }
@@ -906,12 +918,7 @@ fn factor_common_destinations_trie3(
                         let none_like_edge_key = (0, all_llm_bv.clone());
                         let dest_map = src_guard.children_mut().entry(none_like_edge_key).or_default();
                         dest_map.insert(intermediate_node, all_sids_bv.clone());
-                        // Recompute live tokens from scratch after modifying edges.
-                        let mut new_live = LLMTokenBV::zeros();
-                        for ((_, llm_bv), _) in src_guard.children() {
-                            new_live |= llm_bv;
-                        }
-                        src_guard.value.live_tokens = new_live;
+                        src_guard.value.live_tokens |= &all_llm_bv;
                     }
                 }
             }
@@ -1184,10 +1191,10 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
                 }
             }
 
-            // Recompute live tokens from the new merged edges.
-            let mut new_live_tokens = LLMTokenBV::zeros();
-            for ((_, llm_bv), _) in &new_children {
-                new_live_tokens |= llm_bv;
+            for (i, &c) in final_partition.iter().enumerate() {
+                if c == class_id {
+                    new_live_tokens |= &old_of[i].read(trie3_god).unwrap().value.live_tokens;
+                }
             }
 
             let mut guard = rep_idx.write(trie3_god).unwrap();
@@ -1307,10 +1314,12 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
                 .collect();
 
             let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+            let mut new_live_tokens = LLMTokenBV::zeros();
 
             // Merge all edges from all nodes in the class into the representative.
             for node_idx in &nodes_in_class {
                 let guard = node_idx.read(trie3_god).unwrap();
+                new_live_tokens |= &guard.value.live_tokens;
 
                 for ((pop, llm_bv), dest_map) in guard.children() {
                     for (dest_idx, sids) in dest_map {
@@ -1326,12 +1335,6 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
                             .or_insert_with(|| sids.clone());
                     }
                 }
-            }
-
-            // Recompute live tokens from the new merged edges.
-            let mut new_live_tokens = LLMTokenBV::zeros();
-            for ((_, llm_bv), _) in &new_children {
-                new_live_tokens |= llm_bv;
             }
 
             let mut guard = rep_idx.write(trie3_god).unwrap();
