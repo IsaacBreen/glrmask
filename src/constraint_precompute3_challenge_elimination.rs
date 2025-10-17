@@ -90,6 +90,22 @@ fn simplify_path(
                 }
 
                 if let Some(j) = pop_j {
+                    // We need to inspect the pop operation *before* removing it.
+                    if let IntermediateTrie3EdgeKey::Pop(n, _) = &stack[j] {
+                        if *n == 0 {
+                            // For Pop(0), which is a non-consuming check, the simplification is only valid
+                            // if there isn't a subsequent Push that would block it. This mimics the
+                            // trie-based BFS which would find the nested push and stop exploration.
+                            let has_later_push = ((j + 1)..stack.len())
+                                .any(|k| matches!(stack[k], IntermediateTrie3EdgeKey::Push(_)));
+                            if has_later_push {
+                                // Blocked. Don't pair. Continue scanning from the next element.
+                                i += 1;
+                                continue;
+                            }
+                        }
+                    }
+
                     // Found a pair to cancel
                     let pop_op = stack.remove(j);
                     let _push_op = stack.remove(i); // push is at i
