@@ -2121,11 +2121,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut config = config.clone();
         config.current_token = Some(token_id);
 
-        if *self.parser.terminal_map.get_by_right(&token_id).unwrap() == Terminal::RegexName("EOF".to_string()) {
-            println!("here");
-        }
-        crate::debug!(4, "Processing token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
-
         if config.reset_cache {
             self.below_bottom_cache.clear();
         }
