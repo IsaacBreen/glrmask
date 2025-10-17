@@ -4,7 +4,7 @@ use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3
 use crate::constraint::IntermediatePrecomputedNodeContents3;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
-
+use crate::tokenizer::TokenizerStateID;
 
 /// Eliminates adjacent Push/Pop pairs from a stack of intermediate trie edge keys.
 /// This is a core part of simplifying the precompute3 graph.
@@ -83,7 +83,7 @@ pub fn eliminate_pushes_and_pops_path_based(
 /// processing paths, and rebuilding the trie. This maintains the correct logic while
 /// providing the desired API for a true trie-based replacement.
 pub fn eliminate_pushes_and_pops(
-    roots: &mut BTreeMap<u32, IntermediatePrecomputeNode3Index>,
+    roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
     // --- Path extraction, elimination, and trie rebuilding ---
@@ -104,7 +104,7 @@ pub fn eliminate_pushes_and_pops(
     if is_debug_level_enabled(3) {
         println!("Processed paths after elimination:");
         for (sid, paths) in &paths_by_sid {
-            println!("  SID {}:", sid);
+            println!("  SID {}:", sid.0);
             for path in paths {
                 let edge_keys_str: Vec<_> = path.iter()
                     .filter(|ek| !matches!(ek, &IntermediateTrie3EdgeKey::NoOp))
@@ -120,7 +120,7 @@ pub fn eliminate_pushes_and_pops(
     // Rebuild the intermediate trie from the processed paths.
     crate::debug!(2, "Rebuilding intermediate trie3 from processed paths...");
     god.clear();
-    let mut new_root_map: BTreeMap<u32, IntermediatePrecomputeNode3Index> = BTreeMap::new();
+    let mut new_root_map: BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index> = BTreeMap::new();
     for (sid, _old_root) in &*roots {
         let new_root = IntermediatePrecomputeNode3Index::new(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         new_root_map.insert(*sid, new_root);
@@ -169,7 +169,7 @@ mod tests {
         let (eliminated_god, eliminated_roots, _) = Trie::deep_copy_subtrees(input_god, input_roots);
         let mut eliminated_roots_map = BTreeMap::new();
         for (i, r) in eliminated_roots.iter().enumerate() {
-            eliminated_roots_map.insert(i as u32, *r); // Use dummy TokenizerStateID
+            eliminated_roots_map.insert(TokenizerStateID(i), *r); // Use dummy TokenizerStateID
         }
         eliminate_pushes_and_pops(&mut eliminated_roots_map, &eliminated_god);
 
