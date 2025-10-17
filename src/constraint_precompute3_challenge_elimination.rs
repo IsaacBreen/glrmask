@@ -8,6 +8,8 @@ use crate::datastructures::trie::Trie;
 use crate::tokenizer::TokenizerStateID;
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::collections::VecDeque;
+use std::collections::btree_map::Entry;
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
@@ -185,11 +187,350 @@ pub fn eliminate_pushes_and_pops_path_based(
     }
 }
 
+#[derive(Clone, Debug)]
+enum Exit {
+    // Both cancel -> epsilon; we attach a NoOp from the aggregator node to dst.
+    Cancel {
+        llm: LLMTokenBV,
+        dst: IntermediatePrecomputeNode3Index,
+    },
+    // Remove Push unconditionally and decrement Pop(n>1) -> Pop(n-1).
+    DegradePop {
+        llm: LLMTokenBV,
+        new_n: usize,
+        pop_bv: StateIDBV,
+        dst: IntermediatePrecomputeNode3Index,
+    },
+    // Elimination is blocked by a nested Push, or by reaching a leaf with no Pop(n>=1).
+    // We must keep the Push with the possibly-restricted bitset.
+    BlockedPush {
+        llm: LLMTokenBV,
+        push_bv: StateIDBV,
+        dst: IntermediatePrecomputeNode3Index,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct BFSState {
+    node: IntermediatePrecomputeNode3Index,
+    push_bv: StateIDBV,
+    llm_bv: LLMTokenBV,
+}
+
+fn get_or_create_aggregator_node(
+    src: IntermediatePrecomputeNode3Index,
+    llm: &LLMTokenBV,
+    god: &IntermediateTrie3GodWrapper,
+    cache: &mut BTreeMap<LLMTokenBV, IntermediatePrecomputeNode3Index>,
+) -> IntermediatePrecomputeNode3Index {
+    // If no checks to aggregate, the aggregator node is just the source itself.
+    if *llm == LLMTokenBV::max_ones() {
+        return src;
+    }
+    if let Some(idx) = cache.get(llm) {
+        return *idx;
+    }
+    let new_node = god
+        .insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))
+        .into();
+    god.insert_edge_simple(
+        src,
+        new_node,
+        IntermediateTrie3EdgeKey::CheckLLM(llm.clone()),
+        (),
+    );
+    cache.insert(llm.clone(), new_node);
+    new_node
+}
+
+fn compute_push_elim_exits(
+    start: IntermediatePrecomputeNode3Index,
+    initial_push_bv: &StateIDBV,
+    god: &IntermediateTrie3GodWrapper,
+) -> Vec<Exit> {
+    let mut exits: Vec<Exit> = Vec::new();
+    let mut q: VecDeque<BFSState> = VecDeque::new();
+    q.push_back(BFSState {
+        node: start,
+        push_bv: initial_push_bv.clone(),
+        llm_bv: LLMTokenBV::max_ones(),
+    });
+
+    // We include node, push_bv, llm_bv in visited to avoid infinite exploration across cycles.
+    // This is finite because push_bv and llm_bv only ever intersect with finitely many constants.
+    let mut visited: BTreeSet<(usize, StateIDBV, LLMTokenBV)> = BTreeSet::new();
+    // Safety guard (should not normally trigger thanks to visited)
+    let mut steps: usize = 0;
+    let max_steps: usize = 1_000_000;
+
+    while let Some(state) = q.pop_front() {
+        steps += 1;
+        if steps % 100_000 == 0 {
+            eprintln!(
+                "[challenge_elim] BFS progress: {} states explored (guard {})",
+                steps, max_steps
+            );
+        }
+        if steps > max_steps {
+            eprintln!("[challenge_elim] Warning: BFS step guard hit while eliminating a Push; breaking exploration to avoid non-termination.");
+            break;
+        }
+
+        let key = (state.node.as_usize(), state.push_bv.clone(), state.llm_bv.clone());
+        if !visited.insert(key) {
+            continue;
+        }
+
+        // If this node is an end, then along this branch we can only preserve the Push (blocked).
+        if let Some(read_guard) = state.node.read(god) {
+            if read_guard.value.end {
+                exits.push(Exit::BlockedPush {
+                    llm: state.llm_bv.clone(),
+                    push_bv: state.push_bv.clone(),
+                    dst: state.node,
+                });
+                // Do not explore past an end marker; treat as terminal for this branch
+                continue;
+            }
+            // Explore outgoing edges
+            for (ek, dsts) in read_guard.children().iter() {
+                match ek {
+                    IntermediateTrie3EdgeKey::NoOp => {
+                        for (dst_idx, _ev) in dsts.iter() {
+                            q.push_back(BFSState {
+                                node: *dst_idx,
+                                push_bv: state.push_bv.clone(),
+                                llm_bv: state.llm_bv.clone(),
+                            });
+                        }
+                    }
+                    IntermediateTrie3EdgeKey::CheckLLM(llm2) => {
+                        let mut next_llm = state.llm_bv.clone();
+                        // Aggregate checks by intersection; do not prune on emptiness:
+                        // normalize_path keeps empty intersections too.
+                        next_llm &= llm2.clone();
+                        for (dst_idx, _ev) in dsts.iter() {
+                            q.push_back(BFSState {
+                                node: *dst_idx,
+                                push_bv: state.push_bv.clone(),
+                                llm_bv: next_llm.clone(),
+                            });
+                        }
+                    }
+                    IntermediateTrie3EdgeKey::Push(_nested) => {
+                        // Blocked by a nested push: re-emit our (possibly intersected) push
+                        // immediately before this nested push destination.
+                        for (dst_idx, _ev) in dsts.iter() {
+                            exits.push(Exit::BlockedPush {
+                                llm: state.llm_bv.clone(),
+                                push_bv: state.push_bv.clone(),
+                                dst: *dst_idx,
+                            });
+                        }
+                        // Do not traverse past a nested push for this elimination.
+                    }
+                    IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
+                        let n_val = *n;
+                        for (dst_idx, _ev) in dsts.iter() {
+                            match n_val {
+                                0 => {
+                                    // Fold into push: A := A ∩ B; prune branch if disjoint.
+                                    if state.push_bv.is_disjoint(pop_bv) {
+                                        // Invalid on this branch
+                                        continue;
+                                    }
+                                    let mut next_push = state.push_bv.clone();
+                                    next_push &= pop_bv.clone();
+                                    q.push_back(BFSState {
+                                        node: *dst_idx,
+                                        push_bv: next_push,
+                                        llm_bv: state.llm_bv.clone(),
+                                    });
+                                }
+                                1 => {
+                                    // Cancel if intersect; else branch invalid
+                                    if state.push_bv.is_disjoint(pop_bv) {
+                                        continue;
+                                    }
+                                    exits.push(Exit::Cancel {
+                                        llm: state.llm_bv.clone(),
+                                        dst: *dst_idx,
+                                    });
+                                    // Do not explore past a Pop(1) for this elimination.
+                                }
+                                _ => {
+                                    // Remove Push and decrement Pop.
+                                    exits.push(Exit::DegradePop {
+                                        llm: state.llm_bv.clone(),
+                                        new_n: n_val - 1,
+                                        pop_bv: pop_bv.clone(),
+                                        dst: *dst_idx,
+                                    });
+                                    // Do not explore past a Pop(n>1) for this elimination.
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    exits
+}
+
+fn remove_specific_edge(
+    god: &IntermediateTrie3GodWrapper,
+    src: IntermediatePrecomputeNode3Index,
+    key: IntermediateTrie3EdgeKey,
+    dst: IntermediatePrecomputeNode3Index,
+) -> bool {
+    if let Some(mut guard) = src.write(god) {
+        let children = guard.children_mut();
+        match children.entry(key) {
+            Entry::Occupied(mut occ) => {
+                let map = occ.get_mut();
+                let removed = map.remove(&dst).is_some();
+                if map.is_empty() {
+                    occ.remove();
+                }
+                return removed;
+            }
+            Entry::Vacant(_) => {}
+        }
+    }
+    false
+}
+
 pub fn eliminate_pushes_and_pops(
-    _roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-    _god: &IntermediateTrie3GodWrapper,
+    roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+    god: &IntermediateTrie3GodWrapper,
 ) {
-    todo!()
+    // Fixpoint elimination. We never exit early; we iterate until a whole round removes none.
+    let root_indices: Vec<_> = roots.values().cloned().collect();
+    if root_indices.is_empty() {
+        return;
+    }
+
+    let mut round: usize = 0;
+    loop {
+        round += 1;
+        // Collect all reachable nodes for this round.
+        let nodes = Trie::all_nodes(god, &root_indices);
+        // Collect all push edges in the current snapshot.
+        let mut push_edges: Vec<(IntermediatePrecomputeNode3Index, StateIDBV, IntermediatePrecomputeNode3Index)> =
+            Vec::new();
+        for src in &nodes {
+            if let Some(read_guard) = src.read(god) {
+                for (ek, dsts) in read_guard.children().iter() {
+                    if let IntermediateTrie3EdgeKey::Push(bv) = ek {
+                        for (dst_idx, _ev) in dsts.iter() {
+                            push_edges.push((*src, bv.clone(), *dst_idx));
+                        }
+                    }
+                }
+            }
+        }
+
+        if push_edges.is_empty() {
+            eprintln!("[challenge_elim] No pushes found; done.");
+            break;
+        }
+
+        eprintln!(
+            "[challenge_elim] Round {}: attempting to eliminate {} push edge(s).",
+            round,
+            push_edges.len()
+        );
+        // Simple progress bar: print at 10% increments
+        let total = push_edges.len().max(1);
+        let mut processed = 0usize;
+        let mut next_mark = 10usize;
+
+        // For each src, memoize aggregator nodes by LLM BV to avoid node blowup.
+        let mut per_src_agg_cache: BTreeMap<
+            IntermediatePrecomputeNode3Index,
+            BTreeMap<LLMTokenBV, IntermediatePrecomputeNode3Index>,
+        > = BTreeMap::new();
+
+        let mut removed_this_round: usize = 0;
+
+        for (src, push_bv, dst) in push_edges {
+            processed += 1;
+            let pct = (processed * 100) / total;
+            if pct >= next_mark {
+                eprintln!(
+                    "[challenge_elim] Round {} progress: {}/{} ({}%)",
+                    round, processed, total, pct
+                );
+                next_mark += 10;
+            }
+
+            let exits = compute_push_elim_exits(dst, &push_bv, god);
+            if exits.is_empty() {
+                // No way to eliminate or even move this push (e.g., dead cycles only).
+                // Keep the original push edge as-is.
+                continue;
+            }
+
+            let cache = per_src_agg_cache
+                .entry(src)
+                .or_insert_with(BTreeMap::new);
+
+            // Wire exits from src via aggregator nodes.
+            for exit in exits {
+                match exit {
+                    Exit::Cancel { llm, dst } => {
+                        let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                        god.insert_edge_simple(agg, dst, IntermediateTrie3EdgeKey::NoOp, ());
+                    }
+                    Exit::DegradePop {
+                        llm,
+                        new_n,
+                        pop_bv,
+                        dst,
+                    } => {
+                        let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                        god.insert_edge_simple(
+                            agg,
+                            dst,
+                            IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
+                            (),
+                        );
+                    }
+                    Exit::BlockedPush { llm, push_bv, dst } => {
+                        let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                        god.insert_edge_simple(agg, dst, IntermediateTrie3EdgeKey::Push(push_bv), ());
+                    }
+                }
+            }
+
+            // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place.
+            if remove_specific_edge(
+                god,
+                src,
+                IntermediateTrie3EdgeKey::Push(push_bv),
+                dst,
+            ) {
+                removed_this_round += 1;
+            }
+        }
+
+        eprintln!(
+            "[challenge_elim] Round {} removed {} push edge(s).",
+            round, removed_this_round
+        );
+
+        Trie::gc(god, &root_indices);
+
+        if removed_this_round == 0 {
+            // Fixpoint reached: no more eliminations possible.
+            break;
+        }
+    }
+
+    // Optional: recompute depths for diagnostics or downstream heuristics.
+    Trie::recompute_all_max_depths(god, &root_indices);
 }
 
 #[cfg(test)]
