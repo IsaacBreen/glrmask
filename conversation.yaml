@@ -2281,6 +2281,10 @@ local_system:
               let push_cycle_nodes: BTreeSet<IntermediatePrecomputeNode3Index> =
                   compute_push_cycle_nodes(&source, &source_roots);
 
+              // Diagnostic and safety limits
+              const HOT_NODE_THRESHOLD: u64 = 16384;
+              const MAX_BFS_ITERATIONS: u64 = 75_000_000; // Failsafe to prevent hangs
+
               // Prepare destination arena (clear existing graph).
               god.clear();
 
@@ -2299,6 +2303,7 @@ local_system:
               // Memoization: (source_idx, pending_stack) -> dest_idx
               let mut stack_interner = StackInterner::new();
               let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, StackID), IntermediatePrecomputeNode3Index> = BTreeMap::new();
+              let mut visit_counts: BTreeMap<IntermediatePrecomputeNode3Index, u64> = BTreeMap::new();
               let mut work: VecDeque<(IntermediatePrecomputeNode3Index, StackID)> = VecDeque::new();
 
               macro_rules! get_or_create {
@@ -2336,6 +2341,23 @@ local_system:
               let mut processed: u64 = 0;
               while let Some((src_idx, stack_id)) = work.pop_front() {
                   processed += 1;
+
+                  // --- Diagnostics and Safeguards ---
+                  if processed > MAX_BFS_ITERATIONS {
+                      panic!(
+                          "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}. Queue size: {}.",
+                          MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), work.len()
+                      );
+                  }
+                  let count = visit_counts.entry(src_idx).or_insert(0);
+                  *count += 1;
+                  if *count % HOT_NODE_THRESHOLD == 0 && *count > 0 {
+                      println!(
+                          "[WARN] Push/Pop elimination: Source node {:?} has been processed {} times. This may indicate a state explosion. Current stack depth: {}. Queue size: {}.",
+                          src_idx, *count, stack_interner.depth(stack_id), work.len()
+                      );
+                  }
+
                   pb.set_position(processed);
                   if processed & 0xfff == 0 {
                       pb.set_message(format!("queue={}", work.len()));
@@ -2939,7 +2961,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -4940,5 +4962,111 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Introduce StackInterner and fold
       Pop(0, B) constraints via intersection to resolve runaway trie elimination"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/public interface of constraint_precompute3_challenge_elimination.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_challenge_elimination.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Still didn't work. Let's focus on trying to diagnose the issue. Any safeguards?
+      Warnings? Panics? Tricky. Don't wanna flood console - there's trillions of iterations
+      going on. And we don't really know what the issue actually is.
+    metadata:
+  - assistant: |-
+      You're right, the problem is more subtle than just memory pressure from cloning or a simple logic error. The continued runaway queue suggests a state-space explosion, where the number of `(node, stack)` combinations becomes astronomically large, even if it's technically finite. The intersection logic we added was meant to curb this, but there may be pathological graph structures that still defeat it.
+
+      Instead of attempting another blind fix, let's instrument the elimination process to diagnose the problem. We'll add two things:
+      1.  **A "Hot Node" Detector:** This will track how many times each node from the source graph is processed. If a single node is processed an excessive number of times (e.g., >16,000 times), it implies we are cycling through it with an exploding number of different stack configurations. We'll print a warning with contextual information when this happens. This will tell us *where* in the graph the explosion is occurring.
+      2.  **A Hard Iteration Limit:** As a safety net, we'll add a maximum number of iterations to the main BFS loop. If this limit is exceeded, the process will panic with a detailed error message. This prevents the build from hanging indefinitely and turns the non-terminating behavior into a crash with actionable debug info.
+
+      These changes don't alter the elimination logic itself but will give us the necessary visibility to find the root cause.
+
+      ### Step-by-step instructions
+
+      #### File: `src/constraint_precompute3_challenge_elimination.rs`
+
+      1.  **Locate the `run_trie_based_elimination` function.**
+      2.  **Add constants for the new limits:** Just inside the function, before the `ProgressBar` is set up, define constants for the hot node warning threshold and the maximum number of BFS iterations.
+      3.  **Initialize a visit counter:** Before the main `while let Some(...) = work.pop_front()` loop, initialize a `BTreeMap` to store the visit counts for each source node.
+      4.  **Implement the checks inside the loop:** At the top of the `while` loop, right after incrementing the `processed` counter, add the logic for the iteration limit panic and the hot node warning.
+
+      This will give us the diagnostics we need to proceed.
+
+      ### Git Diffs
+
+      Here is the patch to apply these changes.
+
+      ```diff
+      diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
+      index 419503f..1111111 100644
+      --- a/src/constraint_precompute3_challenge_elimination.rs
+      +++ b/src/constraint_precompute3_challenge_elimination.rs
+      @@ -570,6 +570,10 @@
+               // Precompute push-cycling nodes to avoid unbounded pending stacks in SCCs that can keep pushing without encountering Pop(0/1).
+               let push_cycle_nodes: BTreeSet<IntermediatePrecomputeNode3Index> =
+                   compute_push_cycle_nodes(&source, &source_roots);
+      +
+      +        // Diagnostic and safety limits
+      +        const HOT_NODE_THRESHOLD: u64 = 16384;
+      +        const MAX_BFS_ITERATIONS: u64 = 75_000_000; // Failsafe to prevent hangs
+       
+               // Prepare destination arena (clear existing graph).
+               god.clear();
+      @@ -587,6 +591,7 @@
+               // Memoization: (source_idx, pending_stack) -> dest_idx
+               let mut stack_interner = StackInterner::new();
+               let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, StackID), IntermediatePrecomputeNode3Index> = BTreeMap::new();
+      +        let mut visit_counts: BTreeMap<IntermediatePrecomputeNode3Index, u64> = BTreeMap::new();
+               let mut work: VecDeque<(IntermediatePrecomputeNode3Index, StackID)> = VecDeque::new();
+       
+               macro_rules! get_or_create {
+      @@ -619,12 +624,29 @@
+               // BFS over product states
+               let mut processed: u64 = 0;
+               while let Some((src_idx, stack_id)) = work.pop_front() {
+                   processed += 1;
+      +
+      +            // --- Diagnostics and Safeguards ---
+      +            if processed > MAX_BFS_ITERATIONS {
+      +                panic!(
+      +                    "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}. Queue size: {}.",
+      +                    MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), work.len()
+      +                );
+      +            }
+      +            let count = visit_counts.entry(src_idx).or_insert(0);
+      +            *count += 1;
+      +            if *count % HOT_NODE_THRESHOLD == 0 && *count > 0 {
+      +                println!(
+      +                    "[WARN] Push/Pop elimination: Source node {:?} has been processed {} times. This may indicate a state explosion. Current stack depth: {}. Queue size: {}.",
+      +                    src_idx, *count, stack_interner.depth(stack_id), work.len()
+      +                );
+      +            }
+      +
+                   pb.set_position(processed);
+                   if processed & 0xfff == 0 {
+                       pb.set_message(format!("queue={}", work.len()));
+                   }
+                   let dest_idx = *pair_cache.get(&(src_idx, stack_id)).expect("dest exists");
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_challenge_elimination.rs
+      Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor: Introduce StackInterner, fold
+      Pop(0) constraints, and add iteration/hot-node diagnostics to trie elimination"'
     metadata:
 ...

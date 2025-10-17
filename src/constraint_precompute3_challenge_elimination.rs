@@ -668,6 +668,10 @@ fn run_trie_based_elimination(
         let push_cycle_nodes: BTreeSet<IntermediatePrecomputeNode3Index> =
             compute_push_cycle_nodes(&source, &source_roots);
 
+        // Diagnostic and safety limits
+        const HOT_NODE_THRESHOLD: u64 = 16384;
+        const MAX_BFS_ITERATIONS: u64 = 75_000_000; // Failsafe to prevent hangs
+
         // Prepare destination arena (clear existing graph).
         god.clear();
 
@@ -686,6 +690,7 @@ fn run_trie_based_elimination(
         // Memoization: (source_idx, pending_stack) -> dest_idx
         let mut stack_interner = StackInterner::new();
         let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, StackID), IntermediatePrecomputeNode3Index> = BTreeMap::new();
+        let mut visit_counts: BTreeMap<IntermediatePrecomputeNode3Index, u64> = BTreeMap::new();
         let mut work: VecDeque<(IntermediatePrecomputeNode3Index, StackID)> = VecDeque::new();
 
         macro_rules! get_or_create {
@@ -723,6 +728,23 @@ fn run_trie_based_elimination(
         let mut processed: u64 = 0;
         while let Some((src_idx, stack_id)) = work.pop_front() {
             processed += 1;
+
+            // --- Diagnostics and Safeguards ---
+            if processed > MAX_BFS_ITERATIONS {
+                panic!(
+                    "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}. Queue size: {}.",
+                    MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), work.len()
+                );
+            }
+            let count = visit_counts.entry(src_idx).or_insert(0);
+            *count += 1;
+            if *count % HOT_NODE_THRESHOLD == 0 && *count > 0 {
+                println!(
+                    "[WARN] Push/Pop elimination: Source node {:?} has been processed {} times. This may indicate a state explosion. Current stack depth: {}. Queue size: {}.",
+                    src_idx, *count, stack_interner.depth(stack_id), work.len()
+                );
+            }
+
             pb.set_position(processed);
             if processed & 0xfff == 0 {
                 pb.set_message(format!("queue={}", work.len()));
