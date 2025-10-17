@@ -2784,6 +2784,12 @@ fn format_bv(bv: &LLMTokenBV) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GrammarConstraintState<'a> {
+    pub parent: &'a GrammarConstraint,
+    pub state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+}
+
 pub type Trie0GodWrapper = GodWrapper<Option<(TerminalID, Option<TokenizerStateID>)>, HybridBitset, PrecomputedNodeContents0>;
 pub type Trie0God = God<Option<(TerminalID, Option<TokenizerStateID>)>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
