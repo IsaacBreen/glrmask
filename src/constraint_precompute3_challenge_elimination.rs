@@ -307,47 +307,68 @@ fn refine_mismatch(
         minimal_roots.insert(*sid, *old_to_new.get(old_root).unwrap());
     }
 
-    let start_time = Instant::now();
-    let mut last_improvement = Instant::now();
+    let mut changed_in_pass = true;
+    while changed_in_pass {
+        changed_in_pass = false;
 
-    'refine: loop {
-        if start_time.elapsed().as_secs() >= 10 || last_improvement.elapsed().as_millis() > 1000 {
-            break 'refine;
-        }
+        // --- Pass 1: Try to remove edge groups systematically ---
+        let current_roots_vec: Vec<_> = minimal_roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(&minimal_god, &current_roots_vec);
 
-        let current_minimal_roots_vec: Vec<_> = minimal_roots.values().cloned().collect();
-        let (mut candidate_god, candidate_roots_vec, old_to_new) = Trie::deep_copy_subtrees(&minimal_god, &current_minimal_roots_vec);
-        let mut candidate_roots = BTreeMap::new();
-        for (sid, old_root) in &minimal_roots {
-            candidate_roots.insert(*sid, *old_to_new.get(old_root).unwrap());
-        }
-
-        let all_nodes = Trie::all_nodes(&candidate_god, &candidate_roots_vec);
-        if all_nodes.len() <= 1 { break 'refine; }
-
-        let random_node_idx = all_nodes[rand::thread_rng().gen_range(0..all_nodes.len())];
-        
-        let mut removed_an_edge = false;
-        if let Some(mut node_w) = random_node_idx.write(&candidate_god) {
-            if !node_w.children().is_empty() {
-                let keys: Vec<_> = node_w.children().keys().cloned().collect();
-                let key_to_remove = &keys[rand::thread_rng().gen_range(0..keys.len())];
-                if node_w.children_mut().remove(key_to_remove).is_some() {
-                    removed_an_edge = true;
+        let mut all_edge_groups = Vec::new();
+        for node_idx in all_nodes {
+            if let Some(node_r) = node_idx.read(&minimal_god) {
+                for ek in node_r.children().keys() {
+                    all_edge_groups.push((node_idx, ek.clone()));
                 }
             }
         }
 
-        if !removed_an_edge { continue; }
+        for (source_idx, edge_key) in all_edge_groups {
+            let (mut candidate_god, candidate_roots_vec, old_to_new) = Trie::deep_copy_subtrees(&minimal_god, &current_roots_vec);
+            let mut candidate_roots = BTreeMap::new();
+            for (sid, old_root) in &minimal_roots {
+                candidate_roots.insert(*sid, *old_to_new.get(old_root).unwrap());
+            }
+            
+            let mapped_source_idx = *old_to_new.get(&source_idx).unwrap();
 
-        Trie::gc(&candidate_god, &candidate_roots_vec);
+            if let Some(mut node_w) = mapped_source_idx.write(&candidate_god) {
+                node_w.children_mut().remove(&edge_key);
+            }
 
-        if check_mismatch(&candidate_god, &candidate_roots) {
-            minimal_god = candidate_god;
-            minimal_roots = candidate_roots;
-            last_improvement = Instant::now();
-            let new_size = Trie::all_nodes(&minimal_god, &minimal_roots.values().cloned().collect::<Vec<_>>()).len();
-            println!("... Refined mismatch. New size: {} nodes.", new_size);
+            Trie::gc(&candidate_god, &candidate_roots_vec);
+
+            if check_mismatch(&candidate_god, &candidate_roots) {
+                minimal_god = candidate_god;
+                minimal_roots = candidate_roots;
+                changed_in_pass = true;
+                let new_size = Trie::all_nodes(&minimal_god, &minimal_roots.values().cloned().collect::<Vec<_>>()).len();
+                println!("... Refined mismatch by removing edge group. New size: {} nodes.", new_size);
+                break; // Restart the whole process with the smaller graph
+            }
+        }
+
+        if changed_in_pass {
+            continue; // Restart the while loop
+        }
+
+        // --- Pass 2: Try to remove roots (if more than one) ---
+        if minimal_roots.len() > 1 {
+            let root_sids_to_try: Vec<_> = minimal_roots.keys().cloned().collect();
+            for sid_to_remove in root_sids_to_try {
+                let mut candidate_roots = minimal_roots.clone();
+                candidate_roots.remove(&sid_to_remove);
+
+                if candidate_roots.is_empty() { continue; }
+
+                if check_mismatch(&minimal_god, &candidate_roots) {
+                    minimal_roots = candidate_roots;
+                    changed_in_pass = true;
+                    println!("... Refined mismatch by removing a root. New root count: {}.", minimal_roots.len());
+                    break; // Restart the while loop
+                }
+            }
         }
     }
 
