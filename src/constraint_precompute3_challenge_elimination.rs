@@ -162,6 +162,33 @@ mod tests {
     use crate::constraint::LLMTokenBV;
     use crate::datastructures::trie::Trie2Index;
 
+    /// Normalizes a path for comparison purposes.
+    /// - Removes NoOp edges.
+    /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
+    fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
+        let mut combined_llm_bv = LLMTokenBV::ones();
+        let mut has_llm_check = false;
+
+        let mut other_ops: Vec<IntermediateTrie3EdgeKey> = path
+            .into_iter()
+            .filter(|ek| {
+                if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek {
+                    combined_llm_bv &= bv;
+                    has_llm_check = true;
+                    false // remove from path
+                } else {
+                    !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
+                }
+            })
+            .collect();
+
+        if has_llm_check {
+            other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
+        }
+
+        other_ops
+    }
+
     fn run_test(
         input_god: &IntermediateTrie3GodWrapper,
         input_roots: &[IntermediatePrecomputeNode3Index],
@@ -184,12 +211,7 @@ mod tests {
         let final_roots_from_trie_elim: Vec<_> = eliminated_roots_map.values().cloned().collect();
         let paths_from_trie_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&eliminated_god, &final_roots_from_trie_elim, |n| n.value.end)
             .into_iter()
-            .map(|(_r, p)| {
-                p.into_iter()
-                    .map(|(ek, _, _)| ek)
-                    .filter(|ek| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
-                    .collect::<Vec<_>>()
-            })
+            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
             .collect();
 
         // 3. Run old path-based elimination directly
@@ -198,10 +220,7 @@ mod tests {
         for (_root_value, path_edges) in initial_paths {
             let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
             if let Some(new_path) = eliminate_pushes_and_pops_path_based(edge_keys) {
-                let normalized_path: Vec<_> = new_path.into_iter()
-                    .filter(|ek| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
-                    .collect();
-                paths_from_path_elim.insert(normalized_path);
+                paths_from_path_elim.insert(normalize_path(new_path));
             }
         }
 
