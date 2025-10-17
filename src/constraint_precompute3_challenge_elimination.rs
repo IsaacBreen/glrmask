@@ -1,13 +1,10 @@
 // src/constraint_precompute3_challenge_elimination.rs
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV};
+use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, StateIDBV};
 use crate::constraint::IntermediatePrecomputedNodeContents3;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
 use crate::tokenizer::TokenizerStateID;
-
-/// When enabled (e.g. in debug builds), this runs the path-based elimination as a cross-check.
-const DEBUG: bool = cfg!(debug_assertions);
 
 /// Eliminates adjacent Push/Pop pairs from a stack of intermediate trie edge keys.
 /// This is a core part of simplifying the precompute3 graph.
@@ -144,48 +141,10 @@ pub fn eliminate_pushes_and_pops_path_based(
     *roots = new_roots;
 }
 
-/// Normalizes a path for comparison purposes.
-/// - Removes NoOp edges.
-/// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
-fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
-    let mut combined_llm_bv = LLMTokenBV::max_ones();
-    let mut has_llm_check = false;
-
-    let mut other_ops: Vec<IntermediateTrie3EdgeKey> = path
-        .into_iter()
-        .filter(|ek| {
-            if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek {
-                combined_llm_bv &= bv;
-                has_llm_check = true;
-                false // remove from path
-            } else {
-                !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
-            }
-        })
-        .collect();
-
-    if has_llm_check {
-        other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
-    }
-
-    other_ops
-}
-
 pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    // If in debug mode, clone the initial state for later comparison against the path-based version.
-    let initial_state_for_debug = if DEBUG {
-        let sids: Vec<_> = roots.keys().cloned().collect();
-        let old_root_vec: Vec<_> = sids.iter().map(|sid| roots[sid]).collect();
-        let (cloned_god, new_root_indices, _) = Trie::deep_copy_subtrees(god, &old_root_vec);
-        let cloned_roots = sids.into_iter().zip(new_root_indices.into_iter()).collect();
-        Some((cloned_god, cloned_roots))
-    } else {
-        None
-    };
-
     // We build a new graph directly in `god` by traversing a read-only snapshot (`source`)
     // of the original reachable subgraph, using a product over (node, pending_stack).
     // pending_stack is a Vec<StateIDBV> that behaves like a stack of Pushes seen so far but not yet
@@ -337,46 +296,40 @@ pub fn eliminate_pushes_and_pops(
 
     // 6) Replace input roots with new roots (pending_stack is empty).
     *roots = new_roots;
-
-    // After main logic, if in debug mode, run path-based version and compare.
-    if let Some((path_god, mut path_roots_map)) = initial_state_for_debug {
-        // 1. Get paths from the trie-based result (the one we just computed).
-        let final_roots_from_trie_elim: Vec<_> = roots.values().cloned().collect();
-        let paths_from_trie_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(god, &final_roots_from_trie_elim, |n| n.value.end)
-            .into_iter()
-            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-            .collect();
-
-        // 2. Run path-based elimination on the cloned initial state.
-        eliminate_pushes_and_pops_path_based(&mut path_roots_map, &path_god);
-
-        // 3. Get paths from the path-based result.
-        let final_roots_from_path_elim: Vec<_> = path_roots_map.values().cloned().collect();
-        let paths_from_path_elim: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&path_god, &final_roots_from_path_elim, |n| n.value.end)
-            .into_iter()
-            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-            .collect();
-
-        // 4. Compare and panic on mismatch.
-        if paths_from_trie_elim != paths_from_path_elim {
-            let trie_only: Vec<_> = paths_from_trie_elim.difference(&paths_from_path_elim).collect();
-            let path_only: Vec<_> = paths_from_path_elim.difference(&paths_from_trie_elim).collect();
-
-            panic!(
-                "Push/pop elimination mismatch between trie-based and path-based algorithms!\n\
-                 Paths only in trie-based result: {:#?}\n\
-                 Paths only in path-based result: {:#?}\n",
-                trie_only,
-                path_only
-            );
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constraint::LLMTokenBV;
     use crate::datastructures::trie::Trie2Index;
+
+    /// Normalizes a path for comparison purposes.
+    /// - Removes NoOp edges.
+    /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
+    fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
+        let mut combined_llm_bv = LLMTokenBV::max_ones();
+        let mut has_llm_check = false;
+
+        let mut other_ops: Vec<IntermediateTrie3EdgeKey> = path
+            .into_iter()
+            .filter(|ek| {
+                if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek {
+                    combined_llm_bv &= bv;
+                    has_llm_check = true;
+                    false // remove from path
+                } else {
+                    !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
+                }
+            })
+            .collect();
+
+        if has_llm_check {
+            other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
+        }
+
+        other_ops
+    }
 
     fn run_test(
         input_god: &IntermediateTrie3GodWrapper,
