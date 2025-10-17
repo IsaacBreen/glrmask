@@ -2687,21 +2687,36 @@ local_system:
                                   (),
                               );
                           }
-                          Exit::BlockedPush { llm, push_bv, dst } => {
-                              let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                              god.insert_edge_simple(agg, dst, IntermediateTrie3EdgeKey::Push(push_bv), ());
+                          Exit::BlockedPush { llm, push_bv: exit_push_bv, dst: exit_dst } => {
+                              // If this BlockedPush exactly matches the original edge (no LLM aggregation,
+                              // identical destination, identical push bitset), keep the original edge and
+                              // do NOT insert a duplicate. Otherwise, rewire via aggregator.
+                              if llm == LLMTokenBV::max_ones() && exit_dst == dst && exit_push_bv == push_bv {
+                                  keep_original_edge = true;
+                              } else {
+                                  let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                                  god.insert_edge_simple(
+                                      agg,
+                                      exit_dst,
+                                      IntermediateTrie3EdgeKey::Push(exit_push_bv),
+                                      (),
+                                  );
+                              }
                           }
                       }
                   }
 
-                  // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place.
-                  if remove_specific_edge(
-                      god,
-                      src,
-                      IntermediateTrie3EdgeKey::Push(push_bv),
-                      dst,
-                  ) {
-                      removed_this_round += 1;
+                  // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
+                  // unless we determined it must remain (to avoid deleting the only surviving representation).
+                  if !keep_original_edge {
+                      if remove_specific_edge(
+                          god,
+                          src,
+                          IntermediateTrie3EdgeKey::Push(push_bv),
+                          dst,
+                      ) {
+                          removed_this_round += 1;
+                      }
                   }
               }
 
@@ -3425,7 +3440,7 @@ local_system:
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: git-llm
+  prev_apply_mode: llm
 system:
   message: |-
     You are a helpful assistant.
@@ -3433,7 +3448,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -3442,7 +3457,7 @@ system:
     - gf
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -5183,9 +5198,8 @@ messages:
       filename: src/constraint_precompute3_challenge_elimination.rs
   - user: |
       /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib constraint_precompute3_challenge_elimination --profile test --no-fail-fast -- --format=json -Z unstable-options --show-output
-      Testing started at 7:43 pm ...
-          Blocking waiting for file lock on build directory
-          Finished `test` profile [unoptimized + debuginfo] target(s) in 1.16s
+      Testing started at 7:51 pm ...
+          Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
            Running unittests src/lib.rs (target/debug/deps/sep1-ab980023aadae8aa)
       [challenge_elim] Round 1: attempting to eliminate 2 push edge(s).
       [challenge_elim] Round 1 progress: 1/2 (50%)
@@ -5219,7 +5233,7 @@ messages:
         Path 0: [Push(HybridBitset { inner: 1..=1 })]
 
 
-      thread 'constraint_precompute3_challenge_elimination::tests::test_blocked_push' (7342267) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
+      thread 'constraint_precompute3_challenge_elimination::tests::test_blocked_push' (7352242) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
       Push/Pop elimination mismatch detected. See logs for details.
       stack backtrace:
          0: __rustc::rust_begin_unwind
@@ -5322,7 +5336,7 @@ messages:
         Path 0: [CheckLLM(HybridBitset { inner: 100..=100 })]
 
 
-      thread 'constraint_precompute3_challenge_elimination::tests::test_challenging_gauntlet' (7342269) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
+      thread 'constraint_precompute3_challenge_elimination::tests::test_challenging_gauntlet' (7352244) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
       Push/Pop elimination mismatch detected. See logs for details.
       stack backtrace:
          0: __rustc::rust_begin_unwind
@@ -5414,7 +5428,7 @@ messages:
         Path 0: [Push(HybridBitset { inner: 1..=1 })]
 
 
-      thread 'constraint_precompute3_challenge_elimination::tests::test_minimal_push_pop_zero_keeps_push' (7342276) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
+      thread 'constraint_precompute3_challenge_elimination::tests::test_minimal_push_pop_zero_keeps_push' (7352251) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
       Push/Pop elimination mismatch detected. See logs for details.
       stack backtrace:
          0: __rustc::rust_begin_unwind
@@ -5475,7 +5489,7 @@ messages:
         Path 0: [Push(HybridBitset { inner: 1..=1 })]
 
 
-      thread 'constraint_precompute3_challenge_elimination::tests::test_minimal_push_push_pop_cancel' (7342278) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
+      thread 'constraint_precompute3_challenge_elimination::tests::test_minimal_push_push_pop_cancel' (7352254) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
       Push/Pop elimination mismatch detected. See logs for details.
       stack backtrace:
          0: __rustc::rust_begin_unwind
@@ -5557,7 +5571,7 @@ messages:
         Path 0: [CheckLLM(HybridBitset { inner: 0..=0 }), Pop(0, HybridBitset { inner: 4..=4 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 5..=5 }), Pop(0, HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 1..=1 }), Push(HybridBitset { inner: 2..=2 })]
 
 
-      thread 'constraint_precompute3_challenge_elimination::tests::test_mismatch_from_log' (7342279) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
+      thread 'constraint_precompute3_challenge_elimination::tests::test_mismatch_from_log' (7352255) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
       Push/Pop elimination mismatch detected. See logs for details.
       stack backtrace:
          0: __rustc::rust_begin_unwind
@@ -5623,7 +5637,7 @@ messages:
         Path 0: []
 
 
-      thread 'constraint_precompute3_challenge_elimination::tests::test_multiple_cancellations_in_sequence' (7342281) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
+      thread 'constraint_precompute3_challenge_elimination::tests::test_multiple_cancellations_in_sequence' (7352257) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
       Push/Pop elimination mismatch detected. See logs for details.
       stack backtrace:
          0: __rustc::rust_begin_unwind
@@ -5685,7 +5699,7 @@ messages:
         Path 0: [Push(HybridBitset { inner: 1..=1 })]
 
 
-      thread 'constraint_precompute3_challenge_elimination::tests::test_pop_zero_keeps_push' (7342284) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
+      thread 'constraint_precompute3_challenge_elimination::tests::test_pop_zero_keeps_push' (7352260) panicked at src/constraint_precompute3_challenge_elimination.rs:297:9:
       Push/Pop elimination mismatch detected. See logs for details.
       stack backtrace:
          0: __rustc::rust_begin_unwind
@@ -5731,20 +5745,17 @@ messages:
   - user: Fix all of these.
     metadata:
   - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
+      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
+                  - Give concrete, step-by-step edits the user can apply.
+                  - Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
                   Additional general constraints:
       - Do not split your response across multiple messages.
       - Avoid local cache/config advice; focus on actionable fixes or outputs.
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: git-llm
+      mode: llm
       phase: default
   - assistant: |-
       Here’s a concrete plan to fix the mismatches you’re seeing between the trie-based and path-based elimination:
@@ -5914,44 +5925,24 @@ messages:
                );
       ```
     metadata:
-  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
-      applied now.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
-      index d10a6a0..a0d6b2a 100644
-      --- a/src/constraint_precompute3_challenge_elimination.rs
-      +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -766,20 +766,28 @@
-                   let cache = per_src_agg_cache
-                       .entry(src)
-                       .or_insert_with(BTreeMap::new);
-       
-      -            // Wire exits from src via aggregator nodes.
-      +            // Wire exits from src via aggregator nodes.
-      +            // Important: Avoid deleting the original edge if an exit says to keep an identical Push
-      +            // (same dst, no LLM aggregation). Otherwise we'd insert a duplicate and then remove it.
-      +            let mut keep_original_edge = false;
-                   for exit in exits {
-                       match exit {
-                           Exit::Cancel { llm, dst } => {
-                               let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                               god.insert_edge_simple(agg, dst, IntermediateTrie3EdgeKey::NoOp, ());
-                           }
-
-      ```
-    metadata:
   - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Using model 'cp' for code completion.
 
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint_precompute3_challenge_elimination.rs
-      Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/constraint_precompute3_challenge_elimination.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/constraint_precompute3_challenge_elimination.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/constraint_precompute3_challenge_elimination.rs
     metadata:
-  - user: 'Changes committed with message: "Fix: Preserve original Push edge in trie
-      elimination when BlockedPush exit is identical"'
+  - user: 'Changes committed with message: "Fix: Preserve original Push edge when
+      BlockedPush exit is an exact, non-aggregated match"'
     metadata:
 ...

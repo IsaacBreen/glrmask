@@ -777,21 +777,36 @@ fn run_trie_based_elimination(
                             (),
                         );
                     }
-                    Exit::BlockedPush { llm, push_bv, dst } => {
-                        let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                        god.insert_edge_simple(agg, dst, IntermediateTrie3EdgeKey::Push(push_bv), ());
+                    Exit::BlockedPush { llm, push_bv: exit_push_bv, dst: exit_dst } => {
+                        // If this BlockedPush exactly matches the original edge (no LLM aggregation,
+                        // identical destination, identical push bitset), keep the original edge and
+                        // do NOT insert a duplicate. Otherwise, rewire via aggregator.
+                        if llm == LLMTokenBV::max_ones() && exit_dst == dst && exit_push_bv == push_bv {
+                            keep_original_edge = true;
+                        } else {
+                            let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                            god.insert_edge_simple(
+                                agg,
+                                exit_dst,
+                                IntermediateTrie3EdgeKey::Push(exit_push_bv),
+                                (),
+                            );
+                        }
                     }
                 }
             }
 
-            // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place.
-            if remove_specific_edge(
-                god,
-                src,
-                IntermediateTrie3EdgeKey::Push(push_bv),
-                dst,
-            ) {
-                removed_this_round += 1;
+            // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
+            // unless we determined it must remain (to avoid deleting the only surviving representation).
+            if !keep_original_edge {
+                if remove_specific_edge(
+                    god,
+                    src,
+                    IntermediateTrie3EdgeKey::Push(push_bv),
+                    dst,
+                ) {
+                    removed_this_round += 1;
+                }
             }
         }
 
