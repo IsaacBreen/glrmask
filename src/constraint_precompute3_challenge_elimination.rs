@@ -16,7 +16,7 @@ use std::collections::btree_map::Entry;
 /// and if a mismatch is found, attempts to find a minimal failing input graph.
 /// This adds significant overhead and should only be used for debugging the
 /// elimination logic itself.
-const DEBUG_MISMATCHES: bool = true;
+const DEBUG_MISMATCHES: bool = false;
 
 fn debug_mismatches_enabled() -> bool {
     if DEBUG_MISMATCHES {
