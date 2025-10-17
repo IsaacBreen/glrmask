@@ -246,9 +246,13 @@ pub fn eliminate_pushes_and_pops(
         println!("\n--- MINIMAL FAILING INPUT ---");
         println!("{}", Trie::pretty_print_arena(&minimal_god));
         println!("\n--- TRIE-BASED OUTPUT ({} paths) ---", min_trie_paths.len());
-        println!("{}", Trie::pretty_print_arena(&min_trie_god));
+        for (i, path) in min_trie_paths.iter().enumerate() {
+            println!("  Path {}: {:?}", i, path);
+        }
         println!("\n--- PATH-BASED OUTPUT ({} paths) ---", min_path_paths.len());
-        println!("{}", Trie::pretty_print_arena(&min_path_god));
+        for (i, path) in min_path_paths.iter().enumerate() {
+            println!("  Path {}: {:?}", i, path);
+        }
 
         panic!("Push/Pop elimination mismatch detected. See logs for details.");
     }
