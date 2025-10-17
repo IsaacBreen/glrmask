@@ -22,3 +22,4 @@ mod constraint_precompute1_utils;
 mod constraint_precompute0_utils;
 mod constraint_stored_cache_utils;
 mod constraint_precompute3_challenge_elimination;
+mod constraint_precompute3_intermediate_utils;
