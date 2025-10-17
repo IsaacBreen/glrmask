@@ -267,12 +267,11 @@ local_system:
           fn pop(&mut self) -> Option<(K, V)>;
       }
 
-      impl<K: Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+      impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
           fn pop(&mut self) -> Option<(K, V)> {
-              // We use the fully qualified path to call the inherent `pop` method
-              // on the `OrderedHashMap` type, avoiding the recursive call to the
-              // trait method we are implementing.
-              ordered_hash_map::OrderedHashMap::pop(self)
+              self.back()
+                  .map(|(k, _)| k.clone())
+                  .and_then(|k| self.remove_entry(&k))
           }
       }
 
@@ -731,5 +730,113 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Resolve infinite recursion in Pop::pop
       by calling inherent method via fully qualified path"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/entry_api.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/ordered_hash_map.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: chatllm send --paste
+    metadata:
+  - assistant: |-
+      You are absolutely right, and I sincerely apologize for the repeated incorrect solutions. The infinite recursion is a subtle but critical bug that my previous suggestions failed to solve. Calling `ordered_hash_map::OrderedHashMap::pop(self)` was a mistake, as it still resolves to the trait method you are implementing, not a different inherent method, leading directly to the stack overflow you observed.
+
+      My second attempt was closer to the correct manual implementation but was overly complicated and resulted in a confusing type error.
+
+      The correct approach, since `pop_back()` is not available in your environment, is to manually get the key of the last element and then use that key to remove the entry. The `ordered-hash-map` crate provides the methods `back()` to get a reference to the last element and `remove_entry()` to remove a key-value pair and return it.
+
+      Here are the corrected instructions to implement the `Pop` trait properly.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `src/datastructures/ordered_hash_map.rs`**.
+
+      2.  **Navigate to the `Pop` trait implementation.**
+          This is the block of code that is currently causing the stack overflow:
+          ```rust
+          impl<K: Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+              fn pop(&mut self) -> Option<(K, V)> {
+                  ordered_hash_map::OrderedHashMap::pop(self)
+              }
+          }
+          ```
+
+      3.  **Replace the entire `Pop` implementation.**
+          We will replace the block above with a correct manual implementation. This version finds the key of the last element, clones it, and then uses that key to remove and return the full `(K, V)` pair. This requires adding a `Clone` bound to the key type `K`.
+
+          ```rust
+          impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+              fn pop(&mut self) -> Option<(K, V)> {
+                  // Get a reference to the key of the last element.
+                  let key = if let Some((k, _)) = self.back() {
+                      // Clone the key so we have an owned value to work with.
+                      k.clone()
+                  } else {
+                      // If the map is empty, there's nothing to do.
+                      return None;
+                  };
+                  // Use the cloned key to remove and return the original key-value pair.
+                  self.remove_entry(&key)
+              }
+          }
+          ```
+          This can also be written more concisely using `map` and `and_then`:
+          ```rust
+          impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+              fn pop(&mut self) -> Option<(K, V)> {
+                  self.back()
+                      .map(|(k, _)| k.clone())
+                      .and_then(|k| self.remove_entry(&k))
+              }
+          }
+          ```
+          We will use the more concise version in the final diff.
+
+      ### Git Diff
+
+      Here is the git diff to apply this fix. It replaces the recursive implementation with the correct one.
+
+      ```diff
+      diff --git a/src/datastructures/ordered_hash_map.rs b/src/datastructures/ordered_hash_map.rs
+      --- a/src/datastructures/ordered_hash_map.rs
+      +++ b/src/datastructures/ordered_hash_map.rs
+      @@ -24,11 +24,9 @@
+           fn pop(&mut self) -> Option<(K, V)>;
+       }
+       
+      -impl<K: Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+      +impl<K: Clone + Eq + Hash, V> Pop<K, V> for ordered_hash_map::OrderedHashMap<K, V> {
+           fn pop(&mut self) -> Option<(K, V)> {
+      -        // We use the fully qualified path to call the inherent `pop` method
+      -        // on the `OrderedHashMap` type, avoiding the recursive call to the
+      -        // trait method we are implementing.
+      -        ordered_hash_map::OrderedHashMap::pop(self)
+      +        self.back()
+      +            .map(|(k, _)| k.clone())
+      +            .and_then(|k| self.remove_entry(&k))
+           }
+       }
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/ordered_hash_map.rs
+      Applying patch to 'src/datastructures/ordered_hash_map.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/ordered_hash_map.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Implement Pop::pop correctly using
+      back() and remove_entry() for OrderedHashMap"'
     metadata:
 ...
