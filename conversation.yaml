@@ -2655,6 +2655,7 @@ local_system:
               let total = push_edges.len().max(1);
               let mut processed = 0usize;
               let mut next_mark = 10usize;
+              
 
               // For each src, memoize aggregator nodes by LLM BV to avoid node blowup.
               let mut per_src_agg_cache: BTreeMap<
@@ -2676,6 +2677,14 @@ local_system:
                           round, processed, total, pct
                       );
                       next_mark += 10;
+                  }
+
+                  // Shortcut: if this push already targets a leaf, nothing to eliminate.
+                  if let Some(dst_r) = dst.read(god) {
+                      if dst_r.value.end {
+                          // Leave push->leaf edges stable to avoid oscillation across rounds.
+                          continue;
+                      }
                   }
 
                   // Compute or reuse exits for this (dst, push_bv)
@@ -3522,7 +3531,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gpt-5{store=false}
   code_completion_model:
     - cp
   commit_message_model:
@@ -8067,5 +8076,84 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix Pop(0) folding mismatch by special-casing
       leaf rewires in BlockedPush exits, alongside caching and deduplication"'
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/public interface of constraint_precompute3_challenge_elimination.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_challenge_elimination.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Now it appears to loop infinitely.
+    metadata:
+  - assistant: |-
+      Below are targeted edits to stop the oscillation/loop while preserving exact stack semantics and the anti-explosion measures you just added.
+
+      Step-by-step instructions
+
+      1) Short-circuit elimination for push edges whose destination is already a leaf
+      - File: src/constraint_precompute3_challenge_elimination.rs
+      - In run_trie_based_elimination, inside the loop over push_edges, right after the progress print (pct >= next_mark), insert a guard:
+        - If dst is already an end node (leaf), skip elimination for that edge for this round.
+        - Rationale: After your Pop(0) leaf-rewire fix, a subsequent round would process the newly-inserted “push -> leaf” edge, “rewire” it again (adding it) and then remove it (since keep_original_edge is false). This causes oscillation and potential infinite looping across rounds. By recognizing push->leaf edges as terminal (i.e., nothing to eliminate), we leave them stable and terminate.
+
+      2) Keep the prior caching and deduplication as-is
+      - Your exit_cache and dedup sets are still necessary to keep the elimination efficient.
+
+      3) No changes to the mismatch debug toggle in this patch
+      - You can leave DEBUG_MISMATCHES as it is (or disable via env vars at runtime using your debug_mismatches_enabled function). The loop fix itself is deterministic and should not impact equivalence.
+
+      Git diffs
+
+      ```diff
+      diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
+      index 2a648d4..f4a7b38 100644
+      --- a/src/constraint_precompute3_challenge_elimination.rs
+      +++ b/src/constraint_precompute3_challenge_elimination.rs
+      @@ -726,6 +726,7 @@ fn run_trie_based_elimination(
+               let total = push_edges.len().max(1);
+               let mut processed = 0usize;
+               let mut next_mark = 10usize;
+      +        
+       
+               // For each src, memoize aggregator nodes by LLM BV to avoid node blowup.
+               let mut per_src_agg_cache: BTreeMap<
+      @@ -749,6 +750,14 @@ fn run_trie_based_elimination(
+                       eprintln!(
+                           "[challenge_elim] Round {} progress: {}/{} ({}%)",
+                           round, processed, total, pct
+                       );
+                       next_mark += 10;
+                   }
+       
+      +            // Shortcut: if this push already targets a leaf, nothing to eliminate.
+      +            if let Some(dst_r) = dst.read(god) {
+      +                if dst_r.value.end {
+      +                    // Leave push->leaf edges stable to avoid oscillation across rounds.
+      +                    continue;
+      +                }
+      +            }
+      +
+                   // Compute or reuse exits for this (dst, push_bv)
+                   let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
+                       Some(v) => v.clone(),
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_challenge_elimination.rs
+      Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
+    metadata:
+  - user: 'Changes committed with message: "Prevent elimination loop by skipping push
+      edges that already target a leaf node."'
     metadata:
 ...

@@ -727,6 +727,7 @@ fn run_trie_based_elimination(
         let total = push_edges.len().max(1);
         let mut processed = 0usize;
         let mut next_mark = 10usize;
+        
 
         // For each src, memoize aggregator nodes by LLM BV to avoid node blowup.
         let mut per_src_agg_cache: BTreeMap<
@@ -748,6 +749,14 @@ fn run_trie_based_elimination(
                     round, processed, total, pct
                 );
                 next_mark += 10;
+            }
+
+            // Shortcut: if this push already targets a leaf, nothing to eliminate.
+            if let Some(dst_r) = dst.read(god) {
+                if dst_r.value.end {
+                    // Leave push->leaf edges stable to avoid oscillation across rounds.
+                    continue;
+                }
             }
 
             // Compute or reuse exits for this (dst, push_bv)
