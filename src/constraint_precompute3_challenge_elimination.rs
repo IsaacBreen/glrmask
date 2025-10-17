@@ -681,6 +681,7 @@ fn run_trie_based_elimination(
         let push_cycle_nodes: BTreeSet<IntermediatePrecomputeNode3Index> =
             compute_push_cycle_nodes(&source, &source_roots);
 
+
         // Diagnostic and safety limits
         const HOT_NODE_THRESHOLD: u64 = 16384;
         const MAX_BFS_ITERATIONS: u64 = 75_000_000; // Failsafe to prevent hangs
@@ -703,6 +704,7 @@ fn run_trie_based_elimination(
         // Memoization: (source_idx, pending_stack) -> dest_idx
         let mut stack_interner = StackInterner::new();
         let mut pair_cache: BTreeMap<(IntermediatePrecomputeNode3Index, StackID), IntermediatePrecomputeNode3Index> = BTreeMap::new();
+        let mut hot_nodes = BTreeSet::new();
         let mut visit_counts: BTreeMap<IntermediatePrecomputeNode3Index, u64> = BTreeMap::new();
         let mut work: VecDeque<(IntermediatePrecomputeNode3Index, StackID)> = VecDeque::new();
 
@@ -746,16 +748,16 @@ fn run_trie_based_elimination(
             if processed > MAX_BFS_ITERATIONS {
                 panic!(
                     "Push/Pop elimination exceeded maximum BFS iterations ({}). This indicates a likely infinite loop or state explosion. Last processed node: {:?}, stack depth: {}, stack: {}. Queue size: {}.",
-                    MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), stack_interner.to_string(stack_id), work.len()
+                    MAX_BFS_ITERATIONS, src_idx, stack_interner.depth(stack_id), stack_interner.to_string(stack_id), work.len(),
                 );
             }
             let count = visit_counts.entry(src_idx).or_insert(0);
             *count += 1;
-            if *count % HOT_NODE_THRESHOLD == 0 && *count > 0 {
-                println!(
-                    "[WARN] Push/Pop elimination: Source node {:?} has been processed {} times. This may indicate a state explosion. Current stack depth: {}. Queue size: {}.",
-                    src_idx, *count, stack_interner.depth(stack_id), work.len()
-                );
+            if !hot_nodes.contains(&src_idx) && *count > HOT_NODE_THRESHOLD {
+                if is_debug_level_enabled(1) {
+                    println!("[WARN] Push/Pop elimination: Node {:?} became hot (visited > {} times). Flushing stacks on subsequent visits to prevent state explosion.", src_idx, HOT_NODE_THRESHOLD);
+                }
+                hot_nodes.insert(src_idx);
             }
 
             pb.set_position(processed);
@@ -763,8 +765,25 @@ fn run_trie_based_elimination(
                 pb.set_message(format!("queue={}", work.len()));
             }
             let dest_idx = *pair_cache.get(&(src_idx, stack_id)).expect("dest exists");
+
+            // --- Hot Node Stack Flushing Heuristic ---
+            if hot_nodes.contains(&src_idx) && !stack_interner.is_empty(stack_id) {
+                // This node is hot and has a pending stack. Flush the stack to the graph
+                // and then let the re-queued (src_idx, empty_stack) state handle propagation.
+                // This converts stack complexity into graph complexity locally, containing the explosion.
+                let mut from_idx = dest_idx;
+                let items = stack_interner.to_vec_bottom_up(stack_id);
+                for i in 0..items.len() {
+                    let label = IntermediateTrie3EdgeKey::Push(items[i].clone());
+                    let next_stack_id = stack_interner.from_bottom_slice(&items[i+1..]);
+                    let to_idx = get_or_create!(src_idx, next_stack_id);
+                    god.insert_edge_simple(from_idx, to_idx, label, ());
+                    from_idx = to_idx;
+                }
+                continue; // Stop processing this complex state; the empty-stack version will take over.
+            }
+
             let src_guard = src_idx.read(&source).expect("source read");
-            let is_hot = visit_counts.get(&src_idx).map_or(false, |&c| c > HOT_NODE_THRESHOLD);
 
             // If this source node is an end, flush the entire pending stack in order.
             // Note: pending stack bitvectors may already have been narrowed by Pop(0) constraints.
@@ -784,15 +803,10 @@ fn run_trie_based_elimination(
             for (ek, dests) in src_guard.children().iter() {
                 match ek {
                     IntermediateTrie3EdgeKey::Push(bv_new) => {
-                        // Heuristic: If a source node is part of a pre-calculated "push cycle" OR
-                        // if it has become dynamically "hot" (visited too many times), we stop
-                        // deferring its pushes. Instead, we emit them directly into the graph.
-                        // This prevents combinatorial explosion of stack states from complex cycles.
-                        if push_cycle_nodes.contains(&src_idx) || is_hot {
-                            if is_hot && !push_cycle_nodes.contains(&src_idx) && is_debug_level_enabled(3) {
-                                println!("[Push/Pop Elimination] Dynamically forcing immediate push for hot source {:?}.", src_idx);
-                            }
-
+                        // Deferral is the default. However, if a node is in a pre-computed push-cycle,
+                        // we emit the push directly to avoid unbounded stack growth. The hot-node
+                        // heuristic above handles state-explosion cycles dynamically.
+                        if push_cycle_nodes.contains(&src_idx) {
                             for (dst_src_idx, _) in dests.iter() {
                                 let next_state = get_or_create!(*dst_src_idx, stack_id);
                                 god.insert_edge_simple(dest_idx, next_state, IntermediateTrie3EdgeKey::Push(bv_new.clone()), ());
