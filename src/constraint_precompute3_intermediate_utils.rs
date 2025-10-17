@@ -5,7 +5,7 @@ use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
 use std::collections::BTreeMap;
-use crate::datastructures::ordered_hash_map::OrderedHashMap;
+use ordered_hash_map::OrderedHashMap;
 
 pub fn optimize_intermediate_trie3_template(
     start_node: &IntermediatePrecomputeNode3Index,
