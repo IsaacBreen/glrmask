@@ -19,8 +19,8 @@ use crate::hit;
 use crate::tokenizer::LLMTokenID;
 
 // Adapter aliases for precompute-trie types (referencing constraint.rs)
-pub type StoredPrecomputeNodeIndex = crate::constraint::PrecomputeNode3Index;
-pub type StoredTrieGodWrapper = crate::constraint::Trie3GodWrapper;
+pub type StoredPrecomputeNodeIndex = crate::constraint::IntermediatePrecomputeNode3Index;
+pub type StoredTrieGodWrapper = crate::constraint::IntermediateTrie3GodWrapper;
 
 // --- Acc type compatible with LeveledGSS A ---
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -717,28 +717,27 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
                 .entry(source_node.clone())
                 .or_insert_with(|| {
                     StoredPrecomputeNodeIndex::new(
-                        stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                            crate::constraint::PrecomputedNodeContents::internal(),
+                        stored_trie_god.insert(crate::constraint::IntermediatePrecomputeNode3::new(
+                            crate::constraint::IntermediatePrecomputedNodeContents3::internal(),
                         )),
                     )
                 })
                 .clone();
 
             let edge_key = (0, allowed_tokens.clone());
-            let edge_value = StateIDBV::max_ones();
+            let edge_key = crate::constraint::IntermediateTrie3EdgeKey::CheckLLM(allowed_tokens.clone());
+            let edge_value = ();
 
             let inserter = crate::datastructures::trie::EdgeInserter::new(
                 stored_trie_god,
                 source_node.as_arc().clone(),
                 edge_key,
                 edge_value,
-                |e, n| *e |= n,
-                |node_value, _| node_value.live_tokens |= allowed_tokens,
+                |_, _| {},
+                |_, _| {},
                 |_, _| {},
             );
             inserter.try_destination(dest_node.clone()).expect("Cycle detected");
-
-            dest_node.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
 
             final_nodes.insert(dest_node);
         }
@@ -774,9 +773,7 @@ impl GSSNode {
 pub(crate) fn deep_add_precompute_trie_edges(
     root_arc: &mut Arc<GSSNode>,
     god: &StoredTrieGodWrapper,
-    edge_key: &(isize, LLMTokenBV),
-    edge_value: &StateIDBV,
-    tokens_for_update: &LLMTokenBV,
+    edge_key: &crate::constraint::IntermediateTrie3EdgeKey,
     destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
     _memo: &mut PruneAndTransformRecursiveMemo,
 ) {
@@ -793,11 +790,7 @@ pub(crate) fn deep_add_precompute_trie_edges(
             let inserter = crate::datastructures::trie::EdgeInserter::new(
                 god,
                 source_arc,
-                edge_key.clone(),
-                edge_value.clone(),
-                |e, n| *e |= n,
-                |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
-                |_, _| {}, // Unconditional insertion
+                edge_key.clone(), (), |_, _| {}, |_, _| {}, |_, _| {},
             );
             inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
         }
@@ -847,8 +840,8 @@ pub(crate) fn merge_stored_trie_nodes(
             .into_values()
             .map(|p| {
                 let dest = StoredPrecomputeNodeIndex::new(
-                    stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                        crate::constraint::PrecomputedNodeContents::internal(),
+                    stored_trie_god.insert(crate::constraint::IntermediatePrecomputeNode3::new(
+                        crate::constraint::IntermediatePrecomputedNodeContents3::internal(),
                     )),
                 );
                 (p, dest)
@@ -881,8 +874,8 @@ pub(crate) fn merge_stored_trie_nodes(
             .collect();
 
         let tokens_for_edge = acc.llm_tokens_union.clone();
-        let edge_key = (0, tokens_for_edge.clone());
-        let edge_value = StateIDBV::max_ones();
+        let edge_key = crate::constraint::IntermediateTrie3EdgeKey::CheckLLM(tokens_for_edge.clone());
+        let edge_value = ();
 
         for source_node in acc.stored_trie_nodes() {
             let dest_node = source_to_dest_map.get(source_node).unwrap();
@@ -891,13 +884,12 @@ pub(crate) fn merge_stored_trie_nodes(
                 stored_trie_god,
                 source_node.as_arc().clone(),
                 edge_key.clone(),
-                edge_value.clone(),
-                |e, n| *e |= n,
-                |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
-                |_, _| {}, // Unconditional insertion
+                edge_value,
+                |_, _| {},
+                |_, _| {},
+                |_, _| {},
             );
             inserter.try_destination(dest_node.clone()).expect("Cycle detected when merging stored_trie nodes");
-            dest_node.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
         }
 
         new_acc.stored_trie_nodes = new_nodes;

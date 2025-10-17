@@ -1,4 +1,4 @@
-use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
+use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, LLMVocab, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, IntermediateTrie3GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
 use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
@@ -148,7 +148,7 @@ pub struct ParseState {
     pub stack: Arc<GSSNode>,
     pub accepted_state: Option<Arc<GSSNode>>,
     pub prev_accepted_state: Arc<GSSNode>,
-    pub trie2_god: Option<Trie3GodWrapper>,
+    pub trie2_god: Option<IntermediateTrie3GodWrapper>,
 }
 
 impl ParseState {
@@ -166,16 +166,16 @@ impl ParseState {
             stack,
             accepted_state: None,
             prev_accepted_state: Arc::new(GSSNode::new_dead()),
-            trie2_god: None,
+            trie2_god: None, // TODO: rename
         }
     }
 
-    pub(crate) fn with_god(mut self, trie2_god: Trie3GodWrapper) -> Self {
+    pub(crate) fn with_god(mut self, trie2_god: IntermediateTrie3GodWrapper) -> Self {
         self.trie2_god = Some(trie2_god);
         self
-    }
-
-    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<Trie3GodWrapper>) -> Self {
+    } 
+    
+    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<IntermediateTrie3GodWrapper>) -> Self {
         self.trie2_god = maybe_god;
         self
     }
@@ -307,7 +307,7 @@ pub struct GLRParser {
     pub combined_gss: Arc<GSSNode>,
     pub hallucinated_gss: Arc<GSSNode>,
     // New: a dedicated god for stored precomputations and the stored cache itself.
-    pub stored_trie_god: Trie3GodWrapper,
+    pub stored_trie_god: IntermediateTrie3GodWrapper,
     pub stored_below_bottom_cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>,
     // New: synthetic reduce rows (one synthetic state per NonTerminal).
     pub synthetic_reduce_rows: BTreeMap<StateID, BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>>,
@@ -392,7 +392,7 @@ impl JSONConvertible for GLRParser {
                     combined_gss,
                     hallucinated_gss,
                     // Initialize new runtime fields; they will be populated below.
-                    stored_trie_god: Trie3GodWrapper::new(),
+                    stored_trie_god: IntermediateTrie3GodWrapper::new(),
                     stored_below_bottom_cache: HashMap::new(),
                     synthetic_reduce_rows: BTreeMap::new(),
                     synthetic_reduce_state_for_nt: BTreeMap::new(),
@@ -505,7 +505,7 @@ impl GLRParser {
             combined_start_state_id,
             combined_gss,
             hallucinated_gss,
-            stored_trie_god: Trie3GodWrapper::new(),
+            stored_trie_god: IntermediateTrie3GodWrapper::new(),
             stored_below_bottom_cache: HashMap::new(),
             synthetic_reduce_rows: BTreeMap::new(),
             synthetic_reduce_state_for_nt: BTreeMap::new(),
@@ -514,8 +514,9 @@ impl GLRParser {
     }
 
     fn initialize_synthetic_and_stored_cache(mut self) -> Self {
+        return self;
         // Reset caches
-        self.stored_trie_god = Trie3GodWrapper::new();
+        self.stored_trie_god = IntermediateTrie3GodWrapper::new();
         self.stored_below_bottom_cache.clear();
         self.synthetic_reduce_rows.clear();
         self.synthetic_reduce_state_for_nt.clear();
@@ -550,7 +551,7 @@ impl GLRParser {
             for tid in term_ids.iter().cloned() {
                 // Create a dedicated precompute root in the stored god
                 let root = PrecomputeNode3Index::new(
-                    self.stored_trie_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                    self.stored_trie_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal()))
                 );
                 // Seed acc with this root
                 let mut acc = Acc::new_fresh();
@@ -1119,6 +1120,10 @@ impl Display for GLRParser {
             self.format_state_details(f, *sid, "    ")?;
         }
 
+        // Print the hallucinated state.
+        writeln!(f, "  State {} (Hallucinated):", self.hallucinated_state_id.0)?;
+        self.format_state_details(f, self.hallucinated_state_id, "    ")?;
+
         writeln!(f, "\nTerminal Map (name to terminal ID):")?;
         for (terminal, terminal_id) in terminal_map {
             writeln!(f, "  {} -> {}", terminal, terminal_id.0)?;
@@ -1199,11 +1204,11 @@ type WorkMap = BTreeMap<WorkMapKey, (ParseState, Option<usize>)>;
 type FilteredAction<'a> = (Action<'a>, Option<StateIDBV>);
 
 impl<'a> GLRParserState<'a> { // No longer generic
-    pub fn with_god(mut self, trie2_god: Trie3GodWrapper) -> GLRParserState<'a> {
+    pub fn with_god(mut self, trie2_god: IntermediateTrie3GodWrapper) -> GLRParserState<'a> {
         self.active_state.trie2_god = Some(trie2_god);
         self
-    }
-
+    } 
+    
     pub fn set_runtime_cache(&mut self, cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>) {
         self.runtime_below_bottom_cache = cache;
     }
@@ -1273,23 +1278,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let constrained_state_opt = if let Some(bv) = filter {
             timeit!("GLRParserState::handle_action::apply_filter", {
                 let mut constrained = state.clone();
-                if let Some(god) = constrained.trie2_god.as_ref() {
-                    let tokens_all = LLMTokenBV::max_ones();
-                    let key = (0, tokens_all.clone());
-                    let mut memo = PruneAndTransformRecursiveMemo::default();
-                    let mut dest_provider = || {
-                        PrecomputeNode3Index::new(
-                            god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                        )
-                    };
+                if let Some(god) = constrained.trie2_god.as_ref() { // TODO: rename
+                    let key = IntermediateTrie3EdgeKey::Pop(0, bv.clone());
                     deep_add_precompute_trie_edges(
                         &mut constrained.stack,
                         god,
                         &key,
-                        bv,
-                        &tokens_all,
-                        &mut dest_provider,
-                        &mut memo,
+                        &mut || StoredPrecomputeNodeIndex::new(god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false }))),
+                        &mut PruneAndTransformRecursiveMemo::default(),
                     );
                 }
                 Some(constrained)
@@ -1696,17 +1692,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
 
         for (k, accs_by_edge) in popper.below_bottom() {
-            let final_acc = accs_by_edge
-                .values()
-                .map(|arc| arc)
-                .fold(Acc::new_fresh(), |a, b| Acc::merge(&a, b));
+            let final_acc = accs_by_edge.values().map(|arc| arc).fold(Acc::new_fresh(), |a, b| Acc::merge(&a, b));
             // Do not mutate stored_trie_nodes here; handled later.
             result.insert(*k, final_acc);
         }
-
         result
     }
-
     #[time_it]
     fn handle_below_bottom(
         &self,
@@ -1723,37 +1714,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return Vec::new();
         }
 
-        let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
+        let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing"); // TODO: rename
 
         let mut merged_acc_opt: Option<Acc> = None;
         let mut any_sources = false;
         // Eagerly create a destination node. It will be used for any source nodes found.
-        let dest = PrecomputeNode3Index::new(
-            god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-        );
+        let dest = StoredPrecomputeNodeIndex::new(god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
 
         for (k, acc) in below {
             // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
-            let tokens_all = LLMTokenBV::max_ones();
-            let key = (k as isize, tokens_all.clone());
             let all_states = StateIDBV::max_ones();
+            let key = IntermediateTrie3EdgeKey::Pop(k, all_states);
 
             if !acc.stored_trie_nodes().is_empty() {
                 any_sources = true;
-                for node in acc.stored_trie_nodes().iter().cloned() {
-                    let source_arc = node.as_arc().clone();
-
-                    let inserter = EdgeInserter::new(
-                        god,
-                        source_arc,
-                        key.clone(),
-                        all_states.clone(),
-                        |e, n| *e |= n,
-                        |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
-                        |_, _| {}, // Unconditional insertion
-                    );
-                    inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
-                }
+                deep_add_precompute_trie_edges(&mut Arc::new(GSSNode::new(acc.clone())), god, &key, &mut || dest.clone(), &mut PruneAndTransformRecursiveMemo::default());
             }
 
             merged_acc_opt = Some(match merged_acc_opt {
@@ -1816,13 +1791,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut accepted_out: Vec<Arc<GSSNode>> = Vec::new();
 
         // Shared constants and caches for this call
-        let tokens_all = LLMTokenBV::max_ones();
-        let edge_key_all_tokens_zero_k = (0isize, tokens_all.clone());
+        let noop_key = IntermediateTrie3EdgeKey::NoOp;
 
         // Memoize deep_add across identical filters and reuse a single destination per filter for this call.
         // This drastically reduces trie insertions and GSS rewrites.
         let god_opt = self.active_state.trie2_god.as_ref();
-        let mut filter_ctxs: HashMap<StateIDBV, (PrecomputeNode3Index, PruneAndTransformRecursiveMemo)> = HashMap::new();
+        let mut filter_ctxs: HashMap<StateIDBV, (StoredPrecomputeNodeIndex, PruneAndTransformRecursiveMemo)> = HashMap::new();
 
         // Also memoize deep_add calls performed during the "simple GSS" caching for each cached destination.
         let mut cached_dest_memos: BTreeMap<PrecomputeNode3Index, PruneAndTransformRecursiveMemo> = BTreeMap::new();
@@ -1883,7 +1857,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             for (_pred_ptr, isolated_parent) in parents_map {
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos", { // ~500 calls
                 let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
-                let mut seen_gotos = HashSet::new();
+                let mut seen_gotos: BTreeSet<(Goto, Option<StateIDBV>)> = BTreeSet::new();
                 let mut nt_queue = VecDeque::new();
                 nt_queue.push_back(nt);
 
@@ -1928,7 +1902,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", { // SLOW POINT, ~5k calls
                     for (goto, maybe_filter) in gotos_with_filters {
-                        if !seen_gotos.insert(goto) {
+                        if !seen_gotos.insert((goto, maybe_filter.clone())) {
+                            crate::debug!(5, "Skipping GOTO to state {:?}, accept: {}, filter: {:?}", goto.state_id, goto.accept, maybe_filter);
                             continue;
                         }
                         // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
@@ -1936,17 +1911,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) {
                             // Reuse a single destination per unique state filter BV and memoize the transformation.
                             let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
-                                let new_dest = PrecomputeNode3Index::new(
-                                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                                );
+                                let new_dest = StoredPrecomputeNodeIndex::new(god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
                                 (new_dest, PruneAndTransformRecursiveMemo::default())
                             });
+                            let key = IntermediateTrie3EdgeKey::Pop(0, bv.clone());
+                            crate::debug!(5, "Applying state filter {:?}.", bv);
                             deep_add_precompute_trie_edges(
-                                &mut parent_after_filter,
-                                god,
-                                &edge_key_all_tokens_zero_k,
-                                bv,
-                                &tokens_all,
+                                &mut parent_after_filter, god, &key,
                                 &mut || dest.clone(),
                                 memo,
                             );
@@ -1968,6 +1939,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         ..
                                     }) => {
                                         // Unit reduce chain: continue
+                                        crate::debug!(5, "Unit reduce chain: GOTO to state {} leads to reduce of NT '{}', continuing chain.", goto_state_id.0, self.parser.non_terminal_map.get_by_right(next_nt).unwrap());
                                         if seen_nts.insert(*next_nt) {
                                             nt_queue.push_back(*next_nt);
                                         }
@@ -1981,6 +1953,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                 .map_or(false, |r| r.0.len != 1)
                                         {
                                             timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::DefaultNonUnit GSS PUSH", {});
+                                            crate::debug!(5, "Pushing GOTO to state {:?}, accept: {}, filter: {:?}", goto_state_id, goto.accept, maybe_filter);
                                             out.push(Arc::new(parent_after_filter.push(
                                                 ParseStateEdgeContent {
                                                     state_id: goto_state_id,
@@ -2000,6 +1973,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     _ => {
                                         // Not a unit reduction path anymore -> emit a single push to goto_state
                                         timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::NonUnit GSS PUSH", {});
+                                        crate::debug!(5, "GOTO to state {} has a non-unit-reduce action ({:?}). Pushing state.", goto_state_id.0, actions[0].0);
                                         out.push(Arc::new(parent_after_filter.push(
                                             ParseStateEdgeContent {
                                                 state_id: goto_state_id,
@@ -2010,11 +1984,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             } else {
                                 // Not a unit reduction path anymore -> emit a single push to goto_state
                                 timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::MultiAction GSS PUSH", {});
+                                crate::debug!(5, "GOTO to state {} has {} actions, not a unit reduce. Pushing state.", goto_state_id.0, actions.len());
                                 out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
                                     state_id: goto_state_id,
                                 })));
                             }
                         } else {
+                            crate::debug!(5, "No GOTO. We're done.");
                             // No goto target -> we're done.
                         }
                     }
@@ -2053,13 +2029,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // --- CACHE HIT ---
                             crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
                             hit!("GLRParserState::reduce_and_goto::CacheHit");
-                            let cached_dest = occupied.get().clone();
-                            let edge_key = (0, tokens_all.clone());
-                            let edge_value = StateIDBV::max_ones();
+                            let cached_dest = occupied.get().clone(); 
                             let memo_for_dest = cached_dest_memos.entry(cached_dest.clone()).or_default();
-                            deep_add_precompute_trie_edges(
-                                &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                &mut || cached_dest.clone(), memo_for_dest,
+                            deep_add_precompute_trie_edges( 
+                                &mut new_gss_arc, god, &noop_key, &mut || cached_dest.clone(), memo_for_dest,
                             );
                         }
                         std::collections::hash_map::Entry::Vacant(vacant) => {
@@ -2069,13 +2042,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if let Some((runtime_root, runtime_gss)) = self.runtime_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
                                     hit!("GLRParserState::reduce_and_goto::RuntimeCacheHit");
                                     vacant.insert(runtime_root.clone());
-                                    let edge_key = (0, tokens_all.clone());
-                                    let edge_value = StateIDBV::max_ones();
                                     let memo_for_dest = cached_dest_memos.entry(runtime_root.clone()).or_default();
-                                    deep_add_precompute_trie_edges(
-                                        &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                        &mut || runtime_root.clone(), memo_for_dest,
-                                    );
+                                    deep_add_precompute_trie_edges(&mut new_gss_arc, god, &noop_key, &mut || runtime_root.clone(), memo_for_dest);
                                     final_shifted.push(runtime_gss);
                                     continue;
                                 }
@@ -2084,7 +2052,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
                                         // --- STORED REUSE on MISS ---
                                         hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
-                                        let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+                                        let (new_roots, id_map) = IntermediatePrecomputeNode3::deep_copy_subtrees_into(
                                             &self.parser.stored_trie_god, dest_god, &[stored_root.clone().into()],
                                         );
                                         let new_root = new_roots[0];
@@ -2093,13 +2061,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         let mut mapped_gss = stored_gss.clone();
                                         map_trie3_node_ids(&mut mapped_gss, &id_map);
 
-                                        let edge_key = (0, tokens_all.clone());
-                                        let edge_value = StateIDBV::max_ones();
                                         let memo_for_dest = cached_dest_memos.entry(new_root.clone()).or_default();
-                                        deep_add_precompute_trie_edges(
-                                            &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                            &mut || new_root.clone(), memo_for_dest,
-                                        );
+                                        deep_add_precompute_trie_edges(&mut new_gss_arc, god, &noop_key, &mut || new_root.clone(), memo_for_dest);
 
                                         final_shifted.push(mapped_gss);
                                         continue;
@@ -2110,16 +2073,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // --- PURE MISS ---
                             crate::debug!(5, "Cache miss for simple GSS to state {}, adding to output.", state_id.0);
                             hit!("GLRParserState::reduce_and_goto::CacheMiss");
-                            let new_dest = PrecomputeNode3Index::new(
-                                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                            );
-                            let edge_key = (0, tokens_all.clone());
-                            let edge_value = StateIDBV::max_ones();
+                            let new_dest = StoredPrecomputeNodeIndex::new(god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3 { end: false })));
                             let memo_for_dest = cached_dest_memos.entry(new_dest.clone()).or_default();
-                            deep_add_precompute_trie_edges(
-                                &mut new_gss_arc, god, &edge_key, &edge_value, &tokens_all,
-                                &mut || new_dest.clone(), memo_for_dest,
-                            );
+                            deep_add_precompute_trie_edges(&mut new_gss_arc, god, &noop_key, &mut || new_dest.clone(), memo_for_dest);
                             vacant.insert(new_dest);
                             final_out.push(new_gss_arc);
                         }
@@ -2155,6 +2111,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         let mut config = config.clone();
         config.current_token = Some(token_id);
+
+        if *self.parser.terminal_map.get_by_right(&token_id).unwrap() == Terminal::RegexName("EOF".to_string()) {
+            println!("here");
+        }
+        crate::debug!(4, "Processing token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
 
         if config.reset_cache {
             self.below_bottom_cache.clear();
@@ -2780,7 +2741,7 @@ impl GLRParser {
 
     pub fn transfer_stored_cache_to_god(
         &self,
-        dest_god: &Trie3GodWrapper,
+        dest_god: &IntermediateTrie3GodWrapper,
     ) -> HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)> {
         if self.stored_below_bottom_cache.is_empty() {
             return HashMap::new();
@@ -2796,7 +2757,7 @@ impl GLRParser {
 
         // 2. Perform a single bulk copy of all relevant subtrees.
         // This is much more efficient as it traverses the shared parts of the trie only once.
-        let (new_roots_vec, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+        let (new_roots_vec, id_map) = IntermediatePrecomputeNode3::deep_copy_subtrees_into(
             &self.stored_trie_god,
             dest_god,
             &all_roots_vec,
@@ -3048,7 +3009,7 @@ impl GLRParser {
 
         let all_trie_stats: Vec<TrieStats> = grouped_entries.iter().map(|(value, _keys)| {
             let (trie_root, _gss_root) = value;
-            PrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root])
+            IntermediatePrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root])
         }).collect();
  
         println!("\n--- GSS Stats Summary (distribution over unique entries) ---");
@@ -3102,7 +3063,7 @@ impl GLRParser {
             let gss_stats = gather_gss_stats(&[gss_root.as_ref()]);
             println!("  GSS Stats: {:?}", gss_stats);
  
-            let trie_stats = PrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root]);
+            let trie_stats = IntermediatePrecomputeNode3::stats(&self.stored_trie_god, &[*trie_root]);
             println!("  Trie Stats (root {}): {:?}", trie_root.as_usize(), trie_stats);
  
             println!("  Example (NonTerminal, Terminal) pairs (up to 5):");
@@ -3144,7 +3105,7 @@ impl GLRParser {
         // Combined Trie stats
         if !self.stored_below_bottom_cache.is_empty() {
             let all_trie_roots: Vec<_> = self.stored_below_bottom_cache.values().map(|(tr, _)| *tr).collect();
-            let trie_stats = PrecomputeNode3::stats(&self.stored_trie_god, &all_trie_roots);
+            let trie_stats = IntermediatePrecomputeNode3::stats(&self.stored_trie_god, &all_trie_roots);
             println!("\nCombined Stored Trie Stats (from {} total cache entries):", all_trie_roots.len());
             println!("  {:?}", trie_stats);
         }
