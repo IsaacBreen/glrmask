@@ -75,7 +75,7 @@ impl<'r> Precomputer0<'r> {
         }
 
         self.break_structural_cycles();
-        self.assert_no_structural_cycles();
+        self.assert_no_cycles();
 
         if config.gc {
             self.gc();
@@ -166,14 +166,11 @@ impl<'r> Precomputer0<'r> {
         visited.insert(node_idx.clone());
     }
 
-    pub(crate) fn assert_no_structural_cycles(&self) {
-        let back_edges = self.find_back_edges();
-        if !back_edges.is_empty() {
-            let mut report = String::from("Structural cycles detected after attempting to break them:\n");
-            for (src, key, dest) in back_edges.iter().take(5) {
-                report.push_str(&format!("  Back edge from {} to {} with key {:?}\n", src, dest, key));
-            }
-            panic!("{}", report);
+    pub(crate) fn assert_no_cycles(&self) {
+        let roots: Vec<_> = self.roots.values().cloned().collect();
+        let has_cycle = Trie::has_cycle(&self.trie0_god, roots);
+        if has_cycle {
+            panic!("Structural cycles detected after attempting to break them.");
         }
         crate::debug!(2, "Assertion passed: no structural cycles found.");
     }

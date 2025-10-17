@@ -1396,7 +1396,7 @@ impl GrammarConstraint {
         } else {
             helper.break_structural_cycles();
         }
-        helper.assert_no_structural_cycles();
+        helper.assert_no_cycles();
 
         let (precomputed0, trie0_god) = helper.finish();
         let roots_after: Vec<_> = precomputed0.values().cloned().collect();
