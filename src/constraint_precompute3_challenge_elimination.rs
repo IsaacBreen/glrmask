@@ -2024,4 +2024,106 @@ mod tests {
 
         run_test(&god, &[root]);
     }
+
+    #[test]
+    fn test_panic_from_log_push_pop_assertion() {
+        // This test is based on a panic from `assert_no_push_then_pop`.
+        // The trie-based elimination fails to simplify a path, leaving a Pop
+        // reachable from a Push, which is an invalid state.
+        let god = IntermediateTrie3GodWrapper::new();
+
+        // --- Nodes ---
+        // Node IDs from the log.
+        let node_ids = [
+            47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
+            69, 70, 71, 72, 73, 74, 75, 76,
+        ];
+        let mut nodes = BTreeMap::new();
+        for id in node_ids {
+            let content = if id == 49 {
+                IntermediatePrecomputedNodeContents3::leaf()
+            } else {
+                IntermediatePrecomputedNodeContents3::internal()
+            };
+            nodes.insert(id, Trie2Index::from(god.insert(Trie::new(content))));
+        }
+
+        // --- Bitsets ---
+        let mut llm_0 = LLMTokenBV::zeros();
+        llm_0.insert(0);
+        let mut llm_1 = LLMTokenBV::zeros();
+        llm_1.insert(1);
+        let mut llm_2 = LLMTokenBV::zeros();
+        llm_2.insert(2);
+        let mut llm_3 = LLMTokenBV::zeros();
+        llm_3.insert(3);
+
+        let mut bv_0 = StateIDBV::zeros();
+        bv_0.insert(0);
+        let mut bv_1 = StateIDBV::zeros();
+        bv_1.insert(1);
+        let mut bv_2 = StateIDBV::zeros();
+        bv_2.insert(2);
+        let mut bv_3 = StateIDBV::zeros();
+        bv_3.insert(3);
+        let mut bv_4 = StateIDBV::zeros();
+        bv_4.insert(4);
+        let mut bv_5 = StateIDBV::zeros();
+        bv_5.insert(5);
+        let mut bv_6 = StateIDBV::zeros();
+        bv_6.insert(6);
+
+        let mut bv_2_4 = StateIDBV::zeros();
+        bv_2_4.insert(2);
+        bv_2_4.insert(4);
+
+        let bv_max = StateIDBV::max_ones();
+
+        // --- Graph Structure from log ---
+        let n = |id: usize| *nodes.get(&id).unwrap();
+
+        // Root 0 path
+        n(47).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(50));
+        n(50).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(51));
+        n(51).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_2_4.clone()), (), n(52));
+        n(52).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_2.clone()), (), n(53));
+        n(53).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_0.clone()), (), n(55));
+        n(55).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(72));
+        n(72).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(73));
+        n(73).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_2_4.clone()), (), n(74));
+        n(74).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_1.clone()), (), n(75));
+        n(75).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_0.clone()), (), n(76));
+        n(76).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(49));
+        n(53).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_2), (), n(54));
+        n(54).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(49));
+
+        n(47).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(56));
+        n(56).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(57));
+        n(57).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_2_4), (), n(58));
+        n(58).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_1.clone()), (), n(59));
+        n(59).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_3), (), n(60));
+        n(60).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(49));
+
+        n(47).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(61));
+        n(61).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(62));
+        n(62).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_0), (), n(63));
+        n(62).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_1), (), n(63));
+        n(63).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_max.clone()), (), n(66));
+        n(66).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_2.clone()), (), n(68));
+        n(68).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_max.clone()), (), n(70));
+        n(70).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_2), (), n(68)); // Cycle
+        n(70).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_4.clone()), (), n(69));
+        n(66).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_4), (), n(69));
+        n(69).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_5.clone()), (), n(65));
+        n(65).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_6), (), n(67));
+        n(67).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_1), (), n(71));
+        n(71).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(49));
+        n(62).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_3), (), n(64));
+        n(64).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(2, bv_max), (), n(66));
+        n(62).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_5), (), n(65));
+
+        // Roots from log
+        let roots = vec![n(47), n(48)];
+        run_test(&god, &roots);
+    }
 }
