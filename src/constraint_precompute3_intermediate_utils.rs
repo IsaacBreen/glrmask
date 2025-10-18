@@ -150,50 +150,67 @@ fn bypass_noop_nodes(
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
     let all_nodes = Trie::all_nodes(god, start_nodes);
+    let mut changes_to_make: HashMap<IntermediatePrecomputeNode3Index, BTreeMap<_, _>> = HashMap::new();
     let mut changed = false;
 
+    // Phase 1: Read graph and determine changes, without holding locks for long.
     for node_idx in &all_nodes {
-        let mut guard = match node_idx.write(god) {
-            Some(g) => g,
-            None => continue,
+        let old_children = if let Some(guard) = node_idx.read(god) {
+            guard.children().clone()
+        } else {
+            continue;
         };
-        let old_children = std::mem::take(guard.children_mut());
+        
+        if old_children.is_empty() { continue; }
+
+        let mut new_children = old_children.clone();
         let mut local_change = false;
 
-        for (edge_key, dest_map) in old_children {
+        for (edge_key, dest_map) in &old_children {
             if let IntermediateTrie3EdgeKey::NoOp = &edge_key {
-                let mut bypassed = false;
-                for (dest_idx, _) in &dest_map {
+                let mut bypassed_something = false;
+                for (dest_idx, _) in dest_map {
                     if let Some(dest_guard) = dest_idx.read(god) {
                         // Don't bypass end nodes.
                         if dest_guard.value.end { continue; }
 
-                        bypassed = true;
-                        local_change = true;
-
-                        let dest_children = dest_guard.children().clone();
-                        for (child_edge_key, child_dest_map) in dest_children {
-                            let new_dest_map = guard.children_mut().entry(child_edge_key).or_default();
+                        bypassed_something = true;
+                        
+                        // Add dest's children to new_children
+                        for (child_edge_key, child_dest_map) in dest_guard.children() {
+                            let entry = new_children.entry(child_edge_key.clone()).or_default();
                             for (child_dest, val) in child_dest_map {
-                                new_dest_map.insert(child_dest, val);
+                                entry.insert(*child_dest, val.clone());
                             }
                         }
                     }
                 }
-                if !bypassed {
-                    // No bypass happened for this NoOp edge, so put it back
-                    guard.children_mut().insert(edge_key, dest_map);
+                if bypassed_something {
+                    // Remove the NoOp edge from new_children
+                    new_children.remove(edge_key);
+                    local_change = true;
                 }
-            } else {
-                // Not a NoOp edge, put it back
-                guard.children_mut().insert(edge_key, dest_map);
             }
         }
+
         if local_change {
             changed = true;
+            changes_to_make.insert(*node_idx, new_children);
         }
     }
-    changed
+
+    if !changed {
+        return false;
+    }
+
+    // Phase 2: Apply all collected changes.
+    for (node_idx, new_children) in changes_to_make {
+        if let Some(mut guard) = node_idx.write(god) {
+            *guard.children_mut() = new_children;
+        }
+    }
+
+    true
 }
 
 fn merge_equivalent_nodes(
