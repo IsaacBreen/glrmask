@@ -2053,43 +2053,30 @@ impl GrammarConstraint {
                 let mut out = Vec::new();
                 match edge_grammar_token_opt {
                     Some(tid) => {
-                        // Reuse canonical template subgraph; keep it immutable by attaching a per-use "post_end".
+                        // Copy the terminal's template and hook it after merged
                         let (templ_start, templ_end) = terminal_templates.get(&tid).expect("template for terminal missing");
+                        let (copied_start, id_map) = clone_trie3_graph(templ_start, &intermediate_trie3_god);
+                        let copied_end = id_map.get(templ_end).unwrap_or(&copied_start).clone();
 
-                        // Connect merged -> templ_start unconditionally
+                        // Connect merged -> copied_start unconditionally
                         {
                             let inserter = EdgeInserter::new(
                                 &intermediate_trie3_god,
                                 merged.as_arc().clone(),
                                 IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
                             );
-                            inserter.try_destination(templ_start.clone()).expect("Failed to hook merged node to template start");
+                            inserter.try_destination(copied_start.clone()).expect("Failed to hook merged node to copied template start");
                         }
 
-                        // Create a per-use post_end and hook it from templ_end with NoOp
-                        let post_end = IntermediatePrecomputeNode3Index::new(
-                            intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal()))
-                        );
-                        {
-                            let inserter = EdgeInserter::new(
-                                &intermediate_trie3_god,
-                                templ_end.as_arc().clone(),
-                                IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                            );
-                            inserter.try_destination(post_end.clone()).expect("Failed to connect template end to post_end");
-                        }
-
-                        // For each destination in Trie1, fork a node from post_end with LLM tokens on the edge.
+                        // For each destination in Trie1, fork a node from copied_end with LLM tokens on the edge.
                         for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                             let next_tokens = &*current_tokens & edge_bv;
                             if next_tokens.is_empty() { continue; }
 
-                            let next = IntermediatePrecomputeNode3Index::new(
-                                intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal()))
-                            );
+                            let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
                             let inserter = EdgeInserter::new(
                                 &intermediate_trie3_god,
-                                post_end.as_arc().clone(),
+                                copied_end.as_arc().clone(),
                                 IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), (), |_, _| {}, |_, _| {}, |_, _| {},
                             );
                             let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge after template end");
