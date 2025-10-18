@@ -261,14 +261,22 @@ pub fn eliminate_pushes_and_pops_path_based(
     }
 
     // Create a single root for the new trie.
-    let has_only_empty_path =
-        simplified_paths.len() == 1 && simplified_paths.iter().next().unwrap().is_empty();
+    let has_empty_path = simplified_paths.iter().any(|p| p.is_empty());
+    let has_only_empty_path = simplified_paths.len() == 1 && has_empty_path;
     let root_content = if has_only_empty_path {
         IntermediatePrecomputedNodeContents3::leaf()
     } else {
         IntermediatePrecomputedNodeContents3::internal()
     };
-    let new_root = god.insert(Trie::new(root_content)).into();
+    let new_root: IntermediatePrecomputeNode3Index = god.insert(Trie::new(root_content)).into();
+
+    // Preserve the empty path if it exists alongside other non-empty paths by
+    // marking the root as an end node as well. Nodes can be both end and have children.
+    if has_empty_path {
+        if let Some(mut root_w) = new_root.write(god) {
+            root_w.value.end = true;
+        }
+    }
 
     let mut node_cache: BTreeMap<Vec<IntermediateTrie3EdgeKey>, IntermediatePrecomputeNode3Index> =
         BTreeMap::new();
