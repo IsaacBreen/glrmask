@@ -13,6 +13,7 @@ use crate::r#macro::is_debug_level_enabled;
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
 pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
+    return path;
     let mut combined_llm_bv = LLMTokenBV::max_ones();
     let mut has_llm_check = false;
 
@@ -609,7 +610,7 @@ pub fn optimize_intermediate_trie3_templates_global(
     for _ in 0..3 {
         let mut changed = false;
         changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
-        changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
+        // changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
         for (s, e) in templates {
             changed |= prune_unproductive_nodes(&[*s], e, god);
         }
