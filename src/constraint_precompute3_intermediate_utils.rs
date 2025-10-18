@@ -42,6 +42,8 @@ pub fn optimize_intermediate_trie3(
             break;
         }
     }
+
+    compute_and_print_template_stats(templates, god, "After Optimization");
 }
 
 /// Prunes nodes in a graph that cannot reach the specified `end_node`.
@@ -382,6 +384,58 @@ fn structural_merge_nodes_in_subgraph(
     any_changed
 }
 
+fn compute_and_print_template_stats(
+    templates: &[(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)],
+    god: &IntermediateTrie3GodWrapper,
+    phase: &str,
+) {
+    if !is_debug_level_enabled(2) { return; }
+
+    let mut total_nodes_sum = 0; // Sum of nodes in each template if treated separately
+    let mut union_nodes: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+    let mut node_coverage: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
+
+    for (start_node, _end_node) in templates {
+        let nodes_in_template = Trie::all_nodes(god, &[*start_node]);
+        total_nodes_sum += nodes_in_template.len();
+        for node in nodes_in_template {
+            union_nodes.insert(node);
+            *node_coverage.entry(node).or_insert(0) += 1;
+        }
+    }
+
+    let shared_nodes_count = node_coverage.values().filter(|&&count| count > 1).count();
+    let unique_nodes_count = union_nodes.len();
+    let sharing_factor = if total_nodes_sum > 0 {
+        (total_nodes_sum as f64) / (unique_nodes_count as f64)
+    } else {
+        1.0
+    };
+    let shared_pct = if unique_nodes_count > 0 {
+        (shared_nodes_count as f64) * 100.0 / (unique_nodes_count as f64)
+    } else {
+        0.0
+    };
+
+    let mut total_edges = 0;
+    for node in &union_nodes {
+        if let Some(g) = node.read(god) {
+            for (_ek, dm) in g.children() {
+                total_edges += dm.len();
+            }
+        }
+    }
+
+    println!("\n--- Global Template Stats ({}) ---", phase);
+    println!("  Total templates: {}", templates.len());
+    println!("  Sum of nodes (if unshared): {}", total_nodes_sum);
+    println!("  Unique nodes across all templates: {}", unique_nodes_count);
+    println!("  Total edges across all templates: {}", total_edges);
+    println!("  Nodes shared by >= 2 templates: {} ({:.1}%)", shared_nodes_count, shared_pct);
+    println!("  Sharing factor (sum_nodes / unique_nodes): {:.2}x", sharing_factor);
+    println!("--------------------------------------------");
+}
+
 // Run a global optimization across all per-terminal templates.
 // Pins all (start,end) nodes to keep external references valid.
 pub fn optimize_intermediate_trie3_templates_global(
@@ -389,6 +443,8 @@ pub fn optimize_intermediate_trie3_templates_global(
     god: &IntermediateTrie3GodWrapper,
 ) {
     if templates.is_empty() { return; }
+
+    compute_and_print_template_stats(templates, god, "Before Optimization");
 
     let start_nodes: Vec<_> = templates.iter().map(|(s, _)| *s).collect();
     let mut pinned: std::collections::HashSet<IntermediatePrecomputeNode3Index> = std::collections::HashSet::new();
