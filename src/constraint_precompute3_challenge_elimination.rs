@@ -285,16 +285,6 @@ pub fn eliminate_pushes_and_pops(
         return;
     }
 
-    // Check for cycles. The path-based comparison is only valid for acyclic graphs,
-    // as get_all_paths would not terminate on a cyclic graph.
-    if Trie::has_cycle(god, old_root_vec.clone()) {
-        if is_debug_level_enabled(3) {
-            println!("[Push/Pop Elimination] Skipping debug comparison for cyclic graph.");
-        }
-        run_trie_based_elimination(roots, god);
-        return;
-    }
-
     let (source_god, source_roots_vec, _) = Trie::deep_copy_subtrees(god, &old_root_vec);
     let mut source_roots_map = BTreeMap::new();
     for (sid, r_idx) in roots.keys().zip(source_roots_vec.iter()) {
