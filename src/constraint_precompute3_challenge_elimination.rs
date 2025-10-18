@@ -5,6 +5,7 @@ use crate::constraint::{
     IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV,
 };
 use crate::datastructures::trie::Trie;
+use crate::r#macro::is_debug_level_enabled;
 use crate::tokenizer::TokenizerStateID;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -101,23 +102,6 @@ fn simplify_path(
     stack: Vec<IntermediateTrie3EdgeKey>,
 ) -> Option<Vec<IntermediateTrie3EdgeKey>> {
     let mut stack = stack;
-
-    // Early invalidation rule:
-    // If there is any Pop(n >= 1, _) before the first Push, and the path contains at least
-    // one Push somewhere, then this path is unsatisfiable (stack underflow before the first push).
-    // We keep paths that contain only Pops (no Push at all), as those are not eliminated here.
-    if let Some(first_push_pos) = stack
-        .iter()
-        .position(|ek| matches!(ek, IntermediateTrie3EdgeKey::Push(_)))
-    {
-        let has_underflow_prefix = stack[..first_push_pos]
-            .iter()
-            .any(|ek| matches!(ek, IntermediateTrie3EdgeKey::Pop(n, _) if *n >= 1));
-        if has_underflow_prefix {
-            return None;
-        }
-    }
-
     loop {
         let mut changed_in_pass = false;
         let mut i = 0;
@@ -277,10 +261,9 @@ pub fn eliminate_pushes_and_pops_path_based(
     }
 
     // Create a single root for the new trie.
-    // If any simplified path is empty, the root must be accepting so that the
-    // empty path is preserved alongside any non-empty paths.
-    let has_any_empty_path = simplified_paths.iter().any(|p| p.is_empty());
-    let root_content = if has_any_empty_path {
+    let has_only_empty_path =
+        simplified_paths.len() == 1 && simplified_paths.iter().next().unwrap().is_empty();
+    let root_content = if has_only_empty_path {
         IntermediatePrecomputedNodeContents3::leaf()
     } else {
         IntermediatePrecomputedNodeContents3::internal()
