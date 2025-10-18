@@ -847,14 +847,14 @@ fn run_trie_based_elimination(
                 continue;
             }
 
-            // A "complex" BlockedPush is one that has an LLM constraint.
-            // Rewiring these can lead to graph blow-up, especially in cycles, as we might
-            // repeatedly create new aggregator nodes for the same logical path.
-            // If we find such a case, we conservatively do not modify the original push edge.
+            // If the BFS for a push from `src` leads to a `BlockedPush` exit that lands
+            // back at `src`, we are in a tight loop that can cause node explosion if rewired.
+            // This is the specific pathological case we need to avoid. In this situation,
+            // we conservatively make no changes to the original edge for this round.
             let mut must_keep_original_edge = false;
             for ex in &exits {
-                if let Exit::BlockedPush { llm, .. } = ex {
-                    if *llm != LLMTokenBV::max_ones() {
+                if let Exit::BlockedPush { dst: exit_dst, .. } = ex {
+                    if *exit_dst == src {
                         must_keep_original_edge = true;
                         break;
                     }
