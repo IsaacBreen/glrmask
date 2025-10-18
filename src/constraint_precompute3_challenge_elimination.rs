@@ -993,11 +993,6 @@ fn run_trie_based_elimination(
             }
         }
 
-        if push_edges.is_empty() {
-            crate::debug!(5, "[challenge_elim] No pushes found; done.");
-            break;
-        }
-
         eprintln!(
             "[challenge_elim] Round {}: attempting to eliminate {} push edge(s).",
             round,
