@@ -758,7 +758,7 @@ fn run_trie_based_elimination(
             break;
         }
 
-        crate::debug!(5,
+        eprintln!(
             "[challenge_elim] Round {}: attempting to eliminate {} push edge(s).",
             round,
             push_edges.len()
@@ -783,7 +783,7 @@ fn run_trie_based_elimination(
             processed += 1;
             let pct = (processed * 100) / total;
             if pct >= next_mark {
-                crate::debug!(5,
+                eprintln!(
                     "[challenge_elim] Round {} progress: {}/{} ({}%)",
                     round, processed, total, pct
                 );
@@ -910,7 +910,7 @@ fn run_trie_based_elimination(
             }
         }
 
-        crate::debug!(5,
+        eprintln!(
             "[challenge_elim] Round {} removed {} push edge(s).",
             round, removed_this_round
         );
