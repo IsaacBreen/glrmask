@@ -903,64 +903,99 @@ where
     {
         let mut all_paths = Vec::new();
 
+        // The state for our explicit stack is an iterator over a node's children's edges.
+        // We collect edges into a Vec to have a concrete iterator type.
+        type Edge = (EK, EV, T, Trie2Index); // (key, value, child_node_value, child_node_index)
+        type EdgeIter = std::vec::IntoIter<Edge>;
+
         for &root in roots {
-            if let Some(root_guard) = root.read(arena) {
-                let root_value = root_guard.value.clone();
-                Self::get_all_paths_with_cycles_recursive(
-                    arena,
-                    root,
-                    &mut vec![],
-                    &mut all_paths,
-                    &is_end,
-                    &root_value,
-                    max_path_length,
-                );
-            }
-        }
-        all_paths
-    }
+            let root_guard = match root.read(arena) {
+                Some(guard) => guard,
+                None => continue, // Skip invalid root index
+            };
 
-    fn get_all_paths_with_cycles_recursive<F>(
-        arena: &Arena<Self>,
-        node_idx: Trie2Index,
-        current_path: &mut Vec<(EK, EV, T)>,
-        all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
-        is_end: &F,
-        root_value: &T,
-        max_path_length: usize,
-    ) where
-        F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
-        T: Clone,
-        EV: Clone,
-    {
-        if let Some(guard) = node_idx.read(arena) {
-            if is_end(node_idx, &guard) {
-                all_paths.push((root_value.clone(), current_path.clone()));
+            let root_value = root_guard.value.clone();
+
+            // A path with zero edges is returned if the root itself satisfies the `is_end` predicate.
+            if is_end(root, &root_guard) {
+                all_paths.push((root_value.clone(), vec![]));
             }
 
-            if current_path.len() >= max_path_length {
-                return;
+            if max_path_length == 0 {
+                continue;
             }
 
-            for (edge_key, dest_map) in guard.children() {
-                for (child_idx, edge_value) in dest_map.iter() {
-                    if let Some(child_guard) = child_idx.read(arena) {
-                        let child_value = child_guard.value.clone();
-                        current_path.push((edge_key.clone(), edge_value.clone(), child_value));
-                        Self::get_all_paths_with_cycles_recursive(
-                            arena,
-                            *child_idx,
-                            current_path,
-                            all_paths,
-                            is_end,
-                            root_value,
-                            max_path_length,
-                        );
-                        current_path.pop(); // Backtrack
+            // Setup for iterative traversal
+            let mut current_path: Vec<(EK, EV, T)> = Vec::new();
+            let mut stack: Vec<EdgeIter> = Vec::new();
+
+            // Initial set of edges from the root
+            let root_children_edges: Vec<Edge> = root_guard
+                .children()
+                .iter()
+                .flat_map(|(ek, dest_map)| {
+                    dest_map.iter().filter_map(move |(child_idx, ev)| {
+                        child_idx.read(arena).map(|child_guard| {
+                            (ek.clone(), ev.clone(), child_guard.value.clone(), *child_idx)
+                        })
+                    })
+                })
+                .collect();
+
+            drop(root_guard); // Release lock on root
+            stack.push(root_children_edges.into_iter());
+
+            // Iterative DFS
+            while let Some(edges_iter) = stack.last_mut() {
+                if let Some((ek, ev, child_value, child_idx)) = edges_iter.next() {
+                    // Go down: push edge to path and new children iterator to stack
+                    current_path.push((ek, ev, child_value));
+
+                    let child_guard = match child_idx.read(arena) {
+                        Some(guard) => guard,
+                        None => {
+                            // Invalid child index, backtrack
+                            current_path.pop();
+                            continue;
+                        }
+                    };
+
+                    if is_end(child_idx, &child_guard) {
+                        all_paths.push((root_value.clone(), current_path.clone()));
                     }
+
+                    if current_path.len() < max_path_length {
+                        let grand_children_edges: Vec<Edge> = child_guard
+                            .children()
+                            .iter()
+                            .flat_map(|(ek_child, dest_map_child)| {
+                                dest_map_child.iter().filter_map(move |(gc_idx, ev_child)| {
+                                    gc_idx.read(arena).map(|gc_guard| {
+                                        (
+                                            ek_child.clone(),
+                                            ev_child.clone(),
+                                            gc_guard.value.clone(),
+                                            *gc_idx,
+                                        )
+                                    })
+                                })
+                            })
+                            .collect();
+
+                        drop(child_guard); // Release lock
+                        stack.push(grand_children_edges.into_iter());
+                    } else {
+                        // Max path length reached, backtrack
+                        current_path.pop();
+                    }
+                } else {
+                    // Go up: current node's children exhausted. Pop from stack and path.
+                    stack.pop();
+                    current_path.pop();
                 }
             }
         }
+        all_paths
     }
 }
 
