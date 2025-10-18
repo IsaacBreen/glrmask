@@ -4024,57 +4024,58 @@ impl<'a> GrammarConstraintState<'a> {
         while let Some((offset, states_to_process)) = processing_queue.pop_first() {
             crate::debug!(3, "Processing offset {} with states {:?}.", offset, states_to_process.keys().map(|k| k.0).collect::<Vec<_>>());
             for (tokenizer_s_id_at_offset, glr_s_at_offset) in states_to_process {
-                assert!(offset < llm_token_bytes.len());
-
+                let remaining_bytes = &llm_token_bytes[offset..];
                 let exec_result = self.parent.tokenizer.execute_from_state(
-                    &llm_token_bytes[offset..],
+                    remaining_bytes,
                     tokenizer_s_id_at_offset,
                 );
 
+                let mut has_full_match = false;
+                for match_info in &exec_result.matches {
+                    if match_info.width == remaining_bytes.len() {
+                        has_full_match = true;
+                        break;
+                    }
+                }
+
                 for match_info in &exec_result.matches {
                     let mut cloned_glr_s = glr_s_at_offset.clone();
-
                     cloned_glr_s.process_token(TerminalID(match_info.id));
-                    // cloned_glr_s.do_phase3();
 
                     if cloned_glr_s.is_ok() {
                         let new_offset = offset + match_info.width;
-                        // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
-                        let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
-
-                        if let Some(end_state_id) = exec_result.end_state {
-                            let terminals_accessible_from_end_state = self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
-                            if terminals_accessible_from_end_state.contains(&TerminalID(match_info.id)) {
-                                let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
-                                let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
-                                // Disallow this token from being matched again immediately.
-                                disallowed_terminals_for_end_state.insert(match_info.id);
-                                disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
-                                disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
-                            }
-                        }
-                        // cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
-                        // cloned_glr_s.log_gss(format!("After disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
-
                         if new_offset == llm_token_bytes.len() {
-                            // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
-                            new_overall_state.entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
+                            // This path terminates because a grammar token match consumed the rest of the LLM token.
+                            // The new tokenizer state is the end_state from the tokenizer execution.
+                            if let Some(end_state_val) = exec_result.end_state {
+                                let final_tokenizer_state = TokenizerStateID(end_state_val);
+                                new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
+                            } else {
+                                // This should not happen if a match consumed everything, but as a fallback:
+                                let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
+                                new_overall_state.entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
+                            }
                         } else {
+                            // This is a partial match within the LLM token. Queue it for the next segment.
+                            // The tokenizer state should reset to initial for the next segment.
+                            let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
                             processing_queue.entry(new_offset).or_default().entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
                         }
                     }
                 }
 
-                if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                    // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-                    // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-                    let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                    new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
+                if !has_full_match {
+                    if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                        // The rest of the token is consumed as a prefix of some token(s), but not a full token match.
+                        // The GLR state is unchanged, but the tokenizer state advances.
+                        let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
+                        new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
+                    }
                 }
             }
         }
 
-        self.state = new_overall_state.clone();
+        self.state = new_overall_state;
         for glr_parser_state in self.state.values_mut() {
             // glr_parser_state.process_default_reductions();
         }
