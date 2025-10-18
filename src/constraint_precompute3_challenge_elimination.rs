@@ -59,33 +59,6 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
         other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
     }
 
-    // Second pass: fold any immediate Push(A) followed by Pop(0, B) into Push(A ∩ B).
-    // This aligns path normalization with simplify_path’s local behavior for adjacent pairs
-    // and avoids spurious diffs when the trie-based algorithm rewires but leaves a
-    // redundant Pop(0) adjacent to a Push in the residual graph.
-    let mut out: Vec<IntermediateTrie3EdgeKey> = Vec::with_capacity(other_ops.len());
-    let mut i = 0usize;
-    while i < other_ops.len() {
-        match (&other_ops[i], other_ops.get(i + 1)) {
-            (
-                IntermediateTrie3EdgeKey::Push(push_bv),
-                Some(IntermediateTrie3EdgeKey::Pop(0, pop_bv)),
-            ) => {
-                // If disjoint, keep both (normalization should not invalidate).
-                if push_bv.is_disjoint(pop_bv) {
-                    out.push(other_ops[i].clone());
-                    i += 1;
-                } else {
-                    // Replace Push(A), Pop(0, B) with Push(A ∩ B)
-                    let mut new_bv = push_bv.clone();
-                    new_bv &= pop_bv.clone();
-                    out.push(IntermediateTrie3EdgeKey::Push(new_bv));
-                    i += 2;
-                }
-            }
-            _ => { out.push(other_ops[i].clone()); i += 1; }
-        }
-    }
     out
 }
 /// Simplifies a path by repeatedly eliminating Push/Pop pairs.
