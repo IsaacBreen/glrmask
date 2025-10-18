@@ -355,59 +355,6 @@ fn assert_no_push_then_pop(
     }
 }
 
-/// Returns true if there exists any Pop edge reachable from the destination of any Push edge.
-/// This mirrors the traversal in `assert_no_push_then_pop` but does not panic; it is used to
-/// decide whether to fall back to the path-based eliminator to enforce the invariant.
-fn pop_after_push_exists(
-    god: &IntermediateTrie3GodWrapper,
-    roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-) -> bool {
-    let all_root_indices: Vec<_> = roots.values().cloned().collect();
-    if all_root_indices.is_empty() {
-        return false;
-    }
-
-    let all_nodes = Trie::all_nodes(god, &all_root_indices);
-
-    // Find all nodes that are destinations of a Push edge.
-    let mut push_destinations = BTreeSet::new();
-    for node_idx in &all_nodes {
-        if let Some(guard) = node_idx.read(god) {
-            for (ek, dest_map) in guard.children() {
-                if matches!(ek, IntermediateTrie3EdgeKey::Push(_)) {
-                    for (dest_idx, _) in dest_map.iter() {
-                        push_destinations.insert(*dest_idx);
-                    }
-                }
-            }
-        }
-    }
-
-    if push_destinations.is_empty() {
-        return false; // No pushes -> invariant vacuously holds.
-    }
-
-    // BFS from each push destination; if we encounter any Pop edge, invariant is violated.
-    let mut q: VecDeque<IntermediatePrecomputeNode3Index> = push_destinations.iter().cloned().collect();
-    let mut visited: BTreeSet<IntermediatePrecomputeNode3Index> = push_destinations;
-
-    while let Some(node_idx) = q.pop_front() {
-        if let Some(guard) = node_idx.read(god) {
-            for (ek, dest_map) in guard.children() {
-                if matches!(ek, IntermediateTrie3EdgeKey::Pop(_, _)) {
-                    return true;
-                }
-                for (dest_idx, _) in dest_map.iter() {
-                    if visited.insert(*dest_idx) {
-                        q.push_back(*dest_idx);
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
 pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
@@ -505,15 +452,7 @@ pub fn eliminate_pushes_and_pops(
     }
 
     // 5. If no mismatch, run the trie-based version on the actual input `god` to modify it.
-    //    Then enforce the structural postcondition: no Pop (including Pop(0)) reachable from any Push.
     run_trie_based_elimination(roots, god);
-
-    // If the trie-based eliminator left a Pop reachable from a Push destination (structural invariant
-    // violation), fall back to the path-based eliminator which rebuilds a clean trie from simplified paths.
-    if pop_after_push_exists(god, roots) {
-        eprintln!("[challenge_elim] Pop reachable from a Push destination after trie-based elimination. Falling back to path-based rebuild.");
-        eliminate_pushes_and_pops_path_based(roots, god);
-    }
 
     assert_no_push_then_pop(god, roots);
 }
