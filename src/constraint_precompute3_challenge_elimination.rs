@@ -1851,4 +1851,89 @@ mod tests {
         // The test harness takes a slice of roots. So I'll pass &[nodes[0]].
         run_test(&god, &[root]);
     }
+
+    #[test]
+    fn test_mismatch_from_log_3() {
+        // This test is based on a mismatch found during development, using the exact
+        // graph structure from the logs.
+        // The path-based simplifier incorrectly reduces `Push({2}), Pop(0, {2,4})` to `Push({2})`
+        // which is incorrect as the Pop(0) should not be eliminated in this sequence.
+        let god = IntermediateTrie3GodWrapper::new();
+
+        // --- Nodes ---
+        let nodes: Vec<_> = (0..24)
+            .map(|i| {
+                let content = if i == 11 {
+                    IntermediatePrecomputedNodeContents3::leaf()
+                } else {
+                    IntermediatePrecomputedNodeContents3::internal()
+                };
+                Trie2Index::from(god.insert(Trie::new(content)))
+            })
+            .collect();
+        let root = nodes[0];
+
+        // --- Bitsets ---
+        let mut llm_0 = LLMTokenBV::zeros();
+        llm_0.insert(0);
+        let mut llm_1 = LLMTokenBV::zeros();
+        llm_1.insert(1);
+        let mut llm_2 = LLMTokenBV::zeros();
+        llm_2.insert(2);
+
+        let mut bv_1 = StateIDBV::zeros();
+        bv_1.insert(1);
+        let mut bv_2 = StateIDBV::zeros();
+        bv_2.insert(2);
+        let mut bv_3 = StateIDBV::zeros();
+        bv_3.insert(3);
+        let mut bv_4 = StateIDBV::zeros();
+        bv_4.insert(4);
+        let mut bv_5 = StateIDBV::zeros();
+        bv_5.insert(5);
+        let mut bv_6 = StateIDBV::zeros();
+        bv_6.insert(6);
+
+        let mut bv_2_4 = StateIDBV::zeros();
+        bv_2_4.insert(2);
+        bv_2_4.insert(4);
+
+        let bv_max = StateIDBV::max_ones();
+
+        // --- Graph Structure from log ---
+        // Branch 1
+        nodes[0].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[1]);
+        nodes[1].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[2]);
+        nodes[2].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_2_4.clone()), (), nodes[3]);
+        nodes[3].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_2.clone()), (), nodes[4]);
+        nodes[4].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_0.clone()), (), nodes[5]);
+        nodes[5].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[6]);
+        nodes[6].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[7]);
+        nodes[7].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_2_4.clone()), (), nodes[8]);
+        nodes[8].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_1.clone()), (), nodes[9]);
+        nodes[9].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_0), (), nodes[10]);
+        nodes[10].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[11]);
+
+        nodes[4].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_2), (), nodes[12]);
+        nodes[12].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[11]);
+
+        // Branch 2 (stub)
+        nodes[0].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[13]);
+
+        // Branch 3
+        nodes[0].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[14]);
+        nodes[14].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[15]);
+        nodes[15].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_3), (), nodes[16]);
+        nodes[16].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(2, bv_max.clone()), (), nodes[17]);
+        nodes[17].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_2.clone()), (), nodes[18]);
+        nodes[18].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_max), (), nodes[19]);
+        nodes[19].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_2), (), nodes[18]); // Cycle
+        nodes[19].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_4), (), nodes[20]);
+        nodes[20].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_5), (), nodes[21]);
+        nodes[21].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_6), (), nodes[22]);
+        nodes[22].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_1), (), nodes[23]);
+        nodes[23].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[11]);
+
+        run_test(&god, &[root]);
+    }
 }
