@@ -2392,6 +2392,73 @@ local_system:
       pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
       pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+
+          #[test]
+          fn test_get_all_paths_with_cycles_long_path() {
+              type TestTrie = Trie<String, i32, String>;
+              let arena = Arena::<TestTrie>::new();
+
+              // Create a chain of nodes: root -> n1 -> ... -> n10
+              let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+              let mut nodes = vec![root];
+              let mut prev_node_idx = root;
+
+              for i in 1..=10 {
+                  let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
+                  let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
+                  prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
+                  drop(prev_node_w);
+                  nodes.push(new_node_idx);
+                  prev_node_idx = new_node_idx;
+              }
+
+              // Create a cycle: n10 -> n5
+              let n10_idx = nodes[10];
+              let n5_idx = nodes[5];
+              n10_idx
+                  .write(&arena)
+                  .unwrap()
+                  .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
+
+              // We expect to find paths ending at n8, with a max length of 20
+              let n8_idx = nodes[8];
+              let max_len = 20;
+
+              let paths = TestTrie::get_all_paths_with_cycles(
+                  &arena,
+                  &[root],
+                  |idx, _| idx == n8_idx,
+                  |_, _, _| true,
+                  max_len,
+              );
+
+              // Expected paths:
+              // 1. root -> ... -> n8 (length 8)
+              // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
+              // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
+              //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
+              assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
+
+              let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
+              path_lengths.sort_unstable();
+
+              assert_eq!(path_lengths, vec![8, 14, 20]);
+
+              // Verify path contents for the shortest one.
+              let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
+              assert_eq!(shortest_path.0, "root");
+              for i in 0..8 {
+                  let (ek, ev, t) = &shortest_path.1[i];
+                  assert_eq!(*ek, format!("edge_{}", i + 1));
+                  assert_eq!(*ev, (i + 1) as i32);
+                  assert_eq!(*t, format!("n{}", i + 1));
+              }
+          }
+      }
+
   prev_file_contents:
     src/datastructures/trie.rs: |+
       use std::cmp::Ordering;
@@ -3372,7 +3439,7 @@ local_system:
               };
 
               let mut stack: Vec<Frame<EK, EV>> = Vec::new();
-              let mut visiting = std::collections::HashSet::new();
+              let mut visiting: std::collections::HashMap<Trie2Index, usize> = std::collections::HashMap::new();
               stack.push(Frame {
                   node: node_idx,
                   edges: edges_for(node_idx),
@@ -3380,7 +3447,7 @@ local_system:
                   started: false,
                   has_incoming_edge: false, // root has no incoming edge
               });
-              visiting.insert(node_idx);
+              *visiting.entry(node_idx).or_default() += 1;
 
               while let Some(frame) = stack.last_mut() {
                   // On first entry to this node: evaluate `is_end` and enforce max_path_length.
@@ -3396,7 +3463,11 @@ local_system:
                       // If we've reached the max number of edges on this path, do not expand further.
                       if path.len() >= max_path_length {
                           let popped = stack.pop().unwrap();
-                          visiting.remove(&popped.node);
+                          let count = visiting.get_mut(&popped.node).unwrap();
+                          *count -= 1;
+                          if *count == 0 {
+                              visiting.remove(&popped.node);
+                          }
                           if popped.has_incoming_edge {
                               path.pop(); // backtrack edge added when entering this frame
                           }
@@ -3407,7 +3478,11 @@ local_system:
                   // If we've exhausted edges for this node, backtrack.
                   if frame.idx >= frame.edges.len() {
                       let popped = stack.pop().unwrap();
-                      visiting.remove(&popped.node);
+                      let count = visiting.get_mut(&popped.node).unwrap();
+                      *count -= 1;
+                      if *count == 0 {
+                          visiting.remove(&popped.node);
+                      }
                       if popped.has_incoming_edge {
                           path.pop(); // backtrack the edge that led here
                       }
@@ -3418,14 +3493,17 @@ local_system:
                   let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
                   frame.idx += 1;
 
-                  if visiting.contains(&child_idx) {
-                      continue; // Cycle detected, do not re-descend.
-                  }
-
                   if let Some(child_guard) = child_idx.read(arena) {
+                      let counts = counts_toward_length(&ek, &ev, child_idx);
+
+                      // If the edge does not contribute to path length, we must use `visiting` to prevent infinite loops.
+                      // If it *does* contribute, we can revisit nodes because `max_path_length` will eventually terminate the search.
+                      if !counts && visiting.contains_key(&child_idx) {
+                          continue; // Cycle of uncounted edges detected, do not re-descend.
+                      }
+
                       let child_value = child_guard.value.clone();
 
-                      let counts = counts_toward_length(&ek, &ev, child_idx);
                       if counts {
                           // Add this edge to the current path before exploring the child.
                           path.push((ek, ev, child_value));
@@ -3440,7 +3518,7 @@ local_system:
                           started: false,
                           has_incoming_edge: counts,
                       });
-                      visiting.insert(child_idx);
+                      *visiting.entry(child_idx).or_default() += 1;
                   } else {
                       // If child is missing, skip it and proceed.
                       continue;
@@ -7278,12 +7356,101 @@ messages:
       pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
       pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+
+          #[test]
+          fn test_get_all_paths_with_cycles_long_path() {
+              type TestTrie = Trie<String, i32, String>;
+              let arena = Arena::<TestTrie>::new();
+
+              // Create a chain of nodes: root -> n1 -> ... -> n10
+              let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+              let mut nodes = vec![root];
+              let mut prev_node_idx = root;
+
+              for i in 1..=10 {
+                  let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
+                  let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
+                  prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
+                  drop(prev_node_w);
+                  nodes.push(new_node_idx);
+                  prev_node_idx = new_node_idx;
+              }
+
+              // Create a cycle: n10 -> n5
+              let n10_idx = nodes[10];
+              let n5_idx = nodes[5];
+              n10_idx
+                  .write(&arena)
+                  .unwrap()
+                  .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
+
+              // We expect to find paths ending at n8, with a max length of 20
+              let n8_idx = nodes[8];
+              let max_len = 20;
+
+              let paths = TestTrie::get_all_paths_with_cycles(
+                  &arena,
+                  &[root],
+                  |idx, _| idx == n8_idx,
+                  |_, _, _| true,
+                  max_len,
+              );
+
+              // Expected paths:
+              // 1. root -> ... -> n8 (length 8)
+              // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
+              // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
+              //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
+              assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
+
+              let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
+              path_lengths.sort_unstable();
+
+              assert_eq!(path_lengths, vec![8, 14, 20]);
+
+              // Verify path contents for the shortest one.
+              let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
+              assert_eq!(shortest_path.0, "root");
+              for i in 0..8 {
+                  let (ek, ev, t) = &shortest_path.1[i];
+                  assert_eq!(*ek, format!("edge_{}", i + 1));
+                  assert_eq!(*ev, (i + 1) as i32);
+                  assert_eq!(*t, format!("n{}", i + 1));
+              }
+          }
+      }
+
 
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: Add a test to this code for `get_all_paths_with_cycles` that generates very
-      long paths from a cyclic trie.
+  - user: |2+
+
+      thread 'datastructures::trie::tests::test_get_all_paths_with_cycles_long_path' (8959869) panicked at src/datastructures/trie.rs:2436:9:
+      assertion `left == right` failed: Should find 3 paths ending at n8 within max length
+        left: 1
+       right: 3
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:394:5
+         4: sep1::datastructures::trie::tests::test_get_all_paths_with_cycles_long_path
+                   at ./src/datastructures/trie.rs:2436:9
+         5: sep1::datastructures::trie::tests::test_get_all_paths_with_cycles_long_path::{{closure}}
+                   at ./src/datastructures/trie.rs:2393:50
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7302,164 +7469,236 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the test, followed by the corresponding git diff.
+      Hello! As an AI assistant, I'd be happy to help you debug this test failure. The panic indicates that your `get_all_paths_with_cycles` function isn't finding all the expected paths in a graph with cycles.
+
+      The root cause of the issue is in the cycle detection logic within `get_all_paths_with_cycles_recursive`. The current implementation uses a `HashSet` to track visited nodes (`visiting`) and prevents re-entering any node already on the current path. This correctly prevents infinite loops in a simple DFS but is too restrictive for your use case, as it also prevents traversing valid cycles that should be part of the discovered paths.
+
+      The fix involves two main changes:
+      1.  Modifying the `visiting` tracker from a `HashSet` to a `HashMap` to act as a multiset, correctly tracking multiple occurrences of a node on the traversal stack.
+      2.  Adjusting the cycle detection logic to only prevent traversal of cycles composed of "uncounted" edges (those for which `counts_toward_length` returns `false`), as these are the only ones that could cause an infinite loop without making progress toward `max_path_length`.
+
+      Here are the step-by-step instructions to apply the fix.
 
       ### Step-by-step Instructions
 
       1.  **Open the file `src/datastructures/trie.rs`**.
-      2.  **Add a new test module at the end of the file**. Scroll to the bottom of the file and append the following code. This creates a test module and adds a test case named `test_get_all_paths_with_cycles_long_path`.
 
-          This test constructs a graph with a long chain of nodes and a cycle. It then calls `get_all_paths_with_cycles` to find paths that terminate on a specific node within that cycle, respecting a maximum path length. Finally, it asserts that the correct number of paths are found and that their lengths match the expected values (8, 14, and 20 edges).
+      2.  **Navigate to the `get_all_paths_with_cycles_recursive` function.**
 
+      3.  **Change `visiting` to a `HashMap`**:
+          Locate this line (around line 1184):
           ```rust
-          #[cfg(test)]
-          mod tests {
-              use super::*;
+          let mut visiting = std::collections::HashSet::new();
+          ```
+          And change it to:
+          ```rust
+          let mut visiting: std::collections::HashMap<Trie2Index, usize> = std::collections::HashMap::new();
+          ```
 
-              #[test]
-              fn test_get_all_paths_with_cycles_long_path() {
-                  type TestTrie = Trie<String, i32, String>;
-                  let arena = Arena::<TestTrie>::new();
+      4.  **Update `visiting` initialization for the root node**:
+          Locate this line (around line 1193):
+          ```rust
+          visiting.insert(node_idx);
+          ```
+          And replace it with logic to increment the node's count in the map:
+          ```rust
+          *visiting.entry(node_idx).or_default() += 1;
+          ```
 
-                  // Create a chain of nodes: root -> n1 -> ... -> n10
-                  let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
-                  let mut nodes = vec![root];
-                  let mut prev_node_idx = root;
-
-                  for i in 1..=10 {
-                      let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
-                      let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
-                      prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
-                      drop(prev_node_w);
-                      nodes.push(new_node_idx);
-                      prev_node_idx = new_node_idx;
-                  }
-
-                  // Create a cycle: n10 -> n5
-                  let n10_idx = nodes[10];
-                  let n5_idx = nodes[5];
-                  n10_idx
-                      .write(&arena)
-                      .unwrap()
-                      .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
-
-                  // We expect to find paths ending at n8, with a max length of 20
-                  let n8_idx = nodes[8];
-                  let max_len = 20;
-
-                  let paths = TestTrie::get_all_paths_with_cycles(
-                      &arena,
-                      &[root],
-                      |idx, _| idx == n8_idx,
-                      |_, _, _| true,
-                      max_len,
-                  );
-
-                  // Expected paths:
-                  // 1. root -> ... -> n8 (length 8)
-                  // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
-                  // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
-                  //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
-                  assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
-
-                  let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
-                  path_lengths.sort_unstable();
-
-                  assert_eq!(path_lengths, vec![8, 14, 20]);
-
-                  // Verify path contents for the shortest one.
-                  let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
-                  assert_eq!(shortest_path.0, "root");
-                  for i in 0..8 {
-                      let (ek, ev, t) = &shortest_path.1[i];
-                      assert_eq!(*ek, format!("edge_{}", i + 1));
-                      assert_eq!(*ev, (i + 1) as i32);
-                      assert_eq!(*t, format!("n{}", i + 1));
-                  }
+      5.  **Update `visiting` logic when backtracking (popping from the stack)**:
+          There are two places where nodes are popped from the stack and removed from `visiting`. You need to replace the `visiting.remove(...)` call in both places.
+          -   First, around line 1208, change:
+              ```rust
+              visiting.remove(&popped.node);
+              ```
+              to:
+              ```rust
+              let count = visiting.get_mut(&popped.node).unwrap();
+              *count -= 1;
+              if *count == 0 {
+                  visiting.remove(&popped.node);
               }
+              ```
+          -   Second, around line 1220, apply the exact same change. Replace:
+              ```rust
+              visiting.remove(&popped.node);
+              ```
+              with:
+              ```rust
+              let count = visiting.get_mut(&popped.node).unwrap();
+              *count -= 1;
+              if *count == 0 {
+                  visiting.remove(&popped.node);
+              }
+              ```
+
+      6.  **Update the main traversal and cycle-check logic**:
+          Replace the entire block for handling child nodes (from around line 1228 to 1261) with the corrected logic. This involves removing the old unconditional cycle check and adding a new conditional one.
+
+          **Delete** this entire block:
+          ```rust
+          if visiting.contains(&child_idx) {
+              continue; // Cycle detected, do not re-descend.
+          }
+
+          if let Some(child_guard) = child_idx.read(arena) {
+              let child_value = child_guard.value.clone();
+
+              let counts = counts_toward_length(&ek, &ev, child_idx);
+              if counts {
+                  // Add this edge to the current path before exploring the child.
+                  path.push((ek, ev, child_value));
+              }
+
+              // Snapshot child's edges now (no locks held across iterations).
+              let child_edges = edges_for(child_idx);
+              stack.push(Frame {
+                  node: child_idx,
+                  edges: child_edges,
+                  idx: 0,
+                  started: false,
+                  has_incoming_edge: counts,
+              });
+              visiting.insert(child_idx);
+          } else {
+              // If child is missing, skip it and proceed.
+              continue;
           }
           ```
 
+          And **replace it with this new block**:
+          ```rust
+          if let Some(child_guard) = child_idx.read(arena) {
+              let counts = counts_toward_length(&ek, &ev, child_idx);
+
+              // If the edge does not contribute to path length, we must use `visiting` to prevent infinite loops.
+              // If it *does* contribute, we can revisit nodes because `max_path_length` will eventually terminate the search.
+              if !counts && visiting.contains_key(&child_idx) {
+                  continue; // Cycle of uncounted edges detected, do not re-descend.
+              }
+
+              let child_value = child_guard.value.clone();
+
+              if counts {
+                  // Add this edge to the current path before exploring the child.
+                  path.push((ek, ev, child_value));
+              }
+
+              // Snapshot child's edges now (no locks held across iterations).
+              let child_edges = edges_for(child_idx);
+              stack.push(Frame {
+                  node: child_idx,
+                  edges: child_edges,
+                  idx: 0,
+                  started: false,
+                  has_incoming_edge: counts,
+              });
+              *visiting.entry(child_idx).or_default() += 1;
+          } else {
+              // If child is missing, skip it and proceed.
+              continue;
+          }
+          ```
+
+      After applying these changes, the test should pass, and the function will correctly find all paths including those that traverse cycles.
+
       ### Git Diff
 
-      Here is the git diff to apply the changes:
+      Here is the git diff for the changes described above:
 
       ```diff
       diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
-      index 3d2b11e..c8e4a9c 100644
+      index 19f56e1..2370783 100644
       --- a/src/datastructures/trie.rs
       +++ b/src/datastructures/trie.rs
-      @@ -1763,3 +1763,59 @@
+      @@ -1181,13 +1181,13 @@
+               };
        
-       pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
-       pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
+               let mut stack: Vec<Frame<EK, EV>> = Vec::new();
+      -        let mut visiting = std::collections::HashSet::new();
+      +        let mut visiting: std::collections::HashMap<Trie2Index, usize> = std::collections::HashMap::new();
+               stack.push(Frame {
+                   node: node_idx,
+                   edges: edges_for(node_idx),
+                   idx: 0,
+                   started: false,
+                   has_incoming_edge: false, // root has no incoming edge
+               });
+      -        visiting.insert(node_idx);
+      +        *visiting.entry(node_idx).or_default() += 1;
+       
+               while let Some(frame) = stack.last_mut() {
+                   // On first entry to this node: evaluate `is_end` and enforce max_path_length.
+      @@ -1202,7 +1202,12 @@
+                       // If we've reached the max number of edges on this path, do not expand further.
+                       if path.len() >= max_path_length {
+                           let popped = stack.pop().unwrap();
+      -                    visiting.remove(&popped.node);
+      +                    let count = visiting.get_mut(&popped.node).unwrap();
+      +                    *count -= 1;
+      +                    if *count == 0 {
+      +                        visiting.remove(&popped.node);
+      +                    }
+                           if popped.has_incoming_edge {
+                               path.pop(); // backtrack edge added when entering this frame
+                           }
+      @@ -1213,7 +1218,12 @@
+                   // If we've exhausted edges for this node, backtrack.
+                   if frame.idx >= frame.edges.len() {
+                       let popped = stack.pop().unwrap();
+      -                visiting.remove(&popped.node);
+      +                let count = visiting.get_mut(&popped.node).unwrap();
+      +                *count -= 1;
+      +                if *count == 0 {
+      +                    visiting.remove(&popped.node);
+      +                }
+                       if popped.has_incoming_edge {
+                           path.pop(); // backtrack the edge that led here
+                       }
+      @@ -1224,34 +1234,36 @@
+                   let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
+                   frame.idx += 1;
+       
+      -            if visiting.contains(&child_idx) {
+      -                continue; // Cycle detected, do not re-descend.
+      -            }
+      -
+                   if let Some(child_guard) = child_idx.read(arena) {
+      -                let child_value = child_guard.value.clone();
+      -
+                       let counts = counts_toward_length(&ek, &ev, child_idx);
       +
-      +#[cfg(test)]
-      +mod tests {
-      +    use super::*;
+      +                // If the edge does not contribute to path length, we must use `visiting` to prevent infinite loops.
+      +                // If it *does* contribute, we can revisit nodes because `max_path_length` will eventually terminate the search.
+      +                if !counts && visiting.contains_key(&child_idx) {
+      +                    continue; // Cycle of uncounted edges detected, do not re-descend.
+      +                }
       +
-      +    #[test]
-      +    fn test_get_all_paths_with_cycles_long_path() {
-      +        type TestTrie = Trie<String, i32, String>;
-      +        let arena = Arena::<TestTrie>::new();
+      +                let child_value = child_guard.value.clone();
       +
-      +        // Create a chain of nodes: root -> n1 -> ... -> n10
-      +        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
-      +        let mut nodes = vec![root];
-      +        let mut prev_node_idx = root;
-      +
-      +        for i in 1..=10 {
-      +            let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
-      +            let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
-      +            prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
-      +            drop(prev_node_w);
-      +            nodes.push(new_node_idx);
-      +            prev_node_idx = new_node_idx;
-      +        }
-      +
-      +        // Create a cycle: n10 -> n5
-      +        let n10_idx = nodes[10];
-      +        let n5_idx = nodes[5];
-      +        n10_idx
-      +            .write(&arena)
-      +            .unwrap()
-      +            .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
-      +
-      +        // We expect to find paths ending at n8, with a max length of 20
-      +        let n8_idx = nodes[8];
-      +        let max_len = 20;
-      +
-      +        let paths = TestTrie::get_all_paths_with_cycles(
-      +            &arena,
-      +            &[root],
-      +            |idx, _| idx == n8_idx,
-      +            |_, _, _| true,
-      +            max_len,
-      +        );
-      +
-      +        // Expected paths:
-      +        // 1. root -> ... -> n8 (length 8)
-      +        // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
-      +        // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
-      +        //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
-      +        assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
-      +
-      +        let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
-      +        path_lengths.sort_unstable();
-      +
-      +        assert_eq!(path_lengths, vec![8, 14, 20]);
-      +
-      +        // Verify path contents for the shortest one.
-      +        let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
-      +        assert_eq!(shortest_path.0, "root");
-      +        for i in 0..8 {
-      +            let (ek, ev, t) = &shortest_path.1[i];
-      +            assert_eq!(*ek, format!("edge_{}", i + 1));
-      +            assert_eq!(*ev, (i + 1) as i32);
-      +            assert_eq!(*t, format!("n{}", i + 1));
-      +        }
-      +    }
-      +}
+                       if counts {
+                           // Add this edge to the current path before exploring the child.
+                           path.push((ek, ev, child_value));
+                       }
+       
+                       // Snapshot child's edges now (no locks held across iterations).
+                       let child_edges = edges_for(child_idx);
+                       stack.push(Frame {
+                           node: child_idx,
+                           edges: child_edges,
+                           idx: 0,
+                           started: false,
+                           has_incoming_edge: counts,
+                       });
+      -                visiting.insert(child_idx);
+      +                *visiting.entry(child_idx).or_default() += 1;
+                   } else {
+                       // If child is missing, skip it and proceed.
+                       continue;
+                   }
+               }
+           }
+       }
 
       ```
     metadata:
@@ -7472,7 +7711,7 @@ messages:
       Applying patch to 'src/datastructures/trie.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/trie.rs.
     metadata:
-  - user: 'Changes committed with message: "Add test for `get_all_paths_with_cycles`
-      with a long path from a cyclic trie"'
+  - user: 'Changes committed with message: "Fix: Refine cycle detection in path finding
+      to allow traversal through counted cycles in get_all_paths_with_cycles"'
     metadata:
 ...

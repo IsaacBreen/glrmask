@@ -976,7 +976,7 @@ where
         };
 
         let mut stack: Vec<Frame<EK, EV>> = Vec::new();
-        let mut visiting = std::collections::HashSet::new();
+        let mut visiting: std::collections::HashMap<Trie2Index, usize> = std::collections::HashMap::new();
         stack.push(Frame {
             node: node_idx,
             edges: edges_for(node_idx),
@@ -984,7 +984,7 @@ where
             started: false,
             has_incoming_edge: false, // root has no incoming edge
         });
-        visiting.insert(node_idx);
+        *visiting.entry(node_idx).or_default() += 1;
 
         while let Some(frame) = stack.last_mut() {
             // On first entry to this node: evaluate `is_end` and enforce max_path_length.
@@ -1000,7 +1000,11 @@ where
                 // If we've reached the max number of edges on this path, do not expand further.
                 if path.len() >= max_path_length {
                     let popped = stack.pop().unwrap();
-                    visiting.remove(&popped.node);
+                    let count = visiting.get_mut(&popped.node).unwrap();
+                    *count -= 1;
+                    if *count == 0 {
+                        visiting.remove(&popped.node);
+                    }
                     if popped.has_incoming_edge {
                         path.pop(); // backtrack edge added when entering this frame
                     }
@@ -1011,7 +1015,11 @@ where
             // If we've exhausted edges for this node, backtrack.
             if frame.idx >= frame.edges.len() {
                 let popped = stack.pop().unwrap();
-                visiting.remove(&popped.node);
+                let count = visiting.get_mut(&popped.node).unwrap();
+                *count -= 1;
+                if *count == 0 {
+                    visiting.remove(&popped.node);
+                }
                 if popped.has_incoming_edge {
                     path.pop(); // backtrack the edge that led here
                 }
@@ -1022,14 +1030,17 @@ where
             let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
             frame.idx += 1;
 
-            if visiting.contains(&child_idx) {
-                continue; // Cycle detected, do not re-descend.
-            }
-
             if let Some(child_guard) = child_idx.read(arena) {
+                let counts = counts_toward_length(&ek, &ev, child_idx);
+
+                // If the edge does not contribute to path length, we must use `visiting` to prevent infinite loops.
+                // If it *does* contribute, we can revisit nodes because `max_path_length` will eventually terminate the search.
+                if !counts && visiting.contains_key(&child_idx) {
+                    continue; // Cycle of uncounted edges detected, do not re-descend.
+                }
+
                 let child_value = child_guard.value.clone();
 
-                let counts = counts_toward_length(&ek, &ev, child_idx);
                 if counts {
                     // Add this edge to the current path before exploring the child.
                     path.push((ek, ev, child_value));
@@ -1044,7 +1055,7 @@ where
                     started: false,
                     has_incoming_edge: counts,
                 });
-                visiting.insert(child_idx);
+                *visiting.entry(child_idx).or_default() += 1;
             } else {
                 // If child is missing, skip it and proceed.
                 continue;
