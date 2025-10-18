@@ -2392,6 +2392,73 @@ local_system:
       pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
       pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+
+          #[test]
+          fn test_get_all_paths_with_cycles_long_path() {
+              type TestTrie = Trie<String, i32, String>;
+              let arena = Arena::<TestTrie>::new();
+
+              // Create a chain of nodes: root -> n1 -> ... -> n10
+              let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+              let mut nodes = vec![root];
+              let mut prev_node_idx = root;
+
+              for i in 1..=10 {
+                  let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
+                  let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
+                  prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
+                  drop(prev_node_w);
+                  nodes.push(new_node_idx);
+                  prev_node_idx = new_node_idx;
+              }
+
+              // Create a cycle: n10 -> n5
+              let n10_idx = nodes[10];
+              let n5_idx = nodes[5];
+              n10_idx
+                  .write(&arena)
+                  .unwrap()
+                  .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
+
+              // We expect to find paths ending at n8, with a max length of 20
+              let n8_idx = nodes[8];
+              let max_len = 20;
+
+              let paths = TestTrie::get_all_paths_with_cycles(
+                  &arena,
+                  &[root],
+                  |idx, _| idx == n8_idx,
+                  |_, _, _| true,
+                  max_len,
+              );
+
+              // Expected paths:
+              // 1. root -> ... -> n8 (length 8)
+              // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
+              // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
+              //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
+              assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
+
+              let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
+              path_lengths.sort_unstable();
+
+              assert_eq!(path_lengths, vec![8, 14, 20]);
+
+              // Verify path contents for the shortest one.
+              let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
+              assert_eq!(shortest_path.0, "root");
+              for i in 0..8 {
+                  let (ek, ev, t) = &shortest_path.1[i];
+                  assert_eq!(*ek, format!("edge_{}", i + 1));
+                  assert_eq!(*ev, (i + 1) as i32);
+                  assert_eq!(*t, format!("n{}", i + 1));
+              }
+          }
+      }
+
   prev_file_contents:
     src/datastructures/trie.rs: |+
       use std::cmp::Ordering;
@@ -4846,6 +4913,56 @@ local_system:
                   assert_eq!(*t, format!("n{}", i + 1));
               }
           }
+
+          #[test]
+          fn test_get_all_paths_with_cycles_uncounted_cycle() {
+              type TestTrie = Trie<String, (), String>;
+              let arena = Arena::<TestTrie>::new();
+
+              // Graph: root -> c1 -> target
+              //          ^    |
+              //          |    v
+              //          -- c2 -- (uncounted cycle)
+              let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+              let c1 = Trie2Index::from(arena.insert(Trie::new("c1".to_string())));
+              let c2 = Trie2Index::from(arena.insert(Trie::new("c2".to_string())));
+              let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
+
+              // Edges
+              // Counted edge: root -> c1
+              root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), c1);
+              // Uncounted cycle: c1 -> c2 -> c1
+              c1.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c2);
+              c2.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c1);
+              // Counted edge: c1 -> target
+              c1.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
+
+              let paths = TestTrie::get_all_paths_with_cycles(
+                  &arena,
+                  &[root],
+                  |idx, _| idx == target,
+                  |ek, _, _| ek == "counted",
+                  5, // max_path_length
+              );
+
+              // The traversal should be: root -> c1 -> (cycle c1-c2 is traversed but not infinitely) -> target
+              // The `visiting` set should prevent infinite loops.
+              // The returned path should only contain the "counted" edges.
+              assert_eq!(paths.len(), 1, "Should find exactly one path to the target");
+
+              let (root_val, path) = &paths[0];
+              assert_eq!(*root_val, "root");
+              assert_eq!(path.len(), 2, "Path should have 2 counted edges");
+
+              // Verify path contents
+              let (ek1, _ev1, t1) = &path[0];
+              assert_eq!(*ek1, "counted");
+              assert_eq!(*t1, "c1");
+
+              let (ek2, _ev2, t2) = &path[1];
+              assert_eq!(*ek2, "counted");
+              assert_eq!(*t2, "target");
+          }
       }
 
   diffs_applied_this_send: true
@@ -7278,12 +7395,80 @@ messages:
       pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
       pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+
+          #[test]
+          fn test_get_all_paths_with_cycles_long_path() {
+              type TestTrie = Trie<String, i32, String>;
+              let arena = Arena::<TestTrie>::new();
+
+              // Create a chain of nodes: root -> n1 -> ... -> n10
+              let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+              let mut nodes = vec![root];
+              let mut prev_node_idx = root;
+
+              for i in 1..=10 {
+                  let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
+                  let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
+                  prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
+                  drop(prev_node_w);
+                  nodes.push(new_node_idx);
+                  prev_node_idx = new_node_idx;
+              }
+
+              // Create a cycle: n10 -> n5
+              let n10_idx = nodes[10];
+              let n5_idx = nodes[5];
+              n10_idx
+                  .write(&arena)
+                  .unwrap()
+                  .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
+
+              // We expect to find paths ending at n8, with a max length of 20
+              let n8_idx = nodes[8];
+              let max_len = 20;
+
+              let paths = TestTrie::get_all_paths_with_cycles(
+                  &arena,
+                  &[root],
+                  |idx, _| idx == n8_idx,
+                  |_, _, _| true,
+                  max_len,
+              );
+
+              // Expected paths:
+              // 1. root -> ... -> n8 (length 8)
+              // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
+              // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
+              //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
+              assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
+
+              let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
+              path_lengths.sort_unstable();
+
+              assert_eq!(path_lengths, vec![8, 14, 20]);
+
+              // Verify path contents for the shortest one.
+              let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
+              assert_eq!(shortest_path.0, "root");
+              for i in 0..8 {
+                  let (ek, ev, t) = &shortest_path.1[i];
+                  assert_eq!(*ek, format!("edge_{}", i + 1));
+                  assert_eq!(*ev, (i + 1) as i32);
+                  assert_eq!(*t, format!("n{}", i + 1));
+              }
+          }
+      }
+
 
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: Add a test to this code for `get_all_paths_with_cycles` that generates very
-      long paths from a cyclic trie.
+  - user: Add a test for `get_all_paths_with_cycles` that demonstrates it not infinitely
+      looping in a trie where there is a cycle involving only edges that are not counted
+      via `counts_toward_length`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7302,164 +7487,133 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the test, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add the requested test case, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
       1.  **Open the file `src/datastructures/trie.rs`**.
-      2.  **Add a new test module at the end of the file**. Scroll to the bottom of the file and append the following code. This creates a test module and adds a test case named `test_get_all_paths_with_cycles_long_path`.
+      2.  **Navigate to the end of the file** where the `#[cfg(test)] mod tests { ... }` block is defined.
+      3.  **Add a new test function** inside this block. The new test will create a graph with a cycle of "uncounted" edges and verify that the pathfinding algorithm terminates correctly and finds the expected path.
 
-          This test constructs a graph with a long chain of nodes and a cycle. It then calls `get_all_paths_with_cycles` to find paths that terminate on a specific node within that cycle, respecting a maximum path length. Finally, it asserts that the correct number of paths are found and that their lengths match the expected values (8, 14, and 20 edges).
+          Insert the following code after the `test_get_all_paths_with_cycles_long_path` function:
 
           ```rust
-          #[cfg(test)]
-          mod tests {
-              use super::*;
+          #[test]
+          fn test_get_all_paths_with_cycles_uncounted_cycle() {
+              type TestTrie = Trie<String, (), String>;
+              let arena = Arena::<TestTrie>::new();
 
-              #[test]
-              fn test_get_all_paths_with_cycles_long_path() {
-                  type TestTrie = Trie<String, i32, String>;
-                  let arena = Arena::<TestTrie>::new();
+              // Graph: root -> c1 -> target
+              //          ^    |
+              //          |    v
+              //          -- c2 -- (uncounted cycle)
+              let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+              let c1 = Trie2Index::from(arena.insert(Trie::new("c1".to_string())));
+              let c2 = Trie2Index::from(arena.insert(Trie::new("c2".to_string())));
+              let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
 
-                  // Create a chain of nodes: root -> n1 -> ... -> n10
-                  let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
-                  let mut nodes = vec![root];
-                  let mut prev_node_idx = root;
+              // Edges
+              // Counted edge: root -> c1
+              root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), c1);
+              // Uncounted cycle: c1 -> c2 -> c1
+              c1.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c2);
+              c2.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c1);
+              // Counted edge: c1 -> target
+              c1.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
 
-                  for i in 1..=10 {
-                      let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
-                      let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
-                      prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
-                      drop(prev_node_w);
-                      nodes.push(new_node_idx);
-                      prev_node_idx = new_node_idx;
-                  }
+              let paths = TestTrie::get_all_paths_with_cycles(
+                  &arena,
+                  &[root],
+                  |idx, _| idx == target,
+                  |ek, _, _| ek == "counted",
+                  5, // max_path_length
+              );
 
-                  // Create a cycle: n10 -> n5
-                  let n10_idx = nodes[10];
-                  let n5_idx = nodes[5];
-                  n10_idx
-                      .write(&arena)
-                      .unwrap()
-                      .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
+              // The traversal should be: root -> c1 -> (cycle c1-c2 is traversed but not infinitely) -> target
+              // The `visiting` set should prevent infinite loops.
+              // The returned path should only contain the "counted" edges.
+              assert_eq!(paths.len(), 1, "Should find exactly one path to the target");
 
-                  // We expect to find paths ending at n8, with a max length of 20
-                  let n8_idx = nodes[8];
-                  let max_len = 20;
+              let (root_val, path) = &paths[0];
+              assert_eq!(*root_val, "root");
+              assert_eq!(path.len(), 2, "Path should have 2 counted edges");
 
-                  let paths = TestTrie::get_all_paths_with_cycles(
-                      &arena,
-                      &[root],
-                      |idx, _| idx == n8_idx,
-                      |_, _, _| true,
-                      max_len,
-                  );
+              // Verify path contents
+              let (ek1, _ev1, t1) = &path[0];
+              assert_eq!(*ek1, "counted");
+              assert_eq!(*t1, "c1");
 
-                  // Expected paths:
-                  // 1. root -> ... -> n8 (length 8)
-                  // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
-                  // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
-                  //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
-                  assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
-
-                  let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
-                  path_lengths.sort_unstable();
-
-                  assert_eq!(path_lengths, vec![8, 14, 20]);
-
-                  // Verify path contents for the shortest one.
-                  let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
-                  assert_eq!(shortest_path.0, "root");
-                  for i in 0..8 {
-                      let (ek, ev, t) = &shortest_path.1[i];
-                      assert_eq!(*ek, format!("edge_{}", i + 1));
-                      assert_eq!(*ev, (i + 1) as i32);
-                      assert_eq!(*t, format!("n{}", i + 1));
-                  }
-              }
+              let (ek2, _ev2, t2) = &path[1];
+              assert_eq!(*ek2, "counted");
+              assert_eq!(*t2, "target");
           }
           ```
 
       ### Git Diff
 
-      Here is the git diff to apply the changes:
+      Here is the git diff for the changes:
 
       ```diff
       diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
-      index 3d2b11e..c8e4a9c 100644
+      index 2891963..39178f0 100644
       --- a/src/datastructures/trie.rs
       +++ b/src/datastructures/trie.rs
-      @@ -1763,3 +1763,59 @@
-       
-       pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
-       pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
-      +
-      +#[cfg(test)]
-      +mod tests {
-      +    use super::*;
+      @@ -1945,5 +1945,51 @@
+                   assert_eq!(*t, format!("n{}", i + 1));
+               }
+           }
       +
       +    #[test]
-      +    fn test_get_all_paths_with_cycles_long_path() {
-      +        type TestTrie = Trie<String, i32, String>;
+      +    fn test_get_all_paths_with_cycles_uncounted_cycle() {
+      +        type TestTrie = Trie<String, (), String>;
       +        let arena = Arena::<TestTrie>::new();
       +
-      +        // Create a chain of nodes: root -> n1 -> ... -> n10
+      +        // Graph: root -> c1 -> target
+      +        //          ^    |
+      +        //          |    v
+      +        //          -- c2 -- (uncounted cycle)
       +        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
-      +        let mut nodes = vec![root];
-      +        let mut prev_node_idx = root;
+      +        let c1 = Trie2Index::from(arena.insert(Trie::new("c1".to_string())));
+      +        let c2 = Trie2Index::from(arena.insert(Trie::new("c2".to_string())));
+      +        let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
       +
-      +        for i in 1..=10 {
-      +            let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
-      +            let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
-      +            prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
-      +            drop(prev_node_w);
-      +            nodes.push(new_node_idx);
-      +            prev_node_idx = new_node_idx;
-      +        }
-      +
-      +        // Create a cycle: n10 -> n5
-      +        let n10_idx = nodes[10];
-      +        let n5_idx = nodes[5];
-      +        n10_idx
-      +            .write(&arena)
-      +            .unwrap()
-      +            .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
-      +
-      +        // We expect to find paths ending at n8, with a max length of 20
-      +        let n8_idx = nodes[8];
-      +        let max_len = 20;
+      +        // Edges
+      +        // Counted edge: root -> c1
+      +        root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), c1);
+      +        // Uncounted cycle: c1 -> c2 -> c1
+      +        c1.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c2);
+      +        c2.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c1);
+      +        // Counted edge: c1 -> target
+      +        c1.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
       +
       +        let paths = TestTrie::get_all_paths_with_cycles(
       +            &arena,
       +            &[root],
-      +            |idx, _| idx == n8_idx,
-      +            |_, _, _| true,
-      +            max_len,
+      +            |idx, _| idx == target,
+      +            |ek, _, _| ek == "counted",
+      +            5, // max_path_length
       +        );
       +
-      +        // Expected paths:
-      +        // 1. root -> ... -> n8 (length 8)
-      +        // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
-      +        // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
-      +        //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
-      +        assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
+      +        // The traversal should be: root -> c1 -> (cycle c1-c2 is traversed but not infinitely) -> target
+      +        // The `visiting` set should prevent infinite loops.
+      +        // The returned path should only contain the "counted" edges.
+      +        assert_eq!(paths.len(), 1, "Should find exactly one path to the target");
       +
-      +        let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
-      +        path_lengths.sort_unstable();
+      +        let (root_val, path) = &paths[0];
+      +        assert_eq!(*root_val, "root");
+      +        assert_eq!(path.len(), 2, "Path should have 2 counted edges");
       +
-      +        assert_eq!(path_lengths, vec![8, 14, 20]);
+      +        // Verify path contents
+      +        let (ek1, _ev1, t1) = &path[0];
+      +        assert_eq!(*ek1, "counted");
+      +        assert_eq!(*t1, "c1");
       +
-      +        // Verify path contents for the shortest one.
-      +        let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
-      +        assert_eq!(shortest_path.0, "root");
-      +        for i in 0..8 {
-      +            let (ek, ev, t) = &shortest_path.1[i];
-      +            assert_eq!(*ek, format!("edge_{}", i + 1));
-      +            assert_eq!(*ev, (i + 1) as i32);
-      +            assert_eq!(*t, format!("n{}", i + 1));
-      +        }
+      +        let (ek2, _ev2, t2) = &path[1];
+      +        assert_eq!(*ek2, "counted");
+      +        assert_eq!(*t2, "target");
       +    }
-      +}
+       }
+       
 
       ```
     metadata:
@@ -7472,7 +7626,7 @@ messages:
       Applying patch to 'src/datastructures/trie.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/trie.rs.
     metadata:
-  - user: 'Changes committed with message: "Add test for `get_all_paths_with_cycles`
-      with a long path from a cyclic trie"'
+  - user: 'Changes committed with message: "Test: Add test for get_all_paths_with_cycles
+      handling uncounted cycles"'
     metadata:
 ...

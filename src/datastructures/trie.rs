@@ -2450,5 +2450,55 @@ mod tests {
             assert_eq!(*t, format!("n{}", i + 1));
         }
     }
+
+    #[test]
+    fn test_get_all_paths_with_cycles_uncounted_cycle() {
+        type TestTrie = Trie<String, (), String>;
+        let arena = Arena::<TestTrie>::new();
+
+        // Graph: root -> c1 -> target
+        //          ^    |
+        //          |    v
+        //          -- c2 -- (uncounted cycle)
+        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+        let c1 = Trie2Index::from(arena.insert(Trie::new("c1".to_string())));
+        let c2 = Trie2Index::from(arena.insert(Trie::new("c2".to_string())));
+        let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
+
+        // Edges
+        // Counted edge: root -> c1
+        root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), c1);
+        // Uncounted cycle: c1 -> c2 -> c1
+        c1.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c2);
+        c2.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c1);
+        // Counted edge: c1 -> target
+        c1.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
+
+        let paths = TestTrie::get_all_paths_with_cycles(
+            &arena,
+            &[root],
+            |idx, _| idx == target,
+            |ek, _, _| ek == "counted",
+            5, // max_path_length
+        );
+
+        // The traversal should be: root -> c1 -> (cycle c1-c2 is traversed but not infinitely) -> target
+        // The `visiting` set should prevent infinite loops.
+        // The returned path should only contain the "counted" edges.
+        assert_eq!(paths.len(), 1, "Should find exactly one path to the target");
+
+        let (root_val, path) = &paths[0];
+        assert_eq!(*root_val, "root");
+        assert_eq!(path.len(), 2, "Path should have 2 counted edges");
+
+        // Verify path contents
+        let (ek1, _ev1, t1) = &path[0];
+        assert_eq!(*ek1, "counted");
+        assert_eq!(*t1, "c1");
+
+        let (ek2, _ev2, t2) = &path[1];
+        assert_eq!(*ek2, "counted");
+        assert_eq!(*t2, "target");
+    }
 }
 
