@@ -2176,4 +2176,55 @@ mod tests {
         let root = build_graph_from_path(&god, path_edges);
         run_test(&god, &[root]);
     }
+
+    #[test]
+    fn test_mismatch_minimal_failing_input() {
+        // This test is based on a minimal failing input found via the debug refinement logic.
+        // The path-based simplifier was dropping the `[]` path when another path was present.
+        let god = IntermediateTrie3GodWrapper::new();
+
+        // --- Nodes ---
+        let node_ids = [0, 1, 2, 3, 4, 15, 16, 17, 18, 19];
+        let mut nodes = BTreeMap::new();
+        for id in node_ids {
+            let content = if id == 3 {
+                IntermediatePrecomputedNodeContents3::leaf()
+            } else {
+                IntermediatePrecomputedNodeContents3::internal()
+            };
+            nodes.insert(id, Trie2Index::from(god.insert(Trie::new(content))));
+        }
+        let n = |id: usize| *nodes.get(&id).unwrap();
+        let root = n(0);
+
+        // --- Bitsets ---
+        let mut llm_1 = LLMTokenBV::zeros();
+        llm_1.insert(1);
+        let mut llm_3 = LLMTokenBV::zeros();
+        llm_3.insert(3);
+
+        let mut bv_1 = StateIDBV::zeros();
+        bv_1.insert(1);
+        let mut bv_2 = StateIDBV::zeros();
+        bv_2.insert(2);
+
+        // --- Graph Structure ---
+        // Branch 1 (simplifies to `[]` after filtering CheckLLM)
+        n(0).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(1));
+        n(1).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_1), (), n(2));
+        n(2).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(3));
+
+        // Branch 2 (dangling)
+        n(0).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(4));
+
+        // Branch 3 (the other path)
+        n(0).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(15));
+        n(15).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(16));
+        n(16).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv_1), (), n(17));
+        n(17).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_2), (), n(18));
+        n(18).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_3), (), n(19));
+        n(19).write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), n(3));
+
+        run_test(&god, &[root]);
+    }
 }
