@@ -843,17 +843,14 @@ fn run_trie_based_elimination(
                 continue;
             }
 
-            // A "complex" BlockedPush is one that has an LLM constraint AND points to a non-leaf node.
+            // A "complex" BlockedPush is one that has an LLM constraint.
             // Rewiring these can lead to graph blow-up, especially in cycles, as we might
             // repeatedly create new aggregator nodes for the same logical path.
             // If we find such a case, we conservatively do not modify the original push edge.
             let mut must_keep_original_edge = false;
             for ex in &exits {
-                if let Exit::BlockedPush { llm, dst: exit_dst, .. } = ex {
-                    let has_llm_check = *llm != LLMTokenBV::max_ones();
-                    let is_non_leaf = !exit_dst.read(god).map_or(false, |g| g.value.end);
-
-                    if has_llm_check && is_non_leaf {
+                if let Exit::BlockedPush { llm, .. } = ex {
+                    if *llm != LLMTokenBV::max_ones() {
                         must_keep_original_edge = true;
                         break;
                     }
