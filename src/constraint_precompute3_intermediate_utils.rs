@@ -10,6 +10,7 @@ pub fn optimize_intermediate_trie3_template(
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) {
+    return;
     use std::collections::HashSet;
     let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
     pinned.insert(*start_node);
@@ -17,10 +18,10 @@ pub fn optimize_intermediate_trie3_template(
 
     for _ in 0..3 {
         let mut changed = false;
-        changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
-        changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
-        changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
-        changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
+        // changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
+        // changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
+        // changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
+        // changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
         if !changed { break; }
     }
 }
@@ -30,16 +31,17 @@ pub fn optimize_intermediate_trie3(
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) {
+    return;
     if is_debug_level_enabled(2) {
         let mut stats = crate::constraint_extra::PrecomputeStats::default();
         crate::constraint_extra::calculate_intermediate_stats3(roots, &mut stats, god);
         crate::constraint_extra::print_intermediate_stats3(&stats, god);
     }
     for _ in 0..2 {
-        let changed = prune_unproductive_nodes(roots, end_node, god);
-        if !changed {
-            break;
-        }
+        // let changed = prune_unproductive_nodes(roots, end_node, god);
+        // if !changed {
+        //     break;
+        // }
     }
 }
 
@@ -362,6 +364,7 @@ pub fn optimize_intermediate_trie3_templates_global(
     templates: &[(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)],
     god: &IntermediateTrie3GodWrapper,
 ) {
+    return;
     if templates.is_empty() { return; }
 
     let start_nodes: Vec<_> = templates.iter().map(|(s, _)| *s).collect();
@@ -373,15 +376,15 @@ pub fn optimize_intermediate_trie3_templates_global(
 
     // A few global passes: compress NoOp chains and merge identical subgraphs across all templates,
     // then prune per template to drop detritus.
-    for _ in 0..3 {
-        let mut changed = false;
-        changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
-        changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
-        for (s, e) in templates {
-            changed |= prune_unproductive_nodes(&[*s], e, god);
-        }
-        if !changed {
-            break;
-        }
-    }
+    // for _ in 0..3 {
+    //     let mut changed = false;
+    //     changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
+    //     changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
+    //     for (s, e) in templates {
+    //         changed |= prune_unproductive_nodes(&[*s], e, god);
+    //     }
+    //     if !changed {
+    //         break;
+    //     }
+    // }
 }
