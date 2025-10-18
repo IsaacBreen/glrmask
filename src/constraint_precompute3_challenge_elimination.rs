@@ -497,8 +497,6 @@ struct BFSState {
     node: IntermediatePrecomputeNode3Index,
     push_bv: StateIDBV,
     llm_bv: LLMTokenBV,
-    path: Vec<usize>,
-    is_cyclic: bool,
 }
 
 fn get_or_create_aggregator_node(
@@ -531,25 +529,22 @@ fn compute_push_elim_exits(
     start: IntermediatePrecomputeNode3Index,
     initial_push_bv: &StateIDBV,
     god: &IntermediateTrie3GodWrapper,
-) -> (Vec<Exit>, bool) {
+) -> Vec<Exit> {
     crate::debug!(5,
         "[challenge_elim]   - compute_push_elim_exits(start: {}, initial_push_bv: {:?})",
         start, initial_push_bv
     );
     let mut exits: Vec<Exit> = Vec::new();
-    let mut has_cyclic_blocked_push = false;
     let mut q: VecDeque<BFSState> = VecDeque::new();
     q.push_back(BFSState {
         node: start,
         push_bv: initial_push_bv.clone(),
         llm_bv: LLMTokenBV::max_ones(),
-        path: Vec::new(),
-        is_cyclic: false,
     });
 
     // We include node, push_bv, llm_bv in visited to avoid infinite exploration across cycles.
     // This is finite because push_bv and llm_bv only ever intersect with finitely many constants.
-    let mut visited: BTreeSet<(usize, StateIDBV, LLMTokenBV, bool)> = BTreeSet::new();
+    let mut visited: BTreeSet<(usize, StateIDBV, LLMTokenBV)> = BTreeSet::new();
     // Safety guard (should not normally trigger thanks to visited)
     let mut steps: usize = 0;
     let max_steps: usize = 1_000_000;
@@ -567,12 +562,7 @@ fn compute_push_elim_exits(
             break;
         }
 
-        let key = (
-            state.node.as_usize(),
-            state.push_bv.clone(),
-            state.llm_bv.clone(),
-            state.is_cyclic,
-        );
+        let key = (state.node.as_usize(), state.push_bv.clone(), state.llm_bv.clone());
         if !visited.insert(key) {
             if steps < 100 { // Log first few skips
                  crate::debug!(5, "[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
@@ -585,15 +575,9 @@ fn compute_push_elim_exits(
 
         // If this node is an end, then along this branch we can only preserve the Push (blocked).
         if let Some(read_guard) = state.node.read(god) {
-            let mut next_path = state.path.clone();
-            next_path.push(state.node.as_usize());
-
             if read_guard.value.end {
                 if steps < 100 {
                     crate::debug!(5, "[challenge_elim]       - Found end node, creating BlockedPush exit.");
-                }
-                if state.is_cyclic {
-                    has_cyclic_blocked_push = true;
                 }
                 exits.push(Exit::BlockedPush {
                     llm: state.llm_bv.clone(),
@@ -611,10 +595,6 @@ fn compute_push_elim_exits(
                 match ek {
                     IntermediateTrie3EdgeKey::NoOp => {
                         for (dst_idx, _ev) in dsts.iter() {
-                            let mut next_is_cyclic = state.is_cyclic;
-                            if state.path.contains(&dst_idx.as_usize()) {
-                                next_is_cyclic = true;
-                            }
                             if steps < 100 {
                                 crate::debug!(5, "[challenge_elim]         - Enqueueing NoOp -> {}", dst_idx);
                             }
@@ -622,8 +602,6 @@ fn compute_push_elim_exits(
                                 node: *dst_idx,
                                 push_bv: state.push_bv.clone(),
                                 llm_bv: state.llm_bv.clone(),
-                                path: next_path.clone(),
-                                is_cyclic: next_is_cyclic,
                             });
                         }
                     }
@@ -633,10 +611,6 @@ fn compute_push_elim_exits(
                         // normalize_path keeps empty intersections too.
                         next_llm &= llm2.clone();
                         for (dst_idx, _ev) in dsts.iter() {
-                            let mut next_is_cyclic = state.is_cyclic;
-                            if state.path.contains(&dst_idx.as_usize()) {
-                                next_is_cyclic = true;
-                            }
                             if steps < 100 {
                                 crate::debug!(5, "[challenge_elim]         - Enqueueing CheckLLM -> {} with new llm_bv", dst_idx);
                             }
@@ -644,8 +618,6 @@ fn compute_push_elim_exits(
                                 node: *dst_idx,
                                 push_bv: state.push_bv.clone(),
                                 llm_bv: next_llm.clone(),
-                                path: next_path.clone(),
-                                is_cyclic: next_is_cyclic,
                             });
                         }
                     }
@@ -660,9 +632,6 @@ fn compute_push_elim_exits(
                         if steps < 100 {
                             crate::debug!(5, "[challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.");
                         }
-                        if state.is_cyclic {
-                            has_cyclic_blocked_push = true;
-                        }
                         exits.push(Exit::BlockedPush {
                             llm: state.llm_bv.clone(),
                             push_bv: state.push_bv.clone(),
@@ -673,10 +642,6 @@ fn compute_push_elim_exits(
                     IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
                         let n_val = *n;
                         for (dst_idx, _ev) in dsts.iter() {
-                            let mut next_is_cyclic = state.is_cyclic;
-                            if state.path.contains(&dst_idx.as_usize()) {
-                                next_is_cyclic = true;
-                            }
                             match n_val {
                                 0 => {
                                     // Fold into push: A := A ∩ B; prune branch if disjoint.
@@ -696,8 +661,6 @@ fn compute_push_elim_exits(
                                         node: *dst_idx,
                                         push_bv: next_push,
                                         llm_bv: state.llm_bv.clone(),
-                                        path: next_path.clone(),
-                                        is_cyclic: next_is_cyclic,
                                     });
                                 }
                                 1 => {
@@ -738,7 +701,7 @@ fn compute_push_elim_exits(
         }
     }
 
-    (exits, has_cyclic_blocked_push)
+    exits
 }
 
 fn remove_specific_edge(
@@ -816,7 +779,7 @@ fn run_trie_based_elimination(
         > = BTreeMap::new();
 
         // Cache exits per (dst, push_bv) to avoid repeated BFS work in this round.
-        let mut exit_cache: BTreeMap<(usize, StateIDBV), (Vec<Exit>, bool)> = BTreeMap::new();
+        let mut exit_cache: BTreeMap<(usize, StateIDBV), Vec<Exit>> = BTreeMap::new();
 
         let mut removed_this_round: usize = 0;
 
@@ -833,9 +796,9 @@ fn run_trie_based_elimination(
             crate::debug!(5, "[challenge_elim]  - Processing push edge {} --Push({:?})--> {}", src, push_bv, dst);
 
             // Compute or reuse exits for this (dst, push_bv)
-            let (exits, has_cyclic_blocked_push) = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
+            let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
                 Some(v) => {
-                    crate::debug!(5, "[challenge_elim]    - Reusing {} exits from cache for (dst {}, push_bv {:?})", v.0.len(), dst, push_bv);
+                    crate::debug!(5, "[challenge_elim]    - Reusing {} exits from cache for (dst {}, push_bv {:?})", v.len(), dst, push_bv);
                     v.clone()
                 },
                 None => {
@@ -843,7 +806,7 @@ fn run_trie_based_elimination(
                     // BFS exploration to compute exits for (dst, push_bv)
                     // Results are memoized per round to avoid repetition.
                     let e = compute_push_elim_exits(dst, &push_bv, god);
-                    crate::debug!(5, "[challenge_elim]    - Found {} exits.", e.0.len());
+                    crate::debug!(5, "[challenge_elim]    - Found {} exits.", e.len());
                     exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
                     e
                 }
@@ -884,8 +847,22 @@ fn run_trie_based_elimination(
                 continue;
             }
 
-            if has_cyclic_blocked_push {
-                crate::debug!(5, "[challenge_elim]    - Cyclic dependency found in a BlockedPush exit. Keeping original edge to prevent explosion.");
+            // If the BFS for a push from `src` leads to a `BlockedPush` exit that lands
+            // back at `src`, we are in a tight loop that can cause node explosion if rewired.
+            // This is the specific pathological case we need to avoid. In this situation,
+            // we conservatively make no changes to the original edge for this round.
+            let mut must_keep_original_edge = false;
+            for ex in &exits {
+                if let Exit::BlockedPush { dst: exit_dst, .. } = ex {
+                    if *exit_dst == src {
+                        must_keep_original_edge = true;
+                        break;
+                    }
+                }
+            }
+
+            if must_keep_original_edge {
+                crate::debug!(5, "[challenge_elim]    - Complex BlockedPush found. Keeping original edge and making no changes for this push.");
                 continue;
             }
 
