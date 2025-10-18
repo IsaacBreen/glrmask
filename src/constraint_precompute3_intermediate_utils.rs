@@ -25,6 +25,7 @@ pub fn optimize_intermediate_trie3_template(
             .into_iter()
             .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
             .collect();
+        println!("Trie before merging: {}", Trie::pretty_print(&god, roots));
         changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
         let normalized_paths2: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&god, roots, |idx, n| idx == *end_node)
             .into_iter()
