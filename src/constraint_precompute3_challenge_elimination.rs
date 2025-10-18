@@ -59,7 +59,43 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
         other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
     }
 
-    out
+    // 3. Fold immediate Push(A) followed by Pop(0, B) into Push(A ∩ B).
+    // This must be done repeatedly as a fold can enable another fold.
+    loop {
+        let mut changed = false;
+        let mut i = 0;
+        while i + 1 < other_ops.len() {
+            let current_op = &other_ops[i];
+            let next_op = &other_ops[i + 1];
+
+            if let IntermediateTrie3EdgeKey::Push(push_bv) = current_op {
+                if let IntermediateTrie3EdgeKey::Pop(0, pop_bv) = next_op {
+                    let mut new_push_bv = push_bv.clone();
+                    new_push_bv &= pop_bv;
+
+                    if new_push_bv.is_empty() {
+                        // If disjoint, keep both as per instruction.
+                        // Move past the pair.
+                        i += 2;
+                    } else {
+                        // Fold: replace Push, remove Pop(0).
+                        other_ops[i] = IntermediateTrie3EdgeKey::Push(new_push_bv);
+                        other_ops.remove(i + 1);
+                        changed = true;
+                        // Do not increment i. The new Push at index i might fold with the new element at i+1.
+                    }
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    other_ops
 }
 /// Simplifies a path by repeatedly eliminating Push/Pop pairs.
 /// This function finds the innermost Push/Pop pairs and simplifies them according
