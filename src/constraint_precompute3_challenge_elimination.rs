@@ -283,6 +283,10 @@ pub fn eliminate_pushes_and_pops(
             )
         };
 
+        println!(
+            "\n--- MINIMAL FAILING INPUT (graph) ---\n{}",
+            Trie::pretty_print(&minimal_god, &minimal_roots_map.values().cloned().collect::<Vec<_>>())
+        );
         let minimal_input_paths = get_normalized_paths(&minimal_roots_map, &minimal_god);
         println!(
             "\n--- MINIMAL FAILING INPUT ({} paths) ---",
