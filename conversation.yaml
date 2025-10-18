@@ -144,7 +144,7 @@ local_system:
 
       /// Compute the set of nodes that are part of any directed cycle in the subgraph induced by `nodes`.
       /// Uses Kahn's algorithm (iterative topological pruning) to identify nodes not removed => in cycles.
-      fn nodes_in_cycles_subgraph(
+      pub(crate) fn nodes_in_cycles_subgraph(
           god: &IntermediateTrie3GodWrapper,
           nodes: &[IntermediatePrecomputeNode3Index],
       ) -> BTreeSet<usize> {
@@ -4144,7 +4144,6 @@ local_system:
       // src/constraint_precompute3_intermediate_utils.rs
       use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
       use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
-      use crate::constraint_precompute3_challenge_elimination::nodes_in_cycles_subgraph;
       use crate::constraint_precompute3_challenge_elimination::{get_normalized_paths_for_vec, normalize_path};
       use crate::datastructures::ordered_hash_map::Retain;
       use crate::datastructures::trie::Trie;
@@ -4380,9 +4379,9 @@ local_system:
       #[derive(Clone, PartialEq, Eq, Hash)]
       struct NodeSignature {
           end: bool,
-          is_in_cycle: bool,
           // For determinism: edge keys sorted; each has sorted child-colors
           edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
+          incoming_edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
       }
 
       // Merge structurally equivalent nodes within the reachable subgraph, except pinned nodes.
@@ -4400,8 +4399,6 @@ local_system:
               return false;
           }
           let all_nodes_in_subgraph: std::collections::HashSet<_> = all_nodes_vec.clone().into_iter().collect();
-
-          let nodes_in_cycles = nodes_in_cycles_subgraph(god, &all_nodes_vec);
 
           // Snapshot outgoing children for each node within the subgraph for stable iteration
           let mut outgoing: HashMap<
@@ -4442,13 +4439,21 @@ local_system:
           // Seed: base color by end flag and degree patterns
           for n in &all_nodes_in_subgraph {
               let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
-              let is_in_cycle_flag = nodes_in_cycles.contains(&n.as_usize());
-              let deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
+              let out_deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
                   .map(|v| v.iter().map(|(ek, kids)| (ek.clone(), kids.len())).collect())
                   .unwrap_or_default();
+              let mut out_sig_part: Vec<_> = out_deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect();
+              out_sig_part.sort_by(|a, b| a.0.cmp(&b.0));
 
-              let mut sig = NodeSignature { end: end_flag, is_in_cycle: is_in_cycle_flag, edges: deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect() };
-              sig.edges.sort_by(|a, b| a.0.cmp(&b.0));
+              let mut in_deg_by_ek = std::collections::BTreeMap::new();
+              if let Some(preds) = incoming.get(n) {
+                  for (_, ek) in preds {
+                      *in_deg_by_ek.entry(ek.clone()).or_insert(0) += 1;
+                  }
+              }
+              let in_sig_part = in_deg_by_ek.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect();
+
+              let sig = NodeSignature { end: end_flag, edges: out_sig_part, incoming_edges: in_sig_part };
               let len = next_color.len();
               let id = *next_color.entry(sig).or_insert(len as u64 + 1);
               color.insert(*n, id);
@@ -4463,7 +4468,6 @@ local_system:
 
               for n in &all_nodes_in_subgraph {
                   let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
-                  let is_in_cycle_flag = nodes_in_cycles.contains(&n.as_usize());
                   let mut edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
                   if let Some(edges) = outgoing.get(n) {
                       for (ek, kids) in edges {
@@ -4473,7 +4477,21 @@ local_system:
                       }
                       edges_sig.sort_by(|a, b| a.0.cmp(&b.0));
                   }
-                  let sig = NodeSignature { end: end_flag, is_in_cycle: is_in_cycle_flag, edges: edges_sig };
+
+                  let mut incoming_edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
+                  if let Some(preds) = incoming.get(n) {
+                      let mut preds_by_ek = std::collections::BTreeMap::new();
+                      for (pred, ek) in preds {
+                          preds_by_ek.entry(ek.clone()).or_default().push(*pred);
+                      }
+                      for (ek, pred_nodes) in preds_by_ek {
+                          let mut pred_colors: Vec<u64> = pred_nodes.iter().map(|p| *color.get(p).unwrap_or(&0)).collect();
+                          pred_colors.sort_unstable();
+                          incoming_edges_sig.push((ek, pred_colors));
+                      }
+                  }
+
+                  let sig = NodeSignature { end: end_flag, edges: edges_sig, incoming_edges: incoming_edges_sig };
                   let len = interner.len();
                   let id = *interner.entry(sig).or_insert(len as u64 + 1);
                   if color.get(n).copied().unwrap_or(0) != id {
@@ -4733,7 +4751,7 @@ messages:
 
       /// Compute the set of nodes that are part of any directed cycle in the subgraph induced by `nodes`.
       /// Uses Kahn's algorithm (iterative topological pruning) to identify nodes not removed => in cycles.
-      fn nodes_in_cycles_subgraph(
+      pub(crate) fn nodes_in_cycles_subgraph(
           god: &IntermediateTrie3GodWrapper,
           nodes: &[IntermediatePrecomputeNode3Index],
       ) -> BTreeSet<usize> {
@@ -6969,162 +6987,197 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The issue you're encountering with `structural_merge_nodes_in_subgraph` is that it merges nodes that are structurally identical from a local perspective (i.e., they have the same outgoing edge patterns to children with the same "color"), but are not semantically equivalent in the context of `Push`/`Pop` operations.
+      Of course. The panic you're seeing indicates that `structural_merge_nodes_in_subgraph` is performing an invalid optimization. The core issue is that its definition of "structurally equivalent" nodes is too simplistic for graphs with `Push`/`Pop` semantics. It only considers the graph structure *downstream* from a node (its children and descendants), but for stack-based operations, the *upstream* structure (the path taken to reach a node) is critically important.
 
-      The `run_trie_based_elimination` logic has special considerations for nodes within cycles. The structural merge optimization is likely breaking this by incorrectly merging a node that is part of a cycle with one that is not.
+      Two nodes might have identical-looking descendant graphs but be reachable via paths that result in different stack states. Merging them incorrectly assumes they are interchangeable, which can break valid paths or create invalid new ones.
 
-      The fix is to make the node signature used for structural equivalence aware of whether a node is part of a cycle. This will prevent merging nodes across this important semantic boundary.
+      To fix this, we need to make the node equivalence check more robust by implementing a full bisimulation-style coloring algorithm. This involves considering both incoming (predecessor) and outgoing (successor) edges when determining a node's "color" or signature. Nodes will only be considered equivalent if both their past (how they can be reached) and their future (where they can lead) are structurally identical.
 
       Here are the step-by-step instructions to apply the fix:
 
       ### Step-by-step Instructions
 
-      #### 1. Expose the cycle detection utility
+      **File to edit:** `src/constraint_precompute3_intermediate_utils.rs`
 
-      In `src/constraint_precompute3_challenge_elimination.rs`, we need to make the `nodes_in_cycles_subgraph` function accessible to the optimization module.
+      1.  **Update `NodeSignature` Struct:**
+          First, we'll enhance the `NodeSignature` to include information about incoming edges. This is crucial for capturing the context in which a node is used.
 
-      -   **Open:** `src/constraint_precompute3_challenge_elimination.rs`
-      -   **Find:** The function signature for `nodes_in_cycles_subgraph`.
-      -   **Change:** `fn nodes_in_cycles_subgraph(` to `pub(crate) fn nodes_in_cycles_subgraph(`.
+          In `src/constraint_precompute3_intermediate_utils.rs`, locate the `NodeSignature` struct definition and add the `incoming_edges` field:
 
-      #### 2. Enhance the structural merge logic
-
-      In `src/constraint_precompute3_intermediate_utils.rs`, we will update the `structural_merge_nodes_in_subgraph` function to use cycle information.
-
-      -   **Open:** `src/constraint_precompute3_intermediate_utils.rs`
-      -   **Add an import:** At the top of the file, add the following line:
-          ```rust
-          use crate::constraint_precompute3_challenge_elimination::nodes_in_cycles_subgraph;
-          ```
-      -   **Modify `NodeSignature`:** Find the `NodeSignature` struct inside `structural_merge_nodes_in_subgraph` and add the `is_in_cycle` field:
           ```rust
           #[derive(Clone, PartialEq, Eq, Hash)]
           struct NodeSignature {
               end: bool,
-              is_in_cycle: bool, // Add this line
               // For determinism: edge keys sorted; each has sorted child-colors
               edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
+              incoming_edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
           }
           ```
-      -   **Compute cycle information:** Inside `structural_merge_nodes_in_subgraph`, after `all_nodes_in_subgraph` is created, add this line to detect all nodes in cycles:
+
+      2.  **Strengthen Initial Node Coloring:**
+          Next, we'll improve the initial "seeding" of node colors to account for both incoming and outgoing edge degrees. This provides a better starting point for the refinement algorithm.
+
+          Find the comment `// Seed: base color by end flag and degree patterns` inside the `structural_merge_nodes_in_subgraph` function. Replace the entire `for` loop that follows it with this new version:
+
           ```rust
-          let nodes_in_cycles = nodes_in_cycles_subgraph(god, &all_nodes_vec);
+          // Seed: base color by end flag and degree patterns
+          for n in &all_nodes_in_subgraph {
+              let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
+              let out_deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
+                  .map(|v| v.iter().map(|(ek, kids)| (ek.clone(), kids.len())).collect())
+                  .unwrap_or_default();
+              let mut out_sig_part: Vec<_> = out_deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect();
+              out_sig_part.sort_by(|a, b| a.0.cmp(&b.0));
+
+              let mut in_deg_by_ek = std::collections::BTreeMap::new();
+              if let Some(preds) = incoming.get(n) {
+                  for (_, ek) in preds {
+                      *in_deg_by_ek.entry(ek.clone()).or_insert(0) += 1;
+                  }
+              }
+              let in_sig_part = in_deg_by_ek.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect();
+
+              let sig = NodeSignature { end: end_flag, edges: out_sig_part, incoming_edges: in_sig_part };
+              let len = next_color.len();
+              let id = *next_color.entry(sig).or_insert(len as u64 + 1);
+              color.insert(*n, id);
+          }
           ```
-      -   **Update initial coloring:** In the first loop that populates the `color` map (the "Seed" section), update the `NodeSignature` creation to include the cycle flag:
-          -   Add `let is_in_cycle_flag = nodes_in_cycles.contains(&n.as_usize());` inside the loop.
-          -   Modify the `sig` initialization to:
-              ```rust
-              let mut sig = NodeSignature { end: end_flag, is_in_cycle: is_in_cycle_flag, edges: deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect() };
-              ```
-      -   **Update color refinement:** In the main refinement loop (`for _ in 0..max_iters`), update the `NodeSignature` creation similarly:
-          -   Add `let is_in_cycle_flag = nodes_in_cycles.contains(&n.as_usize());` inside the inner `for n in &all_nodes_in_subgraph` loop.
-          -   Modify the `sig` initialization to:
-              ```rust
-              let sig = NodeSignature { end: end_flag, is_in_cycle: is_in_cycle_flag, edges: edges_sig };
-              ```
 
-      ---
+      3.  **Enhance Color Refinement Loop:**
+          Finally, we'll update the main refinement loop to use both predecessor and successor colors when calculating a node's new signature in each iteration. This is the core of the bisimulation logic.
 
-      ### Git Diffs
+          Find the loop that starts with `for _ in 0..max_iters`. Inside it, replace the body of the inner loop (`for n in &all_nodes_in_subgraph { ... }`) with the following implementation:
 
-      Here are the git diffs corresponding to the changes described above.
+          ```rust
+              for n in &all_nodes_in_subgraph {
+                  let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
+                  let mut edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
+                  if let Some(edges) = outgoing.get(n) {
+                      for (ek, kids) in edges {
+                          let mut kid_colors: Vec<u64> = kids.iter().map(|k| *color.get(k).unwrap_or(&0)).collect();
+                          kid_colors.sort_unstable();
+                          edges_sig.push((ek.clone(), kid_colors));
+                      }
+                      edges_sig.sort_by(|a, b| a.0.cmp(&b.0));
+                  }
 
-      ```diff
-      diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
-      index 1111111..2222222 100644
-      --- a/src/constraint_precompute3_challenge_elimination.rs
-      +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -120,7 +120,7 @@
-       
-       /// Compute the set of nodes that are part of any directed cycle in the subgraph induced by `nodes`.
-       /// Uses Kahn's algorithm (iterative topological pruning) to identify nodes not removed => in cycles.
-      -fn nodes_in_cycles_subgraph(
-      +pub(crate) fn nodes_in_cycles_subgraph(
-           god: &IntermediateTrie3GodWrapper,
-           nodes: &[IntermediatePrecomputeNode3Index],
-       ) -> BTreeSet<usize> {
+                  let mut incoming_edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
+                  if let Some(preds) = incoming.get(n) {
+                      let mut preds_by_ek = std::collections::BTreeMap::new();
+                      for (pred, ek) in preds {
+                          preds_by_ek.entry(ek.clone()).or_default().push(*pred);
+                      }
+                      for (ek, pred_nodes) in preds_by_ek {
+                          let mut pred_colors: Vec<u64> = pred_nodes.iter().map(|p| *color.get(p).unwrap_or(&0)).collect();
+                          pred_colors.sort_unstable();
+                          incoming_edges_sig.push((ek, pred_colors));
+                      }
+                  }
 
-      ```
+                  let sig = NodeSignature { end: end_flag, edges: edges_sig, incoming_edges: incoming_edges_sig };
+                  let len = interner.len();
+                  let id = *interner.entry(sig).or_insert(len as u64 + 1);
+                  if color.get(n).copied().unwrap_or(0) != id {
+                      changed = true;
+                  }
+                  new_color.insert(*n, id);
+              }
+          ```
+
+      After applying these changes, the assertion in `optimize_intermediate_trie3_template` should pass, confirming the structural merge is now correct. You can then safely uncomment the calls to `structural_merge_nodes_in_subgraph` in your optimization passes.
+
+      ### Git Diff
+
+      Here is the git diff for the changes described above.
 
       ```diff
       diff --git a/src/constraint_precompute3_intermediate_utils.rs b/src/constraint_precompute3_intermediate_utils.rs
-      index 1111111..2222222 100644
+      index 2411141..1111111 100644
       --- a/src/constraint_precompute3_intermediate_utils.rs
       +++ b/src/constraint_precompute3_intermediate_utils.rs
-      @@ -1,5 +1,6 @@
-       // src/constraint_precompute3_intermediate_utils.rs
-       use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-       use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
-      +use crate::constraint_precompute3_challenge_elimination::nodes_in_cycles_subgraph;
-       use crate::constraint_precompute3_challenge_elimination::{get_normalized_paths_for_vec, normalize_path};
-       use crate::datastructures::ordered_hash_map::Retain;
-       use crate::datastructures::trie::Trie;
-      @@ -221,6 +222,7 @@
-       #[derive(Clone, PartialEq, Eq, Hash)]
-       struct NodeSignature {
+      @@ -271,6 +271,7 @@
            end: bool,
-      +    is_in_cycle: bool,
            // For determinism: edge keys sorted; each has sorted child-colors
            edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
+      +    incoming_edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
        }
-      @@ -238,6 +240,8 @@
-           }
-           let all_nodes_in_subgraph: std::collections::HashSet<_> = all_nodes_vec.clone().into_iter().collect();
        
-      +    let nodes_in_cycles = nodes_in_cycles_subgraph(god, &all_nodes_vec);
-      +
-           // Snapshot outgoing children for each node within the subgraph for stable iteration
-           let mut outgoing: HashMap<
-               IntermediatePrecomputeNode3Index,
-      @@ -275,12 +279,13 @@
+       // Merge structurally equivalent nodes within the reachable subgraph, except pinned nodes.
+      @@ -319,17 +320,28 @@
+       
            // Seed: base color by end flag and degree patterns
            for n in &all_nodes_in_subgraph {
                let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
-      +        let is_in_cycle_flag = nodes_in_cycles.contains(&n.as_usize());
-               let deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
+      -        let deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
+      +        let out_deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
                    .map(|v| v.iter().map(|(ek, kids)| (ek.clone(), kids.len())).collect())
                    .unwrap_or_default();
+      +        let mut out_sig_part: Vec<_> = out_deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect();
+      +        out_sig_part.sort_by(|a, b| a.0.cmp(&b.0));
        
       -        let mut sig = NodeSignature { end: end_flag, edges: deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect() };
-      +        let mut sig = NodeSignature { end: end_flag, is_in_cycle: is_in_cycle_flag, edges: deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect() };
-               sig.edges.sort_by(|a, b| a.0.cmp(&b.0));
+      -        sig.edges.sort_by(|a, b| a.0.cmp(&b.0));
+      +        let mut in_deg_by_ek = std::collections::BTreeMap::new();
+      +        if let Some(preds) = incoming.get(n) {
+      +            for (_, ek) in preds {
+      +                *in_deg_by_ek.entry(ek.clone()).or_insert(0) += 1;
+      +            }
+      +        }
+      +        let in_sig_part = in_deg_by_ek.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect();
+      +
+      +        let sig = NodeSignature { end: end_flag, edges: out_sig_part, incoming_edges: in_sig_part };
                let len = next_color.len();
                let id = *next_color.entry(sig).or_insert(len as u64 + 1);
-      @@ -294,6 +299,7 @@
+               color.insert(*n, id);
+           }
        
-               for n in &all_nodes_in_subgraph {
-                   let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
-      +            let is_in_cycle_flag = nodes_in_cycles.contains(&n.as_usize());
-                   let mut edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
-                   if let Some(edges) = outgoing.get(n) {
-                       for (ek, kids) in edges {
-      @@ -303,7 +309,7 @@
+           // Refine up to a bounded number of iterations or until convergence
+           let max_iters = 8;
+           for _ in 0..max_iters {
+      @@ -347,14 +359,29 @@
                        }
                        edges_sig.sort_by(|a, b| a.0.cmp(&b.0));
                    }
       -            let sig = NodeSignature { end: end_flag, edges: edges_sig };
-      +            let sig = NodeSignature { end: end_flag, is_in_cycle: is_in_cycle_flag, edges: edges_sig };
+      +
+      +            let mut incoming_edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
+      +            if let Some(preds) = incoming.get(n) {
+      +                let mut preds_by_ek = std::collections::BTreeMap::new();
+      +                for (pred, ek) in preds {
+      +                    preds_by_ek.entry(ek.clone()).or_default().push(*pred);
+      +                }
+      +                for (ek, pred_nodes) in preds_by_ek {
+      +                    let mut pred_colors: Vec<u64> = pred_nodes.iter().map(|p| *color.get(p).unwrap_or(&0)).collect();
+      +                    pred_colors.sort_unstable();
+      +                    incoming_edges_sig.push((ek, pred_colors));
+      +                }
+      +            }
+      +
+      +            let sig = NodeSignature { end: end_flag, edges: edges_sig, incoming_edges: incoming_edges_sig };
                    let len = interner.len();
                    let id = *interner.entry(sig).or_insert(len as u64 + 1);
                    if color.get(n).copied().unwrap_or(0) != id {
+                       changed = true;
+                   }
+                   new_color.insert(*n, id);
+               }
+       
+               color = new_color;
+               if !changed {
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint_precompute3_challenge_elimination.rs
-      Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/constraint_precompute3_intermediate_utils.rs
       Applying patch to 'src/constraint_precompute3_intermediate_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_intermediate_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Prevent structural merge from merging
-      nodes across cycle boundaries by including cycle status in node signature"'
+  - user: 'Changes committed with message: "Fix: Improve structural node merging by
+      including incoming edge context in node signatures for bisimulation coloring."'
     metadata:
 ...
