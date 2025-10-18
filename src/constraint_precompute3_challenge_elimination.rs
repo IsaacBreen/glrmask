@@ -234,7 +234,7 @@ pub fn eliminate_pushes_and_pops_path_based(
         return;
     }
     let all_paths =
-        IntermediatePrecomputeNode3::get_all_paths_with_cycles(god, &all_root_indices, |_idx, n| n.value.end, 10);
+        IntermediatePrecomputeNode3::get_all_paths_with_cycles(god, &all_root_indices, |_idx, n| n.value.end, 100000);
 
     // 2. Simplify them.
     let mut simplified_paths = BTreeSet::new();
@@ -470,7 +470,7 @@ pub(crate) fn get_normalized_paths_for_vec(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
 ) -> BTreeSet<Vec<IntermediateTrie3EdgeKey>> {
-    IntermediatePrecomputeNode3::get_all_paths_with_cycles(god, &roots, |_idx, n| n.value.end, 10)
+    IntermediatePrecomputeNode3::get_all_paths_with_cycles(god, &roots, |_idx, n| n.value.end, 100000)
         .into_iter()
         .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
         .collect()
@@ -1135,7 +1135,7 @@ mod tests {
             &eliminated_god,
             &final_roots_from_trie_elim,
             |_idx, n| n.value.end,
-            10,
+            100000,
         )
         .into_iter()
         .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
@@ -1143,7 +1143,7 @@ mod tests {
 
         // 3. Run old path-based elimination directly
         let initial_paths =
-            IntermediatePrecomputeNode3::get_all_paths_with_cycles(input_god, input_roots, |_idx, node| node.value.end, 10);
+            IntermediatePrecomputeNode3::get_all_paths_with_cycles(input_god, input_roots, |_idx, node| node.value.end, 100000);
         let mut paths_from_path_elim = BTreeSet::new();
         for (_root_value, path_edges) in initial_paths {
             let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
