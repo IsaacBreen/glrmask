@@ -365,24 +365,8 @@ pub fn optimize_intermediate_trie3_templates_global(
 ) {
     if templates.is_empty() { return; }
 
-    let start_nodes: Vec<_> = templates.iter().map(|(s, _)| *s).collect();
-    let mut pinned: std::collections::HashSet<IntermediatePrecomputeNode3Index> = std::collections::HashSet::new();
-    for (s, e) in templates {
-        pinned.insert(*s);
-        pinned.insert(*e);
-    }
-
-    // A few global passes: compress NoOp chains and merge identical subgraphs across all templates,
-    // then prune per template to drop detritus.
-    for _ in 0..3 {
-        let mut changed = false;
-        changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
-        changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
-        for (s, e) in templates {
-            changed |= prune_unproductive_nodes(&[*s], e, god);
-        }
-        if !changed {
-            break;
-        }
+    for (start_node, end_node) in templates {
+        optimize_intermediate_trie3_template(start_node, end_node, god);
     }
 }
+
