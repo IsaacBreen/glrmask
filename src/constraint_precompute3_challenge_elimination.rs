@@ -298,6 +298,63 @@ pub fn eliminate_pushes_and_pops_path_based(
     }
 }
 
+fn assert_no_push_then_pop(
+    god: &IntermediateTrie3GodWrapper,
+    roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+) {
+    let all_root_indices: Vec<_> = roots.values().cloned().collect();
+    if all_root_indices.is_empty() {
+        return;
+    }
+
+    let all_nodes = Trie::all_nodes(god, &all_root_indices);
+
+    // Find all nodes that are destinations of a Push edge.
+    let mut push_destinations = BTreeSet::new();
+    for node_idx in &all_nodes {
+        if let Some(guard) = node_idx.read(god) {
+            for (ek, dest_map) in guard.children() {
+                if matches!(ek, IntermediateTrie3EdgeKey::Push(_)) {
+                    for (dest_idx, _) in dest_map.iter() {
+                        push_destinations.insert(*dest_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    if push_destinations.is_empty() {
+        return; // No pushes, so condition holds.
+    }
+
+    // Traverse from each push destination and assert no pops are found.
+    let mut q: VecDeque<IntermediatePrecomputeNode3Index> = push_destinations.into_iter().collect();
+    let mut visited: BTreeSet<IntermediatePrecomputeNode3Index> = q.iter().cloned().collect();
+
+    while let Some(node_idx) = q.pop_front() {
+        if let Some(guard) = node_idx.read(god) {
+            for (ek, dest_map) in guard.children() {
+                if matches!(ek, IntermediateTrie3EdgeKey::Pop(_, _)) {
+                    // Found a Pop after a Push. This is an error.
+                    let final_graph = Trie::pretty_print_arena(god);
+                    panic!(
+                        "Assertion failed: Found a Pop edge reachable from a Push edge.\n\
+                         Node {} has a Pop edge: {:?}.\n\
+                         Final graph state:\n{}",
+                        node_idx, ek, final_graph
+                    );
+                }
+
+                for (dest_idx, _) in dest_map.iter() {
+                    if visited.insert(*dest_idx) {
+                        q.push_back(*dest_idx);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
@@ -396,6 +453,8 @@ pub fn eliminate_pushes_and_pops(
 
     // 5. If no mismatch, run the trie-based version on the actual input `god` to modify it.
     run_trie_based_elimination(roots, god);
+
+    assert_no_push_then_pop(god, roots);
 }
 
 /// Compute the final set of normalized paths from a graph, for comparison.
