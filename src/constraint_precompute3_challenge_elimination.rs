@@ -890,36 +890,37 @@ fn run_trie_based_elimination(
                     };
 
                     if is_leaf_node {
-                        eprintln!(
-                            "[challenge_elim]      - Applying BlockedPush exit by rewiring to leaf {}: {} --Push({:?})--> {}",
-                            exit_dst, src, exit_push_bv.clone(), exit_dst
-                        );
-                        // Directly wire src --Push(exit_push_bv)--> leaf,
-                        // effectively removing the Pop(0) that was folded into the push.
-                        god.insert_edge_simple(
-                            src,
-                            exit_dst,
-                            IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
-                            (),
-                        );
-                        rewired = true;
+                        // This is the key change: check if the "rewiring" is just recreating the original edge.
+                        if exit_dst == dst && exit_push_bv == push_bv {
+                            eprintln!("[challenge_elim]      - BlockedPush exit is a no-op rewire, must keep original edge.");
+                            // This isn't a "rewire", it's a "keep". We don't add a new edge,
+                            // and we signal that the original must be kept. `rewired` remains false.
+                        } else {
+                            eprintln!(
+                                "[challenge_elim]      - Applying BlockedPush exit by rewiring to leaf {}: {} --Push({:?})--> {}",
+                                exit_dst, src, exit_push_bv.clone(), exit_dst
+                            );
+                            // This is a true rewire. Add the new edge.
+                            god.insert_edge_simple(
+                                src,
+                                exit_dst,
+                                IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
+                                (),
+                            );
+                            rewired = true;
+                        }
                     }
                 }
                 if !rewired {
-                    eprintln!("[challenge_elim]      - BlockedPush exit to {} could not be rewired, must keep original edge.", exit_dst);
+                    eprintln!("[challenge_elim]      - BlockedPush exit to {} could not be simplified/rewired, must keep original edge.", exit_dst);
                     // We did not rewire this blocked branch (e.g., nested Push or LLM-aggregated path),
                     // so we must keep the original Push edge to preserve semantics.
                     must_keep_original_edge = true;
                 }
             }
 
-            // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
-            // unless we determined it must remain (to avoid deleting the only surviving representation).
             if !must_keep_original_edge {
-                eprintln!(
-                    "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
-                    src, push_bv.clone(), dst
-                );
+                eprintln!("[challenge_elim]    - Decision: All exits handled by new edges. Removing original edge {} --Push({:?})--> {}", src, push_bv.clone(), dst);
                 if remove_specific_edge(
                     god,
                     src,
@@ -929,10 +930,7 @@ fn run_trie_based_elimination(
                     removed_this_round += 1;
                 }
             } else {
-                eprintln!(
-                    "[challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge {} --Push({:?})--> {}",
-                    src, push_bv, dst
-                );
+                eprintln!("[challenge_elim]    - Decision: Unhandled blocked branch. Keeping original edge {} --Push({:?})--> {}", src, push_bv, dst);
             }
         }
 
