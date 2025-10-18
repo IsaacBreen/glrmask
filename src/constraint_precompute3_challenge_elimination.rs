@@ -1665,4 +1665,39 @@ mod tests {
         );
         run_test(&god, &[root]);
     }
+
+    #[test]
+    fn test_mismatch_from_user_report() {
+        // This test is based on a mismatch found in production logs.
+        // Path-based simplification reduces this path, while the trie-based
+        // one (at the time of writing) does not.
+        // Path: CheckLLM -> Pop(0) -> Push(A) -> Pop(0, A) -> Push(B)
+        // Path-based simplifies Push(A) -> Pop(0, A) into just Push(A),
+        // resulting in: CheckLLM -> Pop(0) -> Push(A) -> Push(B)
+        let god = IntermediateTrie3GodWrapper::new();
+
+        let mut llm_bv = LLMTokenBV::zeros();
+        llm_bv.insert(0);
+        llm_bv.insert(1);
+
+        let mut bv0 = StateIDBV::zeros();
+        bv0.insert(0);
+
+        let mut bv3 = StateIDBV::zeros();
+        bv3.insert(3);
+
+        let mut bv4 = StateIDBV::zeros();
+        bv4.insert(4);
+
+        let path = vec![
+            IntermediateTrie3EdgeKey::CheckLLM(llm_bv),
+            IntermediateTrie3EdgeKey::Pop(0, bv0),
+            IntermediateTrie3EdgeKey::Push(bv3.clone()),
+            IntermediateTrie3EdgeKey::Pop(0, bv3),
+            IntermediateTrie3EdgeKey::Push(bv4),
+        ];
+
+        let root = build_graph_from_path(&god, path);
+        run_test(&god, &[root]);
+    }
 }
