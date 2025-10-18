@@ -162,6 +162,28 @@ fn simplify_path(
             break;
         }
     }
+
+    // After simplification, check for stack underflow.
+    let mut depth: isize = 0;
+    for op in &stack {
+        match op {
+            IntermediateTrie3EdgeKey::Push(_) => depth += 1,
+            IntermediateTrie3EdgeKey::Pop(n, _) => {
+                if *n == 0 {
+                    // Pop(0) is a check, requires non-empty stack.
+                    if depth == 0 {
+                        return None;
+                    }
+                } else {
+                    depth -= *n as isize;
+                    if depth < 0 {
+                        return None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     Some(stack)
 }
 
@@ -261,9 +283,9 @@ pub fn eliminate_pushes_and_pops_path_based(
     }
 
     // Create a single root for the new trie.
-    let has_only_empty_path =
-        simplified_paths.len() == 1 && simplified_paths.iter().next().unwrap().is_empty();
-    let root_content = if has_only_empty_path {
+    // If any simplified path is empty, the new root must be an end node.
+    let has_empty_path = simplified_paths.iter().any(|p| p.is_empty());
+    let root_content = if has_empty_path {
         IntermediatePrecomputedNodeContents3::leaf()
     } else {
         IntermediatePrecomputedNodeContents3::internal()
