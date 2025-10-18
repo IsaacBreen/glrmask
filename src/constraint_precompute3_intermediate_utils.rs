@@ -1,55 +1,43 @@
 // src/constraint_precompute3_intermediate_utils.rs
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use ordered_hash_map::OrderedHashMap;
-use crate::constraint::{IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper};
+use std::collections::{HashMap, HashSet, VecDeque};
+use crate::constraint::{IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::trie::{Trie, Trie2Index};
+use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
-use crate::tokenizer::TokenizerStateID;
 
 pub fn optimize_intermediate_trie3_template(
-    mut start_node: IntermediatePrecomputeNode3Index,
-    mut end_node: IntermediatePrecomputeNode3Index,
-    god: &IntermediateTrie3GodWrapper,
-) -> (IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index) {
-    // A few passes of optimization.
-    for _ in 0..3 {
-        let changed1 = prune_unproductive_nodes(&[start_node.clone()], &end_node, god);
-
-        let (node_map, reps) = merge_nodes_intermediate_trie3(&[start_node.clone()], god, 40);
-        let changed2 = node_map.len() > reps.len();
-        start_node = *node_map.get(&start_node).unwrap_or(&start_node);
-        end_node = *node_map.get(&end_node).unwrap_or(&end_node);
-
-        if !changed1 && !changed2 {
-            break;
-        }
-    }
-    (start_node, end_node)
-}
-
-pub fn optimize_intermediate_trie3(
-    roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+    start_node: &IntermediatePrecomputeNode3Index,
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    if is_debug_level_enabled(2) {
-        let roots_vec: Vec<_> = roots.values().cloned().collect();
-        let mut stats = crate::constraint_extra::PrecomputeStats::default();
-        crate::constraint_extra::calculate_intermediate_stats3(&roots_vec, &mut stats, god);
-        crate::constraint_extra::print_intermediate_stats3(&stats, god);
-    }
+    // A few passes of optimization.
     for _ in 0..2 {
-        let roots_vec: Vec<_> = roots.values().cloned().collect();
-        let changed = prune_unproductive_nodes(&roots_vec, end_node, god);
+        let changed = prune_unproductive_nodes(&[*start_node], end_node, god);
+        // GC is needed to remove nodes that become unreachable after pruning edges.
+        // NOTE: GC is disabled here because it was causing issues with multiple templates
+        // in the same arena. Dangling nodes are acceptable for now.
+        // Trie::gc(god, &[*start_node]);
         if !changed {
             break;
         }
     }
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let (node_map, _) = merge_nodes_intermediate_trie3(&roots_vec, god, 40);
-    for root_idx in roots.values_mut() {
-        *root_idx = *node_map.get(root_idx).unwrap_or(root_idx);
+}
+
+pub fn optimize_intermediate_trie3(
+    roots: &[IntermediatePrecomputeNode3Index],
+    end_node: &IntermediatePrecomputeNode3Index,
+    god: &IntermediateTrie3GodWrapper,
+) {
+    if is_debug_level_enabled(2) {
+        let mut stats = crate::constraint_extra::PrecomputeStats::default();
+        crate::constraint_extra::calculate_intermediate_stats3(roots, &mut stats, god);
+        crate::constraint_extra::print_intermediate_stats3(&stats, god);
+    }
+    for _ in 0..2 {
+        let changed = prune_unproductive_nodes(roots, end_node, god);
+        if !changed {
+            break;
+        }
     }
 }
 
@@ -60,11 +48,7 @@ fn prune_unproductive_nodes(
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
-    let mut combined_roots = start_nodes.to_vec();
-    if !start_nodes.contains(end_node) {
-        combined_roots.push(*end_node);
-    }
-    let all_nodes_vec = Trie::all_nodes(god, &combined_roots);
+    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
     if all_nodes_vec.is_empty() {
         return false;
     }
@@ -129,115 +113,4 @@ fn prune_unproductive_nodes(
     }
 
     changed
-}
-
-fn merge_nodes_intermediate_trie3(
-    roots: &[IntermediatePrecomputeNode3Index],
-    god: &IntermediateTrie3GodWrapper,
-    max_iters: usize,
-) -> (HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>, Vec<IntermediatePrecomputeNode3Index>) {
-    let all_nodes = Trie::all_nodes(god, roots);
-    if all_nodes.is_empty() {
-        return (HashMap::new(), vec![]);
-    }
-
-    let mut dense_of: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
-    let mut old_of: Vec<IntermediatePrecomputeNode3Index> = Vec::with_capacity(all_nodes.len());
-    for (i, node_idx) in all_nodes.iter().enumerate() {
-        dense_of.insert(*node_idx, i);
-        old_of.push(*node_idx);
-    }
-    let n = all_nodes.len();
-
-    let mut ends: Vec<bool> = vec![false; n];
-    type RawEdge = (IntermediateTrie3EdgeKey, usize);
-    let mut raw_edges: Vec<Vec<RawEdge>> = vec![Vec::new(); n];
-
-    for (u_dense, u_idx) in old_of.iter().enumerate() {
-        if let Some(guard) = u_idx.read(god) {
-            ends[u_dense] = guard.value.end;
-            for (ek, dest_map) in guard.children() {
-                for (v_idx, _) in dest_map {
-                    if let Some(&v_dense) = dense_of.get(v_idx) {
-                        raw_edges[u_dense].push((ek.clone(), v_dense));
-                    }
-                }
-            }
-        }
-    }
-
-    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
-
-    for _it in 0..max_iters {
-        type Signature = (bool, Vec<(IntermediateTrie3EdgeKey, usize)>);
-
-        let mut sig_to_id: BTreeMap<Signature, usize> = BTreeMap::new();
-        let mut new_class = vec![0; n];
-        let mut next_id = 0;
-        let mut changes = 0;
-
-        for u in 0..n {
-            let mut sig_edges: Vec<(IntermediateTrie3EdgeKey, usize)> = raw_edges[u]
-                .iter()
-                .map(|(ek, v_dense)| (ek.clone(), prev_class[*v_dense]))
-                .collect();
-            sig_edges.sort();
-
-            let sig: Signature = (ends[u], sig_edges);
-
-            let cid = *sig_to_id.entry(sig).or_insert_with(|| {
-                let id = next_id;
-                next_id += 1;
-                id
-            });
-
-            new_class[u] = cid;
-            if new_class[u] != prev_class[u] {
-                changes += 1;
-            }
-        }
-
-        prev_class = new_class;
-        if changes == 0 {
-            break;
-        }
-    }
-
-    let final_partition = prev_class;
-    let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
-
-    let mut representatives: Vec<Option<IntermediatePrecomputeNode3Index>> = vec![None; num_classes];
-    for (u_dense, &class_id) in final_partition.iter().enumerate() {
-        if representatives[class_id].is_none() {
-            representatives[class_id] = Some(old_of[u_dense]);
-        }
-    }
-
-    let mut node_to_rep: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = HashMap::new();
-    for (u_dense, &class_id) in final_partition.iter().enumerate() {
-        if let Some(rep) = representatives[class_id] {
-            node_to_rep.insert(old_of[u_dense], rep);
-        }
-    }
-
-    for class_id in 0..num_classes {
-        if let Some(rep_idx) = representatives[class_id] {
-            let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
-
-            let mut new_children: BTreeMap<IntermediateTrie3EdgeKey, OrderedHashMap<Trie2Index, ()>> = BTreeMap::new();
-            for (ek, v_dense) in &raw_edges[u_dense] {
-                let dest_class = final_partition[*v_dense];
-                if let Some(dest_rep_idx) = representatives[dest_class] {
-                    new_children.entry(ek.clone()).or_default().insert(dest_rep_idx, ());
-                }
-            }
-
-            if let Some(mut guard) = rep_idx.write(god) {
-                *guard.children_mut() = new_children;
-            }
-        }
-    }
-
-    let reps: Vec<_> = representatives.into_iter().filter_map(|x| x).collect();
-    (node_to_rep, reps)
 }

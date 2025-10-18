@@ -1800,9 +1800,9 @@ impl GrammarConstraint {
         let stacks = s.active_state.stack.inner.to_stacks();
         let end = Self::reduce_gss_stacks_to_trie3_from_start(trie3_god, &stacks, internal_max_llm_token);
         // Optimize the template subgraph
-        let (start, end) = optimize_intermediate_trie3_template(
-            start,
-            end,
+        optimize_intermediate_trie3_template(
+            &start,
+            &end,
             trie3_god,
         );
         (start, end)
@@ -2087,7 +2087,8 @@ impl GrammarConstraint {
 
         // --- New: Optimize intermediate trie before path processing ---
         crate::debug!(2, "Optimizing intermediate trie3...");
-        optimize_intermediate_trie3(&mut intermediate_precomputed3, &trie3_end, &intermediate_trie3_god);
+        let intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
+        optimize_intermediate_trie3(&intermediate_roots, &trie3_end, &intermediate_trie3_god);
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
