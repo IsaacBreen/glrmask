@@ -878,6 +878,10 @@ fn run_trie_based_elimination(
             // - Otherwise, we keep the original edge to preserve the blocked branch.
             for (llm, exit_push_bv, exit_dst) in blocked_set {
                 let mut rewired = false;
+                eprintln!(
+                    "[challenge_elim]      - Considering BlockedPush exit to {}, push_bv: {:?}, llm: {:?}",
+                    exit_dst, exit_push_bv, llm
+                );
                 if llm == LLMTokenBV::max_ones() {
                     let is_leaf_node = if let Some(dst_guard) = exit_dst.read(god) {
                         dst_guard.value.end
@@ -886,41 +890,49 @@ fn run_trie_based_elimination(
                     };
 
                     if is_leaf_node {
-                        eprintln!("[challenge_elim]    - Applying BlockedPush exit by rewiring to leaf {}", exit_dst);
+                        eprintln!(
+                            "[challenge_elim]      - Applying BlockedPush exit by rewiring to leaf {}: {} --Push({:?})--> {}",
+                            exit_dst, src, exit_push_bv.clone(), exit_dst
+                        );
                         // Directly wire src --Push(exit_push_bv)--> leaf,
                         // effectively removing the Pop(0) that was folded into the push.
                         god.insert_edge_simple(
                             src,
                             exit_dst,
-                            IntermediateTrie3EdgeKey::Push(exit_push_bv),
+                            IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
                             (),
                         );
                         rewired = true;
                     }
                 }
                 if !rewired {
-                    eprintln!("[challenge_elim]    - BlockedPush exit to {} could not be rewired, must keep original edge.", exit_dst);
+                    eprintln!("[challenge_elim]      - BlockedPush exit to {} could not be rewired, must keep original edge.", exit_dst);
                     // We did not rewire this blocked branch (e.g., nested Push or LLM-aggregated path),
                     // so we must keep the original Push edge to preserve semantics.
                     must_keep_original_edge = true;
                 }
             }
-            let keep_original_edge = must_keep_original_edge;
 
             // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
             // unless we determined it must remain (to avoid deleting the only surviving representation).
-            if !keep_original_edge {
-                eprintln!("[challenge_elim]    - Removing original push edge after rewiring.");
+            if !must_keep_original_edge {
+                eprintln!(
+                    "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
+                    src, push_bv.clone(), dst
+                );
                 if remove_specific_edge(
                     god,
                     src,
-                    IntermediateTrie3EdgeKey::Push(push_bv),
+                    IntermediateTrie3EdgeKey::Push(push_bv.clone()),
                     dst,
                 ) {
                     removed_this_round += 1;
                 }
             } else {
-                eprintln!("[challenge_elim]    - Keeping original push edge due to blocked branch.");
+                eprintln!(
+                    "[challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge {} --Push({:?})--> {}",
+                    src, push_bv, dst
+                );
             }
         }
 
@@ -988,6 +1000,18 @@ mod tests {
         }
 
         // 4. Compare
+        if paths_from_trie_elim != paths_from_path_elim {
+            eprintln!("\n--- MISMATCH DETECTED IN TEST ---");
+            eprintln!("EXPECTED (path-based):");
+            for path in &paths_from_path_elim {
+                eprintln!("  {:?}", path);
+            }
+            eprintln!("\nACTUAL (trie-based):");
+            for path in &paths_from_trie_elim {
+                eprintln!("  {:?}", path);
+            }
+            eprintln!("---------------------------------\n");
+        }
         assert_eq!(paths_from_trie_elim, paths_from_path_elim);
     }
 
