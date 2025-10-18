@@ -48,7 +48,7 @@ pub fn optimize_intermediate_trie3_template(
     pinned.insert(*start_node);
     pinned.insert(*end_node);
 
-    for _ in 0..2 {
+    for i in 0..2 {
         let mut changed = false;
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
         changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
@@ -63,6 +63,7 @@ pub fn optimize_intermediate_trie3_template(
             .into_iter()
             .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
             .collect();
+        println!("Iteration {}", i);
         println!("Has cycle? {}", Trie::has_cycle(&god, roots.clone()));
         println!("Trie before merging: {}", Trie::pretty_print(&god, roots));
         changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
