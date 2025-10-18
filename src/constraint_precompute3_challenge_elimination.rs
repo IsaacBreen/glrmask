@@ -843,7 +843,33 @@ fn run_trie_based_elimination(
                 continue;
             }
 
-            // If not stable, rewire all exits and remove the original edge.
+            // A push can be fully eliminated only if all its BlockedPush exits are simple
+            // (i.e., unconditional continuations to a leaf node). Any other kind of
+            // BlockedPush means we must preserve the original edge to avoid blow-up or
+            // incorrect semantics from partial elimination. In such cases, we make no
+            // changes to this edge in this round.
+            let mut must_keep_original_edge = false;
+            for ex in &exits {
+                if let Exit::BlockedPush { llm, dst: exit_dst, .. } = ex {
+                    let is_simple_blocked_push = if *llm == LLMTokenBV::max_ones() {
+                        exit_dst.read(god).map_or(false, |g| g.value.end)
+                    } else {
+                        false
+                    };
+
+                    if !is_simple_blocked_push {
+                        must_keep_original_edge = true;
+                        break;
+                    }
+                }
+            }
+
+            if must_keep_original_edge {
+                crate::debug!(5, "[challenge_elim]    - Complex BlockedPush found. Keeping original edge and making no changes for this push.");
+                continue;
+            }
+
+            // If not stable and not complex-blocked, rewire all exits and remove the original edge.
             let cache = per_src_agg_cache
                 .entry(src)
                 .or_insert_with(BTreeMap::new);
