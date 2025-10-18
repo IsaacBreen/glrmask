@@ -46,7 +46,7 @@ pub fn optimize_intermediate_trie3_template(
     pinned.insert(*start_node);
     pinned.insert(*end_node);
 
-    for _ in 0..1 {
+    for _ in 0..2 {
         let mut changed = false;
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
         changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
