@@ -20,18 +20,7 @@ pub fn optimize_intermediate_trie3_template(
         let mut changed = false;
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
         changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
-        let roots = &[*start_node];
-        let normalized_paths1: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&god, roots, |idx, n| idx == *end_node)
-            .into_iter()
-            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-            .collect();
-        println!("Trie before merging: {}", Trie::pretty_print(&god, roots));
         changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
-        let normalized_paths2: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&god, roots, |idx, n| idx == *end_node)
-            .into_iter()
-            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-            .collect();
-        assert_eq!(normalized_paths1, normalized_paths2);
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
         if !changed { break; }
     }
@@ -237,7 +226,7 @@ struct NodeSignature {
 
 // Merge structurally equivalent nodes within the reachable subgraph, except pinned nodes.
 // Works across multiple roots if provided.
-fn structural_merge_nodes_in_subgraph(
+pub(crate) fn structural_merge_nodes_in_subgraph(
     start_nodes: &[IntermediatePrecomputeNode3Index],
     pinned: &std::collections::HashSet<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
@@ -542,4 +531,77 @@ pub fn optimize_intermediate_trie3_templates_global(
     }
 
     compute_and_print_template_stats(templates, god, "After Optimization");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constraint::{IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, StateIDBV};
+    use crate::datastructures::trie::Trie2Index;
+    use std::collections::{BTreeSet, HashMap, HashSet};
+
+    #[test]
+    fn test_structural_merge_preserves_paths_from_panic_log() {
+        let god = IntermediateTrie3GodWrapper::new();
+        let mut nodes = HashMap::new();
+
+        // Create nodes from 0 to 42
+        for i in 0..=42 {
+            let content = if i == 42 {
+                IntermediatePrecomputedNodeContents3::leaf()
+            } else {
+                IntermediatePrecomputedNodeContents3::internal()
+            };
+            nodes.insert(i, Trie2Index::from(god.insert(Trie::new(content))));
+        }
+
+        let mut bv0 = StateIDBV::zeros(); bv0.insert(0);
+        let mut bv1 = StateIDBV::zeros(); bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros(); bv2.insert(2);
+        let mut bv3 = StateIDBV::zeros(); bv3.insert(3);
+        let mut bv4 = StateIDBV::zeros(); bv4.insert(4);
+        let mut bv5 = StateIDBV::zeros(); bv5.insert(5);
+        let mut bv6 = StateIDBV::zeros(); bv6.insert(6);
+        let bv_max = StateIDBV::max_ones();
+
+        // Helper to add edges
+        let mut add_edge = |src: usize, ek: IntermediateTrie3EdgeKey, dst: usize| {
+            nodes[&src].write(&god).unwrap().force_insert_to_node(ek, (), nodes[&dst]);
+        };
+
+        // Reconstruct graph from log
+        add_edge(16, IntermediateTrie3EdgeKey::Pop(0, bv0), 31);
+        add_edge(31, IntermediateTrie3EdgeKey::Pop(1, bv_max.clone()), 32);
+        add_edge(32, IntermediateTrie3EdgeKey::Pop(0, bv1.clone()), 26);
+        add_edge(26, IntermediateTrie3EdgeKey::Pop(1, bv_max.clone()), 34);
+        add_edge(34, IntermediateTrie3EdgeKey::Pop(0, bv1.clone()), 26); // cycle
+        add_edge(34, IntermediateTrie3EdgeKey::Pop(0, bv4.clone()), 39);
+        add_edge(39, IntermediateTrie3EdgeKey::Push(bv5.clone()), 40);
+        add_edge(40, IntermediateTrie3EdgeKey::Push(bv6.clone()), 42);
+
+        add_edge(16, IntermediateTrie3EdgeKey::Pop(0, bv2), 27);
+        add_edge(27, IntermediateTrie3EdgeKey::Pop(2, bv_max.clone()), 28);
+        add_edge(28, IntermediateTrie3EdgeKey::Pop(0, bv1.clone()), 26);
+        add_edge(28, IntermediateTrie3EdgeKey::Pop(0, bv4.clone()), 39);
+
+        add_edge(16, IntermediateTrie3EdgeKey::Pop(0, bv3), 21);
+        add_edge(21, IntermediateTrie3EdgeKey::Pop(1, bv_max.clone()), 22);
+        add_edge(22, IntermediateTrie3EdgeKey::Pop(0, bv1.clone()), 26);
+        add_edge(22, IntermediateTrie3EdgeKey::Pop(0, bv4.clone()), 39);
+
+        add_edge(16, IntermediateTrie3EdgeKey::Pop(0, bv5.clone()), 37);
+        add_edge(37, IntermediateTrie3EdgeKey::Push(bv6.clone()), 42);
+
+        let start_node = nodes[&16];
+        let end_node = nodes[&42];
+        let roots = &[start_node];
+
+        let paths_before: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&god, roots, |idx, _n| idx == end_node).into_iter().map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect())).collect();
+        let mut pinned = HashSet::new();
+        pinned.insert(start_node);
+        pinned.insert(end_node);
+        structural_merge_nodes_in_subgraph(roots, &pinned, &god);
+        let paths_after: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&god, roots, |idx, _n| idx == end_node).into_iter().map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect())).collect();
+        assert_eq!(paths_before, paths_after);
+    }
 }
