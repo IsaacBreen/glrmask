@@ -912,7 +912,6 @@ where
                     arena,
                     root,
                     &mut vec![],
-                    &mut 0,
                     &mut all_paths,
                     &is_end,
                     &counts_toward_length,
@@ -928,7 +927,6 @@ where
         arena: &Arena<Self>,
         node_idx: Trie2Index,
         current_path: &mut Vec<(EK, EV, T)>,
-        current_length: &mut usize,
         all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
         is_end: &F,
         counts_toward_length: &G,
@@ -948,7 +946,6 @@ where
 
         // Work on a local copy of the path, so callers' mutable reference remains unchanged.
         let mut path: Vec<(EK, EV, T)> = current_path.clone();
-        let mut length = *current_length;
 
         // Stack frame for iterative DFS.
         struct Frame<EK2, EV2> {
@@ -957,8 +954,7 @@ where
             edges: Vec<(EK2, EV2, Trie2Index)>,
             idx: usize,                 // Next edge index to process
             started: bool,              // Whether we've done the "node entry" work (is_end + length check)
-            has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`.
-            incoming_edge_counted: bool,
+            has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`
         }
 
         // Helper to snapshot a node's outgoing edges in deterministic order (no locks held after).
@@ -982,8 +978,7 @@ where
             edges: edges_for(node_idx),
             idx: 0,
             started: false,
-            has_incoming_edge: false,    // root has no incoming edge
-            incoming_edge_counted: false,
+            has_incoming_edge: false, // root has no incoming edge
         });
 
         while let Some(frame) = stack.last_mut() {
@@ -997,17 +992,11 @@ where
                     }
                 }
 
-                // If we've reached the max number of counted edges on this path, do not expand further.
-                // We also cap the total path length as a safeguard against infinite loops in cycles of uncounted edges.
-                // The absolute cap is to prevent OOM when a very large `max_path_length` is provided.
-                const ABSOLUTE_MAX_PATH_LEN: usize = 50000;
-                if length >= max_path_length || path.len() >= ABSOLUTE_MAX_PATH_LEN {
+                // If we've reached the max number of edges on this path, do not expand further.
+                if path.len() >= max_path_length {
                     let popped = stack.pop().unwrap();
                     if popped.has_incoming_edge {
                         path.pop(); // backtrack edge added when entering this frame
-                    }
-                    if popped.incoming_edge_counted {
-                        length -= 1;
                     }
                     continue;
                 }
@@ -1019,9 +1008,6 @@ where
                 if popped.has_incoming_edge {
                     path.pop(); // backtrack the edge that led here
                 }
-                if popped.incoming_edge_counted {
-                    length -= 1;
-                }
                 continue;
             }
 
@@ -1032,13 +1018,8 @@ where
             if let Some(child_guard) = child_idx.read(arena) {
                 let child_value = child_guard.value.clone();
 
-                let counted = counts_toward_length(&ek, &ev, child_idx);
-                if counted {
-                    length += 1;
-                }
-
                 // Add this edge to the current path before exploring the child.
-                path.push((ek.clone(), ev.clone(), child_value));
+                path.push((ek, ev, child_value));
 
                 // Snapshot child's edges now (no locks held across iterations).
                 let child_edges = edges_for(child_idx);
@@ -1048,7 +1029,6 @@ where
                     idx: 0,
                     started: false,
                     has_incoming_edge: true,
-                    incoming_edge_counted: counted,
                 });
             } else {
                 // If child is missing, skip it and proceed.
