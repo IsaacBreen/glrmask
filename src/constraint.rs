@@ -1764,35 +1764,10 @@ impl GrammarConstraint {
         let mut term_ids: Vec<TerminalID> = parser.terminal_map.iter().map(|(_l, r)| *r).collect();
         term_ids.sort_by_key(|t| t.0);
 
-        for tid in &term_ids {
-            // Build and optimize each template individually first.
-            let (start, end) = Self::build_trie3_template_for_terminal(parser, trie3_god, *tid, internal_max_llm_token);
-            out.insert(*tid, (start, end));
+        for tid in term_ids {
+            let (start, end) = Self::build_trie3_template_for_terminal(parser, trie3_god, tid, internal_max_llm_token);
+            out.insert(tid, (start, end));
         }
-
-        // Now, perform a global merge across all optimized templates to share common subgraphs.
-        let all_start_nodes: Vec<_> = out.values().map(|(s, _)| s.clone()).collect();
-        let all_end_nodes: std::collections::HashSet<_> = out.values().map(|(_, e)| e.clone()).collect();
-
-        let node_to_rep = crate::constraint_precompute3_intermediate_utils::merge_intermediate_nodes_globally(
-            &all_start_nodes,
-            &all_end_nodes,
-            trie3_god,
-            40);
-
-        // Update start/end nodes in `out` to their representatives
-        for (_tid, (start, end)) in out.iter_mut() {
-            if let Some(rep) = node_to_rep.get(start) {
-                *start = *rep;
-            }
-            if let Some(rep) = node_to_rep.get(end) {
-                *end = *rep;
-            }
-        }
-
-        let final_roots: Vec<_> = out.values().map(|(s, _)| s.clone()).collect();
-        Trie::gc(trie3_god, &final_roots);
-
         out
     }
 
