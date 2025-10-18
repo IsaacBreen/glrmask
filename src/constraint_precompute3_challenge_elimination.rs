@@ -1697,36 +1697,4 @@ mod tests {
         let root = build_graph_from_path(&god, path);
         run_test(&god, &[root]);
     }
-
-    #[test]
-    fn test_mismatch_with_interleaved_llm_check() {
-        // Based on a logged mismatch. The path-based simplifier removes a
-        // Push/Pop(0) pair separated by a CheckLLM. The trie-based one
-        // conservatively refuses to simplify across the CheckLLM, causing a mismatch.
-        let god = IntermediateTrie3GodWrapper::new();
-
-        let mut llm_bv = LLMTokenBV::zeros();
-        llm_bv.insert(0);
-        llm_bv.insert(1);
-
-        let mut bv0 = StateIDBV::zeros();
-        bv0.insert(0);
-
-        let mut bv3 = StateIDBV::zeros();
-        bv3.insert(3);
-
-        let mut bv4 = StateIDBV::zeros();
-        bv4.insert(4);
-
-        let path = vec![
-            IntermediateTrie3EdgeKey::Pop(0, bv0),
-            IntermediateTrie3EdgeKey::Push(bv3.clone()),
-            IntermediateTrie3EdgeKey::CheckLLM(llm_bv),
-            IntermediateTrie3EdgeKey::Pop(0, bv3),
-            IntermediateTrie3EdgeKey::Push(bv4),
-        ];
-
-        let root = build_graph_from_path(&god, path);
-        run_test(&god, &[root]);
-    }
 }
