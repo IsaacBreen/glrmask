@@ -933,32 +933,101 @@ where
         T: Clone,
         EV: Clone,
     {
-        if let Some(guard) = node_idx.read(arena) {
-            if is_end(node_idx, &guard) {
-                all_paths.push((root_value.clone(), current_path.clone()));
-            }
+        // Iterative DFS to avoid stack overflows on deep/large graphs.
+        // Semantics match the recursive version:
+        // - Record a path when is_end(current_node) is true (including the root with a zero-length path).
+        // - Enforce max_path_length AFTER recording the current node as an endpoint.
+        // - Allow revisiting nodes (cycles are allowed) but stop expanding when the edge-count path length reaches max_path_length.
 
-            if current_path.len() >= max_path_length {
-                return;
-            }
+        // Work on a local copy of the path, so callers' mutable reference remains unchanged.
+        let mut path: Vec<(EK, EV, T)> = current_path.clone();
 
-            for (edge_key, dest_map) in guard.children() {
-                for (child_idx, edge_value) in dest_map.iter() {
-                    if let Some(child_guard) = child_idx.read(arena) {
-                        let child_value = child_guard.value.clone();
-                        current_path.push((edge_key.clone(), edge_value.clone(), child_value));
-                        Self::get_all_paths_with_cycles_recursive(
-                            arena,
-                            *child_idx,
-                            current_path,
-                            all_paths,
-                            is_end,
-                            root_value,
-                            max_path_length,
-                        );
-                        current_path.pop(); // Backtrack
+        // Stack frame for iterative DFS.
+        struct Frame<EK2, EV2> {
+            node: Trie2Index,
+            // Snapshot of edges in deterministic order: (edge_key, edge_value, child_idx)
+            edges: Vec<(EK2, EV2, Trie2Index)>,
+            idx: usize,                 // Next edge index to process
+            started: bool,              // Whether we've done the "node entry" work (is_end + length check)
+            has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`
+        }
+
+        // Helper to snapshot a node's outgoing edges in deterministic order (no locks held after).
+        let edges_for = |n: Trie2Index| -> Vec<(EK, EV, Trie2Index)> {
+            if let Some(g) = n.read(arena) {
+                g.children().iter()
+                    .flat_map(|(ek, dest_map)| {
+                        let ekc = ek.clone();
+                        dest_map.iter()
+                            .map(move |(child_idx, ev)| (ekc.clone(), ev.clone(), *child_idx))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+
+        let mut stack: Vec<Frame<EK, EV>> = Vec::new();
+        stack.push(Frame {
+            node: node_idx,
+            edges: edges_for(node_idx),
+            idx: 0,
+            started: false,
+            has_incoming_edge: false, // root has no incoming edge
+        });
+
+        while let Some(frame) = stack.last_mut() {
+            // On first entry to this node: evaluate `is_end` and enforce max_path_length.
+            if !frame.started {
+                frame.started = true;
+
+                if let Some(g) = frame.node.read(arena) {
+                    if is_end(frame.node, &g) {
+                        all_paths.push((root_value.clone(), path.clone()));
                     }
                 }
+
+                // If we've reached the max number of edges on this path, do not expand further.
+                if path.len() >= max_path_length {
+                    let popped = stack.pop().unwrap();
+                    if popped.has_incoming_edge {
+                        path.pop(); // backtrack edge added when entering this frame
+                    }
+                    continue;
+                }
+            }
+
+            // If we've exhausted edges for this node, backtrack.
+            if frame.idx >= frame.edges.len() {
+                let popped = stack.pop().unwrap();
+                if popped.has_incoming_edge {
+                    path.pop(); // backtrack the edge that led here
+                }
+                continue;
+            }
+
+            // Take the next outgoing edge and descend to the child.
+            let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
+            frame.idx += 1;
+
+            if let Some(child_guard) = child_idx.read(arena) {
+                let child_value = child_guard.value.clone();
+
+                // Add this edge to the current path before exploring the child.
+                path.push((ek, ev, child_value));
+
+                // Snapshot child's edges now (no locks held across iterations).
+                let child_edges = edges_for(child_idx);
+                stack.push(Frame {
+                    node: child_idx,
+                    edges: child_edges,
+                    idx: 0,
+                    started: false,
+                    has_incoming_edge: true,
+                });
+            } else {
+                // If child is missing, skip it and proceed.
+                continue;
             }
         }
     }
