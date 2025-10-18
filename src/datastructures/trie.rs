@@ -2399,63 +2399,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathOp<T: Eq + Hash + Clone> {
-    Push(HashSet<T>),
-    Pop { k: usize, set: HashSet<T> },
-}
-
-/// Simplifies a path represented by a sequence of Push and Pop operations.
-///
-/// This function repeatedly finds the innermost push-pop pair and simplifies them
-/// according to the following rules:
-/// - Pop(k=0): The push's set is intersected with the pop's set. The pop is removed.
-/// - Pop(k=1): If the intersection of sets is non-empty, both push and pop are removed.
-/// - Pop(k>=2): The push is removed, and the pop's k is decremented. The modified pop
-///              remains to be processed with the next push to its left.
-///
-/// Returns `true` if the path is valid and simplification completes, `false` otherwise.
-/// A path is invalid if a pop has no corresponding push, or if a k=0/k=1 intersection is empty.
-pub fn simplify_path<T: Eq + Hash + Clone + Debug>(path: &mut Vec<PathOp<T>>) -> bool {
-    loop {
-        let pop_idx = match path.iter().position(|op| matches!(op, PathOp::Pop{..})) {
-            Some(idx) => idx,
-            None => return true, // No more pops, simplification is done and valid.
-        };
-
-        let push_idx = match path[..pop_idx].iter().rposition(|op| matches!(op, PathOp::Push(_))) {
-            Some(idx) => idx,
-            None => return false, // Pop without a push to its left.
-        };
-
-        // Remove from right to left to preserve `push_idx`.
-        let pop_op = path.remove(pop_idx);
-        let push_op = path.remove(push_idx);
-
-        if let (PathOp::Push(push_set), PathOp::Pop { k, set: pop_set }) = (push_op, pop_op) {
-            match k {
-                0 => {
-                    let intersection: HashSet<_> = push_set.intersection(&pop_set).cloned().collect();
-                    if intersection.is_empty() { return false; }
-                    // Re-insert modified push. Pop is gone.
-                    path.insert(push_idx, PathOp::Push(intersection));
-                }
-                1 => {
-                    let intersection: HashSet<_> = push_set.intersection(&pop_set).cloned().collect();
-                    if intersection.is_empty() { return false; }
-                    // Both are removed, do not re-insert anything.
-                }
-                _ => { // k >= 2
-                    // Push is removed. Re-insert modified pop.
-                    path.insert(push_idx, PathOp::Pop { k: k - 1, set: pop_set });
-                }
-            }
-        } else {
-            unreachable!();
-        }
-    }
-}
-
 pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 
@@ -2643,71 +2586,6 @@ mod tests {
         let longest_path = paths.iter().find(|(_, p)| p.len() == 5).unwrap();
         let counted_edges_in_longest_path: Vec<_> = longest_path.1.iter().map(|(ek, _, _)| ek.as_str()).collect();
         assert_eq!(counted_edges_in_longest_path, vec!["to_a", "cycle_counted", "cycle_counted", "cycle_counted", "to_target"]);
-    }
-
-    #[test]
-    fn test_simplify_path() {
-        use std::iter::FromIterator;
-
-        // Helper to create a HashSet from a slice
-        fn set(items: &[i32]) -> HashSet<i32> {
-            HashSet::from_iter(items.iter().cloned())
-        }
-
-        // Case 1: Simple k=1 reduction
-        let mut path1 = vec![PathOp::Push(set(&[1, 2])), PathOp::Pop { k: 1, set: set(&[2, 3]) }];
-        assert!(simplify_path(&mut path1));
-        assert!(path1.is_empty());
-
-        // Case 2: k=1, invalid due to empty intersection
-        let mut path2 = vec![PathOp::Push(set(&[1, 2])), PathOp::Pop { k: 1, set: set(&[3, 4]) }];
-        assert!(!simplify_path(&mut path2));
-
-        // Case 3: Simple k=0 reduction
-        let mut path3 = vec![PathOp::Push(set(&[1, 2, 3])), PathOp::Pop { k: 0, set: set(&[2, 3, 4]) }];
-        assert!(simplify_path(&mut path3));
-        assert_eq!(path3, vec![PathOp::Push(set(&[2, 3]))]);
-
-        // Case 4: k=2 reduction, invalid
-        let mut path4 = vec![
-            PathOp::Push(set(&[1, 2])), // A
-            PathOp::Push(set(&[2, 3])), // B
-            PathOp::Pop { k: 2, set: set(&[3, 4]) } // C
-        ];
-        assert!(!simplify_path(&mut path4));
-
-        // Case 4b: k=2 reduction, valid
-        let mut path4b = vec![
-            PathOp::Push(set(&[1, 2])), // A
-            PathOp::Push(set(&[2, 3])), // B
-            PathOp::Pop { k: 2, set: set(&[2, 4]) } // C
-        ];
-        assert!(simplify_path(&mut path4b));
-        assert!(path4b.is_empty());
-
-        // Case 5: Nested reductions
-        let mut path5 = vec![
-            PathOp::Push(set(&[1])), // A
-            PathOp::Push(set(&[2])), // B
-            PathOp::Pop { k: 1, set: set(&[2]) }, // C, consumes B
-            PathOp::Pop { k: 1, set: set(&[1]) }, // D, consumes A
-        ];
-        assert!(simplify_path(&mut path5));
-        assert!(path5.is_empty());
-
-        // Case 6: Pop without push
-        let mut path6 = vec![PathOp::Pop { k: 1, set: set(&[1]) }];
-        assert!(!simplify_path(&mut path6));
-
-        // Case 7: Push after reduction
-        let mut path7 = vec![PathOp::Push(set(&[1])), PathOp::Pop { k: 1, set: set(&[1]) }, PathOp::Push(set(&[2]))];
-        assert!(simplify_path(&mut path7));
-        assert_eq!(path7, vec![PathOp::Push(set(&[2]))]);
-
-        // Case 8: No pops
-        let mut path8 = vec![PathOp::Push(set(&[1])), PathOp::Push(set(&[2]))];
-        assert!(simplify_path(&mut path8));
-        assert_eq!(path8.len(), 2);
     }
 }
 
