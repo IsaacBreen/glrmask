@@ -998,12 +998,11 @@ fn run_trie_based_elimination(
                 continue;
             }
 
-            // If not stable and not complex-blocked, rewire all exits and remove the original edge.
-            // New policy:
+            // If not stable, rewire all exits and remove the original edge.
+            // Policy:
             // - Always rewire Cancel/Degrade.
-            // - Partition BlockedPush into cyclic vs acyclic.
-            //   If any cyclic: do NOT rewire any BlockedPush; keep original Push but restrict its BV
-            //   to the union of all blocked push_bv (fold Pop(0) constraints), to avoid cycle blow-up.
+            // - Partition BlockedPush into acyclic vs cyclic, but rewire BOTH kinds to ensure
+            //   no Pop edges remain reachable from any Push (even through cycles).
             let cache = per_src_agg_cache
                 .entry(src)
                 .or_insert_with(BTreeMap::new);
@@ -1012,8 +1011,7 @@ fn run_trie_based_elimination(
             let mut cancel_set = BTreeSet::new();
             let mut degrade_set = BTreeSet::new();
             let mut blocked_acyclic_set = BTreeSet::new();
-            let mut has_cyclic_blocked = false;
-            let mut union_blocked_push_bv = StateIDBV::zeros();
+            let mut blocked_cyclic_set = BTreeSet::new();
             for ex in exits.iter() {
                 match ex {
                     Exit::Cancel { llm, dst } => {
@@ -1023,10 +1021,8 @@ fn run_trie_based_elimination(
                         degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
                     }
                     Exit::BlockedPush { llm, push_bv: exit_push_bv, dst, on_cycle } => {
-                        // Track union of push_bv across ALL blocked exits to fold Pop(0) into the push label.
-                        union_blocked_push_bv |= exit_push_bv.clone();
                         if *on_cycle {
-                            has_cyclic_blocked = true;
+                            blocked_cyclic_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
                         } else {
                             blocked_acyclic_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
                         }
@@ -1050,63 +1046,45 @@ fn run_trie_based_elimination(
                 );
             }
 
-            if has_cyclic_blocked {
-                // Avoid creating new Push edges that feed back into cycles.
-                // Keep the original Push edge but fold Pop(0) constraints into its label
-                // using the union of all blocked push_bv, to remain semantically accurate.
-                if union_blocked_push_bv != push_bv {
-                    crate::debug!(5,
-                        "[challenge_elim]    - Cyclic blocked detected. Restricting original push label from {:?} to {:?} (keeping edge).",
-                        push_bv, union_blocked_push_bv
-                    );
-                    // Replace the edge key: remove old (do NOT count as removal), then reinsert with new label.
-                    remove_specific_edge(
-                        god,
-                        src,
-                        IntermediateTrie3EdgeKey::Push(push_bv.clone()),
-                        dst,
-                    );
-                    god.insert_edge_simple(
-                        src,
-                        dst,
-                        IntermediateTrie3EdgeKey::Push(union_blocked_push_bv.clone()),
-                        (),
-                    );
-                } else {
-                    crate::debug!(5,
-                        "[challenge_elim]    - Cyclic blocked detected. Keeping original push edge unchanged (label already minimal)."
-                    );
-                }
-                // Do NOT rewire any BlockedPush exits in cyclic case.
-                continue;
-            } else {
-                // No cyclic blocked: safe to rewire all BlockedPush exits.
-                for (llm, exit_push_bv, exit_dst) in blocked_acyclic_set {
-                    crate::debug!(5,
-                        "[challenge_elim]      - Rewiring BlockedPush (acyclic) to {}, push_bv: {:?}, llm: {:?}",
-                        exit_dst, exit_push_bv, llm
-                    );
-                    let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                    god.insert_edge_simple(
-                        agg,
-                        exit_dst,
-                        IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
-                        (),
-                    );
-                }
-                // Remove the original push edge; rewriting is complete.
+            // Rewire ALL BlockedPush exits (acyclic and cyclic alike).
+            for (llm, exit_push_bv, exit_dst) in blocked_acyclic_set {
                 crate::debug!(5,
-                    "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
-                    src, push_bv.clone(), dst
+                    "[challenge_elim]      - Rewiring BlockedPush (acyclic) to {}, push_bv: {:?}, llm: {:?}",
+                    exit_dst, exit_push_bv, llm
                 );
-                if remove_specific_edge(
-                    god,
-                    src,
-                    IntermediateTrie3EdgeKey::Push(push_bv.clone()),
-                    dst,
-                ) {
-                    removed_this_round += 1;
-                }
+                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                god.insert_edge_simple(
+                    agg,
+                    exit_dst,
+                    IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
+                    (),
+                );
+            }
+            for (llm, exit_push_bv, exit_dst) in blocked_cyclic_set {
+                crate::debug!(5,
+                    "[challenge_elim]      - Rewiring BlockedPush (cyclic) to {}, push_bv: {:?}, llm: {:?}",
+                    exit_dst, exit_push_bv, llm
+                );
+                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                god.insert_edge_simple(
+                    agg,
+                    exit_dst,
+                    IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
+                    (),
+                );
+            }
+            // Remove the original push edge; rewriting is complete.
+            crate::debug!(5,
+                "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
+                src, push_bv.clone(), dst
+            );
+            if remove_specific_edge(
+                god,
+                src,
+                IntermediateTrie3EdgeKey::Push(push_bv.clone()),
+                dst,
+            ) {
+                removed_this_round += 1;
             }
         }
 
