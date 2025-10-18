@@ -2500,5 +2500,75 @@ mod tests {
         assert_eq!(*ek2, "counted");
         assert_eq!(*t2, "target");
     }
+
+    #[test]
+    fn test_get_all_paths_with_cycles_mixed_cycle_produces_multiple_paths() {
+        type TestTrie = Trie<String, (), String>;
+        let arena = Arena::<TestTrie>::new();
+
+        // Graph:
+        // root -> A -> target
+        //   ^     |
+        //   |     v
+        //   C <- B
+        //
+        // Cycle: A -> B -> C -> A
+        // Edges:
+        // root -> A: counted
+        // A -> B: counted ("cycle_counted")
+        // B -> C: uncounted ("cycle_uncounted")
+        // C -> A: uncounted ("cycle_uncounted")
+        // A -> target: counted
+        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+        let node_a = Trie2Index::from(arena.insert(Trie::new("A".to_string())));
+        let node_b = Trie2Index::from(arena.insert(Trie::new("B".to_string())));
+        let node_c = Trie2Index::from(arena.insert(Trie::new("C".to_string())));
+        let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
+
+        root.write(&arena).unwrap().force_insert_to_node("to_a".to_string(), (), node_a);
+        node_a.write(&arena).unwrap().force_insert_to_node("cycle_counted".to_string(), (), node_b);
+        node_b.write(&arena).unwrap().force_insert_to_node("cycle_uncounted".to_string(), (), node_c);
+        node_c.write(&arena).unwrap().force_insert_to_node("cycle_uncounted".to_string(), (), node_a);
+        node_a.write(&arena).unwrap().force_insert_to_node("to_target".to_string(), (), target);
+
+        let paths = TestTrie::get_all_paths_with_cycles(
+            &arena,
+            &[root],
+            |idx, _| idx == target,
+            |ek, _, _| ek != "cycle_uncounted", // only "to_a", "cycle_counted", "to_target" are counted
+            5, // max_path_length
+        );
+
+        // With the current implementation, the `visiting` set prevents re-entering `A` from `C`,
+        // so the cycle is never traversed more than once. Only one path is found:
+        // 1. root -> A -> target. (length 2)
+        //
+        // The desired behavior is to allow traversing the cycle as long as the path length limit
+        // is not exceeded, because the cycle contains a counted edge.
+        // Expected paths to `target`:
+        // - path 1: root -> A -> target.
+        //   Counted edges: (root,A), (A,target). Length 2.
+        // - path 2: root -> A -> B -> C -> A -> target.
+        //   Counted edges: (root,A), (A,B), (A,target). Length 3.
+        // - path 3: root -> A -> B -> C -> A -> B -> C -> A -> target.
+        //   Counted edges: (root,A), (A,B), (A,B), (A,target). Length 4.
+        // - path 4: root -> A -> B -> C -> A -> B -> C -> A -> B -> C -> A -> target.
+        //   Counted edges: (root,A), (A,B), (A,B), (A,B), (A,target). Length 5.
+        //
+        // The next path would have length 6, which is > max_path_length.
+        // So we expect 4 paths. The current implementation will fail this test.
+        // To make this test pass, the cycle detection in `get_all_paths_with_cycles_recursive`
+        // needs to be relaxed.
+        assert_eq!(paths.len(), 4, "Should find 4 paths to the target within max length by traversing the cycle");
+
+        let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
+        path_lengths.sort_unstable();
+        assert_eq!(path_lengths, vec![2, 3, 4, 5]);
+
+        // Verify the longest path to ensure the cycle was traversed.
+        let longest_path = paths.iter().find(|(_, p)| p.len() == 5).unwrap();
+        let counted_edges_in_longest_path: Vec<_> = longest_path.1.iter().map(|(ek, _, _)| ek.as_str()).collect();
+        assert_eq!(counted_edges_in_longest_path, vec!["to_a", "cycle_counted", "cycle_counted", "cycle_counted", "to_target"]);
+    }
 }
 
