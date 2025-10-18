@@ -219,7 +219,7 @@ fn compress_noop_only_nodes(
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct NodeSignature {
     end: bool,
-    // For determinism: edge keys sorted; each has sorted child-colors
+    // For determinism: edge keys sorted; each has sorted child-ids (dense IDs)
     edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
 }
 
@@ -230,7 +230,6 @@ fn structural_merge_nodes_in_subgraph(
     pinned: &std::collections::HashSet<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
-    // return false;
     use std::collections::HashMap;
 
     let all_nodes_vec = Trie::all_nodes(god, start_nodes);
@@ -271,81 +270,56 @@ fn structural_merge_nodes_in_subgraph(
         }
     }
 
-    // Iterative color refinement on DAG-like structure (robust even if cycles appear).
-    let mut color: HashMap<IntermediatePrecomputeNode3Index, u64> = HashMap::new();
-    let mut next_color: HashMap<NodeSignature, u64> = HashMap::new();
+    // Build a deterministic dense id for each node
+    let mut nodes_sorted: Vec<_> = all_nodes_in_subgraph.iter().cloned().collect();
+    nodes_sorted.sort();
+    let mut dense_id: HashMap<IntermediatePrecomputeNode3Index, u64> = HashMap::new();
+    for (i, n) in nodes_sorted.iter().enumerate() {
+        dense_id.insert(*n, i as u64);
+    }
 
-    // Seed: base color by end flag and degree patterns
-    for n in &all_nodes_in_subgraph {
+    // Group nodes by exact structural signature:
+    // (end flag, for each edge key -> exact sorted list of child node IDs)
+    let mut groups: HashMap<NodeSignature, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
+    for n in &nodes_sorted {
         let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
-        let deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
-            .map(|v| v.iter().map(|(ek, kids)| (ek.clone(), kids.len())).collect())
-            .unwrap_or_default();
-
-        let mut sig = NodeSignature { end: end_flag, edges: deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect() };
-        sig.edges.sort_by(|a, b| a.0.cmp(&b.0));
-        let len = next_color.len();
-        let id = *next_color.entry(sig).or_insert(len as u64 + 1);
-        color.insert(*n, id);
-    }
-
-    // Refine up to a bounded number of iterations or until convergence
-    let max_iters = 8;
-    for _ in 0..max_iters {
-        let mut changed = false;
-        let mut interner: HashMap<NodeSignature, u64> = HashMap::new();
-        let mut new_color: HashMap<IntermediatePrecomputeNode3Index, u64> = HashMap::new();
-
-        for n in &all_nodes_in_subgraph {
-            let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
-            let mut edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
-            if let Some(edges) = outgoing.get(n) {
-                for (ek, kids) in edges {
-                    let mut kid_colors: Vec<u64> = kids.iter().map(|k| *color.get(k).unwrap_or(&0)).collect();
-                    kid_colors.sort_unstable();
-                    edges_sig.push((ek.clone(), kid_colors));
-                }
-                edges_sig.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
+        if let Some(edges) = outgoing.get(n) {
+            for (ek, kids) in edges {
+                let mut kid_ids: Vec<u64> = kids.iter().map(|k| *dense_id.get(k).unwrap_or(&0)).collect();
+                kid_ids.sort_unstable();
+                edges_sig.push((ek.clone(), kid_ids));
             }
-            let sig = NodeSignature { end: end_flag, edges: edges_sig };
-            let len = interner.len();
-            let id = *interner.entry(sig).or_insert(len as u64 + 1);
-            if color.get(n).copied().unwrap_or(0) != id {
-                changed = true;
-            }
-            new_color.insert(*n, id);
+            edges_sig.sort_by(|a, b| a.0.cmp(&b.0));
         }
-
-        color = new_color;
-        if !changed {
-            break;
-        }
-    }
-
-    // Group nodes by final color
-    let mut groups: HashMap<u64, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
-    for (n, c) in &color {
-        groups.entry(*c).or_default().push(*n);
+        let sig = NodeSignature { end: end_flag, edges: edges_sig };
+        groups.entry(sig).or_default().push(*n);
     }
 
     let mut any_changed = false;
 
-    // For each group, pick a canonical node (avoid pinned nodes) and redirect predecessors of others.
-    for (_c, nodes) in groups {
-        let mut non_pinned: Vec<_> = nodes.into_iter().filter(|n| !pinned.contains(n)).collect();
-        if non_pinned.len() < 2 {
-            continue;
-        }
-        non_pinned.sort(); // deterministic canonical choice
-        let canonical = non_pinned[0];
+    // For each signature group, pick a canonical node (prefer pinned if any), then redirect
+    // predecessors of other (non-pinned) nodes in the group to the canonical.
+    for (_sig, mut nodes) in groups {
+        if nodes.len() < 2 { continue; }
+        nodes.sort();
+        let canonical = if let Some(pn) = nodes.iter().find(|n| pinned.contains(n)) {
+            *pn
+        } else {
+            nodes[0]
+        };
 
-        for &victim in non_pinned.iter().skip(1) {
+        for &victim in nodes.iter() {
+            if victim == canonical { continue; }
+            if pinned.contains(&victim) { continue; }
             if let Some(preds) = incoming.get(&victim) {
                 for (pred, ek) in preds {
                     if let Some(mut w) = pred.write(god) {
                         let dest_map = w.children_mut().entry(ek.clone()).or_default();
-                        if dest_map.remove(&victim).is_some() {
-                            dest_map.insert(canonical, ());
+                        // Remove pred -> victim (if present) and insert pred -> canonical
+                        let removed = dest_map.remove(&victim).is_some();
+                        dest_map.insert(canonical, ());
+                        if removed {
                             any_changed = true;
                         }
                     }
