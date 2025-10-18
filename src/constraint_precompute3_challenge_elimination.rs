@@ -35,9 +35,6 @@ fn debug_mismatches_enabled() -> bool {
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
-/// - Additionally, folds any immediate Push(A) followed by Pop(0, B) into a single
-///   Push(A ∩ B). If A and B are disjoint, both are kept (normalization should not
-///   invalidate paths; elimination/pruning happens elsewhere).
 pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
     let mut combined_llm_bv = LLMTokenBV::max_ones();
     let mut has_llm_check = false;
@@ -57,42 +54,6 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
 
     if has_llm_check {
         other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
-    }
-
-    // 3. Fold immediate Push(A) followed by Pop(0, B) into Push(A ∩ B).
-    // This must be done repeatedly as a fold can enable another fold.
-    loop {
-        let mut changed = false;
-        let mut i = 0;
-        while i + 1 < other_ops.len() {
-            let current_op = &other_ops[i];
-            let next_op = &other_ops[i + 1];
-
-            if let IntermediateTrie3EdgeKey::Push(push_bv) = current_op {
-                if let IntermediateTrie3EdgeKey::Pop(0, pop_bv) = next_op {
-                    let mut new_push_bv = push_bv.clone();
-                    new_push_bv &= pop_bv;
-
-                    if new_push_bv.is_empty() {
-                        // If disjoint, keep both as per instruction.
-                        // Move past the pair.
-                        i += 2;
-                    } else {
-                        // Fold: replace Push, remove Pop(0).
-                        other_ops[i] = IntermediateTrie3EdgeKey::Push(new_push_bv);
-                        other_ops.remove(i + 1);
-                        changed = true;
-                        // Do not increment i. The new Push at index i might fold with the new element at i+1.
-                    }
-                    continue;
-                }
-            }
-            i += 1;
-        }
-
-        if !changed {
-            break;
-        }
     }
 
     other_ops
