@@ -903,11 +903,6 @@ where
     {
         let mut all_paths = Vec::new();
 
-        // The state for our explicit stack is an iterator over a node's children's edges.
-        // We collect edges into a Vec to have a concrete iterator type.
-        type Edge = (EK, EV, T, Trie2Index); // (key, value, child_node_value, child_node_index)
-        type EdgeIter = std::vec::IntoIter<Edge>;
-
         for &root in roots {
             let root_guard = match root.read(arena) {
                 Some(guard) => guard,
@@ -927,10 +922,10 @@ where
 
             // Setup for iterative traversal
             let mut current_path: Vec<(EK, EV, T)> = Vec::new();
-            let mut stack: Vec<EdgeIter> = Vec::new();
+            let mut stack: Vec<std::vec::IntoIter<(EK, EV, T, Trie2Index)>> = Vec::new();
 
             // Initial set of edges from the root
-            let root_children_edges: Vec<Edge> = root_guard
+            let root_children_edges: Vec<(EK, EV, T, Trie2Index)> = root_guard
                 .children()
                 .iter()
                 .flat_map(|(ek, dest_map)| {
@@ -965,7 +960,7 @@ where
                     }
 
                     if current_path.len() < max_path_length {
-                        let grand_children_edges: Vec<Edge> = child_guard
+                        let grand_children_edges: Vec<(EK, EV, T, Trie2Index)> = child_guard
                             .children()
                             .iter()
                             .flat_map(|(ek_child, dest_map_child)| {
