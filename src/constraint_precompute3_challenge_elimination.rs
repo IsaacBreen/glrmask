@@ -879,19 +879,23 @@ fn run_trie_based_elimination(
             for (llm, exit_push_bv, exit_dst) in blocked_set {
                 let mut rewired = false;
                 if llm == LLMTokenBV::max_ones() {
-                    if let Some(dst_guard) = exit_dst.read(god) {
-                        if dst_guard.value.end {
-                            eprintln!("[challenge_elim]    - Applying BlockedPush exit by rewiring to leaf {}", exit_dst);
-                            // Directly wire src --Push(exit_push_bv)--> leaf,
-                            // effectively removing the Pop(0) that was folded into the push.
-                            god.insert_edge_simple(
-                                src,
-                                exit_dst,
-                                IntermediateTrie3EdgeKey::Push(exit_push_bv),
-                                (),
-                            );
-                            rewired = true;
-                        }
+                    let is_leaf_node = if let Some(dst_guard) = exit_dst.read(god) {
+                        dst_guard.value.end
+                    } else {
+                        false
+                    };
+
+                    if is_leaf_node {
+                        eprintln!("[challenge_elim]    - Applying BlockedPush exit by rewiring to leaf {}", exit_dst);
+                        // Directly wire src --Push(exit_push_bv)--> leaf,
+                        // effectively removing the Pop(0) that was folded into the push.
+                        god.insert_edge_simple(
+                            src,
+                            exit_dst,
+                            IntermediateTrie3EdgeKey::Push(exit_push_bv),
+                            (),
+                        );
+                        rewired = true;
                     }
                 }
                 if !rewired {
