@@ -161,6 +161,30 @@ fn simplify_path(
             break;
         }
     }
+
+    // After all cancellations, check for stack validity (e.g., underflow).
+    // An unpaired Pop on an empty stack makes the path invalid.
+    let mut depth: isize = 0;
+    for op in &stack {
+        match op {
+            IntermediateTrie3EdgeKey::Push(_) => depth += 1,
+            IntermediateTrie3EdgeKey::Pop(n, _) => {
+                if *n == 0 {
+                    // Pop(0) is a check, requires at least one item on the stack.
+                    if depth == 0 {
+                        return None;
+                    }
+                } else {
+                    // Pop(n>0) consumes n items.
+                    depth -= *n as isize;
+                    if depth < 0 {
+                        return None; // Underflow
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     Some(stack)
 }
 
@@ -2104,5 +2128,58 @@ mod tests {
         // Roots from log
         let roots = vec![n(47), n(48)];
         run_test(&god, &roots);
+    }
+
+    #[test]
+    fn test_mismatch_leading_pops_invalidate() {
+        // This test is based on a mismatch found during development, where the
+        // trie-based algorithm fails to invalidate a path with leading Pop operations
+        // that would cause a stack underflow. The path-based `simplify_path` (after fixing)
+        // should correctly identify this as an invalid path.
+        let god = IntermediateTrie3GodWrapper::new();
+
+        // --- Bitsets ---
+        let mut llm_0 = LLMTokenBV::zeros();
+        llm_0.insert(0);
+
+        let mut bv_0 = StateIDBV::zeros();
+        bv_0.insert(0);
+        let mut bv_1 = StateIDBV::zeros();
+        bv_1.insert(1);
+        let mut bv_4 = StateIDBV::zeros();
+        bv_4.insert(4);
+        let mut bv_5 = StateIDBV::zeros();
+        bv_5.insert(5);
+        let mut bv_7 = StateIDBV::zeros();
+        bv_7.insert(7);
+
+        let mut bv_1_5 = StateIDBV::zeros();
+        bv_1_5.insert(1);
+        bv_1_5.insert(5);
+
+        let bv_max = StateIDBV::max_ones();
+
+        // --- Graph Structure from log ---
+        // This path is invalid due to initial Pop operations on an empty stack.
+        let path_edges = vec![
+            // NoOps are filtered by simplify_path, but we include them to be faithful to the graph.
+            IntermediateTrie3EdgeKey::NoOp,
+            IntermediateTrie3EdgeKey::NoOp,
+            IntermediateTrie3EdgeKey::Pop(0, bv_7),
+            IntermediateTrie3EdgeKey::Pop(1, bv_max.clone()),
+            IntermediateTrie3EdgeKey::Pop(0, bv_5),
+            IntermediateTrie3EdgeKey::Push(bv_0),
+            IntermediateTrie3EdgeKey::Push(bv_1),
+            IntermediateTrie3EdgeKey::CheckLLM(llm_0.clone()),
+            IntermediateTrie3EdgeKey::NoOp,
+            IntermediateTrie3EdgeKey::NoOp,
+            IntermediateTrie3EdgeKey::Pop(0, bv_1_5),
+            IntermediateTrie3EdgeKey::Push(bv_4),
+            IntermediateTrie3EdgeKey::CheckLLM(llm_0),
+            IntermediateTrie3EdgeKey::NoOp,
+        ];
+
+        let root = build_graph_from_path(&god, path_edges);
+        run_test(&god, &[root]);
     }
 }
