@@ -53,6 +53,7 @@ pub fn optimize_intermediate_trie3_template(
             .into_iter()
             .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
             .collect();
+        println!("Has cycle? {}", Trie::has_cycle(&god, roots.clone()));
         println!("Trie before merging: {}", Trie::pretty_print(&god, roots));
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
         changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
