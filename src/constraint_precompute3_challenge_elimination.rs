@@ -326,27 +326,23 @@ fn assert_no_push_then_pop(
     if push_destinations.is_empty() {
         return; // No pushes, so condition holds.
     }
-    // Traverse from each push destination and assert no Pop(n>=1) edges are found.
-    // Pop(0, B) is a non-consuming filter that may remain reachable from a Push
-    // even after elimination. The strict invariant we uphold here is that no
-    // consuming Pop (n >= 1) remains reachable from the destination of any Push.
+
+    // Traverse from each push destination and assert no pops are found.
     let mut q: VecDeque<IntermediatePrecomputeNode3Index> = push_destinations.into_iter().collect();
     let mut visited: BTreeSet<IntermediatePrecomputeNode3Index> = q.iter().cloned().collect();
 
     while let Some(node_idx) = q.pop_front() {
         if let Some(guard) = node_idx.read(god) {
             for (ek, dest_map) in guard.children() {
-                if let IntermediateTrie3EdgeKey::Pop(n, _) = ek {
-                    if *n >= 1 {
-                        // Found a consuming Pop (n>=1) after a Push. This is an error.
-                        let final_graph = Trie::pretty_print_arena(god);
-                        panic!(
-                            "Assertion failed: Found a Pop(n>=1) edge reachable from a Push edge.\n\
-                             Node {} has a Pop edge: {:?}.\n\
-                             Final graph state:\n{}",
-                            node_idx, ek, final_graph
-                        );
-                    }
+                if matches!(ek, IntermediateTrie3EdgeKey::Pop(_, _)) {
+                    // Found a Pop after a Push. This is an error.
+                    let final_graph = Trie::pretty_print_arena(god);
+                    panic!(
+                        "Assertion failed: Found a Pop edge reachable from a Push edge.\n\
+                         Node {} has a Pop edge: {:?}.\n\
+                         Final graph state:\n{}",
+                        node_idx, ek, final_graph
+                    );
                 }
 
                 for (dest_idx, _) in dest_map.iter() {
