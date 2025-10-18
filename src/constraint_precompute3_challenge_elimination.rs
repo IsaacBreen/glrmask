@@ -36,6 +36,7 @@ fn debug_mismatches_enabled() -> bool {
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
 pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
+    // IMPORTANT: DO NOT MODIFY THIS FUNCTION.
     let mut combined_llm_bv = LLMTokenBV::max_ones();
     let mut has_llm_check = false;
 
@@ -76,6 +77,7 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
 fn simplify_path(
     stack: Vec<IntermediateTrie3EdgeKey>,
 ) -> Option<Vec<IntermediateTrie3EdgeKey>> {
+    // IMPORTANT: DO NOT MODIFY THIS FUNCTION. It is the 'ground truth' for eliminating Push/Pop pairs.
     let mut ops = stack;
 
     loop {
