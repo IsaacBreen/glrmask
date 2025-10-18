@@ -42,8 +42,6 @@ pub fn optimize_intermediate_trie3(
             break;
         }
     }
-
-    compute_and_print_template_stats(templates, god, "After Optimization");
 }
 
 /// Prunes nodes in a graph that cannot reach the specified `end_node`.
@@ -466,4 +464,6 @@ pub fn optimize_intermediate_trie3_templates_global(
             break;
         }
     }
+
+    compute_and_print_template_stats(templates, god, "After Optimization");
 }
