@@ -2102,6 +2102,15 @@ impl<T> Arena<T> {
             .filter_map(|(i, v)| v.as_ref().map(|val| (Index::from(i), val.clone())))
             .collect()
     }
+
+    pub fn deep_clone(&self) -> Self
+    where
+        T: Clone,
+    {
+        let inner_guard = self.inner.read().unwrap();
+        let cloned_inner = inner_guard.clone();
+        Arena { inner: Arc::new(RwLock::new(cloned_inner)) }
+    }
 }
 
 impl<T> JSONConvertible for Arena<T>
