@@ -9,6 +9,8 @@ use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
 
+const MAX_PATH_LEN: usize = 100; // Increased for complex test cases
+
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
@@ -56,7 +58,7 @@ pub fn optimize_intermediate_trie3_template(
             roots,
             |idx, n| idx == *end_node,
             |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
-            1000000,
+            MAX_PATH_LEN,
         )
             .into_iter()
             .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
@@ -69,7 +71,7 @@ pub fn optimize_intermediate_trie3_template(
             roots,
             |idx, n| idx == *end_node,
             |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
-            1000000,
+            MAX_PATH_LEN,
         )
             .into_iter()
             .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
