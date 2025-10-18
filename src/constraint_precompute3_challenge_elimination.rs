@@ -16,7 +16,7 @@ use std::collections::btree_map::Entry;
 /// and if a mismatch is found, attempts to find a minimal failing input graph.
 /// This adds significant overhead and should only be used for debugging the
 /// elimination logic itself.
-const DEBUG_MISMATCHES: bool = true;
+const DEBUG_MISMATCHES: bool = false;
 
 fn debug_mismatches_enabled() -> bool {
     if DEBUG_MISMATCHES {
@@ -526,6 +526,10 @@ fn compute_push_elim_exits(
     initial_push_bv: &StateIDBV,
     god: &IntermediateTrie3GodWrapper,
 ) -> Vec<Exit> {
+    eprintln!(
+        "[challenge_elim]   - compute_push_elim_exits(start: {}, initial_push_bv: {:?})",
+        start, initial_push_bv
+    );
     let mut exits: Vec<Exit> = Vec::new();
     let mut q: VecDeque<BFSState> = VecDeque::new();
     q.push_back(BFSState {
@@ -543,10 +547,10 @@ fn compute_push_elim_exits(
 
     while let Some(state) = q.pop_front() {
         steps += 1;
-        if steps % 100_000 == 0 {
+        if steps % 10_000 == 0 {
             eprintln!(
-                "[challenge_elim] BFS progress: {} states explored (guard {})",
-                steps, max_steps
+                "[challenge_elim]   - BFS progress: {} states explored (q_len: {}, visited: {}, exits: {}), guard {}",
+                steps, q.len(), visited.len(), exits.len(), max_steps
             );
         }
         if steps > max_steps {
@@ -556,12 +560,21 @@ fn compute_push_elim_exits(
 
         let key = (state.node.as_usize(), state.push_bv.clone(), state.llm_bv.clone());
         if !visited.insert(key) {
+            if steps < 100 { // Log first few skips
+                 eprintln!("[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
+            }
             continue;
+        }
+        if steps < 100 { // Log first few processed
+            eprintln!("[challenge_elim]     - BFS processing state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
         }
 
         // If this node is an end, then along this branch we can only preserve the Push (blocked).
         if let Some(read_guard) = state.node.read(god) {
             if read_guard.value.end {
+                if steps < 100 {
+                    eprintln!("[challenge_elim]       - Found end node, creating BlockedPush exit.");
+                }
                 exits.push(Exit::BlockedPush {
                     llm: state.llm_bv.clone(),
                     push_bv: state.push_bv.clone(),
@@ -572,9 +585,15 @@ fn compute_push_elim_exits(
             }
             // Explore outgoing edges
             for (ek, dsts) in read_guard.children().iter() {
+                if steps < 100 {
+                    eprintln!("[challenge_elim]       - Exploring edge {:?} to {} dests", ek, dsts.len());
+                }
                 match ek {
                     IntermediateTrie3EdgeKey::NoOp => {
                         for (dst_idx, _ev) in dsts.iter() {
+                            if steps < 100 {
+                                eprintln!("[challenge_elim]         - Enqueueing NoOp -> {}", dst_idx);
+                            }
                             q.push_back(BFSState {
                                 node: *dst_idx,
                                 push_bv: state.push_bv.clone(),
@@ -588,6 +607,9 @@ fn compute_push_elim_exits(
                         // normalize_path keeps empty intersections too.
                         next_llm &= llm2.clone();
                         for (dst_idx, _ev) in dsts.iter() {
+                            if steps < 100 {
+                                eprintln!("[challenge_elim]         - Enqueueing CheckLLM -> {} with new llm_bv", dst_idx);
+                            }
                             q.push_back(BFSState {
                                 node: *dst_idx,
                                 push_bv: state.push_bv.clone(),
@@ -603,6 +625,9 @@ fn compute_push_elim_exits(
                         // Important: We DO NOT move the push forward to the nested push's
                         // destination. That would violate the stack semantics used by the
                         // path-based simplifier (which blocks when encountering another push).
+                        if steps < 100 {
+                            eprintln!("[challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.");
+                        }
                         exits.push(Exit::BlockedPush {
                             llm: state.llm_bv.clone(),
                             push_bv: state.push_bv.clone(),
@@ -617,11 +642,17 @@ fn compute_push_elim_exits(
                                 0 => {
                                     // Fold into push: A := A ∩ B; prune branch if disjoint.
                                     if state.push_bv.is_disjoint(pop_bv) {
+                                        if steps < 100 {
+                                            eprintln!("[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
+                                        }
                                         // Invalid on this branch
                                         continue;
                                     }
                                     let mut next_push = state.push_bv.clone();
                                     next_push &= pop_bv.clone();
+                                    if steps < 100 {
+                                        eprintln!("[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", dst_idx);
+                                    }
                                     q.push_back(BFSState {
                                         node: *dst_idx,
                                         push_bv: next_push,
@@ -631,7 +662,13 @@ fn compute_push_elim_exits(
                                 1 => {
                                     // Cancel if intersect; else branch invalid
                                     if state.push_bv.is_disjoint(pop_bv) {
+                                        if steps < 100 {
+                                            eprintln!("[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
+                                        }
                                         continue;
+                                    }
+                                    if steps < 100 {
+                                        eprintln!("[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", dst_idx);
                                     }
                                     exits.push(Exit::Cancel {
                                         llm: state.llm_bv.clone(),
@@ -641,6 +678,9 @@ fn compute_push_elim_exits(
                                 }
                                 _ => {
                                     // Remove Push and decrement Pop.
+                                    if steps < 100 {
+                                        eprintln!("[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
+                                    }
                                     exits.push(Exit::DegradePop {
                                         llm: state.llm_bv.clone(),
                                         new_n: n_val - 1,
@@ -749,14 +789,20 @@ fn run_trie_based_elimination(
                 );
                 next_mark += 10;
             }
+            eprintln!("[challenge_elim]  - Processing push edge {} --Push({:?})--> {}", src, push_bv, dst);
 
             // Compute or reuse exits for this (dst, push_bv)
             let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
-                Some(v) => v.clone(),
+                Some(v) => {
+                    eprintln!("[challenge_elim]    - Reusing {} exits from cache for (dst {}, push_bv {:?})", v.len(), dst, push_bv);
+                    v.clone()
+                },
                 None => {
+                    eprintln!("[challenge_elim]    - Computing exits for (dst {}, push_bv {:?})", dst, push_bv);
                     // BFS exploration to compute exits for (dst, push_bv)
                     // Results are memoized per round to avoid repetition.
                     let e = compute_push_elim_exits(dst, &push_bv, god);
+                    eprintln!("[challenge_elim]    - Found {} exits.", e.len());
                     exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
                     e
                 }
@@ -784,6 +830,7 @@ fn run_trie_based_elimination(
                 }
             }
             if exits.is_empty() {
+                eprintln!("[challenge_elim]    - No exits found. Removing original push edge.");
                 // No viable continuations were found for this push under the stack semantics
                 // (e.g., every branch mismatched). This path is dead; remove the original push.
                 if remove_specific_edge(
@@ -810,10 +857,12 @@ fn run_trie_based_elimination(
             let mut must_keep_original_edge = false;
 
             for (llm, cancel_dst) in cancel_set {
+                eprintln!("[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
                 let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                 god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
             }
             for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
+                eprintln!("[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
                 let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                 god.insert_edge_simple(
                     agg,
@@ -832,6 +881,7 @@ fn run_trie_based_elimination(
                 if llm == LLMTokenBV::max_ones() {
                     if let Some(dst_guard) = exit_dst.read(god) {
                         if dst_guard.value.end {
+                            eprintln!("[challenge_elim]    - Applying BlockedPush exit by rewiring to leaf {}", exit_dst);
                             // Directly wire src --Push(exit_push_bv)--> leaf,
                             // effectively removing the Pop(0) that was folded into the push.
                             god.insert_edge_simple(
@@ -845,6 +895,7 @@ fn run_trie_based_elimination(
                     }
                 }
                 if !rewired {
+                    eprintln!("[challenge_elim]    - BlockedPush exit to {} could not be rewired, must keep original edge.", exit_dst);
                     // We did not rewire this blocked branch (e.g., nested Push or LLM-aggregated path),
                     // so we must keep the original Push edge to preserve semantics.
                     must_keep_original_edge = true;
@@ -855,6 +906,7 @@ fn run_trie_based_elimination(
             // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
             // unless we determined it must remain (to avoid deleting the only surviving representation).
             if !keep_original_edge {
+                eprintln!("[challenge_elim]    - Removing original push edge after rewiring.");
                 if remove_specific_edge(
                     god,
                     src,
@@ -863,6 +915,8 @@ fn run_trie_based_elimination(
                 ) {
                     removed_this_round += 1;
                 }
+            } else {
+                eprintln!("[challenge_elim]    - Keeping original push edge due to blocked branch.");
             }
         }
 
