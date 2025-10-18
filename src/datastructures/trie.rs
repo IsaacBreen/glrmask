@@ -891,7 +891,11 @@ where
     ///             A path is only returned if its final node satisfies this predicate.
     /// * `counts_toward_length`: A predicate that decides whether an edge is included in the returned path
     ///             and counts toward `max_path_length`. Edges for which this returns `false` are still
-    ///             traversed, but are not part of the output path. Cycle detection prevents infinite loops.
+    ///             traversed, but are not part of the output path.
+    ///             Cycle prevention uses an "active stamp" per node keyed by the counted-edge length
+    ///             (i.e., current path length). We only forbid re-entering the same node at the same
+    ///             counted length, which blocks infinite loops made solely of uncounted edges while
+    ///             allowing revisits after progress on counted edges.
     /// * `max_path_length`: The maximum length of a path (number of edges) to explore.
     pub fn get_all_paths_with_cycles<F, G>(
         arena: &Arena<Self>,
@@ -942,12 +946,12 @@ where
         EV: Clone,
     {
         // Iterative DFS to avoid stack overflows on deep/large graphs.
-        // Semantics match the recursive version:
+        // Semantics:
         // - Record a path when is_end(current_node) is true (including the root with a zero-length path).
         // - Enforce max_path_length AFTER recording the current node as an endpoint, based on counted edges.
-        // - Allow revisiting nodes (cycles are allowed) but stop expanding when the edge-count path length reaches max_path_length.
-        // - A `visiting` set is used to prevent infinite loops on cycles of uncounted edges.
-
+        // - Allow revisiting nodes (cycles are allowed) but stop expanding when the counted-edge path length reaches max_path_length.
+        // - Prevent infinite loops formed solely by uncounted edges using an "active stamps" map:
+        //   a node cannot be revisited at the same counted length (stamp), but can be revisited after progress.
         // Work on a local copy of the path, so callers' mutable reference remains unchanged.
         let mut path: Vec<(EK, EV, T)> = current_path.clone();
         // Stack frame for iterative DFS.
@@ -958,8 +962,9 @@ where
             idx: usize,                 // Next edge index to process
             started: bool,              // Whether we've done the "node entry" work (is_end + length check)
             has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`
+            // "Stamp" equals counted-edge length (path.len()) at entry; used to manage active stamps.
+            stamp: usize,
         }
-
         // Helper to snapshot a node's outgoing edges in deterministic order (no locks held after).
         let edges_for = |n: Trie2Index| -> Vec<(EK, EV, Trie2Index)> {
             if let Some(g) = n.read(arena) {
@@ -974,67 +979,78 @@ where
                 Vec::new()
             }
         };
-
         let mut stack: Vec<Frame<EK, EV>> = Vec::new();
-        let mut visiting = std::collections::HashSet::new();
+        // Active stamps: for each node, which counted-length stamps are currently on the path.
+        let mut active: HashMap<Trie2Index, Vec<usize>> = HashMap::new();
         stack.push(Frame {
             node: node_idx,
             edges: edges_for(node_idx),
             idx: 0,
             started: false,
             has_incoming_edge: false, // root has no incoming edge
+            stamp: 0,                  // root is entered at counted length 0
         });
-        visiting.insert(node_idx);
-
+        active.entry(node_idx).or_default().push(0);
         while let Some(frame) = stack.last_mut() {
             // On first entry to this node: evaluate `is_end` and enforce max_path_length.
             if !frame.started {
                 frame.started = true;
-
                 if let Some(g) = frame.node.read(arena) {
                     if is_end(frame.node, &g) {
                         all_paths.push((root_value.clone(), path.clone()));
                     }
                 }
-
                 // If we've reached the max number of edges on this path, do not expand further.
                 if path.len() >= max_path_length {
                     let popped = stack.pop().unwrap();
-                    visiting.remove(&popped.node);
+                    if let Some(vec) = active.get_mut(&popped.node) {
+                        if let Some(last) = vec.pop() {
+                            debug_assert!(last == popped.stamp);
+                        }
+                        if vec.is_empty() {
+                            active.remove(&popped.node);
+                        }
+                    }
                     if popped.has_incoming_edge {
                         path.pop(); // backtrack edge added when entering this frame
                     }
                     continue;
                 }
             }
-
             // If we've exhausted edges for this node, backtrack.
             if frame.idx >= frame.edges.len() {
                 let popped = stack.pop().unwrap();
-                visiting.remove(&popped.node);
+                if let Some(vec) = active.get_mut(&popped.node) {
+                    if let Some(last) = vec.pop() {
+                        debug_assert!(last == popped.stamp);
+                    }
+                    if vec.is_empty() {
+                        active.remove(&popped.node);
+                    }
+                }
                 if popped.has_incoming_edge {
                     path.pop(); // backtrack the edge that led here
                 }
                 continue;
             }
-
             // Take the next outgoing edge and descend to the child.
             let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
             frame.idx += 1;
+            // Determine whether this edge increases the counted length.
+            let counts = counts_toward_length(&ek, &ev, child_idx);
+            let next_stamp = path.len() + if counts { 1 } else { 0 };
 
-            if visiting.contains(&child_idx) {
-                continue; // Cycle detected, do not re-descend.
+            // Prevent infinite loops formed solely by uncounted edges:
+            // do not re-enter the same node at the same counted length.
+            if active.get(&child_idx).map_or(false, |v| v.contains(&next_stamp)) {
+                continue;
             }
-
             if let Some(child_guard) = child_idx.read(arena) {
                 let child_value = child_guard.value.clone();
-
-                let counts = counts_toward_length(&ek, &ev, child_idx);
                 if counts {
                     // Add this edge to the current path before exploring the child.
                     path.push((ek, ev, child_value));
                 }
-
                 // Snapshot child's edges now (no locks held across iterations).
                 let child_edges = edges_for(child_idx);
                 stack.push(Frame {
@@ -1043,8 +1059,9 @@ where
                     idx: 0,
                     started: false,
                     has_incoming_edge: counts,
+                    stamp: next_stamp,
                 });
-                visiting.insert(child_idx);
+                active.entry(child_idx).or_default().push(next_stamp);
             } else {
                 // If child is missing, skip it and proceed.
                 continue;
