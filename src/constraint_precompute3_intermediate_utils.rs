@@ -1,5 +1,5 @@
 // src/constraint_precompute3_intermediate_utils.rs
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
 use crate::constraint_precompute3_challenge_elimination::{get_normalized_paths_for_vec, normalize_path};
 use crate::datastructures::ordered_hash_map::Retain;
@@ -222,7 +222,6 @@ struct NodeSignature {
     end: bool,
     // For determinism: edge keys sorted; each has sorted child-colors
     edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
-    incoming_edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
 }
 
 // Merge structurally equivalent nodes within the reachable subgraph, except pinned nodes.
@@ -277,7 +276,7 @@ fn structural_merge_nodes_in_subgraph(
     let mut color: HashMap<IntermediatePrecomputeNode3Index, u64> = HashMap::new();
     let mut next_color: HashMap<NodeSignature, u64> = HashMap::new();
 
-    // Seed: base color by end flag and degree patterns
+    // Seed: base color by end flag and out-degree patterns only (ignore incoming context).
     for n in &all_nodes_in_subgraph {
         let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
         let out_deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
@@ -286,22 +285,14 @@ fn structural_merge_nodes_in_subgraph(
         let mut out_sig_part: Vec<_> = out_deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect();
         out_sig_part.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut in_deg_by_ek = std::collections::BTreeMap::new();
-        if let Some(preds) = incoming.get(n) {
-            for (_, ek) in preds {
-                *in_deg_by_ek.entry(ek.clone()).or_insert(0) += 1;
-            }
-        }
-        let in_sig_part = in_deg_by_ek.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect();
-
-        let sig = NodeSignature { end: end_flag, edges: out_sig_part, incoming_edges: in_sig_part };
+        let sig = NodeSignature { end: end_flag, edges: out_sig_part };
         let len = next_color.len();
         let id = *next_color.entry(sig).or_insert(len as u64 + 1);
         color.insert(*n, id);
     }
 
     // Refine up to a bounded number of iterations or until convergence
-    let max_iters = 8;
+    let max_iters = 16;
     for _ in 0..max_iters {
         let mut changed = false;
         let mut interner: HashMap<NodeSignature, u64> = HashMap::new();
@@ -319,20 +310,8 @@ fn structural_merge_nodes_in_subgraph(
                 edges_sig.sort_by(|a, b| a.0.cmp(&b.0));
             }
 
-            let mut incoming_edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
-            if let Some(preds) = incoming.get(n) {
-                let mut preds_by_ek: BTreeMap<_, Vec<_>> = BTreeMap::new();
-                for (pred, ek) in preds {
-                    preds_by_ek.entry(ek.clone()).or_default().push(*pred);
-                }
-                for (ek, pred_nodes) in preds_by_ek {
-                    let mut pred_colors: Vec<u64> = pred_nodes.iter().map(|p| *color.get(p).unwrap_or(&0)).collect();
-                    pred_colors.sort_unstable();
-                    incoming_edges_sig.push((ek, pred_colors));
-                }
-            }
-
-            let sig = NodeSignature { end: end_flag, edges: edges_sig, incoming_edges: incoming_edges_sig };
+            // Ignore incoming context for equivalence; only outgoing structure + end flag matters.
+            let sig = NodeSignature { end: end_flag, edges: edges_sig };
             let len = interner.len();
             let id = *interner.entry(sig).or_insert(len as u64 + 1);
             if color.get(n).copied().unwrap_or(0) != id {
