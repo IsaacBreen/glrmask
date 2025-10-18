@@ -877,33 +877,31 @@ where
 
     /// TEST UTILITY: Traverses the graph from the given roots and returns all
     /// possible paths that end in a node satisfying the `is_end` predicate.
-    /// This version includes cyclic paths, up to a certain limit.
+    /// This version correctly handles cycles by allowing nodes to be revisited.
     ///
     /// A "path" is a tuple containing the value of the root node and a vector of
-    /// (edge key, edge value, destination node value) tuples.
+    /// (edge key, edge value, destination node value) tuples representing the edges.
+    /// A path with zero edges (i.e., just the root node) is returned if the root
+    /// itself satisfies the `is_end` predicate.
     ///
     /// # Arguments
     /// * `arena`: The arena containing the graph.
     /// * `roots`: The starting nodes for path traversal.
     /// * `is_end`: A predicate that returns true if a node is a valid end point for a path.
-    ///             Acyclic paths are only returned if they end in such a node.
-    /// * `max_cyclic_paths`: The approximate maximum number of cyclic paths to return.
-    ///                       If returning cyclic paths of a certain length would exceed this
-    ///                       limit, all paths of that length are still returned. No paths
-    ///                       of a greater length will be returned.
+    ///             A path is only returned if its final node satisfies this predicate.
+    /// * `max_path_length`: The maximum length of a path (number of edges) to explore.
     pub fn get_all_paths_with_cycles<F>(
         arena: &Arena<Self>,
         roots: &[Trie2Index],
         is_end: F,
-        max_cyclic_paths: usize,
+        max_path_length: usize,
     ) -> Vec<(T, Vec<(EK, EV, T)>)>
     where
         F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
         T: Clone,
         EV: Clone,
     {
-        let mut acyclic_paths = Vec::new();
-        let mut cyclic_paths = Vec::new();
+        let mut all_paths = Vec::new();
 
         for &root in roots {
             if let Some(root_guard) = root.read(arena) {
@@ -912,64 +910,36 @@ where
                     arena,
                     root,
                     &mut vec![],
-                    &mut HashMap::new(),
-                    &mut acyclic_paths,
-                    &mut cyclic_paths,
+                    &mut all_paths,
                     &is_end,
                     &root_value,
+                    max_path_length,
                 );
             }
         }
-
-        // Process cyclic paths to respect the limit
-        if cyclic_paths.len() > max_cyclic_paths {
-            let mut grouped_by_len: BTreeMap<usize, Vec<(T, Vec<(EK, EV, T)>)>> =
-                BTreeMap::new();
-            for path in cyclic_paths {
-                grouped_by_len.entry(path.1.len()).or_default().push(path);
-            }
-
-            let mut limited_cyclic_paths = Vec::new();
-            for (_len, mut paths) in grouped_by_len {
-                if !limited_cyclic_paths.is_empty()
-                    && limited_cyclic_paths.len() >= max_cyclic_paths
-                {
-                    break;
-                }
-                limited_cyclic_paths.append(&mut paths);
-            }
-            cyclic_paths = limited_cyclic_paths;
-        }
-
-        acyclic_paths.append(&mut cyclic_paths);
-        acyclic_paths
+        all_paths
     }
 
     fn get_all_paths_with_cycles_recursive<F>(
         arena: &Arena<Self>,
         node_idx: Trie2Index,
         current_path: &mut Vec<(EK, EV, T)>,
-        visiting: &mut HashMap<Trie2Index, usize>, // Map from node to its index in the current path
-        acyclic_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
-        cyclic_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
+        all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
         is_end: &F,
         root_value: &T,
+        max_path_length: usize,
     ) where
         F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
         T: Clone,
         EV: Clone,
     {
-        if visiting.contains_key(&node_idx) {
-            // Cycle detected.
-            cyclic_paths.push((root_value.clone(), current_path.clone()));
-            return;
-        }
-
-        visiting.insert(node_idx, current_path.len());
-
         if let Some(guard) = node_idx.read(arena) {
             if is_end(node_idx, &guard) {
-                acyclic_paths.push((root_value.clone(), current_path.clone()));
+                all_paths.push((root_value.clone(), current_path.clone()));
+            }
+
+            if current_path.len() >= max_path_length {
+                return;
             }
 
             for (edge_key, dest_map) in guard.children() {
@@ -981,19 +951,16 @@ where
                             arena,
                             *child_idx,
                             current_path,
-                            visiting,
-                            acyclic_paths,
-                            cyclic_paths,
+                            all_paths,
                             is_end,
                             root_value,
+                            max_path_length,
                         );
                         current_path.pop(); // Backtrack
                     }
                 }
             }
         }
-
-        visiting.remove(&node_idx); // Backtrack
     }
 }
 
