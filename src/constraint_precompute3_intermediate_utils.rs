@@ -262,7 +262,7 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
     // return false;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     let all_nodes_vec = Trie::all_nodes(god, start_nodes);
     if all_nodes_vec.is_empty() {
@@ -364,28 +364,75 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
 
     let mut any_changed = false;
 
-    // Build representative map that respects pinned nodes.
+    // Helper: reachability check within the current subgraph snapshot, memoized.
+    let mut reach_memo: HashMap<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index), bool> = HashMap::new();
+    let mut is_reachable = |src: IntermediatePrecomputeNode3Index, dst: IntermediatePrecomputeNode3Index| -> bool {
+        if src == dst {
+            return true;
+        }
+        if let Some(&cached) = reach_memo.get(&(src, dst)) {
+            return cached;
+        }
+        let mut found = false;
+        let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+        let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
+        visited.insert(src);
+        q.push_back(src);
+        while let Some(n) = q.pop_front() {
+            if let Some(edges) = outgoing.get(&n) {
+                'edge_loop: for (_ek, kids) in edges {
+                    for k in kids {
+                        if *k == dst {
+                            found = true;
+                            break 'edge_loop;
+                        }
+                        if visited.insert(*k) {
+                            q.push_back(*k);
+                        }
+                    }
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        reach_memo.insert((src, dst), found);
+        found
+    };
+
+    // Build representative map that respects pinned nodes and avoids merging nodes
+    // that are reachable from one another (in either direction).
     // - All pinned nodes map to themselves (never merged).
-    // - In each color group, all non-pinned nodes map to a chosen canonical non-pinned node.
+    // - Non-pinned nodes: greedily merge into a canonical only if they are pairwise
+    //   non-reachable with that canonical (prevents creating self-loops and losing paths).
     let mut rep: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = HashMap::new();
     let mut victims: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
     for (_c, nodes) in groups {
         // Partition by pinned status
         let mut non_pinned: Vec<_> = nodes.iter().cloned().filter(|n| !pinned.contains(n)).collect();
         let mut pinned_nodes: Vec<_> = nodes.iter().cloned().filter(|n| pinned.contains(n)).collect();
-        non_pinned.sort();    // deterministic canonical choice
-        pinned_nodes.sort();  // deterministic
+        non_pinned.sort();    // deterministic order
+        pinned_nodes.sort();  // deterministic order
 
         // Pinned nodes are always their own representative
         for p in pinned_nodes {
             rep.insert(p, p);
         }
-        // If there are non-pinned nodes in this group, pick a canonical and map rest to it
-        if let Some(canonical) = non_pinned.first().copied() {
-            rep.insert(canonical, canonical);
-            for v in non_pinned.into_iter().skip(1) {
-                rep.insert(v, canonical);
-                victims.push(v);
+        // Greedy antichain among non-pinned nodes
+        let mut canonicals: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
+        for v in non_pinned {
+            let mut merged = false;
+            for &c in &canonicals {
+                if !is_reachable(v, c) && !is_reachable(c, v) {
+                    rep.insert(v, c);
+                    victims.push(v);
+                    merged = true;
+                    break;
+                }
+            }
+            if !merged {
+                rep.insert(v, v);
+                canonicals.push(v);
             }
         }
     }
