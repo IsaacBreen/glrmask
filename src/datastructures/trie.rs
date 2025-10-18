@@ -886,10 +886,7 @@ where
     /// * `arena`: The arena containing the graph.
     /// * `roots`: The starting nodes for path traversal.
     /// * `is_end`: A predicate that returns true if a node is a valid end point for a path.
-    ///             Acyclic paths are returned for any path that terminates at a leaf node.
-    ///             Additionally, any path that reaches a node for which `is_end` returns
-    ///             true will also be returned. Traversal continues past `is_end` nodes,
-    ///             so a single traversal may yield multiple paths that are prefixes of one another.
+    ///             Acyclic paths are only returned if they end in such a node.
     /// * `max_cyclic_paths`: The approximate maximum number of cyclic paths to return.
     ///                       If returning cyclic paths of a certain length would exceed this
     ///                       limit, all paths of that length are still returned. No paths
@@ -971,7 +968,7 @@ where
         visiting.insert(node_idx, current_path.len());
 
         if let Some(guard) = node_idx.read(arena) {
-            if is_end(node_idx, &guard) || guard.is_leaf() {
+            if is_end(node_idx, &guard) {
                 acyclic_paths.push((root_value.clone(), current_path.clone()));
             }
 
