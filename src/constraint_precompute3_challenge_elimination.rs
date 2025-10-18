@@ -1699,11 +1699,13 @@ mod tests {
     }
 
     #[test]
-    fn test_mismatch_from_log_output() {
-        // This test is based on the minimal failing input from a debug session.
-        // The path-based simplifier incorrectly reduces `Push(3), Pop(0, 3)` to `Push(3)`,
-        // while the trie-based approach correctly identifies this as a no-op for that
-        // specific simplification, leaving the path unchanged.
+    fn test_mismatch_from_log_2() {
+        // This test is based on a mismatch found in production logs, which is identical
+        // to the one in test_mismatch_from_user_report, but added for explicit coverage
+        // of the minimal failing path:
+        // [CheckLLM(0..=1), Pop(0, 0..=0), Push(3..=3), Pop(0, 3..=3), Push(4..=4)]
+        // Path-based simplifies Push(3..=3) -> Pop(0, 3..=3) into just Push(3..=3),
+        // resulting in: CheckLLM -> Pop(0) -> Push(3..=3) -> Push(4..=4)
         let god = IntermediateTrie3GodWrapper::new();
 
         let mut llm_bv = LLMTokenBV::zeros();
