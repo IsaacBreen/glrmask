@@ -1697,4 +1697,69 @@ mod tests {
         let root = build_graph_from_path(&god, path);
         run_test(&god, &[root]);
     }
+
+    #[test]
+    fn test_mismatch_from_log_2() {
+        // This test is based on a mismatch found during development, using the exact
+        // graph structure from the logs.
+        // The path-based simplifier incorrectly reduces `Push(A), Pop(0, A)` to `Push(A)`.
+        // The correct behavior, exhibited by the trie-based approach, is to leave this
+        // sequence unmodified.
+        let god = IntermediateTrie3GodWrapper::new();
+
+        // --- Bitsets ---
+        let mut llm_bv = LLMTokenBV::zeros();
+        llm_bv.insert(0);
+        llm_bv.insert(1);
+
+        let mut bv0 = StateIDBV::zeros();
+        bv0.insert(0);
+
+        let mut bv3 = StateIDBV::zeros();
+        bv3.insert(3);
+
+        let mut bv4 = StateIDBV::zeros();
+        bv4.insert(4);
+
+        // --- Nodes ---
+        // The log shows nodes 0-17.
+        let nodes: Vec<_> = (0..18)
+            .map(|i| {
+                let content = if i == 15 {
+                    IntermediatePrecomputedNodeContents3::leaf()
+                } else {
+                    IntermediatePrecomputedNodeContents3::internal()
+                };
+                Trie2Index::from(god.insert(Trie::new(content)))
+            })
+            .collect();
+
+        let root = nodes[0];
+
+        // --- Graph Structure from log ---
+        // Main path
+        nodes[0].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[1]);
+        nodes[1].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[2]);
+        nodes[2].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv0), (), nodes[3]);
+        nodes[3].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[4]);
+        nodes[4].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv3.clone()), (), nodes[5]);
+        nodes[5].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[6]);
+        nodes[6].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_bv.clone()), (), nodes[7]);
+        nodes[7].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[8]);
+        nodes[8].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[9]);
+        nodes[9].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv3), (), nodes[10]);
+        nodes[10].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[11]);
+        nodes[11].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv4), (), nodes[12]);
+        nodes[12].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[13]);
+        nodes[13].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_bv), (), nodes[14]);
+        nodes[14].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[15]);
+
+        // Other branches from root
+        nodes[0].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[16]);
+        nodes[0].write(&god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), nodes[17]);
+
+        // The root in the log is not node 0, but an implicit root pointing to node 0.
+        // The test harness takes a slice of roots. So I'll pass &[nodes[0]].
+        run_test(&god, &[root]);
+    }
 }
