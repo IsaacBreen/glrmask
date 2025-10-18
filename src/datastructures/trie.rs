@@ -889,9 +889,9 @@ where
     /// * `roots`: The starting nodes for path traversal.
     /// * `is_end`: A predicate that returns true if a node is a valid end point for a path.
     ///             A path is only returned if its final node satisfies this predicate.
-    /// * `counts_toward_length`: A predicate that decides whether an edge is INCLUDED in traversal.
-    ///             If it returns false for an edge, that edge is EXCLUDED entirely (not traversed,
-    ///             not counted). This also prevents cycles formed by excluded edges.
+    /// * `counts_toward_length`: A predicate that decides whether an edge is included in the returned path
+    ///             and counts toward `max_path_length`. Edges for which this returns `false` are still
+    ///             traversed, but are not part of the output path. Cycle detection prevents infinite loops.
     /// * `max_path_length`: The maximum length of a path (number of edges) to explore.
     pub fn get_all_paths_with_cycles<F, G>(
         arena: &Arena<Self>,
@@ -944,10 +944,10 @@ where
         // Iterative DFS to avoid stack overflows on deep/large graphs.
         // Semantics match the recursive version:
         // - Record a path when is_end(current_node) is true (including the root with a zero-length path).
-        // - Edges are filtered using `counts_toward_length`; only INCLUDED edges are traversed and appended to the path.
-        // - Enforce max_path_length AFTER recording the current node as an endpoint, based on INCLUDED edges only
-        //   (i.e., `path.len()` counts only included/traversed edges).
-        // - Allow revisiting nodes (cycles are allowed) but stop expanding when the included-edge path length reaches max_path_length.
+        // - Enforce max_path_length AFTER recording the current node as an endpoint, based on counted edges.
+        // - Allow revisiting nodes (cycles are allowed) but stop expanding when the edge-count path length reaches max_path_length.
+        // - A `visiting` set is used to prevent infinite loops on cycles of uncounted edges.
+
         // Work on a local copy of the path, so callers' mutable reference remains unchanged.
         let mut path: Vec<(EK, EV, T)> = current_path.clone();
         // Stack frame for iterative DFS.
@@ -959,20 +959,15 @@ where
             started: bool,              // Whether we've done the "node entry" work (is_end + length check)
             has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`
         }
+
         // Helper to snapshot a node's outgoing edges in deterministic order (no locks held after).
         let edges_for = |n: Trie2Index| -> Vec<(EK, EV, Trie2Index)> {
             if let Some(g) = n.read(arena) {
-                g.children()
-                    .iter()
+                g.children().iter()
                     .flat_map(|(ek, dest_map)| {
                         let ekc = ek.clone();
-                        dest_map.iter().filter_map(move |(child_idx, ev)| {
-                            if counts_toward_length(&ekc, ev, *child_idx) {
-                                Some((ekc.clone(), ev.clone(), *child_idx))
-                            } else {
-                                None
-                            }
-                        })
+                        dest_map.iter()
+                            .map(move |(child_idx, ev)| (ekc.clone(), ev.clone(), *child_idx))
                     })
                     .collect()
             } else {
@@ -981,6 +976,7 @@ where
         };
 
         let mut stack: Vec<Frame<EK, EV>> = Vec::new();
+        let mut visiting = std::collections::HashSet::new();
         stack.push(Frame {
             node: node_idx,
             edges: edges_for(node_idx),
@@ -988,6 +984,7 @@ where
             started: false,
             has_incoming_edge: false, // root has no incoming edge
         });
+        visiting.insert(node_idx);
 
         while let Some(frame) = stack.last_mut() {
             // On first entry to this node: evaluate `is_end` and enforce max_path_length.
@@ -1003,6 +1000,7 @@ where
                 // If we've reached the max number of edges on this path, do not expand further.
                 if path.len() >= max_path_length {
                     let popped = stack.pop().unwrap();
+                    visiting.remove(&popped.node);
                     if popped.has_incoming_edge {
                         path.pop(); // backtrack edge added when entering this frame
                     }
@@ -1013,6 +1011,7 @@ where
             // If we've exhausted edges for this node, backtrack.
             if frame.idx >= frame.edges.len() {
                 let popped = stack.pop().unwrap();
+                visiting.remove(&popped.node);
                 if popped.has_incoming_edge {
                     path.pop(); // backtrack the edge that led here
                 }
@@ -1023,11 +1022,18 @@ where
             let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
             frame.idx += 1;
 
+            if visiting.contains(&child_idx) {
+                continue; // Cycle detected, do not re-descend.
+            }
+
             if let Some(child_guard) = child_idx.read(arena) {
                 let child_value = child_guard.value.clone();
 
-                // Add this edge to the current path before exploring the child.
-                path.push((ek, ev, child_value));
+                let counts = counts_toward_length(&ek, &ev, child_idx);
+                if counts {
+                    // Add this edge to the current path before exploring the child.
+                    path.push((ek, ev, child_value));
+                }
 
                 // Snapshot child's edges now (no locks held across iterations).
                 let child_edges = edges_for(child_idx);
@@ -1036,8 +1042,9 @@ where
                     edges: child_edges,
                     idx: 0,
                     started: false,
-                    has_incoming_edge: true,
+                    has_incoming_edge: counts,
                 });
+                visiting.insert(child_idx);
             } else {
                 // If child is missing, skip it and proceed.
                 continue;
