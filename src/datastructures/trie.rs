@@ -805,7 +805,7 @@ where
         is_end: F,
     ) -> Vec<(T, Vec<(EK, EV, T)>)>
     where
-        F: Fn(&Trie<EK, EV, T>) -> bool,
+        F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
         T: Clone,
         EV: Clone,
     {
@@ -838,7 +838,7 @@ where
         is_end: &F,
         root_value: T,
     ) where
-        F: Fn(&Trie<EK, EV, T>) -> bool,
+        F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
         T: Clone,
         EV: Clone,
     {
@@ -848,7 +848,7 @@ where
         }
 
         if let Some(guard) = node_idx.read(arena) {
-            if is_end(&guard) {
+            if is_end(node_idx, &guard) {
                 all_paths.push((root_value, current_path));
             } else {
                 for (edge_key, dest_map) in guard.children() {

@@ -28,12 +28,12 @@ pub fn optimize_intermediate_trie3_template(
     let god2 = god.clone();
     structural_merge_nodes_in_subgraph(&[*start_node], &pinned, &god2);
     let roots = &[*start_node];
-    let normalized_paths1 = IntermediatePrecomputeNode3::get_all_paths(&god, &roots, |n| n.value.end)
+    let normalized_paths1 = IntermediatePrecomputeNode3::get_all_paths(&god, &roots, |_idx, n| n.value.end)
         .into_iter()
         .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
         .collect();
     let roots1 = &[*start_node];
-    let normalized_paths2 = IntermediatePrecomputeNode3::get_all_paths(&god2, &roots1, |n| n.value.end)
+    let normalized_paths2 = IntermediatePrecomputeNode3::get_all_paths(&god2, &roots1, |_idx, n| n.value.end)
         .into_iter()
         .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
         .collect();

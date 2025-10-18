@@ -1986,13 +1986,10 @@ impl GrammarConstraint {
                 let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
                 println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
 
-                let end_node_guard = end_node.read(&intermediate_trie3_god).unwrap();
-                let end_node_ref: &IntermediatePrecomputeNode3 = &*end_node_guard;
-
                 let template_paths = IntermediatePrecomputeNode3::get_all_paths(
                     &intermediate_trie3_god,
                     &[start_node.clone()],
-                    |node| std::ptr::eq(node, end_node_ref)
+                    |idx, _node| idx == *end_node
                 );
 
                 if template_paths.is_empty() {
