@@ -88,16 +88,21 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
     }
     out
 }
-/// Eliminates adjacent Push/Pop pairs from a stack of intermediate trie edge keys.
-/// Additionally, Pop(0, B) constraints are folded into the preceding Push via intersection.
-/// This is a core part of simplifying the precompute3 graph.
+/// Simplifies a path by repeatedly eliminating Push/Pop pairs.
+/// This function finds the innermost Push/Pop pairs and simplifies them according
+/// to stack machine rules, repeating until no more simplifications can be made.
 ///
-/// Pairing rules applied when a Push(A) looks to the nearest Pop(n, B) to its right
-/// (stopping if another Push is encountered first):
-/// - n == 0: If A intersects B, remove Pop(0, B) and keep Push(A). If disjoint, the stack is invalid (None).
-/// - n == 1: If A intersects B, both cancel (epsilon). If disjoint, the stack is invalid (None).
-/// - n > 1: Remove Push(A) and replace Pop with Pop(n - 1, B) unconditionally (no intersection check).
-/// The scan repeats until no more changes can be made.
+/// A Push operation at index `i` is paired with the first Pop operation at index `j > i`
+/// such that there are no other Push operations between `i` and `j`.
+///
+/// Rules for a `Push(A)` paired with a `Pop(k, B)`:
+/// - k = 0: The push is updated to `Push(A ∩ B)` and the pop is removed. If the
+///   intersection is empty, the path is invalid (`None`).
+/// - k = 1: If `A` and `B` have a non-empty intersection, both the push and pop are
+///   removed. Otherwise, the path is invalid (`None`).
+/// - k > 1: The push is removed, and the pop is updated to `Pop(k - 1, B)`. This
+///   newly modified pop may then pair with a push further to its left in a
+///   subsequent pass.
 fn simplify_path(
     stack: Vec<IntermediateTrie3EdgeKey>,
 ) -> Option<Vec<IntermediateTrie3EdgeKey>> {
@@ -124,68 +129,69 @@ fn simplify_path(
             _ => {}
         }
     }
-    let mut stack = stack;
+
+    let mut ops = stack;
+
     loop {
-        let mut changed_in_pass = false;
-        let mut i = 0;
-        while i < stack.len() {
-            if let IntermediateTrie3EdgeKey::Push(push_states) = &stack[i] {
-                let push_states = push_states.clone();
-                // Find nearest pop to the right, not blocked by another push
-                let mut pop_j = None;
-                for j in (i + 1)..stack.len() {
-                    if matches!(stack[j], IntermediateTrie3EdgeKey::Push(_)) {
-                        break; // Blocked
-                    }
-                    if matches!(stack[j], IntermediateTrie3EdgeKey::Pop(_, _)) {
-                        pop_j = Some(j);
-                        break;
-                    }
-                }
+        let mut changed = false;
 
-                if let Some(j) = pop_j {
-                    // Found a pair to cancel
-                    let pop_op = stack.remove(j);
-                    let _push_op = stack.remove(i); // push is at i
-
-                    if let IntermediateTrie3EdgeKey::Pop(n, pop_states) = pop_op {
-                        match n {
-                            0 => {
-                                if push_states.is_disjoint(&pop_states) {
-                                    return None; // Mismatch on state check
-                                }
-                                // Fold Pop(0, B) constraint into preceding Push(A) as A := A ∩ B.
-                                // This preserves semantics and reduces the state space.
-                                let mut new_push_bv = push_states.clone();
-                                new_push_bv &= pop_states;
-                                // If intersection is empty we'd have returned None above.
-                                stack.insert(i, IntermediateTrie3EdgeKey::Push(new_push_bv));
-                            }
-                            1 => {
-                                if push_states.is_disjoint(&pop_states) {
-                                    return None; // Mismatch on single-pop check
-                                }
-                                // Intersection: both cancel -> epsilon (nothing to insert).
-                            }
-                            _ => {
-                                // n > 1: remove Push unconditionally and decrement Pop.
-                                stack.insert(i, IntermediateTrie3EdgeKey::Pop(n - 1, pop_states));
-                            }
-                        }
-                    }
-                    changed_in_pass = true;
-                    // Restart scan from beginning of modified stack
-                    i = 0;
-                    continue;
+        // Find an innermost Push-Pop pair. This is a push that is followed by a pop
+        // with no other pushes in between.
+        let mut push_idx = None;
+        let mut pop_idx = None;
+        for i in 0..ops.len() {
+            if matches!(ops[i], IntermediateTrie3EdgeKey::Push(_)) {
+                push_idx = Some(i);
+            } else if let IntermediateTrie3EdgeKey::Pop(_, _) = ops[i] {
+                if push_idx.is_some() {
+                    pop_idx = Some(i);
+                    break;
                 }
             }
-            i += 1;
         }
-        if !changed_in_pass {
+
+        if let (Some(p_idx), Some(o_idx)) = (push_idx, pop_idx) {
+            let push_op = ops[p_idx].clone();
+            let pop_op = ops[o_idx].clone();
+
+            if let (IntermediateTrie3EdgeKey::Push(push_bv), IntermediateTrie3EdgeKey::Pop(k, pop_bv)) = (push_op, pop_op) {
+                match k {
+                    0 => {
+                        let mut new_push_bv = push_bv;
+                        new_push_bv &= pop_bv;
+                        if new_push_bv.is_empty() {
+                            return None;
+                        }
+                        // Modify push, remove pop.
+                        ops[p_idx] = IntermediateTrie3EdgeKey::Push(new_push_bv);
+                        ops.remove(o_idx);
+                        changed = true;
+                    }
+                    1 => {
+                        if push_bv.is_disjoint(&pop_bv) {
+                            return None;
+                        }
+                        // Remove both. Pop is at a higher index.
+                        ops.remove(o_idx);
+                        ops.remove(p_idx);
+                        changed = true;
+                    }
+                    _ => { // k > 1
+                        // Remove push, decrement pop.
+                        ops.remove(p_idx);
+                        // The pop is now at index o_idx - 1.
+                        ops[o_idx - 1] = IntermediateTrie3EdgeKey::Pop(k - 1, pop_bv);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if !changed {
             break;
         }
     }
-    Some(stack)
+    Some(ops)
 }
 
 /// Compute the set of nodes that are part of any directed cycle in the subgraph induced by `nodes`.
