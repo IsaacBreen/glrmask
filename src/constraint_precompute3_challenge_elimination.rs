@@ -17,7 +17,7 @@ use std::collections::btree_map::Entry;
 /// This adds significant overhead and should only be used for debugging the
 /// elimination logic itself.
 const DEBUG_MISMATCHES: bool = true;
-const MAX_PATH_LEN: usize = 100;
+const MAX_PATH_LEN: usize = 5;
 
 fn debug_mismatches_enabled() -> bool {
     if DEBUG_MISMATCHES {
@@ -101,6 +101,29 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
 fn simplify_path(
     stack: Vec<IntermediateTrie3EdgeKey>,
 ) -> Option<Vec<IntermediateTrie3EdgeKey>> {
+    // First, perform a quick check for stack underflow on the original path.
+    // A Pop(n>0) requires at least n items on the stack.
+    // A Pop(0) requires at least 1 item on the stack.
+    // This invalidates paths with leading pops or insufficient pushes.
+    let mut depth = 0isize;
+    for op in &stack {
+        match op {
+            IntermediateTrie3EdgeKey::Push(_) => depth += 1,
+            IntermediateTrie3EdgeKey::Pop(n, _) => {
+                if *n > 0 {
+                    depth -= *n as isize;
+                } else { // n == 0
+                    if depth == 0 {
+                        return None; // Pop(0) on empty stack is invalid.
+                    }
+                }
+                if depth < 0 {
+                    return None; // Stack underflow.
+                }
+            }
+            _ => {}
+        }
+    }
     let mut stack = stack;
     loop {
         let mut changed_in_pass = false;
@@ -897,6 +920,48 @@ fn remove_specific_edge(
     false
 }
 
+/// Traverses the graph from the roots along non-Push edges and removes any Pop edges found.
+/// Such pops would occur on an empty stack and are therefore invalid. Returns the number of
+/// individual edges removed.
+fn prune_leading_pops(
+    god: &IntermediateTrie3GodWrapper,
+    roots: &[IntermediatePrecomputeNode3Index],
+) -> usize {
+    let mut q: VecDeque<IntermediatePrecomputeNode3Index> = roots.iter().cloned().collect();
+    let mut visited: BTreeSet<IntermediatePrecomputeNode3Index> = roots.iter().cloned().collect();
+    let mut edges_to_remove = vec![];
+
+    let mut head = 0;
+    while head < q.len() {
+        let u = q[head];
+        head += 1;
+
+        if let Some(guard) = u.read(god) {
+            for (ek, dsts) in guard.children() {
+                if let IntermediateTrie3EdgeKey::Pop(_, _) = ek {
+                    for (v, _) in dsts {
+                        edges_to_remove.push((u, ek.clone(), *v));
+                    }
+                } else if !matches!(ek, IntermediateTrie3EdgeKey::Push(_)) {
+                    for (v, _) in dsts {
+                        if visited.insert(*v) {
+                            q.push_back(*v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut num_removed = 0;
+    for (u, ek, v) in edges_to_remove {
+        if remove_specific_edge(god, u, ek, v) {
+            num_removed += 1;
+        }
+    }
+    num_removed
+}
+
 fn run_trie_based_elimination(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
@@ -952,7 +1017,7 @@ fn run_trie_based_elimination(
         // Cache exits per (dst, push_bv) to avoid repeated BFS work in this round.
         let mut exit_cache: BTreeMap<(usize, StateIDBV), Vec<Exit>> = BTreeMap::new();
 
-        let mut removed_this_round: usize = 0;
+        let mut pushes_rewired_this_round: usize = 0;
 
         for (src, push_bv, dst) in push_edges {
             processed += 1;
@@ -993,7 +1058,7 @@ fn run_trie_based_elimination(
                     IntermediateTrie3EdgeKey::Push(push_bv.clone()),
                     dst,
                 ) {
-                    removed_this_round += 1;
+                    pushes_rewired_this_round += 1;
                 }
                 continue;
             }
@@ -1104,13 +1169,17 @@ fn run_trie_based_elimination(
                 IntermediateTrie3EdgeKey::Push(push_bv.clone()),
                 dst,
             ) {
-                removed_this_round += 1;
+                pushes_rewired_this_round += 1;
             }
         }
 
+        // After rewiring pushes, prune any newly-exposed invalid pops.
+        let pops_pruned_this_round = prune_leading_pops(god, &root_indices);
+        let removed_this_round = pushes_rewired_this_round + pops_pruned_this_round;
+
         eprintln!(
-            "[challenge_elim] Round {} removed {} push edge(s).",
-            round, removed_this_round
+            "[challenge_elim] Round {}: rewired {} push edge(s), pruned {} pop edge(s).",
+            round, pushes_rewired_this_round, pops_pruned_this_round
         );
 
         Trie::gc(god, &root_indices);
