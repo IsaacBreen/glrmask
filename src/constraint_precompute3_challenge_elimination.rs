@@ -161,30 +161,6 @@ fn simplify_path(
             break;
         }
     }
-
-    // After all cancellations, check for stack validity (e.g., underflow).
-    // An unpaired Pop on an empty stack makes the path invalid.
-    let mut depth: isize = 0;
-    for op in &stack {
-        match op {
-            IntermediateTrie3EdgeKey::Push(_) => depth += 1,
-            IntermediateTrie3EdgeKey::Pop(n, _) => {
-                if *n == 0 {
-                    // Pop(0) is a check, requires at least one item on the stack.
-                    if depth == 0 {
-                        return None;
-                    }
-                } else {
-                    // Pop(n>0) consumes n items.
-                    depth -= *n as isize;
-                    if depth < 0 {
-                        return None; // Underflow
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
     Some(stack)
 }
 
