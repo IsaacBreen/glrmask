@@ -8121,6 +8121,10 @@ local_system:
               // Build per-terminal template subgraphs once in this arena.
               let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
 
+              // GC after all templates have been optimized to clean up dangling nodes.
+              let all_template_roots: Vec<_> = terminal_templates.values().map(|(s, _e)| s.clone()).collect();
+              Trie::gc(&intermediate_trie3_god, &all_template_roots);
+
               if is_debug_level_enabled(2) {
                   println!("\n--- Intermediate Trie3 Template Statistics ---");
                   println!("{:<25} {:<5} {:>10} {:>10}", "Terminal Name", "ID", "Nodes", "Edges");
@@ -12331,7 +12335,6 @@ local_system:
               if !changed {
                   break;
               }
-              Trie::gc(god, &[*start_node]);
           }
       }
 
@@ -19829,5 +19832,154 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix deadlock in intermediate trie optimization
       by restructuring bypass_noop_nodes to use a two-phase read/write approach"'
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_intermediate_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      thread 'test_constraint_basic::test_trivial' (8066402) panicked at src/constraint_extra.rs:740:55:
+      called `Option::unwrap()` on a `None` value
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::panic
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:145:5
+         3: core::option::unwrap_failed
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/option.rs:2130:5
+         4: core::option::Option<T>::unwrap
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1009:21
+         5: sep1::constraint_extra::calculate_intermediate_stats3
+                   at ./src/constraint_extra.rs:740:55
+         6: sep1::constraint::GrammarConstraint::precompute3
+                   at ./src/constraint.rs:1919:17
+         7: sep1::constraint::GrammarConstraint::new_with_config
+                   at ./src/constraint.rs:1064:41
+         8: sep1::constraint::GrammarConstraint::new
+                   at ./src/constraint.rs:842:9
+         9: sep1::test_constraint_basic::test_trivial
+                   at ./src/test_constraint_basic.rs:70:22
+        10: sep1::test_constraint_basic::test_trivial::{{closure}}
+                   at ./src/test_constraint_basic.rs:40:18
+        11: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+        12: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+
+      This wasn't happening before.
+    metadata:
+  - assistant: |-
+      You've encountered a panic, likely due to memory corruption caused by an incorrect garbage collection step during the template optimization phase. My previous change to fix the deadlock was correct, but the optimization logic has a flaw where optimizing one grammar construct's template inadvertently deletes nodes belonging to another, leading to dangling references and the subsequent panic.
+
+      The fix is to remove the garbage collection step from the individual template optimization function and perform a single, collective garbage collection after all templates have been built and optimized.
+
+      Here are the step-by-step instructions to apply this fix.
+
+      ### Step-by-step Instructions
+
+      #### 1. Modify `src/constraint.rs`
+
+      We will add a garbage collection step in `precompute3` after all the templates have been generated and optimized. This ensures that all valid nodes are preserved.
+
+      **File: `src/constraint.rs`**
+
+      1.  Navigate to the `precompute3` function.
+      2.  Find this line:
+          ```rust
+          let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
+          ```
+      3.  Immediately after that line, insert the following code block to perform a garbage collection that is aware of all template roots:
+          ```rust
+          // GC after all templates have been optimized to clean up dangling nodes.
+          let all_template_roots: Vec<_> = terminal_templates.values().map(|(s, _e)| s.clone()).collect();
+          Trie::gc(&intermediate_trie3_god, &all_template_roots);
+          ```
+
+      #### 2. Modify `src/constraint_precompute3_intermediate_utils.rs`
+
+      We will remove the incorrect, localized garbage collection call from the template optimization function.
+
+      **File: `src/constraint_precompute3_intermediate_utils.rs`**
+
+      1.  Navigate to the `optimize_intermediate_trie3_template` function.
+      2.  Find and delete the following line at the end of the `for` loop:
+          ```rust
+          Trie::gc(god, &[*start_node]);
+          ```
+
+      ### Git Diffs
+
+      Here are the changes in `git diff` format for you to apply directly.
+
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      index 37d7a55..568e64c 100644
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1921,6 +1921,10 @@
+       
+               // Build per-terminal template subgraphs once in this arena.
+               let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
+      +
+      +        // GC after all templates have been optimized to clean up dangling nodes.
+      +        let all_template_roots: Vec<_> = terminal_templates.values().map(|(s, _e)| s.clone()).collect();
+      +        Trie::gc(&intermediate_trie3_god, &all_template_roots);
+       
+               if is_debug_level_enabled(2) {
+                   println!("\n--- Intermediate Trie3 Template Statistics ---");
+
+      ```
+
+      ```diff
+      diff --git a/src/constraint_precompute3_intermediate_utils.rs b/src/constraint_precompute3_intermediate_utils.rs
+      index 6d2d385..e581403 100644
+      --- a/src/constraint_precompute3_intermediate_utils.rs
+      +++ b/src/constraint_precompute3_intermediate_utils.rs
+      @@ -28,7 +28,6 @@
+               if !changed {
+                   break;
+               }
+      -        Trie::gc(god, &[*start_node]);
+           }
+       }
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/constraint_precompute3_intermediate_utils.rs
+      Applying patch to 'src/constraint_precompute3_intermediate_utils.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_intermediate_utils.rs.
+    metadata:
+  - user: 'Changes committed with message: "Implement full intermediate trie3 optimization:
+      add node bypassing/merging and correct GC placement to resolve panics/deadlocks"'
     metadata:
 ...

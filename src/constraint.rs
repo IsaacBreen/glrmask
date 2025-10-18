@@ -1906,6 +1906,10 @@ impl GrammarConstraint {
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
 
+        // GC after all templates have been optimized to clean up dangling nodes.
+        let all_template_roots: Vec<_> = terminal_templates.values().map(|(s, _e)| s.clone()).collect();
+        Trie::gc(&intermediate_trie3_god, &all_template_roots);
+
         if is_debug_level_enabled(2) {
             println!("\n--- Intermediate Trie3 Template Statistics ---");
             println!("{:<25} {:<5} {:>10} {:>10}", "Terminal Name", "ID", "Nodes", "Edges");

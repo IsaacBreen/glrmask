@@ -28,7 +28,6 @@ pub fn optimize_intermediate_trie3_template(
         if !changed {
             break;
         }
-        Trie::gc(god, &[*start_node]);
     }
 }
 
