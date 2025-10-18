@@ -890,14 +890,16 @@ where
     /// * `is_end`: A predicate that returns true if a node is a valid end point for a path.
     ///             A path is only returned if its final node satisfies this predicate.
     /// * `max_path_length`: The maximum length of a path (number of edges) to explore.
-    pub fn get_all_paths_with_cycles<F>(
+    pub fn get_all_paths_with_cycles<F, G>(
         arena: &Arena<Self>,
         roots: &[Trie2Index],
         is_end: F,
+        counts_toward_length: G,
         max_path_length: usize,
     ) -> Vec<(T, Vec<(EK, EV, T)>)>
     where
         F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
+        G: Fn(&EK, &EV, Trie2Index) -> bool,
         T: Clone,
         EV: Clone,
     {
@@ -910,8 +912,10 @@ where
                     arena,
                     root,
                     &mut vec![],
+                    &mut 0,
                     &mut all_paths,
                     &is_end,
+                    &counts_toward_length,
                     &root_value,
                     max_path_length,
                 );
@@ -920,27 +924,31 @@ where
         all_paths
     }
 
-    fn get_all_paths_with_cycles_recursive<F>(
+    fn get_all_paths_with_cycles_recursive<F, G>(
         arena: &Arena<Self>,
         node_idx: Trie2Index,
         current_path: &mut Vec<(EK, EV, T)>,
+        current_length: &mut usize,
         all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
         is_end: &F,
+        counts_toward_length: &G,
         root_value: &T,
         max_path_length: usize,
     ) where
         F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
+        G: Fn(&EK, &EV, Trie2Index) -> bool,
         T: Clone,
         EV: Clone,
     {
         // Iterative DFS to avoid stack overflows on deep/large graphs.
         // Semantics match the recursive version:
         // - Record a path when is_end(current_node) is true (including the root with a zero-length path).
-        // - Enforce max_path_length AFTER recording the current node as an endpoint.
+        // - Enforce max_path_length AFTER recording the current node as an endpoint, based on counted edges.
         // - Allow revisiting nodes (cycles are allowed) but stop expanding when the edge-count path length reaches max_path_length.
 
         // Work on a local copy of the path, so callers' mutable reference remains unchanged.
         let mut path: Vec<(EK, EV, T)> = current_path.clone();
+        let mut length = *current_length;
 
         // Stack frame for iterative DFS.
         struct Frame<EK2, EV2> {
@@ -949,7 +957,8 @@ where
             edges: Vec<(EK2, EV2, Trie2Index)>,
             idx: usize,                 // Next edge index to process
             started: bool,              // Whether we've done the "node entry" work (is_end + length check)
-            has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`
+            has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`.
+            incoming_edge_counted: bool,
         }
 
         // Helper to snapshot a node's outgoing edges in deterministic order (no locks held after).
@@ -973,7 +982,8 @@ where
             edges: edges_for(node_idx),
             idx: 0,
             started: false,
-            has_incoming_edge: false, // root has no incoming edge
+            has_incoming_edge: false,    // root has no incoming edge
+            incoming_edge_counted: false,
         });
 
         while let Some(frame) = stack.last_mut() {
@@ -988,10 +998,13 @@ where
                 }
 
                 // If we've reached the max number of edges on this path, do not expand further.
-                if path.len() >= max_path_length {
+                if length >= max_path_length {
                     let popped = stack.pop().unwrap();
                     if popped.has_incoming_edge {
                         path.pop(); // backtrack edge added when entering this frame
+                    }
+                    if popped.incoming_edge_counted {
+                        length -= 1;
                     }
                     continue;
                 }
@@ -1003,6 +1016,9 @@ where
                 if popped.has_incoming_edge {
                     path.pop(); // backtrack the edge that led here
                 }
+                if popped.incoming_edge_counted {
+                    length -= 1;
+                }
                 continue;
             }
 
@@ -1013,8 +1029,13 @@ where
             if let Some(child_guard) = child_idx.read(arena) {
                 let child_value = child_guard.value.clone();
 
+                let counted = counts_toward_length(&ek, &ev, child_idx);
+                if counted {
+                    length += 1;
+                }
+
                 // Add this edge to the current path before exploring the child.
-                path.push((ek, ev, child_value));
+                path.push((ek.clone(), ev.clone(), child_value));
 
                 // Snapshot child's edges now (no locks held across iterations).
                 let child_edges = edges_for(child_idx);
@@ -1024,6 +1045,7 @@ where
                     idx: 0,
                     started: false,
                     has_incoming_edge: true,
+                    incoming_edge_counted: counted,
                 });
             } else {
                 // If child is missing, skip it and proceed.
