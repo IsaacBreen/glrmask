@@ -7,15 +7,14 @@ use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
 
-struct GlobalInternState { by_fingerprint: HashMap<u64, IntermediatePrecomputeNode3Index>, total_inserted: usize, total_reused: usize, total_merged: usize }
-impl GlobalInternState { fn new() -> Self { Self { by_fingerprint: HashMap::new(), total_inserted: 0, total_reused: 0, total_merged: 0 } } }
-static INTERMEDIATE_TRIE3_GLOBAL_INTERN: OnceLock<Mutex<GlobalInternState>> = OnceLock::new();
-fn global_intern() -> &'static Mutex<GlobalInternState> { INTERMEDIATE_TRIE3_GLOBAL_INTERN.get_or_init(|| Mutex::new(GlobalInternState::new())) }
+pub struct GlobalInternState { by_fingerprint: HashMap<u64, IntermediatePrecomputeNode3Index>, total_inserted: usize, total_reused: usize, total_merged: usize }
+impl GlobalInternState { pub fn new() -> Self { Self { by_fingerprint: HashMap::new(), total_inserted: 0, total_reused: 0, total_merged: 0 } } }
 
 pub fn optimize_intermediate_trie3_template(
     start_node: &IntermediatePrecomputeNode3Index,
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
+    interner: &mut GlobalInternState,
 ) {
     // Iterate until convergence or max passes. GC remains disabled in this arena.
     let max_passes = 4;
@@ -31,7 +30,7 @@ pub fn optimize_intermediate_trie3_template(
                 changed = true;
             }
         }
-        if dedup_structurally_and_share(&[*start_node], end_node, god) {
+        if dedup_structurally_and_share(&[*start_node], end_node, god, interner) {
             changed = true;
             if prune_unproductive_nodes(&[*start_node], end_node, god) {
                 changed = true;
@@ -43,10 +42,9 @@ pub fn optimize_intermediate_trie3_template(
     }
 
     if is_debug_level_enabled(3) {
-        let gi = global_intern().lock().unwrap();
         eprintln!(
             "[template-opt] interner: inserted={}, reused={}, merged={}",
-            gi.total_inserted, gi.total_reused, gi.total_merged
+            interner.total_inserted, interner.total_reused, interner.total_merged
         );
     }
 }
@@ -55,6 +53,7 @@ pub fn optimize_intermediate_trie3(
     roots: &[IntermediatePrecomputeNode3Index],
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
+    interner: &mut GlobalInternState,
 ) {
     if is_debug_level_enabled(2) {
         let mut stats = crate::constraint_extra::PrecomputeStats::default();
@@ -73,7 +72,7 @@ pub fn optimize_intermediate_trie3(
                 changed = true;
             }
         }
-        if dedup_structurally_and_share(roots, end_node, god) {
+        if dedup_structurally_and_share(roots, end_node, god, interner) {
             changed = true;
             if prune_unproductive_nodes(roots, end_node, god) {
                 changed = true;
@@ -339,6 +338,7 @@ fn dedup_structurally_and_share(
     start_nodes: &[IntermediatePrecomputeNode3Index],
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
+    interner: &mut GlobalInternState,
 ) -> bool {
     let (nodes, mut incoming, child_sets) = collect_subgraph_nodes_and_incoming(start_nodes, god);
     if nodes.is_empty() { return false; }
@@ -347,22 +347,21 @@ fn dedup_structurally_and_share(
     compute_structural_fingerprints(&order, god, &mut fingerprints);
     let mut changed = false;
     let mut local_canonical: HashMap<u64, IntermediatePrecomputeNode3Index> = HashMap::new();
-    let mut gi = global_intern().lock().unwrap();
     for n in &order {
         let sig = match fingerprints.get(n) { Some(s) => *s, None => continue };
         if n == end_node {
-            gi.by_fingerprint.insert(sig, *n);
+            interner.by_fingerprint.insert(sig, *n);
             local_canonical.insert(sig, *n);
             continue;
         }
         let is_start = start_nodes.iter().any(|s| s == n);
         let mut canonical = if let Some(c) = local_canonical.get(&sig) {
             *c
-        } else if let Some(c) = gi.by_fingerprint.get(&sig) {
+        } else if let Some(c) = interner.by_fingerprint.get(&sig) {
             *c
         } else {
-            gi.by_fingerprint.insert(sig, *n);
-            gi.total_inserted += 1;
+            interner.by_fingerprint.insert(sig, *n);
+            interner.total_inserted += 1;
             local_canonical.insert(sig, *n);
             *n
         };
@@ -372,10 +371,10 @@ fn dedup_structurally_and_share(
         if canonical != *n && !is_start {
             let rewired = redirect_incoming_to(*n, canonical, &mut incoming, god);
             if rewired {
-                gi.total_merged += 1;
+                interner.total_merged += 1;
                 changed = true;
             } else {
-                gi.total_reused += 1;
+                interner.total_reused += 1;
             }
         } else {
             local_canonical.insert(sig, *n);
