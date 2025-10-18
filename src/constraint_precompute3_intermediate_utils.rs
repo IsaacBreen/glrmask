@@ -334,22 +334,108 @@ fn structural_merge_nodes_in_subgraph(
 
     let mut any_changed = false;
 
-    // For each group, pick a canonical node (avoid pinned nodes) and redirect predecessors of others.
+    // Build representative map that respects pinned nodes.
+    // - All pinned nodes map to themselves (never merged).
+    // - In each color group, all non-pinned nodes map to a chosen canonical non-pinned node.
+    let mut rep: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = HashMap::new();
+    let mut victims: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
     for (_c, nodes) in groups {
-        let mut non_pinned: Vec<_> = nodes.into_iter().filter(|n| !pinned.contains(n)).collect();
-        if non_pinned.len() < 2 {
-            continue;
-        }
-        non_pinned.sort(); // deterministic canonical choice
-        let canonical = non_pinned[0];
+        // Partition by pinned status
+        let mut non_pinned: Vec<_> = nodes.iter().cloned().filter(|n| !pinned.contains(n)).collect();
+        let mut pinned_nodes: Vec<_> = nodes.iter().cloned().filter(|n| pinned.contains(n)).collect();
+        non_pinned.sort();    // deterministic canonical choice
+        pinned_nodes.sort();  // deterministic
 
-        for &victim in non_pinned.iter().skip(1) {
+        // Pinned nodes are always their own representative
+        for p in pinned_nodes {
+            rep.insert(p, p);
+        }
+        // If there are non-pinned nodes in this group, pick a canonical and map rest to it
+        if let Some(canonical) = non_pinned.first().copied() {
+            rep.insert(canonical, canonical);
+            for v in non_pinned.into_iter().skip(1) {
+                rep.insert(v, canonical);
+                victims.push(v);
+            }
+        }
+    }
+
+    // Union outgoing edges from all nodes into their representative, mapping destinations to representatives.
+    // Do this only for edges within the reachable subgraph snapshot.
+    let mut to_add: HashMap<
+        (IntermediatePrecomputeNode3Index, crate::constraint::IntermediateTrie3EdgeKey),
+        HashSet<IntermediatePrecomputeNode3Index>
+    > = HashMap::new();
+    for (src, edges) in &outgoing {
+        let rep_src = rep.get(src).copied().unwrap_or(*src);
+        for (ek, kids) in edges {
+            for dst in kids {
+                let rep_dst = rep.get(dst).copied().unwrap_or(*dst);
+                if all_nodes_in_subgraph.contains(&rep_src) && all_nodes_in_subgraph.contains(&rep_dst) {
+                    to_add.entry((rep_src, ek.clone())).or_default().insert(rep_dst);
+                }
+            }
+        }
+    }
+    for ((src_rep, ek), dests) in to_add {
+        if let Some(mut w) = src_rep.write(god) {
+            let dest_map = w.children_mut().entry(ek).or_default();
+            for d in dests {
+                if dest_map.get(&d).is_none() {
+                    dest_map.insert(d, ());
+                    any_changed = true;
+                }
+            }
+        }
+    }
+
+    // Retarget representative nodes' existing edges to point to representatives (within subgraph).
+    let canonicals_set: HashSet<IntermediatePrecomputeNode3Index> = rep.values().copied().collect();
+    for src_rep in canonicals_set {
+        if let Some(g) = src_rep.read(god) {
+            let mut moves: HashMap<
+                crate::constraint::IntermediateTrie3EdgeKey,
+                Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>
+            > = HashMap::new();
+            for (ek, dm) in g.children() {
+                for (dst, _) in dm {
+                    if all_nodes_in_subgraph.contains(dst) {
+                        let rep_dst = rep.get(dst).copied().unwrap_or(*dst);
+                        if rep_dst != *dst {
+                            moves.entry(ek.clone()).or_default().push((*dst, rep_dst));
+                        }
+                    }
+                }
+            }
+            drop(g);
+            if let Some(mut w) = src_rep.write(god) {
+                for (ek, pairs) in moves {
+                    let dest_map = w.children_mut().entry(ek).or_default();
+                    for (old, new) in pairs {
+                        let mut local_changed = false;
+                        if dest_map.remove(&old).is_some() {
+                            local_changed = true;
+                        }
+                        if dest_map.get(&new).is_none() {
+                            dest_map.insert(new, ());
+                            local_changed = true;
+                        }
+                        if local_changed { any_changed = true; }
+                    }
+                }
+            }
+        }
+    }
+
+    // Finally, redirect predecessors of non-representative (victim) nodes to their representative.
+    for victim in victims {
+        if let Some(target) = rep.get(&victim).copied() {
             if let Some(preds) = incoming.get(&victim) {
                 for (pred, ek) in preds {
                     if let Some(mut w) = pred.write(god) {
                         let dest_map = w.children_mut().entry(ek.clone()).or_default();
                         if dest_map.remove(&victim).is_some() {
-                            dest_map.insert(canonical, ());
+                            dest_map.insert(target, ());
                             any_changed = true;
                         }
                     }
