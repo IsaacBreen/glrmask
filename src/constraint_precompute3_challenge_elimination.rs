@@ -384,7 +384,14 @@ fn get_normalized_paths(
     god: &IntermediateTrie3GodWrapper,
 ) -> BTreeSet<Vec<IntermediateTrie3EdgeKey>> {
     let root_indices: Vec<_> = roots.values().cloned().collect();
-    IntermediatePrecomputeNode3::get_all_paths(god, &root_indices, |n| n.value.end)
+    get_normalized_paths_for_vec(&root_indices, god)
+}
+
+pub(crate) fn get_normalized_paths_for_vec(
+    roots: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) -> BTreeSet<Vec<IntermediateTrie3EdgeKey>> {
+    IntermediatePrecomputeNode3::get_all_paths(god, &roots, |n| n.value.end)
         .into_iter()
         .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
         .collect()
