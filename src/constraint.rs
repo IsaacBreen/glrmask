@@ -64,7 +64,7 @@ use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use std::iter::FromIterator;
 use crate::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
-use crate::constraint_precompute3_intermediate_utils::{GlobalInternState, optimize_intermediate_trie3, optimize_intermediate_trie3_template};
+use crate::constraint_precompute3_intermediate_utils::{optimize_intermediate_trie3, optimize_intermediate_trie3_template};
 
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;
@@ -1758,7 +1758,6 @@ impl GrammarConstraint {
         parser: &GLRParser,
         trie3_god: &IntermediateTrie3GodWrapper,
         internal_max_llm_token: usize,
-        interner: &mut GlobalInternState,
     ) -> BTreeMap<TerminalID, (IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)> {
         let mut out = BTreeMap::new();
         // Iterate terminals deterministically by ID
@@ -1766,7 +1765,7 @@ impl GrammarConstraint {
         term_ids.sort_by_key(|t| t.0);
 
         for tid in term_ids {
-            let (start, end) = Self::build_trie3_template_for_terminal(parser, trie3_god, tid, internal_max_llm_token, interner);
+            let (start, end) = Self::build_trie3_template_for_terminal(parser, trie3_god, tid, internal_max_llm_token);
             out.insert(tid, (start, end));
         }
         out
@@ -1782,7 +1781,6 @@ impl GrammarConstraint {
         trie3_god: &IntermediateTrie3GodWrapper,
         tid: TerminalID,
         internal_max_llm_token: usize,
-        interner: &mut GlobalInternState,
     ) -> (IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index) {
         // Create template start node
         let start = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
@@ -1806,7 +1804,6 @@ impl GrammarConstraint {
             &start,
             &end,
             trie3_god,
-            interner,
         );
         (start, end)
     }
@@ -1904,10 +1901,9 @@ impl GrammarConstraint {
         assert!(!Trie::has_cycle(trie1_god, roots));
         let mut intermediate_precomputed3 = BTreeMap::new();
         let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
-        let mut interner = GlobalInternState::new();
 
         // Build per-terminal template subgraphs once in this arena.
-        let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token, &mut interner);
+        let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
 
         if is_debug_level_enabled(2) {
             println!("\n--- Intermediate Trie3 Template Statistics ---");
@@ -2092,7 +2088,7 @@ impl GrammarConstraint {
         // --- New: Optimize intermediate trie before path processing ---
         crate::debug!(2, "Optimizing intermediate trie3...");
         let intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        optimize_intermediate_trie3(&intermediate_roots, &trie3_end, &intermediate_trie3_god, &mut interner);
+        optimize_intermediate_trie3(&intermediate_roots, &trie3_end, &intermediate_trie3_god);
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
