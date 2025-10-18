@@ -1,7 +1,7 @@
 // src/constraint_precompute3_intermediate_utils.rs
 use std::collections::{HashMap, HashSet, VecDeque};
-use crate::constraint::{IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
-use crate::constraint_precompute3_challenge_elimination::get_normalized_paths_for_vec;
+use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
+use crate::constraint_precompute3_challenge_elimination::{get_normalized_paths_for_vec, normalize_path};
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
@@ -27,8 +27,18 @@ pub fn optimize_intermediate_trie3_template(
 
     let god2 = god.clone();
     structural_merge_nodes_in_subgraph(&[*start_node], &pinned, &god2);
-    let normalized_paths1 = get_normalized_paths_for_vec(&[*start_node], &god);
-    let normalized_paths2 = get_normalized_paths_for_vec(&[*start_node], &god2);
+    let roots = &[*start_node];
+    let normalized_paths1 = IntermediatePrecomputeNode3::get_all_paths(&god, &roots, |n| n.value.end)
+        .into_iter()
+        .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+        .collect();
+    let roots1 = &[*start_node];
+    let normalized_paths2 = IntermediatePrecomputeNode3::get_all_paths(&god2, &roots1, |n| n.value.end)
+        .into_iter()
+        .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+        .collect();
+    println!("Normalized paths before structural merge: {:?}", normalized_paths1);
+    println!("Normalized paths after structural merge:  {:?}", normalized_paths2);
     assert_eq!(normalized_paths1, normalized_paths2);
 }
 
