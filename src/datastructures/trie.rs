@@ -2385,3 +2385,70 @@ where
 pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_all_paths_with_cycles_long_path() {
+        type TestTrie = Trie<String, i32, String>;
+        let arena = Arena::<TestTrie>::new();
+
+        // Create a chain of nodes: root -> n1 -> ... -> n10
+        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+        let mut nodes = vec![root];
+        let mut prev_node_idx = root;
+
+        for i in 1..=10 {
+            let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
+            let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
+            prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
+            drop(prev_node_w);
+            nodes.push(new_node_idx);
+            prev_node_idx = new_node_idx;
+        }
+
+        // Create a cycle: n10 -> n5
+        let n10_idx = nodes[10];
+        let n5_idx = nodes[5];
+        n10_idx
+            .write(&arena)
+            .unwrap()
+            .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
+
+        // We expect to find paths ending at n8, with a max length of 20
+        let n8_idx = nodes[8];
+        let max_len = 20;
+
+        let paths = TestTrie::get_all_paths_with_cycles(
+            &arena,
+            &[root],
+            |idx, _| idx == n8_idx,
+            |_, _, _| true,
+            max_len,
+        );
+
+        // Expected paths:
+        // 1. root -> ... -> n8 (length 8)
+        // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
+        // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
+        //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
+        assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
+
+        let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
+        path_lengths.sort_unstable();
+
+        assert_eq!(path_lengths, vec![8, 14, 20]);
+
+        // Verify path contents for the shortest one.
+        let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
+        assert_eq!(shortest_path.0, "root");
+        for i in 0..8 {
+            let (ek, ev, t) = &shortest_path.1[i];
+            assert_eq!(*ek, format!("edge_{}", i + 1));
+            assert_eq!(*ev, (i + 1) as i32);
+            assert_eq!(*t, format!("n{}", i + 1));
+        }
+    }
+}
+
