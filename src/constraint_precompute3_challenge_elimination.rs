@@ -843,21 +843,17 @@ fn run_trie_based_elimination(
                 continue;
             }
 
-            // A push can be fully eliminated only if all its BlockedPush exits are simple
-            // (i.e., unconditional continuations to a leaf node). Any other kind of
-            // BlockedPush means we must preserve the original edge to avoid blow-up or
-            // incorrect semantics from partial elimination. In such cases, we make no
-            // changes to this edge in this round.
+            // A "complex" BlockedPush is one that has an LLM constraint AND points to a non-leaf node.
+            // Rewiring these can lead to graph blow-up, especially in cycles, as we might
+            // repeatedly create new aggregator nodes for the same logical path.
+            // If we find such a case, we conservatively do not modify the original push edge.
             let mut must_keep_original_edge = false;
             for ex in &exits {
                 if let Exit::BlockedPush { llm, dst: exit_dst, .. } = ex {
-                    let is_simple_blocked_push = if *llm == LLMTokenBV::max_ones() {
-                        exit_dst.read(god).map_or(false, |g| g.value.end)
-                    } else {
-                        false
-                    };
+                    let has_llm_check = *llm != LLMTokenBV::max_ones();
+                    let is_non_leaf = !exit_dst.read(god).map_or(false, |g| g.value.end);
 
-                    if !is_simple_blocked_push {
+                    if has_llm_check && is_non_leaf {
                         must_keep_original_edge = true;
                         break;
                     }
