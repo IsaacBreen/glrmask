@@ -17,6 +17,7 @@ use std::collections::btree_map::Entry;
 /// This adds significant overhead and should only be used for debugging the
 /// elimination logic itself.
 const DEBUG_MISMATCHES: bool = true;
+const MAX_PATH_LEN: usize = 100;
 
 fn debug_mismatches_enabled() -> bool {
     if DEBUG_MISMATCHES {
@@ -234,7 +235,7 @@ pub fn eliminate_pushes_and_pops_path_based(
         return;
     }
     let all_paths =
-        IntermediatePrecomputeNode3::get_all_paths_with_cycles(god, &all_root_indices, |_idx, n| n.value.end, 100000);
+        IntermediatePrecomputeNode3::get_all_paths_with_cycles(god, &all_root_indices, |_idx, n| n.value.end, MAX_PATH_LEN);
 
     // 2. Simplify them.
     let mut simplified_paths = BTreeSet::new();
@@ -470,7 +471,7 @@ pub(crate) fn get_normalized_paths_for_vec(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
 ) -> BTreeSet<Vec<IntermediateTrie3EdgeKey>> {
-    IntermediatePrecomputeNode3::get_all_paths_with_cycles(god, &roots, |_idx, n| n.value.end, 100000)
+    IntermediatePrecomputeNode3::get_all_paths_with_cycles(god, &roots, |_idx, n| n.value.end, MAX_PATH_LEN)
         .into_iter()
         .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
         .collect()
@@ -1135,7 +1136,7 @@ mod tests {
             &eliminated_god,
             &final_roots_from_trie_elim,
             |_idx, n| n.value.end,
-            100000,
+            MAX_PATH_LEN,
         )
         .into_iter()
         .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
@@ -1143,7 +1144,7 @@ mod tests {
 
         // 3. Run old path-based elimination directly
         let initial_paths =
-            IntermediatePrecomputeNode3::get_all_paths_with_cycles(input_god, input_roots, |_idx, node| node.value.end, 100000);
+            IntermediatePrecomputeNode3::get_all_paths_with_cycles(input_god, input_roots, |_idx, node| node.value.end, MAX_PATH_LEN);
         let mut paths_from_path_elim = BTreeSet::new();
         for (_root_value, path_edges) in initial_paths {
             let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
