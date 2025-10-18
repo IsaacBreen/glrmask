@@ -1799,11 +1799,10 @@ impl GrammarConstraint {
         // Flatten the active GSS into explicit stacks. Each is (Vec<ParseStateEdgeContent>, Acc).
         let stacks = s.active_state.stack.inner.to_stacks();
         let end = Self::reduce_gss_stacks_to_trie3_from_start(trie3_god, &stacks, internal_max_llm_token);
-        let (mut start, mut end) = (start, end);
         // Optimize the template subgraph
         optimize_intermediate_trie3_template(
-            &mut start,
-            &mut end,
+            &start,
+            &end,
             trie3_god,
         );
         (start, end)
@@ -1905,10 +1904,6 @@ impl GrammarConstraint {
 
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
-
-        // GC after all templates have been optimized to clean up dangling nodes.
-        let all_template_roots: Vec<_> = terminal_templates.values().map(|(s, _e)| s.clone()).collect();
-        Trie::gc(&intermediate_trie3_god, &all_template_roots);
 
         if is_debug_level_enabled(2) {
             println!("\n--- Intermediate Trie3 Template Statistics ---");
@@ -2092,7 +2087,8 @@ impl GrammarConstraint {
 
         // --- New: Optimize intermediate trie before path processing ---
         crate::debug!(2, "Optimizing intermediate trie3...");
-        optimize_intermediate_trie3(&mut intermediate_precomputed3, &trie3_end, &intermediate_trie3_god);
+        let intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
+        optimize_intermediate_trie3(&intermediate_roots, &trie3_end, &intermediate_trie3_god);
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
