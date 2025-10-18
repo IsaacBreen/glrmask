@@ -1,12 +1,11 @@
 // src/constraint_precompute3_challenge_elimination.rs
 use crate::constraint::IntermediatePrecomputedNodeContents3;
 use crate::constraint::{
-    IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper,
-    LLMTokenBV, StateIDBV,
+    IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
+    IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV,
 };
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
-use crate::constraint_precompute3_intermediate_utils::normalize_path;
 use crate::tokenizer::TokenizerStateID;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,6 +31,32 @@ fn debug_mismatches_enabled() -> bool {
     }
 }
 
+/// Normalizes a path for comparison purposes.
+/// - Removes NoOp edges.
+/// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
+pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
+    let mut combined_llm_bv = LLMTokenBV::max_ones();
+    let mut has_llm_check = false;
+
+    let mut other_ops: Vec<IntermediateTrie3EdgeKey> = path
+        .into_iter()
+        .filter(|ek| {
+            if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek {
+                combined_llm_bv &= bv;
+                has_llm_check = true;
+                false // remove from path
+            } else {
+                !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
+            }
+        })
+        .collect();
+
+    if has_llm_check {
+        other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
+    }
+
+    other_ops
+}
 /// Eliminates adjacent Push/Pop pairs from a stack of intermediate trie edge keys.
 /// Additionally, Pop(0, B) constraints are folded into the preceding Push via intersection.
 /// This is a core part of simplifying the precompute3 graph.
