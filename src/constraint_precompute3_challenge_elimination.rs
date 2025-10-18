@@ -78,6 +78,11 @@ fn simplify_path(
     stack: Vec<IntermediateTrie3EdgeKey>,
 ) -> Option<Vec<IntermediateTrie3EdgeKey>> {
     // IMPORTANT: DO NOT MODIFY THIS FUNCTION. It is the 'ground truth' for eliminating Push/Pop pairs.
+    // If you are worried about this thing not behaving well with a 'stack' or something, you're probably misunderstanding the purpose of this code.
+    // There is no 'stack' we're popping/pushing onto. I won't go into the details of what we're actually doing, but in the past people have
+    // modified this function to try and make it more stack-like or something, and 'check for stack underflow', and this is WRONG. Don't do this.
+    // DO NOT MODIFY THIS FUNCTION.
+    // This function is the reference implementation. If there's a mismatch between this and the trie-based elimination, it's the trie-based elimination that is wrong. This one is the ground truth.
     let mut ops = stack;
 
     loop {
@@ -1123,7 +1128,11 @@ fn run_trie_based_elimination(
         }
 
         // After rewiring pushes, prune any newly-exposed invalid pops.
-        let pops_pruned_this_round = prune_leading_pops(god, &root_indices);
+        // NOTE: Disabled because leading pops are NOT invalid according to the ground truth
+        // simplify_path. Despite the naming, these Push/Pop operations are not traditional
+        // stack operations, and a Pop without a preceding Push is allowed.
+        let pops_pruned_this_round = 0; // prune_leading_pops(god, &root_indices);
+        
         let removed_this_round = pushes_rewired_this_round + pops_pruned_this_round;
 
         eprintln!(
