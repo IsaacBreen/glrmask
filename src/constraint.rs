@@ -1796,9 +1796,8 @@ impl GrammarConstraint {
         };
         s.process_token_advanced(tid, &cfg);
 
-        // Flatten the active GSS into explicit stacks. Each is (Vec<ParseStateEdgeContent>, Acc).
-        let stacks = s.active_state.stack.inner.to_stacks();
-        let end = Self::reduce_gss_stacks_to_trie3_from_start(trie3_god, &stacks, internal_max_llm_token);
+        // Convert the GSS directly to a trie, preserving sharing.
+        let end = Self::convert_gss_to_trie3_template(&s.active_state.stack, &start, trie3_god);
         // Optimize the template subgraph
         optimize_intermediate_trie3_template(
             &start,
@@ -1808,65 +1807,59 @@ impl GrammarConstraint {
         (start, end)
     }
 
-    /// Convert GSS stacks into a Trie3 path starting from the stored trie nodes in each stack's Acc:
-    /// - For each stack:
-    ///   - Take its Acc.stored_trie_nodes (should contain the template start)
-    ///   - Create a "head" node and connect each stored node -> head with unconditional (pop=0, all tokens, EV=all states)
-    ///   - For each subsequent state in the stack (skip the first, the hallucinated state), add
-    ///     an edge (pop=-1, all tokens) with EV=singleton(state_id)
-    ///   - Accumulate the final nodes across stacks
-    /// - Converge all final nodes into a single shared `end` node by unconditional edges.
-    fn reduce_gss_stacks_to_trie3_from_start( // TODO: rename
+    fn convert_gss_to_trie3_template(
+        gss_root: &std::sync::Arc<crate::datastructures::gss_leveled_adapter::GSSNode>,
+        start_node: &IntermediatePrecomputeNode3Index,
         trie3_god: &IntermediateTrie3GodWrapper,
-        stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
-        internal_max_llm_token: usize,
     ) -> IntermediatePrecomputeNode3Index {
-        let states_all = StateIDBV::max_ones();
+        let end_node = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
 
-        let mut final_nodes: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
+        let mut gss_to_trie_map: HashMap<crate::datastructures::arc_wrapper::ArcPtrWrapper<crate::datastructures::gss_leveled_adapter::GSSNode>, IntermediatePrecomputeNode3Index> = HashMap::new();
+        let mut q: VecDeque<std::sync::Arc<crate::datastructures::gss_leveled_adapter::GSSNode>> = VecDeque::new();
 
-        for (items, acc) in stacks.iter() {
-            // Create a head node and hook it from all stored trie nodes in this stack's Acc
-            let head = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-            for src in acc.stored_trie_nodes().iter() {
+        if !gss_root.is_empty() {
+            gss_to_trie_map.insert(crate::datastructures::arc_wrapper::ArcPtrWrapper(gss_root.clone()), end_node.clone());
+            q.push_back(gss_root.clone());
+        }
+
+        while let Some(gss_node) = q.pop_front() {
+            let trie_node_dst = gss_to_trie_map.get(&crate::datastructures::arc_wrapper::ArcPtrWrapper(gss_node.clone())).unwrap().clone();
+
+            for (pred_gss_node_arc, edge_content) in gss_node.iter_predecessors() {
+                let pred_ptr = crate::datastructures::arc_wrapper::ArcPtrWrapper(pred_gss_node_arc.clone());
+                let trie_node_src = match gss_to_trie_map.entry(pred_ptr) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let new_trie_node = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
+                        entry.insert(new_trie_node.clone());
+                        q.push_back(pred_gss_node_arc.clone());
+                        new_trie_node
+                    }
+                };
+
+                let mut state_bv = StateIDBV::zeros();
+                state_bv.insert(edge_content.state_id.0);
+                let edge_key = IntermediateTrie3EdgeKey::Push(state_bv);
+
                 let inserter = EdgeInserter::new(
                     trie3_god,
-                    src.as_arc().clone(),
+                    trie_node_src.as_arc().clone(),
+                    edge_key, (), |_, _| {}, |_, _| {}, |_, _| {},
+                );
+                inserter.try_destination(trie_node_dst.clone()).expect("Failed to insert edge in template");
+            }
+
+            if gss_node.acc().stored_trie_nodes().contains(start_node) {
+                let inserter = EdgeInserter::new(
+                    trie3_god,
+                    start_node.as_arc().clone(),
                     IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
                 );
-                inserter.try_destination(head.clone()).expect("Failed to insert unconditional edge to template head");
+                inserter.try_destination(trie_node_dst.clone()).expect("Failed to connect start_node to template body");
             }
-
-            // Now walk the stack; items go top->bottom; first item is the hallucinated state: skip it.
-            let mut cur = head.clone();
-            for state_content in items.iter().skip(1) {
-                let mut state_bv = StateIDBV::zeros();
-                state_bv.insert(state_content.state_id.0);
-                let inserter = EdgeInserter::new(
-                    trie3_god,
-                    cur.as_arc().clone(),
-                    IntermediateTrie3EdgeKey::Push(state_bv), (), |_, _| {}, |_, _| {}, |_, _| {},
-                );
-                let next = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                let actual = inserter.try_destination(next.clone()).expect("Failed to insert (-1) pop edge in template chain");
-                cur = actual;
-            }
-
-            final_nodes.push(cur);
         }
 
-        // Converge all final nodes into a single shared end node.
-        let end = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-        for src in final_nodes {
-            let inserter = EdgeInserter::new(
-                trie3_god,
-                src.as_arc().clone(),
-                IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-            );
-            inserter.try_destination(end.clone()).expect("Failed to insert final convergence edge to template end");
-        }
-
-        end
+        end_node
     }
 
     fn _process_and_rebuild_trie3_paths(
