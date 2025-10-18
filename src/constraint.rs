@@ -1772,8 +1772,13 @@ impl GrammarConstraint {
 
         // Now, perform a global merge across all optimized templates to share common subgraphs.
         let all_start_nodes: Vec<_> = out.values().map(|(s, _)| s.clone()).collect();
+        let all_end_nodes: std::collections::HashSet<_> = out.values().map(|(_, e)| e.clone()).collect();
 
-        let node_to_rep = crate::constraint_precompute3_intermediate_utils::merge_intermediate_nodes_globally(&all_start_nodes, trie3_god, 40);
+        let node_to_rep = crate::constraint_precompute3_intermediate_utils::merge_intermediate_nodes_globally(
+            &all_start_nodes,
+            &all_end_nodes,
+            trie3_god,
+            40);
 
         // Update start/end nodes in `out` to their representatives
         for (_tid, (start, end)) in out.iter_mut() {

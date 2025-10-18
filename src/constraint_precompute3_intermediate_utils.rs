@@ -118,6 +118,7 @@ fn prune_unproductive_nodes(
 
 pub fn merge_intermediate_nodes_globally(
     roots: &[IntermediatePrecomputeNode3Index],
+    protected_nodes: &HashSet<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
     max_iters: usize,
 ) -> HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
@@ -148,17 +149,39 @@ pub fn merge_intermediate_nodes_globally(
         }
     }
 
-    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+    // Initial classification: protected nodes get unique classes, others get classes based on `end` flag.
+    let mut prev_class: Vec<usize> = vec![0; n];
+    let mut next_class_id = 0;
+    let mut protected_dense_ids: HashSet<usize> = HashSet::new();
+
+    for i in 0..n {
+        if protected_nodes.contains(&old_of[i]) {
+            prev_class[i] = next_class_id;
+            next_class_id += 1;
+            protected_dense_ids.insert(i);
+        }
+    }
+    let non_protected_base_class = next_class_id;
+    for i in 0..n {
+        if !protected_dense_ids.contains(&i) {
+            prev_class[i] = non_protected_base_class + (if ends[i] { 1 } else { 0 });
+        }
+    }
 
     for _it in 0..max_iters {
         type SignatureIntermediate = (bool, Vec<(IntermediateTrie3EdgeKey, usize)>);
 
         let mut sig_to_id: HashMap<SignatureIntermediate, usize> = HashMap::new();
         let mut new_class = vec![0; n];
-        let mut next_id = 0;
+        let mut next_id = non_protected_base_class + 2; // Start after initial non-protected classes
         let mut changes = 0;
 
         for u in 0..n {
+            if protected_dense_ids.contains(&u) {
+                new_class[u] = prev_class[u]; // Protected nodes keep their unique class
+                continue;
+            }
+
             let mut edges_for_sig: Vec<(IntermediateTrie3EdgeKey, usize)> = raw_edges[u]
                 .iter()
                 .map(|(ek, v_dense)| (ek.clone(), prev_class[*v_dense]))

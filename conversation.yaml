@@ -4,7 +4,7 @@ local_system:
     - src/constraint_extra.rs
     - src/constraint_precompute3_utils.rs
     - src/constraint_precompute3_intermediate_utils.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/constraint.rs: |-
@@ -9544,8 +9544,13 @@ local_system:
 
               // Now, perform a global merge across all optimized templates to share common subgraphs.
               let all_start_nodes: Vec<_> = out.values().map(|(s, _)| s.clone()).collect();
+              let all_end_nodes: std::collections::HashSet<_> = out.values().map(|(_, e)| e.clone()).collect();
 
-              let node_to_rep = crate::constraint_precompute3_intermediate_utils::merge_intermediate_nodes_globally(&all_start_nodes, trie3_god, 40);
+              let node_to_rep = crate::constraint_precompute3_intermediate_utils::merge_intermediate_nodes_globally(
+                  &all_start_nodes,
+                  &all_end_nodes,
+                  trie3_god,
+                  40);
 
               // Update start/end nodes in `out` to their representatives
               for (_tid, (start, end)) in out.iter_mut() {
@@ -15436,9 +15441,10 @@ local_system:
     src/constraint_precompute3_intermediate_utils.rs: |
       // src/constraint_precompute3_intermediate_utils.rs
       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+      use ordered_hash_map::OrderedHashMap;
       use crate::constraint::{IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper};
       use crate::datastructures::ordered_hash_map::Retain;
-      use crate::datastructures::trie::Trie;
+      use crate::datastructures::trie::{Trie, Trie2Index};
       use crate::r#macro::is_debug_level_enabled;
 
       pub fn optimize_intermediate_trie3_template(
@@ -15553,6 +15559,7 @@ local_system:
 
       pub fn merge_intermediate_nodes_globally(
           roots: &[IntermediatePrecomputeNode3Index],
+          protected_nodes: &HashSet<IntermediatePrecomputeNode3Index>,
           god: &IntermediateTrie3GodWrapper,
           max_iters: usize,
       ) -> HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
@@ -15583,17 +15590,39 @@ local_system:
               }
           }
 
-          let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+          // Initial classification: protected nodes get unique classes, others get classes based on `end` flag.
+          let mut prev_class: Vec<usize> = vec![0; n];
+          let mut next_class_id = 0;
+          let mut protected_dense_ids: HashSet<usize> = HashSet::new();
+
+          for i in 0..n {
+              if protected_nodes.contains(&old_of[i]) {
+                  prev_class[i] = next_class_id;
+                  next_class_id += 1;
+                  protected_dense_ids.insert(i);
+              }
+          }
+          let non_protected_base_class = next_class_id;
+          for i in 0..n {
+              if !protected_dense_ids.contains(&i) {
+                  prev_class[i] = non_protected_base_class + (if ends[i] { 1 } else { 0 });
+              }
+          }
 
           for _it in 0..max_iters {
               type SignatureIntermediate = (bool, Vec<(IntermediateTrie3EdgeKey, usize)>);
 
               let mut sig_to_id: HashMap<SignatureIntermediate, usize> = HashMap::new();
               let mut new_class = vec![0; n];
-              let mut next_id = 0;
+              let mut next_id = non_protected_base_class + 2; // Start after initial non-protected classes
               let mut changes = 0;
 
               for u in 0..n {
+                  if protected_dense_ids.contains(&u) {
+                      new_class[u] = prev_class[u]; // Protected nodes keep their unique class
+                      continue;
+                  }
+
                   let mut edges_for_sig: Vec<(IntermediateTrie3EdgeKey, usize)> = raw_edges[u]
                       .iter()
                       .map(|(ek, v_dense)| (ek.clone(), prev_class[*v_dense]))
@@ -15641,7 +15670,7 @@ local_system:
                   let mut new_children = BTreeMap::new();
 
                   for (ek, dest_map) in old_children {
-                      let new_dest_map = new_children.entry(ek).or_default();
+                      let new_dest_map: &mut OrderedHashMap<Trie2Index, ()> = new_children.entry(ek).or_default();
                       for (old_dest, val) in dest_map {
                           let new_dest = *node_to_rep.get(&old_dest).unwrap();
                           // The value is `()`, so we can just insert. If there are duplicates, they are fine.
@@ -23800,5 +23829,174 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor: Implement global merging of
       intermediate trie3 templates to share common subgraphs."'
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_extra.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_intermediate_utils.rs since previous turn:
+      ```diff
+      --- original version of src/constraint_precompute3_intermediate_utils.rs
+      +++ current version of src/constraint_precompute3_intermediate_utils.rs
+      @@ -1,8 +1,9 @@
+       // src/constraint_precompute3_intermediate_utils.rs
+       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+      +use ordered_hash_map::OrderedHashMap;
+       use crate::constraint::{IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper};
+       use crate::datastructures::ordered_hash_map::Retain;
+      -use crate::datastructures::trie::Trie;
+      +use crate::datastructures::trie::{Trie, Trie2Index};
+       use crate::r#macro::is_debug_level_enabled;
+       
+       pub fn optimize_intermediate_trie3_template(
+      @@ -205,7 +206,7 @@
+                   let mut new_children = BTreeMap::new();
+       
+                   for (ek, dest_map) in old_children {
+      -                let new_dest_map = new_children.entry(ek).or_default();
+      +                let new_dest_map: &mut OrderedHashMap<Trie2Index, ()> = new_children.entry(ek).or_default();
+                       for (old_dest, val) in dest_map {
+                           let new_dest = *node_to_rep.get(&old_dest).unwrap();
+                           // The value is `()`, so we can just insert. If there are duplicates, they are fine.
+
+      ```
+    metadata:
+  - user: This is causing a mismatch in behaviour. Analyse closely and fix it.
+    metadata:
+  - assistant: |-
+      I've analyzed the changes and the reported behavior mismatch. The issue likely stems from the global merge algorithm treating all template "end nodes" as equivalent because they are structurally identical (sinks with `end: false`). This is logically incorrect, as these nodes serve as distinct endpoints for different terminal-consuming subgraphs. Merging them conflates these distinct logical roles.
+
+      The fix is to make the merge algorithm aware of these special nodes and prevent them from being merged with each other or with any other nodes. I will modify the merge function to accept a set of "protected" nodes that will each be assigned a unique, permanent equivalence class.
+
+      Here are the step-by-step instructions and the corresponding git diffs to apply this fix.
+
+      ### Step-by-step Instructions
+
+      1.  **`src/constraint.rs`:**
+          -   In the `build_terminal_trie3_templates` function, after building the templates, I will collect all the unique `end_node`s into a `HashSet`.
+          -   I will then pass this `HashSet` of protected nodes as a new argument to the `merge_intermediate_nodes_globally` function call.
+
+      2.  **`src/constraint_precompute3_intermediate_utils.rs`:**
+          -   I will update the function signature of `merge_intermediate_nodes_globally` to accept the `protected_nodes: &HashSet<...>` as a new parameter.
+          -   I will modify the initial classification logic within the function. It will first iterate through all nodes, and if a node is in the `protected_nodes` set, it will be assigned its own unique class ID. Other nodes will be classified based on their `end` flag as before.
+          -   During the iterative refinement loop, I will add a check to ensure that protected nodes are skipped and retain their unique class IDs throughout the process.
+
+      This change ensures that the logical distinction between template endpoints is preserved, correcting the over-aggressive merging and resolving the behavioral mismatch, while still allowing all other common subgraphs to be shared.
+
+      ### Git Diffs
+
+      Here are the git diffs to apply the changes.
+
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1610,8 +1610,13 @@
+       
+               // Now, perform a global merge across all optimized templates to share common subgraphs.
+               let all_start_nodes: Vec<_> = out.values().map(|(s, _)| s.clone()).collect();
+      +        let all_end_nodes: std::collections::HashSet<_> = out.values().map(|(_, e)| e.clone()).collect();
+       
+      -        let node_to_rep = crate::constraint_precompute3_intermediate_utils::merge_intermediate_nodes_globally(&all_start_nodes, trie3_god, 40);
+      +        let node_to_rep = crate::constraint_precompute3_intermediate_utils::merge_intermediate_nodes_globally(
+      +            &all_start_nodes,
+      +            &all_end_nodes,
+      +            trie3_god,
+      +            40);
+       
+               // Update start/end nodes in `out` to their representatives
+               for (_tid, (start, end)) in out.iter_mut() {
+
+      ```
+
+      ```diff
+      diff --git a/src/constraint_precompute3_intermediate_utils.rs b/src/constraint_precompute3_intermediate_utils.rs
+      --- a/src/constraint_precompute3_intermediate_utils.rs
+      +++ b/src/constraint_precompute3_intermediate_utils.rs
+      @@ -88,6 +88,7 @@
+       
+       pub fn merge_intermediate_nodes_globally(
+           roots: &[IntermediatePrecomputeNode3Index],
+      +    protected_nodes: &HashSet<IntermediatePrecomputeNode3Index>,
+           god: &IntermediateTrie3GodWrapper,
+           max_iters: usize,
+       ) -> HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
+      @@ -118,7 +119,21 @@
+               }
+           }
+       
+      -    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+      +    // Initial classification: protected nodes get unique classes, others get classes based on `end` flag.
+      +    let mut prev_class: Vec<usize> = vec![0; n];
+      +    let mut next_class_id = 0;
+      +    let mut protected_dense_ids: HashSet<usize> = HashSet::new();
+      +
+      +    for i in 0..n {
+      +        if protected_nodes.contains(&old_of[i]) {
+      +            prev_class[i] = next_class_id;
+      +            next_class_id += 1;
+      +            protected_dense_ids.insert(i);
+      +        }
+      +    }
+      +    let non_protected_base_class = next_class_id;
+      +    for i in 0..n {
+      +        if !protected_dense_ids.contains(&i) {
+      +            prev_class[i] = non_protected_base_class + (if ends[i] { 1 } else { 0 });
+      +        }
+      +    }
+       
+           for _it in 0..max_iters {
+               type SignatureIntermediate = (bool, Vec<(IntermediateTrie3EdgeKey, usize)>);
+      @@ -126,11 +141,16 @@
+       
+               let mut sig_to_id: HashMap<SignatureIntermediate, usize> = HashMap::new();
+               let mut new_class = vec![0; n];
+      -        let mut next_id = 0;
+      +        let mut next_id = non_protected_base_class + 2; // Start after initial non-protected classes
+               let mut changes = 0;
+       
+               for u in 0..n {
+      +            if protected_dense_ids.contains(&u) {
+      +                new_class[u] = prev_class[u]; // Protected nodes keep their unique class
+      +                continue;
+      +            }
+      +
+                   let mut edges_for_sig: Vec<(IntermediateTrie3EdgeKey, usize)> = raw_edges[u]
+                       .iter()
+                       .map(|(ek, v_dense)| (ek.clone(), prev_class[*v_dense]))
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/constraint_precompute3_intermediate_utils.rs
+      Applying patch to 'src/constraint_precompute3_intermediate_utils.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_intermediate_utils.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor: Protect template end nodes during
+      global intermediate trie3 merging and add GC"'
     metadata:
 ...
