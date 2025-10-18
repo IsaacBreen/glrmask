@@ -106,30 +106,6 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
 fn simplify_path(
     stack: Vec<IntermediateTrie3EdgeKey>,
 ) -> Option<Vec<IntermediateTrie3EdgeKey>> {
-    // First, perform a quick check for stack underflow on the original path.
-    // A Pop(n>0) requires at least n items on the stack.
-    // A Pop(0) requires at least 1 item on the stack.
-    // This invalidates paths with leading pops or insufficient pushes.
-    let mut depth = 0isize;
-    for op in &stack {
-        match op {
-            IntermediateTrie3EdgeKey::Push(_) => depth += 1,
-            IntermediateTrie3EdgeKey::Pop(n, _) => {
-                if *n > 0 {
-                    depth -= *n as isize;
-                } else { // n == 0
-                    if depth == 0 {
-                        return None; // Pop(0) on empty stack is invalid.
-                    }
-                }
-                if depth < 0 {
-                    return None; // Stack underflow.
-                }
-            }
-            _ => {}
-        }
-    }
-
     let mut ops = stack;
 
     loop {
