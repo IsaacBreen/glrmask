@@ -6246,8 +6246,11 @@ local_system:
                           }
                       }
 
-                      // If we've reached the max number of edges on this path, do not expand further.
-                      if length >= max_path_length {
+                      // If we've reached the max number of counted edges on this path, do not expand further.
+                      // We also cap the total path length as a safeguard against infinite loops in cycles of uncounted edges.
+                      // The absolute cap is to prevent OOM when a very large `max_path_length` is provided.
+                      const ABSOLUTE_MAX_PATH_LEN: usize = 50000;
+                      if length >= max_path_length || path.len() >= ABSOLUTE_MAX_PATH_LEN {
                           let popped = stack.pop().unwrap();
                           if popped.has_incoming_edge {
                               path.pop(); // backtrack edge added when entering this frame
@@ -16266,5 +16269,84 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Update path finding to exclude NoOp/CheckLLM
       edges from length calculation"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_intermediate_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_challenge_elimination.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: This results in an infinite loop. Consider the case where we discount a
+      series of edges that form a cycle.
+    metadata:
+  - assistant: |-
+      You've correctly identified the issue. A cycle composed entirely of edges that are not counted towards the path length would indeed cause an infinite loop, as the `length >= max_path_length` condition would never be met.
+
+      To fix this, I will introduce a secondary safeguard based on the total number of edges in the path (`path.len()`). This acts as an absolute cap to prevent run-away recursion and memory usage, regardless of whether the edges are "counted" or not.
+
+      ### Step-by-step Instructions
+
+      1.  **File: `src/datastructures/trie.rs`**
+          *   Navigate to the `get_all_paths_with_cycles_recursive` function.
+          *   Inside the main `while` loop, find the `if !frame.started` block.
+          *   Modify the path length check within this block. The existing check is `if length >= max_path_length`.
+          *   I will augment this check to also include a condition on the total path length, `path.len()`. I'll introduce a constant `ABSOLUTE_MAX_PATH_LEN` with a reasonable value like `50000` to serve as a hard limit.
+          *   The new condition will be `if length >= max_path_length || path.len() >= ABSOLUTE_MAX_PATH_LEN`. This ensures that even if a cycle of uncounted edges is traversed, the exploration will terminate when the total path length hits the absolute maximum, preventing the infinite loop.
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@ -898,15 +898,20 @@
+                           }
+                       }
+       
+      -                // If we've reached the max number of edges on this path, do not expand further.
+      -                if length >= max_path_length {
+      +                // If we've reached the max number of counted edges on this path, do not expand further.
+      +                // We also cap the total path length as a safeguard against infinite loops in cycles of uncounted edges.
+      +                // The absolute cap is to prevent OOM when a very large `max_path_length` is provided.
+      +                const ABSOLUTE_MAX_PATH_LEN: usize = 50000;
+      +                if length >= max_path_length || path.len() >= ABSOLUTE_MAX_PATH_LEN {
+                           let popped = stack.pop().unwrap();
+                           if popped.has_incoming_edge {
+                               path.pop(); // backtrack edge added when entering this frame
+                           }
+                           if popped.incoming_edge_counted {
+                               length -= 1;
+                           }
+                           continue;
+                       }
+                   }
+       
+                   // If we've exhausted edges for this node, backtrack.
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+    metadata:
+  - user: 'Changes committed with message: "Trie: Add absolute path length limit to
+      get_all_paths_with_cycles to prevent infinite loops on uncounted cycles"'
     metadata:
 ...

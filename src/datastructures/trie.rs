@@ -997,8 +997,11 @@ where
                     }
                 }
 
-                // If we've reached the max number of edges on this path, do not expand further.
-                if length >= max_path_length {
+                // If we've reached the max number of counted edges on this path, do not expand further.
+                // We also cap the total path length as a safeguard against infinite loops in cycles of uncounted edges.
+                // The absolute cap is to prevent OOM when a very large `max_path_length` is provided.
+                const ABSOLUTE_MAX_PATH_LEN: usize = 50000;
+                if length >= max_path_length || path.len() >= ABSOLUTE_MAX_PATH_LEN {
                     let popped = stack.pop().unwrap();
                     if popped.has_incoming_edge {
                         path.pop(); // backtrack edge added when entering this frame
