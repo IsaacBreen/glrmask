@@ -12362,7 +12362,11 @@ local_system:
           end_node: &IntermediatePrecomputeNode3Index,
           god: &IntermediateTrie3GodWrapper,
       ) -> bool {
-          let all_nodes_vec = Trie::all_nodes(god, start_nodes);
+          let mut combined_roots = start_nodes.to_vec();
+          if !start_nodes.contains(end_node) {
+              combined_roots.push(*end_node);
+          }
+          let all_nodes_vec = Trie::all_nodes(god, &combined_roots);
           if all_nodes_vec.is_empty() {
               return false;
           }
@@ -19322,5 +19326,91 @@ messages:
     metadata:
   - user: 'Changes committed with message: "fix: Use BTreeMap for intermediate trie3
       node signatures to ensure correct structural merging"'
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_intermediate_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: It's mismatching. Fix it.
+    metadata:
+  - assistant: |-
+      You are absolutely right to point out the persistent mismatch. My apologies. The previous fix was necessary but insufficient. The core issue was more subtle and lay in how the optimization passes interacted, specifically how the graph's nodes were collected before pruning.
+
+      The `prune_unproductive_nodes` function was calculating the set of all nodes by starting only from the `start_nodes`. However, it needs to determine reachability to the `end_node`. If the `end_node` was not reachable from any of the `start_nodes` in the graph traversal, it would not be included in the analysis. This could lead to the set of "productive" nodes being empty, causing the entire graph to be incorrectly pruned away, thus changing its semantics.
+
+      The fix is to ensure that when we gather the nodes for analysis, we start the traversal from both the `start_nodes` *and* the `end_node`, guaranteeing that the entire relevant component of the graph is considered.
+
+      ### Step-by-step Instructions
+
+      The change is confined to the `prune_unproductive_nodes` function in `src/constraint_precompute3_intermediate_utils.rs`.
+
+      1.  **Open `src/constraint_precompute3_intermediate_utils.rs`**.
+      2.  **Navigate to the `prune_unproductive_nodes` function**.
+      3.  **Modify the beginning of the function** to include the `end_node` in the initial set of roots for graph traversal.
+
+          Replace this line:
+          ```rust
+          let all_nodes_vec = Trie::all_nodes(god, start_nodes);
+          ```
+          with this block of code:
+          ```rust
+          let mut combined_roots = start_nodes.to_vec();
+          if !start_nodes.contains(end_node) {
+              combined_roots.push(*end_node);
+          }
+          let all_nodes_vec = Trie::all_nodes(god, &combined_roots);
+          ```
+
+      This ensures the analysis is always performed on the correct and complete subgraph, preserving the trie's semantics.
+
+      ### Git Diff
+
+      Here is the git diff to apply this fix:
+
+      ```diff
+      diff --git a/src/constraint_precompute3_intermediate_utils.rs b/src/constraint_precompute3_intermediate_utils.rs
+      --- a/src/constraint_precompute3_intermediate_utils.rs
+      +++ b/src/constraint_precompute3_intermediate_utils.rs
+      @@ -47,7 +47,11 @@
+           end_node: &IntermediatePrecomputeNode3Index,
+           god: &IntermediateTrie3GodWrapper,
+       ) -> bool {
+      -    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
+      +    let mut combined_roots = start_nodes.to_vec();
+      +    if !start_nodes.contains(end_node) {
+      +        combined_roots.push(*end_node);
+      +    }
+      +    let all_nodes_vec = Trie::all_nodes(god, &combined_roots);
+           if all_nodes_vec.is_empty() {
+               return false;
+           }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_intermediate_utils.rs
+      Applying patch to 'src/constraint_precompute3_intermediate_utils.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_intermediate_utils.rs.
+    metadata:
+  - user: 'Changes committed with message: "fix: Ensure end_node is included in graph
+      traversal for pruning in intermediate trie3"'
     metadata:
 ...

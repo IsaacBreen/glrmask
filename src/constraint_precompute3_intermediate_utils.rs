@@ -60,7 +60,11 @@ fn prune_unproductive_nodes(
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
-    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
+    let mut combined_roots = start_nodes.to_vec();
+    if !start_nodes.contains(end_node) {
+        combined_roots.push(*end_node);
+    }
+    let all_nodes_vec = Trie::all_nodes(god, &combined_roots);
     if all_nodes_vec.is_empty() {
         return false;
     }
