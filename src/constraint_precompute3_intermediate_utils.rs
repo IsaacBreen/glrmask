@@ -1,10 +1,40 @@
 // src/constraint_precompute3_intermediate_utils.rs
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
-use crate::constraint_precompute3_challenge_elimination::{get_normalized_paths_for_vec, normalize_path};
+use crate::constraint::{
+    IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
+    IntermediateTrie3GodWrapper, LLMTokenBV,
+};
+use crate::constraint_precompute3_challenge_elimination::get_normalized_paths_for_vec;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
+
+/// Normalizes a path for comparison purposes.
+/// - Removes NoOp edges.
+/// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
+pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
+    let mut combined_llm_bv = LLMTokenBV::max_ones();
+    let mut has_llm_check = false;
+
+    let mut other_ops: Vec<IntermediateTrie3EdgeKey> = path
+        .into_iter()
+        .filter(|ek| {
+            if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek {
+                combined_llm_bv &= bv;
+                has_llm_check = true;
+                false // remove from path
+            } else {
+                !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
+            }
+        })
+        .collect();
+
+    if has_llm_check {
+        other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
+    }
+
+    other_ops
+}
 
 pub fn optimize_intermediate_trie3_template(
     start_node: &IntermediatePrecomputeNode3Index,
