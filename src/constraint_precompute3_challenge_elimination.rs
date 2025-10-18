@@ -136,7 +136,7 @@ fn simplify_path(
 
 /// Compute the set of nodes that are part of any directed cycle in the subgraph induced by `nodes`.
 /// Uses Kahn's algorithm (iterative topological pruning) to identify nodes not removed => in cycles.
-fn nodes_in_cycles_subgraph(
+pub(crate) fn nodes_in_cycles_subgraph(
     god: &IntermediateTrie3GodWrapper,
     nodes: &[IntermediatePrecomputeNode3Index],
 ) -> BTreeSet<usize> {

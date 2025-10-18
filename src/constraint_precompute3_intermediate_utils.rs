@@ -1,6 +1,7 @@
 // src/constraint_precompute3_intermediate_utils.rs
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper};
+use crate::constraint_precompute3_challenge_elimination::nodes_in_cycles_subgraph;
 use crate::constraint_precompute3_challenge_elimination::{get_normalized_paths_for_vec, normalize_path};
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
@@ -236,6 +237,7 @@ fn compress_noop_only_nodes(
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct NodeSignature {
     end: bool,
+    is_in_cycle: bool,
     // For determinism: edge keys sorted; each has sorted child-colors
     edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
 }
@@ -255,6 +257,8 @@ fn structural_merge_nodes_in_subgraph(
         return false;
     }
     let all_nodes_in_subgraph: std::collections::HashSet<_> = all_nodes_vec.clone().into_iter().collect();
+
+    let nodes_in_cycles = nodes_in_cycles_subgraph(god, &all_nodes_vec);
 
     // Snapshot outgoing children for each node within the subgraph for stable iteration
     let mut outgoing: HashMap<
@@ -295,11 +299,12 @@ fn structural_merge_nodes_in_subgraph(
     // Seed: base color by end flag and degree patterns
     for n in &all_nodes_in_subgraph {
         let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
+        let is_in_cycle_flag = nodes_in_cycles.contains(&n.as_usize());
         let deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
             .map(|v| v.iter().map(|(ek, kids)| (ek.clone(), kids.len())).collect())
             .unwrap_or_default();
 
-        let mut sig = NodeSignature { end: end_flag, edges: deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect() };
+        let mut sig = NodeSignature { end: end_flag, is_in_cycle: is_in_cycle_flag, edges: deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect() };
         sig.edges.sort_by(|a, b| a.0.cmp(&b.0));
         let len = next_color.len();
         let id = *next_color.entry(sig).or_insert(len as u64 + 1);
@@ -315,6 +320,7 @@ fn structural_merge_nodes_in_subgraph(
 
         for n in &all_nodes_in_subgraph {
             let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
+            let is_in_cycle_flag = nodes_in_cycles.contains(&n.as_usize());
             let mut edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
             if let Some(edges) = outgoing.get(n) {
                 for (ek, kids) in edges {
@@ -324,7 +330,7 @@ fn structural_merge_nodes_in_subgraph(
                 }
                 edges_sig.sort_by(|a, b| a.0.cmp(&b.0));
             }
-            let sig = NodeSignature { end: end_flag, edges: edges_sig };
+            let sig = NodeSignature { end: end_flag, is_in_cycle: is_in_cycle_flag, edges: edges_sig };
             let len = interner.len();
             let id = *interner.entry(sig).or_insert(len as u64 + 1);
             if color.get(n).copied().unwrap_or(0) != id {
