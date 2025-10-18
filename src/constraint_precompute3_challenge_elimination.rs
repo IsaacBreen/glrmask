@@ -17,7 +17,7 @@ use std::collections::btree_map::Entry;
 /// This adds significant overhead and should only be used for debugging the
 /// elimination logic itself.
 const DEBUG_MISMATCHES: bool = true; // Keep true for robust testing
-const MAX_PATH_LEN: usize = 15; // Increased for complex test cases
+const MAX_PATH_LEN: usize = 1000; // Increased for complex test cases
 
 fn debug_mismatches_enabled() -> bool {
     if DEBUG_MISMATCHES {
