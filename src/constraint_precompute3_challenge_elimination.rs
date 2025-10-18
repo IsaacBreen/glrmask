@@ -646,7 +646,6 @@ struct BFSState {
     node: IntermediatePrecomputeNode3Index,
     push_bv: StateIDBV,
     llm_bv: LLMTokenBV,
-    depth: usize,
 }
 
 fn get_or_create_aggregator_node(
@@ -691,7 +690,6 @@ fn compute_push_elim_exits(
         node: start,
         push_bv: initial_push_bv.clone(),
         llm_bv: LLMTokenBV::max_ones(),
-        depth: 0,
     });
 
     // We include node, push_bv, llm_bv in visited to avoid infinite exploration across cycles.
@@ -719,21 +717,6 @@ fn compute_push_elim_exits(
             if steps < 100 { // Log first few skips
                  crate::debug!(5, "[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
             }
-            continue;
-        }
-
-        // Bound exploration by path length to match the path-based algorithm's behavior.
-        // When we exceed MAX_PATH_LEN, treat the current node as blocked.
-        if state.depth >= MAX_PATH_LEN {
-            if steps < 100 {
-                crate::debug!(5, "[challenge_elim]       - Depth limit reached, creating BlockedPush exit.");
-            }
-            exits.push(Exit::BlockedPush {
-                llm: state.llm_bv.clone(),
-                push_bv: state.push_bv.clone(),
-                dst: state.node,
-                on_cycle: nodes_on_cycle.contains(&state.node.as_usize()),
-            });
             continue;
         }
         if steps < 100 { // Log first few processed
@@ -770,7 +753,6 @@ fn compute_push_elim_exits(
                                 node: *dst_idx,
                                 push_bv: state.push_bv.clone(),
                                 llm_bv: state.llm_bv.clone(),
-                                depth: state.depth, // NoOp edges don't count toward path length
                             });
                         }
                     }
@@ -787,7 +769,6 @@ fn compute_push_elim_exits(
                                 node: *dst_idx,
                                 push_bv: state.push_bv.clone(),
                                 llm_bv: next_llm.clone(),
-                                depth: state.depth, // CheckLLM edges don't count toward path length
                             });
                         }
                     }
@@ -832,7 +813,6 @@ fn compute_push_elim_exits(
                                         node: *dst_idx,
                                         push_bv: next_push,
                                         llm_bv: state.llm_bv.clone(),
-                                        depth: state.depth + 1,
                                     });
                                 }
                                 1 => {

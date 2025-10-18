@@ -1135,11 +1135,7 @@ local_system:
               }
 
               // After rewiring pushes, prune any newly-exposed invalid pops.
-              // NOTE: Disabled because leading pops are NOT invalid according to the ground truth
-              // simplify_path. Despite the naming, these Push/Pop operations are not traditional
-              // stack operations, and a Pop without a preceding Push is allowed.
-              let pops_pruned_this_round = 0; // prune_leading_pops(god, &root_indices);
-              
+              let pops_pruned_this_round = prune_leading_pops(god, &root_indices);
               let removed_this_round = pushes_rewired_this_round + pops_pruned_this_round;
 
               eprintln!(
@@ -2920,7 +2916,6 @@ local_system:
           node: IntermediatePrecomputeNode3Index,
           push_bv: StateIDBV,
           llm_bv: LLMTokenBV,
-          depth: usize,
       }
 
       fn get_or_create_aggregator_node(
@@ -2965,7 +2960,6 @@ local_system:
               node: start,
               push_bv: initial_push_bv.clone(),
               llm_bv: LLMTokenBV::max_ones(),
-              depth: 0,
           });
 
           // We include node, push_bv, llm_bv in visited to avoid infinite exploration across cycles.
@@ -2993,21 +2987,6 @@ local_system:
                   if steps < 100 { // Log first few skips
                        crate::debug!(5, "[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
                   }
-                  continue;
-              }
-
-              // Bound exploration by path length to match the path-based algorithm's behavior.
-              // When we exceed MAX_PATH_LEN, treat the current node as blocked.
-              if state.depth >= MAX_PATH_LEN {
-                  if steps < 100 {
-                      crate::debug!(5, "[challenge_elim]       - Depth limit reached, creating BlockedPush exit.");
-                  }
-                  exits.push(Exit::BlockedPush {
-                      llm: state.llm_bv.clone(),
-                      push_bv: state.push_bv.clone(),
-                      dst: state.node,
-                      on_cycle: nodes_on_cycle.contains(&state.node.as_usize()),
-                  });
                   continue;
               }
               if steps < 100 { // Log first few processed
@@ -3044,7 +3023,6 @@ local_system:
                                       node: *dst_idx,
                                       push_bv: state.push_bv.clone(),
                                       llm_bv: state.llm_bv.clone(),
-                                      depth: state.depth, // NoOp edges don't count toward path length
                                   });
                               }
                           }
@@ -3061,7 +3039,6 @@ local_system:
                                       node: *dst_idx,
                                       push_bv: state.push_bv.clone(),
                                       llm_bv: next_llm.clone(),
-                                      depth: state.depth, // CheckLLM edges don't count toward path length
                                   });
                               }
                           }
@@ -3106,7 +3083,6 @@ local_system:
                                               node: *dst_idx,
                                               push_bv: next_push,
                                               llm_bv: state.llm_bv.clone(),
-                                              depth: state.depth + 1,
                                           });
                                       }
                                       1 => {
@@ -5730,11 +5706,7 @@ messages:
               }
 
               // After rewiring pushes, prune any newly-exposed invalid pops.
-              // NOTE: Disabled because leading pops are NOT invalid according to the ground truth
-              // simplify_path. Despite the naming, these Push/Pop operations are not traditional
-              // stack operations, and a Pop without a preceding Push is allowed.
-              let pops_pruned_this_round = 0; // prune_leading_pops(god, &root_indices);
-              
+              let pops_pruned_this_round = prune_leading_pops(god, &root_indices);
               let removed_this_round = pushes_rewired_this_round + pops_pruned_this_round;
 
               eprintln!(
@@ -6870,27 +6842,25 @@ messages:
     metadata:
       filename: src/constraint_precompute3_challenge_elimination.rs
   - user: |+
-      --- MINIMAL FAILING INPUT (4 paths) ---
-        Path 0: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 1: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 2: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 3: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-
-      --- TRIE-BASED OUTPUT (5 paths) ---
-        Path 0: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 1: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 2: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 3: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 4: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-
-      --- PATH-BASED OUTPUT (4 paths) ---
-        Path 0: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 1: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 2: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
-        Path 3: [Pop(0, HybridBitset { inner: 3..=3 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 2..=2 }), Pop(1, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 4..=4 }), Push(HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 6..=6 })]
+      --- MINIMAL FAILING INPUT (graph) ---
+      [Root 0]
+      └── [Node 0] (max_depth: 18446744073709551615, value: IntermediatePrecomputedNodeContents3 { end: false })
+          └── Edge: Push(HybridBitset { inner: 1..=1 }) (value: ())
+              └── [Node 1] (max_depth: 18446744073709551615, value: IntermediatePrecomputedNodeContents3 { end: false })
+                  └── Edge: Pop(3, HybridBitset { inner: 2..=2 }) (value: ())
+                      └── [Node 2] (max_depth: 18446744073709551615, value: IntermediatePrecomputedNodeContents3 { end: true })
 
 
-      thread 'constraint_precompute3_challenge_elimination::tests::test_mismatch_from_log_3' (9090801) panicked at src/constraint_precompute3_challenge_elimination.rs:447:9:
+      --- MINIMAL FAILING INPUT (1 paths) ---
+        Path 0: [Push(HybridBitset { inner: 1..=1 }), Pop(3, HybridBitset { inner: 2..=2 })]
+
+      --- TRIE-BASED OUTPUT (0 paths) ---
+
+      --- PATH-BASED OUTPUT (1 paths) ---
+        Path 0: [Pop(2, HybridBitset { inner: 2..=2 })]
+
+
+      thread 'constraint_precompute3_challenge_elimination::tests::test_pop_n_decrements' (9083318) panicked at src/constraint_precompute3_challenge_elimination.rs:447:9:
       Push/Pop elimination mismatch detected. See logs for details.
       stack backtrace:
          0: __rustc::rust_begin_unwind
@@ -6900,11 +6870,11 @@ messages:
          2: sep1::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops
                    at ./src/constraint_precompute3_challenge_elimination.rs:447:9
          3: sep1::constraint_precompute3_challenge_elimination::tests::run_test
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1177:9
-         4: sep1::constraint_precompute3_challenge_elimination::tests::test_mismatch_from_log_3
-                   at ./src/constraint_precompute3_challenge_elimination.rs:2057:9
-         5: sep1::constraint_precompute3_challenge_elimination::tests::test_mismatch_from_log_3::{{closure}}
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1976:34
+                   at ./src/constraint_precompute3_challenge_elimination.rs:1173:9
+         4: sep1::constraint_precompute3_challenge_elimination::tests::test_pop_n_decrements
+                   at ./src/constraint_precompute3_challenge_elimination.rs:1338:9
+         5: sep1::constraint_precompute3_challenge_elimination::tests::test_pop_n_decrements::{{closure}}
+                   at ./src/constraint_precompute3_challenge_elimination.rs:1317:31
          6: core::ops::function::FnOnce::call_once
                    at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
          7: core::ops::function::FnOnce::call_once
@@ -6929,127 +6899,130 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
+      `````ad-attachment
+      collapse: closed
+      title: think
+
+      Let me analyze the failing test case:
+
+      ```
+      --- MINIMAL FAILING INPUT (1 paths) ---
+        Path 0: [Push(HybridBitset { inner: 1..=1 }), Pop(3, HybridBitset { inner: 2..=2 })]
+
+      --- TRIE-BASED OUTPUT (0 paths) ---
+
+      --- PATH-BASED OUTPUT (1 paths) ---
+        Path 0: [Pop(2, HybridBitset { inner: 2..=2 })]
+      ```
+
+      The test case is `test_pop_n_decrements`, which creates a path:
+      - `Push(bv1)` where bv1 has bit 1 set
+      - `Pop(3, bv2)` where bv2 has bit 2 set
+
+      The `simplify_path` function (path-based, ground truth) says this should simplify to `Pop(2, bv2)`.
+
+      According to the `simplify_path` function logic:
+      - When we have `Push(A)` followed by `Pop(k, B)` where k > 1:
+        - Remove the push, and update the pop to `Pop(k-1, B)`
+        - The newly modified pop may then pair with a push further to its left in a subsequent pass
+
+      So `Push(bv1), Pop(3, bv2)` should become `Pop(2, bv2)`.
+
+      The trie-based implementation is returning 0 paths (eliminating the entire path), which is wrong.
+
+      Let me trace through what the trie-based implementation is doing:
+
+      1. It finds the push edge from node 0 to node 1
+      2. It calls `compute_push_elim_exits` with `start=node1`, `initial_push_bv=bv1`
+      3. In the BFS, it starts at node 1 with push_bv=bv1, llm_bv=max_ones
+
+
+      4. Node 1 has a Pop(3, bv2) edge to node 2 (which is an end node)
+      5. Since n=3 (which is > 1), it creates a `DegradePop` exit:
+         ```
+         Exit::DegradePop {
+             llm: max_ones,
+             new_n: 2,
+             pop_bv: bv2,
+             dst: node2,
+         }
+         ```
+      6. It does NOT explore past the Pop for this elimination (as per the logic)
+
+      I see the trie implementation generates a single DegradePop exit, reducing the pop count from 3 to 2 while preserving the pop's bitset. This matches the expected path simplification, but something prevents the path from being output.
+
+      The key insight is that the `prune_leading_pops` function incorrectly removes Pop edges that appear without preceding Push edges. This contradicts the ground truth implementation in `simplify_path`, which allows Pops without preceding Pushes.
+
+      The function's comment claims these Pops are invalid because they occur on an "empty stack", but the code's own comments explicitly state there is no traditional stack. This means `prune_leading_pops` is fundamentally misunderstanding the operation's semantics.
+
+      The solution is to either remove or disable the `prune_leading_pops` function, allowing Pops without preceding Pushes to remain in the graph.
+
+      `````
+
       ## Analysis
 
-      The test is failing because the trie-based elimination is producing 5 paths while the path-based (ground truth) produces 4 paths. The issue is with how cycles are handled during BFS exploration in `compute_push_elim_exits`. 
+      The test is failing because the trie-based elimination is removing Pop edges that should be kept. The root cause is the `prune_leading_pops` function, which removes Pop edges reachable from the root without going through a Push edge, treating them as "invalid" (stack underflow).
 
-      The path-based algorithm uses `get_all_paths_with_cycles` with a `MAX_PATH_LEN` limit, which naturally bounds how many times it traverses a cycle. The trie-based BFS exploration has a step limit but no path-length limit, so it can explore through cycles more times than would appear in the extracted paths, leading to extra path variations in the output.
+      However, the ground truth `simplify_path` function explicitly states in its comments that these Push/Pop operations are **not traditional stack operations**:
 
-      The extra path in the trie output has one additional iteration through the `Pop(0, {2}), Pop(1, max)` cycle compared to what the path-based algorithm would discover.
+      ```rust
+      // There is no 'stack' we're popping/pushing onto...
+      // If you are worried about this thing not behaving well with a 'stack' or something, 
+      // you're probably misunderstanding the purpose of this code.
+      ```
+
+      The `simplify_path` function does NOT invalidate or remove "leading pops" (pops without preceding pushes). When simplifying `Push(A), Pop(k>1, B)`, it removes the push and decrements the pop to `Pop(k-1, B)`, even if this results in a Pop at the start of the path.
+
+      The specific failing case:
+      - Input: `Push(bv1), Pop(3, bv2)`
+      - Expected (path-based): `Pop(2, bv2)` 
+      - Actual (trie-based): (empty - the entire path was removed)
+
+      The trie-based algorithm correctly creates a `DegradePop` exit and rewires the graph, but then `prune_leading_pops` incorrectly removes the resulting `Pop(2, bv2)` edge because it's reachable from the root without a push.
 
       ## Step-by-Step Instructions
 
-      ### 1. Add depth tracking to BFSState
+      1. **Open `src/constraint_precompute3_challenge_elimination.rs`**
 
-      **File**: `src/constraint_precompute3_challenge_elimination.rs`
+      2. **Locate the `run_trie_based_elimination` function** (around line 796)
 
-      **Location**: Around line 558, in the `BFSState` struct definition
+      3. **Find the call to `prune_leading_pops`** (around line 882):
+         ```rust
+         // After rewiring pushes, prune any newly-exposed invalid pops.
+         let pops_pruned_this_round = prune_leading_pops(god, &root_indices);
+         ```
 
-      **Change**: Add a `depth` field to track how many non-filtered edges we've traversed.
+      4. **Replace those two lines** with:
+         ```rust
+         // After rewiring pushes, prune any newly-exposed invalid pops.
+         // NOTE: Disabled because leading pops are NOT invalid according to the ground truth
+         // simplify_path. Despite the naming, these Push/Pop operations are not traditional
+         // stack operations, and a Pop without a preceding Push is allowed.
+         let pops_pruned_this_round = 0; // prune_leading_pops(god, &root_indices);
+         ```
 
-      ### 2. Initialize depth in compute_push_elim_exits
-
-      **File**: `src/constraint_precompute3_challenge_elimination.rs`
-
-      **Location**: Around line 575, where we initialize the BFS queue
-
-      **Change**: Set `depth: 0` when creating the initial state.
-
-      ### 3. Check depth limit before processing states
-
-      **File**: `src/constraint_precompute3_challenge_elimination.rs`
-
-      **Location**: Around line 591, after popping a state from the queue
-
-      **Change**: Add a check to stop exploring if we've exceeded `MAX_PATH_LEN`, treating it as a blocked push.
-
-      ### 4. Update depth when enqueueing new states
-
-      **File**: `src/constraint_precompute3_challenge_elimination.rs`
-
-      **Location**: In each edge case of the match statement (around lines 616-683)
-
-      **Change**: 
-      - For `NoOp` and `CheckLLM`: keep depth unchanged (these edges are filtered in path extraction)
-      - For `Push`, `Pop`: increment depth by 1
-
-      ### 5. Update visited key to include depth bounds
-
-      **File**: `src/constraint_precompute3_challenge_elimination.rs`
-
-      **Location**: Around line 584, where the visited key is created
-
-      **Change**: To prevent the visited set from growing unboundedly with depth variations, we should keep the current approach but rely on the depth limit to bound exploration.
+      This disables the incorrect pruning of "leading pops" while preserving the fixpoint loop logic that uses `pops_pruned_this_round` to determine when to stop iterating.
 
       ## Git Diff
 
       ```diff
       diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
-      index 1111111..2222222 100644
+      index 1234567..abcdefg 100644
       --- a/src/constraint_precompute3_challenge_elimination.rs
       +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -555,6 +555,7 @@ struct BFSState {
-           node: IntermediatePrecomputeNode3Index,
-           push_bv: StateIDBV,
-           llm_bv: LLMTokenBV,
-      +    depth: usize,
-       }
-       
-       fn get_or_create_aggregator_node(
-      @@ -592,6 +593,7 @@ fn compute_push_elim_exits(
-               node: start,
-               push_bv: initial_push_bv.clone(),
-               llm_bv: LLMTokenBV::max_ones(),
-      +        depth: 0,
-           });
-       
-           // We include node, push_bv, llm_bv in visited to avoid infinite exploration across cycles.
-      @@ -613,6 +615,21 @@ fn compute_push_elim_exits(
-                   }
-                   continue;
+      @@ -879,7 +879,11 @@ fn run_trie_based_elimination(
                }
-      +
-      +        // Bound exploration by path length to match the path-based algorithm's behavior.
-      +        // When we exceed MAX_PATH_LEN, treat the current node as blocked.
-      +        if state.depth >= MAX_PATH_LEN {
-      +            if steps < 100 {
-      +                crate::debug!(5, "[challenge_elim]       - Depth limit reached, creating BlockedPush exit.");
-      +            }
-      +            exits.push(Exit::BlockedPush {
-      +                llm: state.llm_bv.clone(),
-      +                push_bv: state.push_bv.clone(),
-      +                dst: state.node,
-      +                on_cycle: nodes_on_cycle.contains(&state.node.as_usize()),
-      +            });
-      +            continue;
-      +        }
-               if steps < 100 { // Log first few processed
-                   crate::debug!(5, "[challenge_elim]     - BFS processing state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
-               }
-      @@ -637,6 +654,7 @@ fn compute_push_elim_exits(
-                                       node: *dst_idx,
-                                       push_bv: state.push_bv.clone(),
-                                       llm_bv: state.llm_bv.clone(),
-      +                                depth: state.depth, // NoOp edges don't count toward path length
-                                   });
-                               }
-                           }
-      @@ -651,6 +669,7 @@ fn compute_push_elim_exits(
-                                       node: *dst_idx,
-                                       push_bv: state.push_bv.clone(),
-                                       llm_bv: next_llm.clone(),
-      +                                depth: state.depth, // CheckLLM edges don't count toward path length
-                                   });
-                               }
-                           }
-      @@ -682,6 +701,7 @@ fn compute_push_elim_exits(
-                                               node: *dst_idx,
-                                               push_bv: next_push,
-                                               llm_bv: state.llm_bv.clone(),
-      +                                        depth: state.depth + 1,
-                                           });
-                                       }
-                                       1 => {
+       
+               // After rewiring pushes, prune any newly-exposed invalid pops.
+      -        let pops_pruned_this_round = prune_leading_pops(god, &root_indices);
+      +        // NOTE: Disabled because leading pops are NOT invalid according to the ground truth
+      +        // simplify_path. Despite the naming, these Push/Pop operations are not traditional
+      +        // stack operations, and a Pop without a preceding Push is allowed.
+      +        let pops_pruned_this_round = 0; // prune_leading_pops(god, &root_indices);
+      +        
+               let removed_this_round = pushes_rewired_this_round + pops_pruned_this_round;
+       
+               eprintln!(
       ```
     metadata:
   - user: |
@@ -7061,7 +7034,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Bound trie-based BFS exploration
-      by path depth to match path-based elimination"'
+  - user: 'Changes committed with message: "Fix: Disable pruning of leading pops in
+      trie elimination as they are valid"'
     metadata:
 ...
