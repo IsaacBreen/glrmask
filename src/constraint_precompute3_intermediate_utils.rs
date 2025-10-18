@@ -25,7 +25,7 @@ pub fn optimize_intermediate_trie3_template(
         if !changed { break; }
     }
 
-    let god2 = god.clone();
+    let god2 = god.deep_clone();
     structural_merge_nodes_in_subgraph(&[*start_node], &pinned, &god2);
     let roots = &[*start_node];
     let normalized_paths1: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&god, roots, |idx, n| idx == *end_node)
