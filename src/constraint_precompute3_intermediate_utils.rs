@@ -167,7 +167,7 @@ fn merge_nodes_intermediate_trie3(
     for _it in 0..max_iters {
         type Signature = (bool, Vec<(IntermediateTrie3EdgeKey, usize)>);
 
-        let mut sig_to_id: HashMap<Signature, usize> = HashMap::new();
+        let mut sig_to_id: BTreeMap<Signature, usize> = BTreeMap::new();
         let mut new_class = vec![0; n];
         let mut next_id = 0;
         let mut changes = 0;
