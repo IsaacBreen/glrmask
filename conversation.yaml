@@ -2457,6 +2457,56 @@ local_system:
                   assert_eq!(*t, format!("n{}", i + 1));
               }
           }
+
+          #[test]
+          fn test_get_all_paths_with_cycles_uncounted_cycle() {
+              type TestTrie = Trie<String, (), String>;
+              let arena = Arena::<TestTrie>::new();
+
+              // Graph: root -> c1 -> target
+              //          ^    |
+              //          |    v
+              //          -- c2 -- (uncounted cycle)
+              let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+              let c1 = Trie2Index::from(arena.insert(Trie::new("c1".to_string())));
+              let c2 = Trie2Index::from(arena.insert(Trie::new("c2".to_string())));
+              let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
+
+              // Edges
+              // Counted edge: root -> c1
+              root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), c1);
+              // Uncounted cycle: c1 -> c2 -> c1
+              c1.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c2);
+              c2.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c1);
+              // Counted edge: c1 -> target
+              c1.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
+
+              let paths = TestTrie::get_all_paths_with_cycles(
+                  &arena,
+                  &[root],
+                  |idx, _| idx == target,
+                  |ek, _, _| ek == "counted",
+                  5, // max_path_length
+              );
+
+              // The traversal should be: root -> c1 -> (cycle c1-c2 is traversed but not infinitely) -> target
+              // The `visiting` set should prevent infinite loops.
+              // The returned path should only contain the "counted" edges.
+              assert_eq!(paths.len(), 1, "Should find exactly one path to the target");
+
+              let (root_val, path) = &paths[0];
+              assert_eq!(*root_val, "root");
+              assert_eq!(path.len(), 2, "Path should have 2 counted edges");
+
+              // Verify path contents
+              let (ek1, _ev1, t1) = &path[0];
+              assert_eq!(*ek1, "counted");
+              assert_eq!(*t1, "c1");
+
+              let (ek2, _ev2, t2) = &path[1];
+              assert_eq!(*ek2, "counted");
+              assert_eq!(*t2, "target");
+          }
       }
 
   prev_file_contents:
@@ -4963,6 +5013,56 @@ local_system:
               assert_eq!(*ek2, "counted");
               assert_eq!(*t2, "target");
           }
+
+          #[test]
+          fn test_get_all_paths_with_cycles_mixed_cycle() {
+              type TestTrie = Trie<String, (), String>;
+              let arena = Arena::<TestTrie>::new();
+
+              // Graph:
+              // root -> a (counted)
+              // a -> b (uncounted)
+              // b -> c (uncounted)
+              // c -> a (counted, cycle)
+              // c -> target (counted)
+              let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+              let a = Trie2Index::from(arena.insert(Trie::new("a".to_string())));
+              let b = Trie2Index::from(arena.insert(Trie::new("b".to_string())));
+              let c = Trie2Index::from(arena.insert(Trie::new("c".to_string())));
+              let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
+
+              // Edges
+              root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), a);
+              a.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), b);
+              b.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c);
+              c.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), a);
+              c.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
+
+              let paths = TestTrie::get_all_paths_with_cycles(
+                  &arena,
+                  &[root],
+                  |idx, _| idx == target,
+                  |ek, _, _| ek == "counted",
+                  5, // max_path_length
+              );
+
+              // The traversal should be: root -> a -> b -> c -> (back to a is blocked by `visiting`) -> target.
+              // The function should not loop infinitely and should find the one simple path to the target.
+              assert_eq!(paths.len(), 1, "Should find exactly one simple path to the target");
+
+              let (root_val, path) = &paths[0];
+              assert_eq!(*root_val, "root");
+              assert_eq!(path.len(), 2, "Path should have 2 counted edges");
+
+              // Verify path contents
+              let (ek1, _ev1, t1) = &path[0];
+              assert_eq!(*ek1, "counted");
+              assert_eq!(*t1, "a");
+
+              let (ek2, _ev2, t2) = &path[1];
+              assert_eq!(*ek2, "counted");
+              assert_eq!(*t2, "target");
+          }
       }
 
   diffs_applied_this_send: true
@@ -7460,44 +7560,7 @@ messages:
                   assert_eq!(*t, format!("n{}", i + 1));
               }
           }
-      }
 
-
-      ```
-    metadata:
-      filename: src/datastructures/trie.rs
-  - user: Add a test for `get_all_paths_with_cycles` that demonstrates it not infinitely
-      looping in a trie where there is a cycle involving only edges that are not counted
-      via `counts_toward_length`.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested test case, followed by the corresponding git diff.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `src/datastructures/trie.rs`**.
-      2.  **Navigate to the end of the file** where the `#[cfg(test)] mod tests { ... }` block is defined.
-      3.  **Add a new test function** inside this block. The new test will create a graph with a cycle of "uncounted" edges and verify that the pathfinding algorithm terminates correctly and finds the expected path.
-
-          Insert the following code after the `test_get_all_paths_with_cycles_long_path` function:
-
-          ```rust
           #[test]
           fn test_get_all_paths_with_cycles_uncounted_cycle() {
               type TestTrie = Trie<String, (), String>;
@@ -7547,44 +7610,133 @@ messages:
               assert_eq!(*ek2, "counted");
               assert_eq!(*t2, "target");
           }
+      }
+
+
+      ```
+    metadata:
+      filename: src/datastructures/trie.rs
+  - user: Add a test for `get_all_paths_with_cycles` that demonstrates it not infinitely
+      looping in a trie where there is a cycle involving some edges that are not counted
+      via `counts_toward_length`, but one edge that is counted.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to add the requested test, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `src/datastructures/trie.rs`**.
+      2.  **Navigate to the `tests` module** at the very end of the file.
+      3.  **Add a new test function** inside the `mod tests { ... }` block, after the existing `test_get_all_paths_with_cycles_uncounted_cycle` test. This new test will verify that the pathfinding logic correctly handles cycles with a mix of "counted" and "uncounted" edges without getting into an infinite loop.
+
+          Copy and paste the following code for the new test:
+
+          ```rust
+          #[test]
+          fn test_get_all_paths_with_cycles_mixed_cycle() {
+              type TestTrie = Trie<String, (), String>;
+              let arena = Arena::<TestTrie>::new();
+
+              // Graph:
+              // root -> a (counted)
+              // a -> b (uncounted)
+              // b -> c (uncounted)
+              // c -> a (counted, cycle)
+              // c -> target (counted)
+              let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+              let a = Trie2Index::from(arena.insert(Trie::new("a".to_string())));
+              let b = Trie2Index::from(arena.insert(Trie::new("b".to_string())));
+              let c = Trie2Index::from(arena.insert(Trie::new("c".to_string())));
+              let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
+
+              // Edges
+              root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), a);
+              a.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), b);
+              b.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c);
+              c.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), a);
+              c.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
+
+              let paths = TestTrie::get_all_paths_with_cycles(
+                  &arena,
+                  &[root],
+                  |idx, _| idx == target,
+                  |ek, _, _| ek == "counted",
+                  5, // max_path_length
+              );
+
+              // The traversal should be: root -> a -> b -> c -> (back to a is blocked by `visiting`) -> target.
+              // The function should not loop infinitely and should find the one simple path to the target.
+              assert_eq!(paths.len(), 1, "Should find exactly one simple path to the target");
+
+              let (root_val, path) = &paths[0];
+              assert_eq!(*root_val, "root");
+              assert_eq!(path.len(), 2, "Path should have 2 counted edges");
+
+              // Verify path contents
+              let (ek1, _ev1, t1) = &path[0];
+              assert_eq!(*ek1, "counted");
+              assert_eq!(*t1, "a");
+
+              let (ek2, _ev2, t2) = &path[1];
+              assert_eq!(*ek2, "counted");
+              assert_eq!(*t2, "target");
+          }
           ```
 
       ### Git Diff
 
-      Here is the git diff for the changes:
+      Here is the git patch to apply the changes:
 
       ```diff
       diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
-      index 2891963..39178f0 100644
+      index 289458e..82e750b 100644
       --- a/src/datastructures/trie.rs
       +++ b/src/datastructures/trie.rs
-      @@ -1945,5 +1945,51 @@
-                   assert_eq!(*t, format!("n{}", i + 1));
-               }
+      @@ -2012,4 +2012,50 @@
+               assert_eq!(*ek2, "counted");
+               assert_eq!(*t2, "target");
            }
+      -}
       +
       +    #[test]
-      +    fn test_get_all_paths_with_cycles_uncounted_cycle() {
+      +    fn test_get_all_paths_with_cycles_mixed_cycle() {
       +        type TestTrie = Trie<String, (), String>;
       +        let arena = Arena::<TestTrie>::new();
       +
-      +        // Graph: root -> c1 -> target
-      +        //          ^    |
-      +        //          |    v
-      +        //          -- c2 -- (uncounted cycle)
+      +        // Graph:
+      +        // root -> a (counted)
+      +        // a -> b (uncounted)
+      +        // b -> c (uncounted)
+      +        // c -> a (counted, cycle)
+      +        // c -> target (counted)
       +        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
-      +        let c1 = Trie2Index::from(arena.insert(Trie::new("c1".to_string())));
-      +        let c2 = Trie2Index::from(arena.insert(Trie::new("c2".to_string())));
+      +        let a = Trie2Index::from(arena.insert(Trie::new("a".to_string())));
+      +        let b = Trie2Index::from(arena.insert(Trie::new("b".to_string())));
+      +        let c = Trie2Index::from(arena.insert(Trie::new("c".to_string())));
       +        let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
       +
       +        // Edges
-      +        // Counted edge: root -> c1
-      +        root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), c1);
-      +        // Uncounted cycle: c1 -> c2 -> c1
-      +        c1.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c2);
-      +        c2.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c1);
-      +        // Counted edge: c1 -> target
-      +        c1.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
+      +        root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), a);
+      +        a.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), b);
+      +        b.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c);
+      +        c.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), a);
+      +        c.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
       +
       +        let paths = TestTrie::get_all_paths_with_cycles(
       +            &arena,
@@ -7594,10 +7746,9 @@ messages:
       +            5, // max_path_length
       +        );
       +
-      +        // The traversal should be: root -> c1 -> (cycle c1-c2 is traversed but not infinitely) -> target
-      +        // The `visiting` set should prevent infinite loops.
-      +        // The returned path should only contain the "counted" edges.
-      +        assert_eq!(paths.len(), 1, "Should find exactly one path to the target");
+      +        // The traversal should be: root -> a -> b -> c -> (back to a is blocked by `visiting`) -> target.
+      +        // The function should not loop infinitely and should find the one simple path to the target.
+      +        assert_eq!(paths.len(), 1, "Should find exactly one simple path to the target");
       +
       +        let (root_val, path) = &paths[0];
       +        assert_eq!(*root_val, "root");
@@ -7606,14 +7757,13 @@ messages:
       +        // Verify path contents
       +        let (ek1, _ev1, t1) = &path[0];
       +        assert_eq!(*ek1, "counted");
-      +        assert_eq!(*t1, "c1");
+      +        assert_eq!(*t1, "a");
       +
       +        let (ek2, _ev2, t2) = &path[1];
       +        assert_eq!(*ek2, "counted");
       +        assert_eq!(*t2, "target");
       +    }
-       }
-       
+      +}
 
       ```
     metadata:
@@ -7626,7 +7776,7 @@ messages:
       Applying patch to 'src/datastructures/trie.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/trie.rs.
     metadata:
-  - user: 'Changes committed with message: "Test: Add test for get_all_paths_with_cycles
-      handling uncounted cycles"'
+  - user: 'Changes committed with message: "test: Add test for get_all_paths_with_cycles
+      with mixed counted/uncounted cycle"'
     metadata:
 ...
