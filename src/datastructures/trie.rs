@@ -889,6 +889,9 @@ where
     /// * `roots`: The starting nodes for path traversal.
     /// * `is_end`: A predicate that returns true if a node is a valid end point for a path.
     ///             A path is only returned if its final node satisfies this predicate.
+    /// * `counts_toward_length`: A predicate that decides whether an edge is INCLUDED in traversal.
+    ///             If it returns false for an edge, that edge is EXCLUDED entirely (not traversed,
+    ///             not counted). This also prevents cycles formed by excluded edges.
     /// * `max_path_length`: The maximum length of a path (number of edges) to explore.
     pub fn get_all_paths_with_cycles<F, G>(
         arena: &Arena<Self>,
@@ -941,12 +944,12 @@ where
         // Iterative DFS to avoid stack overflows on deep/large graphs.
         // Semantics match the recursive version:
         // - Record a path when is_end(current_node) is true (including the root with a zero-length path).
-        // - Enforce max_path_length AFTER recording the current node as an endpoint, based on counted edges.
-        // - Allow revisiting nodes (cycles are allowed) but stop expanding when the edge-count path length reaches max_path_length.
-
+        // - Edges are filtered using `counts_toward_length`; only INCLUDED edges are traversed and appended to the path.
+        // - Enforce max_path_length AFTER recording the current node as an endpoint, based on INCLUDED edges only
+        //   (i.e., `path.len()` counts only included/traversed edges).
+        // - Allow revisiting nodes (cycles are allowed) but stop expanding when the included-edge path length reaches max_path_length.
         // Work on a local copy of the path, so callers' mutable reference remains unchanged.
         let mut path: Vec<(EK, EV, T)> = current_path.clone();
-
         // Stack frame for iterative DFS.
         struct Frame<EK2, EV2> {
             node: Trie2Index,
@@ -956,15 +959,20 @@ where
             started: bool,              // Whether we've done the "node entry" work (is_end + length check)
             has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`
         }
-
         // Helper to snapshot a node's outgoing edges in deterministic order (no locks held after).
         let edges_for = |n: Trie2Index| -> Vec<(EK, EV, Trie2Index)> {
             if let Some(g) = n.read(arena) {
-                g.children().iter()
+                g.children()
+                    .iter()
                     .flat_map(|(ek, dest_map)| {
                         let ekc = ek.clone();
-                        dest_map.iter()
-                            .map(move |(child_idx, ev)| (ekc.clone(), ev.clone(), *child_idx))
+                        dest_map.iter().filter_map(move |(child_idx, ev)| {
+                            if counts_toward_length(&ekc, ev, *child_idx) {
+                                Some((ekc.clone(), ev.clone(), *child_idx))
+                            } else {
+                                None
+                            }
+                        })
                     })
                     .collect()
             } else {
