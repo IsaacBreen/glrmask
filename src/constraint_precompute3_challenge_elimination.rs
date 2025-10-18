@@ -526,7 +526,7 @@ fn compute_push_elim_exits(
     initial_push_bv: &StateIDBV,
     god: &IntermediateTrie3GodWrapper,
 ) -> Vec<Exit> {
-    eprintln!(
+    crate::debug!(5,
         "[challenge_elim]   - compute_push_elim_exits(start: {}, initial_push_bv: {:?})",
         start, initial_push_bv
     );
@@ -548,32 +548,32 @@ fn compute_push_elim_exits(
     while let Some(state) = q.pop_front() {
         steps += 1;
         if steps % 10_000 == 0 {
-            eprintln!(
+            crate::debug!(5,
                 "[challenge_elim]   - BFS progress: {} states explored (q_len: {}, visited: {}, exits: {}), guard {}",
                 steps, q.len(), visited.len(), exits.len(), max_steps
             );
         }
         if steps > max_steps {
-            eprintln!("[challenge_elim] Warning: BFS step guard hit while eliminating a Push; breaking exploration to avoid non-termination.");
+            crate::debug!(5, "[challenge_elim] Warning: BFS step guard hit while eliminating a Push; breaking exploration to avoid non-termination.");
             break;
         }
 
         let key = (state.node.as_usize(), state.push_bv.clone(), state.llm_bv.clone());
         if !visited.insert(key) {
             if steps < 100 { // Log first few skips
-                 eprintln!("[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
+                 crate::debug!(5, "[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
             }
             continue;
         }
         if steps < 100 { // Log first few processed
-            eprintln!("[challenge_elim]     - BFS processing state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
+            crate::debug!(5, "[challenge_elim]     - BFS processing state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
         }
 
         // If this node is an end, then along this branch we can only preserve the Push (blocked).
         if let Some(read_guard) = state.node.read(god) {
             if read_guard.value.end {
                 if steps < 100 {
-                    eprintln!("[challenge_elim]       - Found end node, creating BlockedPush exit.");
+                    crate::debug!(5, "[challenge_elim]       - Found end node, creating BlockedPush exit.");
                 }
                 exits.push(Exit::BlockedPush {
                     llm: state.llm_bv.clone(),
@@ -586,13 +586,13 @@ fn compute_push_elim_exits(
             // Explore outgoing edges
             for (ek, dsts) in read_guard.children().iter() {
                 if steps < 100 {
-                    eprintln!("[challenge_elim]       - Exploring edge {:?} to {} dests", ek, dsts.len());
+                    crate::debug!(5, "[challenge_elim]       - Exploring edge {:?} to {} dests", ek, dsts.len());
                 }
                 match ek {
                     IntermediateTrie3EdgeKey::NoOp => {
                         for (dst_idx, _ev) in dsts.iter() {
                             if steps < 100 {
-                                eprintln!("[challenge_elim]         - Enqueueing NoOp -> {}", dst_idx);
+                                crate::debug!(5, "[challenge_elim]         - Enqueueing NoOp -> {}", dst_idx);
                             }
                             q.push_back(BFSState {
                                 node: *dst_idx,
@@ -608,7 +608,7 @@ fn compute_push_elim_exits(
                         next_llm &= llm2.clone();
                         for (dst_idx, _ev) in dsts.iter() {
                             if steps < 100 {
-                                eprintln!("[challenge_elim]         - Enqueueing CheckLLM -> {} with new llm_bv", dst_idx);
+                                crate::debug!(5, "[challenge_elim]         - Enqueueing CheckLLM -> {} with new llm_bv", dst_idx);
                             }
                             q.push_back(BFSState {
                                 node: *dst_idx,
@@ -626,7 +626,7 @@ fn compute_push_elim_exits(
                         // destination. That would violate the stack semantics used by the
                         // path-based simplifier (which blocks when encountering another push).
                         if steps < 100 {
-                            eprintln!("[challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.");
+                            crate::debug!(5, "[challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.");
                         }
                         exits.push(Exit::BlockedPush {
                             llm: state.llm_bv.clone(),
@@ -643,7 +643,7 @@ fn compute_push_elim_exits(
                                     // Fold into push: A := A ∩ B; prune branch if disjoint.
                                     if state.push_bv.is_disjoint(pop_bv) {
                                         if steps < 100 {
-                                            eprintln!("[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
+                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
                                         }
                                         // Invalid on this branch
                                         continue;
@@ -651,7 +651,7 @@ fn compute_push_elim_exits(
                                     let mut next_push = state.push_bv.clone();
                                     next_push &= pop_bv.clone();
                                     if steps < 100 {
-                                        eprintln!("[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", dst_idx);
+                                        crate::debug!(5, "[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", dst_idx);
                                     }
                                     q.push_back(BFSState {
                                         node: *dst_idx,
@@ -663,12 +663,12 @@ fn compute_push_elim_exits(
                                     // Cancel if intersect; else branch invalid
                                     if state.push_bv.is_disjoint(pop_bv) {
                                         if steps < 100 {
-                                            eprintln!("[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
+                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
                                         }
                                         continue;
                                     }
                                     if steps < 100 {
-                                        eprintln!("[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", dst_idx);
+                                        crate::debug!(5, "[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", dst_idx);
                                     }
                                     exits.push(Exit::Cancel {
                                         llm: state.llm_bv.clone(),
@@ -679,7 +679,7 @@ fn compute_push_elim_exits(
                                 _ => {
                                     // Remove Push and decrement Pop.
                                     if steps < 100 {
-                                        eprintln!("[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
+                                        crate::debug!(5, "[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
                                     }
                                     exits.push(Exit::DegradePop {
                                         llm: state.llm_bv.clone(),
@@ -754,11 +754,11 @@ fn run_trie_based_elimination(
         }
 
         if push_edges.is_empty() {
-            eprintln!("[challenge_elim] No pushes found; done.");
+            crate::debug!(5, "[challenge_elim] No pushes found; done.");
             break;
         }
 
-        eprintln!(
+        crate::debug!(5,
             "[challenge_elim] Round {}: attempting to eliminate {} push edge(s).",
             round,
             push_edges.len()
@@ -783,33 +783,33 @@ fn run_trie_based_elimination(
             processed += 1;
             let pct = (processed * 100) / total;
             if pct >= next_mark {
-                eprintln!(
+                crate::debug!(5,
                     "[challenge_elim] Round {} progress: {}/{} ({}%)",
                     round, processed, total, pct
                 );
                 next_mark += 10;
             }
-            eprintln!("[challenge_elim]  - Processing push edge {} --Push({:?})--> {}", src, push_bv, dst);
+            crate::debug!(5, "[challenge_elim]  - Processing push edge {} --Push({:?})--> {}", src, push_bv, dst);
 
             // Compute or reuse exits for this (dst, push_bv)
             let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
                 Some(v) => {
-                    eprintln!("[challenge_elim]    - Reusing {} exits from cache for (dst {}, push_bv {:?})", v.len(), dst, push_bv);
+                    crate::debug!(5, "[challenge_elim]    - Reusing {} exits from cache for (dst {}, push_bv {:?})", v.len(), dst, push_bv);
                     v.clone()
                 },
                 None => {
-                    eprintln!("[challenge_elim]    - Computing exits for (dst {}, push_bv {:?})", dst, push_bv);
+                    crate::debug!(5, "[challenge_elim]    - Computing exits for (dst {}, push_bv {:?})", dst, push_bv);
                     // BFS exploration to compute exits for (dst, push_bv)
                     // Results are memoized per round to avoid repetition.
                     let e = compute_push_elim_exits(dst, &push_bv, god);
-                    eprintln!("[challenge_elim]    - Found {} exits.", e.len());
+                    crate::debug!(5, "[challenge_elim]    - Found {} exits.", e.len());
                     exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
                     e
                 }
             };
             // Deduplicate exits and detect any blocked branches.
             if exits.is_empty() {
-                eprintln!("[challenge_elim]    - No exits found. Removing original push edge.");
+                crate::debug!(5, "[challenge_elim]    - No exits found. Removing original push edge.");
                 // No viable continuations were found for this push under the stack semantics
                 // (e.g., every branch mismatched). This path is dead; remove the original push.
                 if remove_specific_edge(
@@ -839,7 +839,7 @@ fn run_trie_based_elimination(
             }
 
             if is_stable {
-                eprintln!("[challenge_elim]    - Push edge is stable, no changes made.");
+                crate::debug!(5, "[challenge_elim]    - Push edge is stable, no changes made.");
                 continue;
             }
 
@@ -867,12 +867,12 @@ fn run_trie_based_elimination(
             }
 
             for (llm, cancel_dst) in cancel_set {
-                eprintln!("[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
+                crate::debug!(5, "[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
                 let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                 god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
             }
             for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
-                eprintln!("[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
+                crate::debug!(5, "[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
                 let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                 god.insert_edge_simple(
                     agg,
@@ -882,7 +882,7 @@ fn run_trie_based_elimination(
                 );
             }
             for (llm, exit_push_bv, exit_dst) in blocked_set {
-                eprintln!(
+                crate::debug!(5,
                     "[challenge_elim]      - Considering BlockedPush exit to {}, push_bv: {:?}, llm: {:?}",
                     exit_dst, exit_push_bv, llm
                 );
@@ -896,7 +896,7 @@ fn run_trie_based_elimination(
             }
 
             // Since we handled the stable case, we can always remove the original edge.
-            eprintln!(
+            crate::debug!(5,
                 "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
                 src, push_bv.clone(), dst
             );
@@ -910,7 +910,7 @@ fn run_trie_based_elimination(
             }
         }
 
-        eprintln!(
+        crate::debug!(5,
             "[challenge_elim] Round {} removed {} push edge(s).",
             round, removed_this_round
         );

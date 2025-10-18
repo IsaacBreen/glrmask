@@ -218,7 +218,7 @@ local_system:
       /// and if a mismatch is found, attempts to find a minimal failing input graph.
       /// This adds significant overhead and should only be used for debugging the
       /// elimination logic itself.
-      const DEBUG_MISMATCHES: bool = false;
+      const DEBUG_MISMATCHES: bool = true;
 
       fn debug_mismatches_enabled() -> bool {
           if DEBUG_MISMATCHES {
@@ -1010,27 +1010,6 @@ local_system:
                       }
                   };
                   // Deduplicate exits and detect any blocked branches.
-                  let mut cancel_set: BTreeSet<(LLMTokenBV, IntermediatePrecomputeNode3Index)> =
-                      BTreeSet::new();
-                  let mut degrade_set: BTreeSet<(LLMTokenBV, usize, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                      BTreeSet::new();
-                  let mut blocked_set: BTreeSet<(LLMTokenBV, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                      BTreeSet::new();
-                  let mut saw_blocked = false;
-                  for ex in exits.iter() {
-                      match ex {
-                          Exit::Cancel { llm, dst } => {
-                              cancel_set.insert((llm.clone(), *dst));
-                          }
-                          Exit::DegradePop { llm, new_n, pop_bv, dst } => {
-                              degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
-                          }
-                          Exit::BlockedPush { llm, push_bv: exit_push_bv, dst } => {
-                              saw_blocked = true;
-                              blocked_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
-                          }
-                      }
-                  }
                   if exits.is_empty() {
                       eprintln!("[challenge_elim]    - No exits found. Removing original push edge.");
                       // No viable continuations were found for this push under the stack semantics
@@ -1046,17 +1025,48 @@ local_system:
                       continue;
                   }
 
+                  // Check for stability. A push is stable if all its exits are BlockedPush and they
+                  // represent no-op transformations (i.e., same destination, same push bitvector, no LLM checks).
+                  let mut is_stable = true;
+                  for ex in &exits {
+                      if let Exit::BlockedPush { llm, push_bv: exit_push_bv, dst: exit_dst } = ex {
+                          if *llm != LLMTokenBV::max_ones() || *exit_dst != dst || *exit_push_bv != push_bv {
+                              is_stable = false;
+                              break;
+                          }
+                      } else {
+                          is_stable = false;
+                          break;
+                      }
+                  }
+
+                  if is_stable {
+                      eprintln!("[challenge_elim]    - Push edge is stable, no changes made.");
+                      continue;
+                  }
+
+                  // If not stable, rewire all exits and remove the original edge.
                   let cache = per_src_agg_cache
                       .entry(src)
                       .or_insert_with(BTreeMap::new);
 
-                  // Wire deduplicated exits from src via aggregator nodes.
-                  // - For Cancel/Degrade: wire via aggregator nodes (deduplicated).
-                  // - For BlockedPush: by default, preserve the original Push edge (to avoid blow-up),
-                  //   EXCEPT for the safe Pop(0)-only case that ends at a leaf with no LLM aggregation:
-                  //     we rewire src --Push(restricted_bv)--> leaf and drop the original edge.
-                  //   If any blocked branch is not rewired, we must keep the original edge.
-                  let mut must_keep_original_edge = false;
+                  // Deduplicate exits before wiring.
+                  let mut cancel_set = BTreeSet::new();
+                  let mut degrade_set = BTreeSet::new();
+                  let mut blocked_set = BTreeSet::new();
+                  for ex in exits.iter() {
+                      match ex {
+                          Exit::Cancel { llm, dst } => {
+                              cancel_set.insert((llm.clone(), *dst));
+                          }
+                          Exit::DegradePop { llm, new_n, pop_bv, dst } => {
+                              degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
+                          }
+                          Exit::BlockedPush { llm, push_bv: exit_push_bv, dst } => {
+                              blocked_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
+                          }
+                      }
+                  }
 
                   for (llm, cancel_dst) in cancel_set {
                       eprintln!("[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
@@ -1073,68 +1083,32 @@ local_system:
                           (),
                       );
                   }
-
-                  // Handle BlockedPush exits conservatively:
-                  // - If llm == max and exit_dst is a leaf, we can safely "skip" Pop(0) chains by
-                  //   rewiring the push directly to the leaf with the restricted push_bv.
-                  // - Otherwise, we keep the original edge to preserve the blocked branch.
                   for (llm, exit_push_bv, exit_dst) in blocked_set {
-                      let mut rewired = false;
                       eprintln!(
                           "[challenge_elim]      - Considering BlockedPush exit to {}, push_bv: {:?}, llm: {:?}",
                           exit_dst, exit_push_bv, llm
                       );
-                      if llm == LLMTokenBV::max_ones() {
-                          let is_leaf_node = if let Some(dst_guard) = exit_dst.read(god) {
-                              dst_guard.value.end
-                          } else {
-                              false
-                          };
-
-                          if is_leaf_node {
-                              eprintln!(
-                                  "[challenge_elim]      - Applying BlockedPush exit by rewiring to leaf {}: {} --Push({:?})--> {}",
-                                  exit_dst, src, exit_push_bv.clone(), exit_dst
-                              );
-                              // Directly wire src --Push(exit_push_bv)--> leaf,
-                              // effectively removing the Pop(0) that was folded into the push.
-                              god.insert_edge_simple(
-                                  src,
-                                  exit_dst,
-                                  IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
-                                  (),
-                              );
-                              rewired = true;
-                          }
-                      }
-                      if !rewired {
-                          eprintln!("[challenge_elim]      - BlockedPush exit to {} could not be rewired, must keep original edge.", exit_dst);
-                          // We did not rewire this blocked branch (e.g., nested Push or LLM-aggregated path),
-                          // so we must keep the original Push edge to preserve semantics.
-                          must_keep_original_edge = true;
-                      }
+                      let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                      god.insert_edge_simple(
+                          agg,
+                          exit_dst,
+                          IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
+                          (),
+                      );
                   }
 
-                  // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
-                  // unless we determined it must remain (to avoid deleting the only surviving representation).
-                  if !must_keep_original_edge {
-                      eprintln!(
-                          "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
-                          src, push_bv.clone(), dst
-                      );
-                      if remove_specific_edge(
-                          god,
-                          src,
-                          IntermediateTrie3EdgeKey::Push(push_bv.clone()),
-                          dst,
-                      ) {
-                          removed_this_round += 1;
-                      }
-                  } else {
-                      eprintln!(
-                          "[challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge {} --Push({:?})--> {}",
-                          src, push_bv, dst
-                      );
+                  // Since we handled the stable case, we can always remove the original edge.
+                  eprintln!(
+                      "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
+                      src, push_bv.clone(), dst
+                  );
+                  if remove_specific_edge(
+                      god,
+                      src,
+                      IntermediateTrie3EdgeKey::Push(push_bv.clone()),
+                      dst,
+                  ) {
+                      removed_this_round += 1;
                   }
               }
 
@@ -2117,7 +2091,7 @@ local_system:
       /// and if a mismatch is found, attempts to find a minimal failing input graph.
       /// This adds significant overhead and should only be used for debugging the
       /// elimination logic itself.
-      const DEBUG_MISMATCHES: bool = false;
+      const DEBUG_MISMATCHES: bool = true;
 
       fn debug_mismatches_enabled() -> bool {
           if DEBUG_MISMATCHES {
@@ -2627,7 +2601,7 @@ local_system:
           initial_push_bv: &StateIDBV,
           god: &IntermediateTrie3GodWrapper,
       ) -> Vec<Exit> {
-          eprintln!(
+          crate::debug!(5,
               "[challenge_elim]   - compute_push_elim_exits(start: {}, initial_push_bv: {:?})",
               start, initial_push_bv
           );
@@ -2649,20 +2623,20 @@ local_system:
           while let Some(state) = q.pop_front() {
               steps += 1;
               if steps % 10_000 == 0 {
-                  eprintln!(
+                  crate::debug!(5,
                       "[challenge_elim]   - BFS progress: {} states explored (q_len: {}, visited: {}, exits: {}), guard {}",
                       steps, q.len(), visited.len(), exits.len(), max_steps
                   );
               }
               if steps > max_steps {
-                  eprintln!("[challenge_elim] Warning: BFS step guard hit while eliminating a Push; breaking exploration to avoid non-termination.");
+                  crate::debug!(5, "[challenge_elim] Warning: BFS step guard hit while eliminating a Push; breaking exploration to avoid non-termination.");
                   break;
               }
 
               let key = (state.node.as_usize(), state.push_bv.clone(), state.llm_bv.clone());
               if !visited.insert(key) {
                   if steps < 100 { // Log first few skips
-                       eprintln!("[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
+                       crate::debug!(5, "[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
                   }
                   continue;
               }
@@ -2674,7 +2648,7 @@ local_system:
               if let Some(read_guard) = state.node.read(god) {
                   if read_guard.value.end {
                       if steps < 100 {
-                          eprintln!("[challenge_elim]       - Found end node, creating BlockedPush exit.");
+                          crate::debug!(5, "[challenge_elim]       - Found end node, creating BlockedPush exit.");
                       }
                       exits.push(Exit::BlockedPush {
                           llm: state.llm_bv.clone(),
@@ -2687,13 +2661,13 @@ local_system:
                   // Explore outgoing edges
                   for (ek, dsts) in read_guard.children().iter() {
                       if steps < 100 {
-                          eprintln!("[challenge_elim]       - Exploring edge {:?} to {} dests", ek, dsts.len());
+                          crate::debug!(5, "[challenge_elim]       - Exploring edge {:?} to {} dests", ek, dsts.len());
                       }
                       match ek {
                           IntermediateTrie3EdgeKey::NoOp => {
                               for (dst_idx, _ev) in dsts.iter() {
                                   if steps < 100 {
-                                      eprintln!("[challenge_elim]         - Enqueueing NoOp -> {}", dst_idx);
+                                      crate::debug!(5, "[challenge_elim]         - Enqueueing NoOp -> {}", dst_idx);
                                   }
                                   q.push_back(BFSState {
                                       node: *dst_idx,
@@ -2709,7 +2683,7 @@ local_system:
                               next_llm &= llm2.clone();
                               for (dst_idx, _ev) in dsts.iter() {
                                   if steps < 100 {
-                                      eprintln!("[challenge_elim]         - Enqueueing CheckLLM -> {} with new llm_bv", dst_idx);
+                                      crate::debug!(5, "[challenge_elim]         - Enqueueing CheckLLM -> {} with new llm_bv", dst_idx);
                                   }
                                   q.push_back(BFSState {
                                       node: *dst_idx,
@@ -2727,7 +2701,7 @@ local_system:
                               // destination. That would violate the stack semantics used by the
                               // path-based simplifier (which blocks when encountering another push).
                               if steps < 100 {
-                                  eprintln!("[challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.");
+                                  crate::debug!(5, "[challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.");
                               }
                               exits.push(Exit::BlockedPush {
                                   llm: state.llm_bv.clone(),
@@ -2744,7 +2718,7 @@ local_system:
                                           // Fold into push: A := A ∩ B; prune branch if disjoint.
                                           if state.push_bv.is_disjoint(pop_bv) {
                                               if steps < 100 {
-                                                  eprintln!("[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
+                                                  crate::debug!(5, "[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
                                               }
                                               // Invalid on this branch
                                               continue;
@@ -2752,7 +2726,7 @@ local_system:
                                           let mut next_push = state.push_bv.clone();
                                           next_push &= pop_bv.clone();
                                           if steps < 100 {
-                                              eprintln!("[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", dst_idx);
+                                              crate::debug!(5, "[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", dst_idx);
                                           }
                                           q.push_back(BFSState {
                                               node: *dst_idx,
@@ -2764,12 +2738,12 @@ local_system:
                                           // Cancel if intersect; else branch invalid
                                           if state.push_bv.is_disjoint(pop_bv) {
                                               if steps < 100 {
-                                                  eprintln!("[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
+                                                  crate::debug!(5, "[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
                                               }
                                               continue;
                                           }
                                           if steps < 100 {
-                                              eprintln!("[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", dst_idx);
+                                              crate::debug!(5, "[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", dst_idx);
                                           }
                                           exits.push(Exit::Cancel {
                                               llm: state.llm_bv.clone(),
@@ -2780,7 +2754,7 @@ local_system:
                                       _ => {
                                           // Remove Push and decrement Pop.
                                           if steps < 100 {
-                                              eprintln!("[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
+                                              crate::debug!(5, "[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
                                           }
                                           exits.push(Exit::DegradePop {
                                               llm: state.llm_bv.clone(),
@@ -2855,11 +2829,11 @@ local_system:
               }
 
               if push_edges.is_empty() {
-                  eprintln!("[challenge_elim] No pushes found; done.");
+                  crate::debug!(5, "[challenge_elim] No pushes found; done.");
                   break;
               }
 
-              eprintln!(
+              crate::debug!(5,
                   "[challenge_elim] Round {}: attempting to eliminate {} push edge(s).",
                   round,
                   push_edges.len()
@@ -2884,33 +2858,33 @@ local_system:
                   processed += 1;
                   let pct = (processed * 100) / total;
                   if pct >= next_mark {
-                      eprintln!(
+                      crate::debug!(5,
                           "[challenge_elim] Round {} progress: {}/{} ({}%)",
                           round, processed, total, pct
                       );
                       next_mark += 10;
                   }
-                  eprintln!("[challenge_elim]  - Processing push edge {} --Push({:?})--> {}", src, push_bv, dst);
+                  crate::debug!(5, "[challenge_elim]  - Processing push edge {} --Push({:?})--> {}", src, push_bv, dst);
 
                   // Compute or reuse exits for this (dst, push_bv)
                   let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
                       Some(v) => {
-                          eprintln!("[challenge_elim]    - Reusing {} exits from cache for (dst {}, push_bv {:?})", v.len(), dst, push_bv);
+                          crate::debug!(5, "[challenge_elim]    - Reusing {} exits from cache for (dst {}, push_bv {:?})", v.len(), dst, push_bv);
                           v.clone()
                       },
                       None => {
-                          eprintln!("[challenge_elim]    - Computing exits for (dst {}, push_bv {:?})", dst, push_bv);
+                          crate::debug!(5, "[challenge_elim]    - Computing exits for (dst {}, push_bv {:?})", dst, push_bv);
                           // BFS exploration to compute exits for (dst, push_bv)
                           // Results are memoized per round to avoid repetition.
                           let e = compute_push_elim_exits(dst, &push_bv, god);
-                          eprintln!("[challenge_elim]    - Found {} exits.", e.len());
+                          crate::debug!(5, "[challenge_elim]    - Found {} exits.", e.len());
                           exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
                           e
                       }
                   };
                   // Deduplicate exits and detect any blocked branches.
                   if exits.is_empty() {
-                      eprintln!("[challenge_elim]    - No exits found. Removing original push edge.");
+                      crate::debug!(5, "[challenge_elim]    - No exits found. Removing original push edge.");
                       // No viable continuations were found for this push under the stack semantics
                       // (e.g., every branch mismatched). This path is dead; remove the original push.
                       if remove_specific_edge(
@@ -2940,7 +2914,7 @@ local_system:
                   }
 
                   if is_stable {
-                      eprintln!("[challenge_elim]    - Push edge is stable, no changes made.");
+                      crate::debug!(5, "[challenge_elim]    - Push edge is stable, no changes made.");
                       continue;
                   }
 
@@ -2968,12 +2942,12 @@ local_system:
                   }
 
                   for (llm, cancel_dst) in cancel_set {
-                      eprintln!("[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
+                      crate::debug!(5, "[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
                       let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                       god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
                   }
                   for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
-                      eprintln!("[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
+                      crate::debug!(5, "[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
                       let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                       god.insert_edge_simple(
                           agg,
@@ -2983,7 +2957,7 @@ local_system:
                       );
                   }
                   for (llm, exit_push_bv, exit_dst) in blocked_set {
-                      eprintln!(
+                      crate::debug!(5,
                           "[challenge_elim]      - Considering BlockedPush exit to {}, push_bv: {:?}, llm: {:?}",
                           exit_dst, exit_push_bv, llm
                       );
@@ -2997,7 +2971,7 @@ local_system:
                   }
 
                   // Since we handled the stable case, we can always remove the original edge.
-                  eprintln!(
+                  crate::debug!(5,
                       "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
                       src, push_bv.clone(), dst
                   );
@@ -3011,7 +2985,7 @@ local_system:
                   }
               }
 
-              eprintln!(
+              crate::debug!(5,
                   "[challenge_elim] Round {} removed {} push edge(s).",
                   round, removed_this_round
               );
@@ -3786,7 +3760,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -4036,7 +4010,7 @@ messages:
       /// and if a mismatch is found, attempts to find a minimal failing input graph.
       /// This adds significant overhead and should only be used for debugging the
       /// elimination logic itself.
-      const DEBUG_MISMATCHES: bool = false;
+      const DEBUG_MISMATCHES: bool = true;
 
       fn debug_mismatches_enabled() -> bool {
           if DEBUG_MISMATCHES {
@@ -4828,27 +4802,6 @@ messages:
                       }
                   };
                   // Deduplicate exits and detect any blocked branches.
-                  let mut cancel_set: BTreeSet<(LLMTokenBV, IntermediatePrecomputeNode3Index)> =
-                      BTreeSet::new();
-                  let mut degrade_set: BTreeSet<(LLMTokenBV, usize, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                      BTreeSet::new();
-                  let mut blocked_set: BTreeSet<(LLMTokenBV, StateIDBV, IntermediatePrecomputeNode3Index)> =
-                      BTreeSet::new();
-                  let mut saw_blocked = false;
-                  for ex in exits.iter() {
-                      match ex {
-                          Exit::Cancel { llm, dst } => {
-                              cancel_set.insert((llm.clone(), *dst));
-                          }
-                          Exit::DegradePop { llm, new_n, pop_bv, dst } => {
-                              degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
-                          }
-                          Exit::BlockedPush { llm, push_bv: exit_push_bv, dst } => {
-                              saw_blocked = true;
-                              blocked_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
-                          }
-                      }
-                  }
                   if exits.is_empty() {
                       eprintln!("[challenge_elim]    - No exits found. Removing original push edge.");
                       // No viable continuations were found for this push under the stack semantics
@@ -4864,17 +4817,48 @@ messages:
                       continue;
                   }
 
+                  // Check for stability. A push is stable if all its exits are BlockedPush and they
+                  // represent no-op transformations (i.e., same destination, same push bitvector, no LLM checks).
+                  let mut is_stable = true;
+                  for ex in &exits {
+                      if let Exit::BlockedPush { llm, push_bv: exit_push_bv, dst: exit_dst } = ex {
+                          if *llm != LLMTokenBV::max_ones() || *exit_dst != dst || *exit_push_bv != push_bv {
+                              is_stable = false;
+                              break;
+                          }
+                      } else {
+                          is_stable = false;
+                          break;
+                      }
+                  }
+
+                  if is_stable {
+                      eprintln!("[challenge_elim]    - Push edge is stable, no changes made.");
+                      continue;
+                  }
+
+                  // If not stable, rewire all exits and remove the original edge.
                   let cache = per_src_agg_cache
                       .entry(src)
                       .or_insert_with(BTreeMap::new);
 
-                  // Wire deduplicated exits from src via aggregator nodes.
-                  // - For Cancel/Degrade: wire via aggregator nodes (deduplicated).
-                  // - For BlockedPush: by default, preserve the original Push edge (to avoid blow-up),
-                  //   EXCEPT for the safe Pop(0)-only case that ends at a leaf with no LLM aggregation:
-                  //     we rewire src --Push(restricted_bv)--> leaf and drop the original edge.
-                  //   If any blocked branch is not rewired, we must keep the original edge.
-                  let mut must_keep_original_edge = false;
+                  // Deduplicate exits before wiring.
+                  let mut cancel_set = BTreeSet::new();
+                  let mut degrade_set = BTreeSet::new();
+                  let mut blocked_set = BTreeSet::new();
+                  for ex in exits.iter() {
+                      match ex {
+                          Exit::Cancel { llm, dst } => {
+                              cancel_set.insert((llm.clone(), *dst));
+                          }
+                          Exit::DegradePop { llm, new_n, pop_bv, dst } => {
+                              degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
+                          }
+                          Exit::BlockedPush { llm, push_bv: exit_push_bv, dst } => {
+                              blocked_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
+                          }
+                      }
+                  }
 
                   for (llm, cancel_dst) in cancel_set {
                       eprintln!("[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
@@ -4891,68 +4875,32 @@ messages:
                           (),
                       );
                   }
-
-                  // Handle BlockedPush exits conservatively:
-                  // - If llm == max and exit_dst is a leaf, we can safely "skip" Pop(0) chains by
-                  //   rewiring the push directly to the leaf with the restricted push_bv.
-                  // - Otherwise, we keep the original edge to preserve the blocked branch.
                   for (llm, exit_push_bv, exit_dst) in blocked_set {
-                      let mut rewired = false;
                       eprintln!(
                           "[challenge_elim]      - Considering BlockedPush exit to {}, push_bv: {:?}, llm: {:?}",
                           exit_dst, exit_push_bv, llm
                       );
-                      if llm == LLMTokenBV::max_ones() {
-                          let is_leaf_node = if let Some(dst_guard) = exit_dst.read(god) {
-                              dst_guard.value.end
-                          } else {
-                              false
-                          };
-
-                          if is_leaf_node {
-                              eprintln!(
-                                  "[challenge_elim]      - Applying BlockedPush exit by rewiring to leaf {}: {} --Push({:?})--> {}",
-                                  exit_dst, src, exit_push_bv.clone(), exit_dst
-                              );
-                              // Directly wire src --Push(exit_push_bv)--> leaf,
-                              // effectively removing the Pop(0) that was folded into the push.
-                              god.insert_edge_simple(
-                                  src,
-                                  exit_dst,
-                                  IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
-                                  (),
-                              );
-                              rewired = true;
-                          }
-                      }
-                      if !rewired {
-                          eprintln!("[challenge_elim]      - BlockedPush exit to {} could not be rewired, must keep original edge.", exit_dst);
-                          // We did not rewire this blocked branch (e.g., nested Push or LLM-aggregated path),
-                          // so we must keep the original Push edge to preserve semantics.
-                          must_keep_original_edge = true;
-                      }
+                      let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                      god.insert_edge_simple(
+                          agg,
+                          exit_dst,
+                          IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
+                          (),
+                      );
                   }
 
-                  // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
-                  // unless we determined it must remain (to avoid deleting the only surviving representation).
-                  if !must_keep_original_edge {
-                      eprintln!(
-                          "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
-                          src, push_bv.clone(), dst
-                      );
-                      if remove_specific_edge(
-                          god,
-                          src,
-                          IntermediateTrie3EdgeKey::Push(push_bv.clone()),
-                          dst,
-                      ) {
-                          removed_this_round += 1;
-                      }
-                  } else {
-                      eprintln!(
-                          "[challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge {} --Push({:?})--> {}",
-                          src, push_bv, dst
-                      );
+                  // Since we handled the stable case, we can always remove the original edge.
+                  eprintln!(
+                      "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
+                      src, push_bv.clone(), dst
+                  );
+                  if remove_specific_edge(
+                      god,
+                      src,
+                      IntermediateTrie3EdgeKey::Push(push_bv.clone()),
+                      dst,
+                  ) {
+                      removed_this_round += 1;
                   }
               }
 
@@ -5725,492 +5673,9 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_challenge_elimination.rs
-  - user: |-
-      `````ad-attachment
-      collapse: closed
-
-      ```
-      [challenge_elim] Round 1: attempting to eliminate 1 push edge(s).
-      [challenge_elim] Round 1 progress: 1/1 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(1), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(1), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(1), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Pop(0, HybridBitset { inner: 1..=1 }) to 1 dests
-      [challenge_elim]         - Enqueueing Pop(0) -> Trie2Index(2) with restricted push_bv
-      [challenge_elim]     - BFS processing state: node Trie2Index(2), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(2), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(2): Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(2)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim] Round 1 removed 1 push edge(s).
-      [challenge_elim] Round 2: attempting to eliminate 1 push edge(s).
-      [challenge_elim] Round 2 progress: 1/1 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(2)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(2), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(2), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(2), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(2), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(2): Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(2)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(2)
-      [challenge_elim] Round 2 removed 1 push edge(s).
-      [challenge_elim] No pushes found; done.
-
-      --- MISMATCH DETECTED IN TEST ---
-      EXPECTED (path-based):
-        [Push(HybridBitset { inner: 1..=1 })]
-
-      ACTUAL (trie-based):
-      ---------------------------------
-
-
-
-      thread 'constraint_precompute3_challenge_elimination::tests::test_pop_zero_keeps_push' (7832316) panicked at src/constraint_precompute3_challenge_elimination.rs:1015:9:
-      assertion `left == right` failed
-        left: {}
-       right: {[Push(HybridBitset { inner: 1..=1 })]}
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::constraint_precompute3_challenge_elimination::tests::run_test
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1015:9
-         5: sep1::constraint_precompute3_challenge_elimination::tests::test_pop_zero_keeps_push
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1086:9
-         6: sep1::constraint_precompute3_challenge_elimination::tests::test_pop_zero_keeps_push::{{closure}}
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1067:34
-         7: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         8: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-
-      [challenge_elim] Round 1: attempting to eliminate 2 push edge(s).
-      [challenge_elim] Round 1 progress: 1/2 (50%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(1), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(1), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(1), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Push(HybridBitset { inner: 2..=2 }) to 1 dests
-      [challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(1), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - BlockedPush exit to Trie2Index(1) could not be rewired, must keep original edge.
-      [challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim] Round 1 progress: 2/2 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(1) --Push(HybridBitset { inner: 2..=2 })--> Trie2Index(2)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(2), push_bv HybridBitset { inner: 2..=2 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(2), initial_push_bv: HybridBitset { inner: 2..=2 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(2), push_bv HybridBitset { inner: 2..=2 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Pop(1, HybridBitset { inner: 2..=2 }) to 1 dests
-      [challenge_elim]       - Found Pop(1). Creating Cancel exit to Trie2Index(3).
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]    - Applying Cancel exit to Trie2Index(3) via LLM HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(1) --Push(HybridBitset { inner: 2..=2 })--> Trie2Index(2)
-      [challenge_elim] Round 1 removed 1 push edge(s).
-      [challenge_elim] Round 2: attempting to eliminate 1 push edge(s).
-      [challenge_elim] Round 2 progress: 1/1 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(1), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(1), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(1), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge NoOp to 1 dests
-      [challenge_elim]         - Enqueueing NoOp -> Trie2Index(3)
-      [challenge_elim]     - BFS processing state: node Trie2Index(3), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(3), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(3): Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(3)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim] Round 2 removed 1 push edge(s).
-      [challenge_elim] Round 3: attempting to eliminate 1 push edge(s).
-      [challenge_elim] Round 3 progress: 1/1 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(3)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(3), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(3), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(3), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(3), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(3): Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(3)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(3)
-      [challenge_elim] Round 3 removed 1 push edge(s).
-      [challenge_elim] No pushes found; done.
-
-      --- MISMATCH DETECTED IN TEST ---
-      EXPECTED (path-based):
-        [Push(HybridBitset { inner: 1..=1 })]
-
-      ACTUAL (trie-based):
-      ---------------------------------
-
-
-
-      thread 'constraint_precompute3_challenge_elimination::tests::test_blocked_push' (7832299) panicked at src/constraint_precompute3_challenge_elimination.rs:1015:9:
-      assertion `left == right` failed
-        left: {}
-       right: {[Push(HybridBitset { inner: 1..=1 })]}
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::constraint_precompute3_challenge_elimination::tests::run_test
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1015:9
-         5: sep1::constraint_precompute3_challenge_elimination::tests::test_blocked_push
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1166:9
-         6: sep1::constraint_precompute3_challenge_elimination::tests::test_blocked_push::{{closure}}
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1140:27
-         7: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         8: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-
-      [challenge_elim] Round 1: attempting to eliminate 4 push edge(s).
-      [challenge_elim] Round 1 progress: 1/4 (25%)
-      [challenge_elim]  - Processing push edge Trie2Index(4) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(5)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(5), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(5), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(5), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Push(HybridBitset { inner: 4..=4 }) to 1 dests
-      [challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(5), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - BlockedPush exit to Trie2Index(5) could not be rewired, must keep original edge.
-      [challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge Trie2Index(4) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(5)
-      [challenge_elim] Round 1 progress: 2/4 (50%)
-      [challenge_elim]  - Processing push edge Trie2Index(5) --Push(HybridBitset { inner: 4..=4 })--> Trie2Index(6)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(6), push_bv HybridBitset { inner: 4..=4 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(6), initial_push_bv: HybridBitset { inner: 4..=4 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(6), push_bv HybridBitset { inner: 4..=4 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Pop(0, HybridBitset { inner: 4..=4 }) to 1 dests
-      [challenge_elim]         - Enqueueing Pop(0) -> Trie2Index(7) with restricted push_bv
-      [challenge_elim]     - BFS processing state: node Trie2Index(7), push_bv HybridBitset { inner: 4..=4 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Pop(2, HybridBitset { inner: 0..=usize::MAX }) to 1 dests
-      [challenge_elim]       - Found Pop(>1). Creating DegradePop exit to Trie2Index(8).
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]    - Applying DegradePop exit to Trie2Index(8) via LLM HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(5) --Push(HybridBitset { inner: 4..=4 })--> Trie2Index(6)
-      [challenge_elim] Round 1 progress: 3/4 (75%)
-      [challenge_elim]  - Processing push edge Trie2Index(9) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(10)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(10), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(10), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(10), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Push(HybridBitset { inner: 2..=2 }) to 1 dests
-      [challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(10), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - BlockedPush exit to Trie2Index(10) could not be rewired, must keep original edge.
-      [challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge Trie2Index(9) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(10)
-      [challenge_elim] Round 1 progress: 4/4 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(10) --Push(HybridBitset { inner: 2..=2 })--> Trie2Index(11)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(11), push_bv HybridBitset { inner: 2..=2 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(11), initial_push_bv: HybridBitset { inner: 2..=2 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(11), push_bv HybridBitset { inner: 2..=2 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(11), push_bv: HybridBitset { inner: 2..=2 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(11): Trie2Index(10) --Push(HybridBitset { inner: 2..=2 })--> Trie2Index(11)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(10) --Push(HybridBitset { inner: 2..=2 })--> Trie2Index(11)
-      [challenge_elim] Round 1 removed 2 push edge(s).
-      [challenge_elim] Round 2: attempting to eliminate 2 push edge(s).
-      [challenge_elim] Round 2 progress: 1/2 (50%)
-      [challenge_elim]  - Processing push edge Trie2Index(4) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(5)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(5), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(5), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(5), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Pop(1, HybridBitset { inner: 0..=usize::MAX }) to 1 dests
-      [challenge_elim]       - Found Pop(1). Creating Cancel exit to Trie2Index(8).
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]    - Applying Cancel exit to Trie2Index(8) via LLM HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(4) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(5)
-      [challenge_elim] Round 2 progress: 2/2 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(9) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(10)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(10), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(10), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(10), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]    - Found 0 exits.
-      [challenge_elim]    - No exits found. Removing original push edge.
-      [challenge_elim] Round 2 removed 2 push edge(s).
-      [challenge_elim] No pushes found; done.
-
-      --- MISMATCH DETECTED IN TEST ---
-      EXPECTED (path-based):
-        [CheckLLM(HybridBitset { inner: 0..=0 }), Pop(0, HybridBitset { inner: 4..=4 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 5..=5 }), Pop(0, HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 1..=1 }), Push(HybridBitset { inner: 2..=2 })]
-
-      ACTUAL (trie-based):
-      ---------------------------------
-
-
-
-      thread 'constraint_precompute3_challenge_elimination::tests::test_mismatch_from_log' (7832311) panicked at src/constraint_precompute3_challenge_elimination.rs:1015:9:
-      assertion `left == right` failed
-        left: {}
-       right: {[CheckLLM(HybridBitset { inner: 0..=0 }), Pop(0, HybridBitset { inner: 4..=4 }), Pop(2, HybridBitset { inner: 0..=usize::MAX }), Pop(0, HybridBitset { inner: 5..=5 }), Pop(0, HybridBitset { inner: 5..=5 }), Push(HybridBitset { inner: 1..=1 }), Push(HybridBitset { inner: 2..=2 })]}
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::constraint_precompute3_challenge_elimination::tests::run_test
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1015:9
-         5: sep1::constraint_precompute3_challenge_elimination::tests::test_mismatch_from_log
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1489:9
-         6: sep1::constraint_precompute3_challenge_elimination::tests::test_mismatch_from_log::{{closure}}
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1432:32
-         7: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         8: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-
-      [challenge_elim] Round 1: attempting to eliminate 2 push edge(s).
-      [challenge_elim] Round 1 progress: 1/2 (50%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(1), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(1), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(1), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Push(HybridBitset { inner: 2..=2 }) to 1 dests
-      [challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(1), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - BlockedPush exit to Trie2Index(1) could not be rewired, must keep original edge.
-      [challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim] Round 1 progress: 2/2 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(1) --Push(HybridBitset { inner: 2..=2 })--> Trie2Index(2)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(2), push_bv HybridBitset { inner: 2..=2 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(2), initial_push_bv: HybridBitset { inner: 2..=2 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(2), push_bv HybridBitset { inner: 2..=2 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Pop(1, HybridBitset { inner: 2..=2 }) to 1 dests
-      [challenge_elim]       - Found Pop(1). Creating Cancel exit to Trie2Index(3).
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]    - Applying Cancel exit to Trie2Index(3) via LLM HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(1) --Push(HybridBitset { inner: 2..=2 })--> Trie2Index(2)
-      [challenge_elim] Round 1 removed 1 push edge(s).
-      [challenge_elim] Round 2: attempting to eliminate 1 push edge(s).
-      [challenge_elim] Round 2 progress: 1/1 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(1), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(1), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(1), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge NoOp to 1 dests
-      [challenge_elim]         - Enqueueing NoOp -> Trie2Index(3)
-      [challenge_elim]     - BFS processing state: node Trie2Index(3), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(3), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(3): Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(3)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim] Round 2 removed 1 push edge(s).
-      [challenge_elim] Round 3: attempting to eliminate 1 push edge(s).
-      [challenge_elim] Round 3 progress: 1/1 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(3)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(3), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(3), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(3), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(3), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(3): Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(3)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(3)
-      [challenge_elim] Round 3 removed 1 push edge(s).
-      [challenge_elim] No pushes found; done.
-
-      --- MISMATCH DETECTED IN TEST ---
-      EXPECTED (path-based):
-        [Push(HybridBitset { inner: 1..=1 })]
-
-      ACTUAL (trie-based):
-      ---------------------------------
-
-
-
-      thread 'constraint_precompute3_challenge_elimination::tests::test_minimal_push_push_pop_cancel' (7832310) panicked at src/constraint_precompute3_challenge_elimination.rs:1015:9:
-      assertion `left == right` failed
-        left: {}
-       right: {[Push(HybridBitset { inner: 1..=1 })]}
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::constraint_precompute3_challenge_elimination::tests::run_test
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1015:9
-         5: sep1::constraint_precompute3_challenge_elimination::tests::test_minimal_push_push_pop_cancel
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1589:9
-         6: sep1::constraint_precompute3_challenge_elimination::tests::test_minimal_push_push_pop_cancel::{{closure}}
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1574:43
-         7: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         8: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-
-      [challenge_elim] Round 1: attempting to eliminate 1 push edge(s).
-      [challenge_elim] Round 1 progress: 1/1 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(1), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(1), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(1), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Pop(0, HybridBitset { inner: 1..=1 }) to 1 dests
-      [challenge_elim]         - Enqueueing Pop(0) -> Trie2Index(2) with restricted push_bv
-      [challenge_elim]     - BFS processing state: node Trie2Index(2), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(2), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(2): Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(2)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(1)
-      [challenge_elim] Round 1 removed 1 push edge(s).
-      [challenge_elim] Round 2: attempting to eliminate 1 push edge(s).
-      [challenge_elim] Round 2 progress: 1/1 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(2)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(2), push_bv HybridBitset { inner: 1..=1 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(2), initial_push_bv: HybridBitset { inner: 1..=1 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(2), push_bv HybridBitset { inner: 1..=1 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(2), push_bv: HybridBitset { inner: 1..=1 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(2): Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(2)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(0) --Push(HybridBitset { inner: 1..=1 })--> Trie2Index(2)
-      [challenge_elim] Round 2 removed 1 push edge(s).
-      [challenge_elim] No pushes found; done.
-
-      --- MISMATCH DETECTED IN TEST ---
-      EXPECTED (path-based):
-        [Push(HybridBitset { inner: 1..=1 })]
-
-      ACTUAL (trie-based):
-      ---------------------------------
-
-
-
-      thread 'constraint_precompute3_challenge_elimination::tests::test_minimal_push_pop_zero_keeps_push' (7832308) panicked at src/constraint_precompute3_challenge_elimination.rs:1015:9:
-      assertion `left == right` failed
-        left: {}
-       right: {[Push(HybridBitset { inner: 1..=1 })]}
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::constraint_precompute3_challenge_elimination::tests::run_test
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1015:9
-         5: sep1::constraint_precompute3_challenge_elimination::tests::test_minimal_push_pop_zero_keeps_push
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1623:9
-         6: sep1::constraint_precompute3_challenge_elimination::tests::test_minimal_push_pop_zero_keeps_push::{{closure}}
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1611:47
-         7: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         8: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-      [challenge_elim] Round 1: attempting to eliminate 2 push edge(s).
-      [challenge_elim] Round 1 progress: 1/2 (50%)
-      [challenge_elim]  - Processing push edge Trie2Index(2) --Push(HybridBitset { inner: 3..=3 })--> Trie2Index(3)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(3), push_bv HybridBitset { inner: 3..=3 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(3), initial_push_bv: HybridBitset { inner: 3..=3 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(3), push_bv HybridBitset { inner: 3..=3 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Pop(0, HybridBitset { inner: 3..=3 }) to 1 dests
-      [challenge_elim]         - Enqueueing Pop(0) -> Trie2Index(4) with restricted push_bv
-      [challenge_elim]     - BFS processing state: node Trie2Index(4), push_bv HybridBitset { inner: 3..=3 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Push(HybridBitset { inner: 4..=4 }) to 1 dests
-      [challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(4), push_bv: HybridBitset { inner: 3..=3 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - BlockedPush exit to Trie2Index(4) could not be rewired, must keep original edge.
-      [challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge Trie2Index(2) --Push(HybridBitset { inner: 3..=3 })--> Trie2Index(3)
-      [challenge_elim] Round 1 progress: 2/2 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(4) --Push(HybridBitset { inner: 4..=4 })--> Trie2Index(5)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(5), push_bv HybridBitset { inner: 4..=4 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(5), initial_push_bv: HybridBitset { inner: 4..=4 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(5), push_bv HybridBitset { inner: 4..=4 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Found end node, creating BlockedPush exit.
-      [challenge_elim]    - Found 1 exits.
-      [challenge_elim]      - Considering BlockedPush exit to Trie2Index(5), push_bv: HybridBitset { inner: 4..=4 }, llm: HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]      - Applying BlockedPush exit by rewiring to leaf Trie2Index(5): Trie2Index(4) --Push(HybridBitset { inner: 4..=4 })--> Trie2Index(5)
-      [challenge_elim]    - Decision: Rewiring complete. Removing original edge Trie2Index(4) --Push(HybridBitset { inner: 4..=4 })--> Trie2Index(5)
-      [challenge_elim] Round 1 removed 1 push edge(s).
-      [challenge_elim] Round 2: attempting to eliminate 1 push edge(s).
-      [challenge_elim] Round 2 progress: 1/1 (100%)
-      [challenge_elim]  - Processing push edge Trie2Index(2) --Push(HybridBitset { inner: 3..=3 })--> Trie2Index(3)
-      [challenge_elim]    - Computing exits for (dst Trie2Index(3), push_bv HybridBitset { inner: 3..=3 })
-      [challenge_elim]   - compute_push_elim_exits(start: Trie2Index(3), initial_push_bv: HybridBitset { inner: 3..=3 })
-      [challenge_elim]     - BFS processing state: node Trie2Index(3), push_bv HybridBitset { inner: 3..=3 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]       - Exploring edge Pop(0, HybridBitset { inner: 3..=3 }) to 1 dests
-      [challenge_elim]         - Enqueueing Pop(0) -> Trie2Index(4) with restricted push_bv
-      [challenge_elim]     - BFS processing state: node Trie2Index(4), push_bv HybridBitset { inner: 3..=3 }, llm_bv HybridBitset { inner: 0..=usize::MAX }
-      [challenge_elim]    - Found 0 exits.
-      [challenge_elim]    - No exits found. Removing original push edge.
-      [challenge_elim] Round 2 removed 1 push edge(s).
-      [challenge_elim] No pushes found; done.
-
-      --- MISMATCH DETECTED IN TEST ---
-      EXPECTED (path-based):
-        [CheckLLM(HybridBitset { inner: 0..=1 }), Pop(0, HybridBitset { inner: 0..=0 }), Push(HybridBitset { inner: 3..=3 }), Push(HybridBitset { inner: 4..=4 })]
-
-      ACTUAL (trie-based):
-      ---------------------------------
-
-
-
-      thread 'constraint_precompute3_challenge_elimination::tests::test_mismatch_from_user_report' (7860557) panicked at src/constraint_precompute3_challenge_elimination.rs:1015:9:
-      assertion `left == right` failed
-        left: {}
-       right: {[CheckLLM(HybridBitset { inner: 0..=1 }), Pop(0, HybridBitset { inner: 0..=0 }), Push(HybridBitset { inner: 3..=3 }), Push(HybridBitset { inner: 4..=4 })]}
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::constraint_precompute3_challenge_elimination::tests::run_test
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1015:9
-         5: sep1::constraint_precompute3_challenge_elimination::tests::test_mismatch_from_user_report
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1701:9
-         6: sep1::constraint_precompute3_challenge_elimination::tests::test_mismatch_from_user_report::{{closure}}
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1670:40
-         7: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         8: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-      ```
-
-      `````
-
-      Fix these mismatches.
+  - user: There are a lot of eprintln statements in this code that clog up the output.
+      Replace them with `crate::debug!(5, ...)` statements (5 here refers to debug
+      level).
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6229,336 +5694,293 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! I see you're running into some mismatches with your trie-based push/pop elimination logic. The logs indicate that the new algorithm is too aggressive, pruning paths that should be preserved. This often happens with fixpoint algorithms when a "stable" state is incorrectly modified, leading to its deletion in a subsequent iteration.
-
-      I've analyzed the logs and the code and found two key issues:
-
-      1.  **Incorrect Handling of Stable Pushes**: The algorithm doesn't correctly identify when a `Push` edge is in a "stable" or "final" form. When it processes such an edge, it re-derives the same edge as a "simplification" and then deletes the original, effectively deleting the path. This is the primary cause of the test failures where the trie-based approach yields an empty result set.
-      2.  **Overly Restrictive Simplification**: The logic for simplifying `Push` edges followed by `Pop(0)` operations (a common pattern) was too conservative. It would only perform the simplification if the path ended at a leaf node, preventing simplifications in the middle of a graph that the path-based version handles correctly.
-
-      I'll provide a patch that addresses both issues by introducing a cleaner, more robust logic block. Here's how we'll fix it:
+      The `eprintln!` statements in `src/constraint_precompute3_challenge_elimination.rs` are being replaced with `crate::debug!(5, ...)` statements to use the internal logging mechanism at debug level 5.
 
       ### Step-by-step Instructions
 
-      In the file `src/constraint_precompute3_challenge_elimination.rs`, we will replace a large block of logic within the `run_trie_based_elimination` function.
+      In the file `src/constraint_precompute3_challenge_elimination.rs`, replace all instances of `eprintln!(` with `crate::debug!(5, ` in the following functions: `compute_push_elim_exits` and `run_trie_based_elimination`.
 
-      1.  **Navigate to `run_trie_based_elimination`**: Open `src/constraint_precompute3_challenge_elimination.rs` and find the `run_trie_based_elimination` function.
+      Specifically, apply the following changes:
 
-      2.  **Locate the Logic Block**: Inside the `for (src, push_bv, dst) in push_edges` loop, find the block of code responsible for processing the computed `exits`. This block starts around line 900 with the comment `// Deduplicate exits and detect any blocked branches.` and ends around line 999.
+      1.  **In `fn compute_push_elim_exits(...)`:**
+          *   Change line 408 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 420 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 423 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 431 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 434 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 439 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 442 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 447 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 450 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 463 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 475 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 483 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 493 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 501 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 508 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 516 from `eprintln!(` to `crate::debug!(5, `.
 
-      3.  **Replace the Block**: Delete this entire block and replace it with the new logic below. The new implementation first explicitly checks if a push edge is "stable". If it is, we skip it. If not, we apply all simplifications (including a more general `BlockedPush` handling) and then remove the original edge.
+      2.  **In `fn run_trie_based_elimination(...)`:**
+          *   Change line 578 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 584 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 593 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 605 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 609 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 612 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 615 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 620 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 624 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 626 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 630 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 635 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 643 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 647 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 652 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 657 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 665 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 674 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 683 from `eprintln!(` to `crate::debug!(5, `.
+          *   Change line 690 from `eprintln!(` to `crate::debug!(5, `.
 
-      Here is the new code block to insert:
-
-      ```rust
-                  if exits.is_empty() {
-                      eprintln!("[challenge_elim]    - No exits found. Removing original push edge.");
-                      // No viable continuations were found for this push under the stack semantics
-                      // (e.g., every branch mismatched). This path is dead; remove the original push.
-                      if remove_specific_edge(
-                          god,
-                          src,
-                          IntermediateTrie3EdgeKey::Push(push_bv.clone()),
-                          dst,
-                      ) {
-                          removed_this_round += 1;
-                      }
-                      continue;
-                  }
-
-                  // Check for stability. A push is stable if all its exits are BlockedPush and they
-                  // represent no-op transformations (i.e., same destination, same push bitvector, no LLM checks).
-                  let mut is_stable = true;
-                  for ex in &exits {
-                      if let Exit::BlockedPush { llm, push_bv: exit_push_bv, dst: exit_dst } = ex {
-                          if *llm != LLMTokenBV::max_ones() || *exit_dst != dst || *exit_push_bv != push_bv {
-                              is_stable = false;
-                              break;
-                          }
-                      } else {
-                          is_stable = false;
-                          break;
-                      }
-                  }
-
-                  if is_stable {
-                      eprintln!("[challenge_elim]    - Push edge is stable, no changes made.");
-                      continue;
-                  }
-
-                  // If not stable, rewire all exits and remove the original edge.
-                  let cache = per_src_agg_cache
-                      .entry(src)
-                      .or_insert_with(BTreeMap::new);
-
-                  // Deduplicate exits before wiring.
-                  let mut cancel_set = BTreeSet::new();
-                  let mut degrade_set = BTreeSet::new();
-                  let mut blocked_set = BTreeSet::new();
-                  for ex in exits.iter() {
-                      match ex {
-                          Exit::Cancel { llm, dst } => {
-                              cancel_set.insert((llm.clone(), *dst));
-                          }
-                          Exit::DegradePop { llm, new_n, pop_bv, dst } => {
-                              degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
-                          }
-                          Exit::BlockedPush { llm, push_bv: exit_push_bv, dst } => {
-                              blocked_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
-                          }
-                      }
-                  }
-
-                  for (llm, cancel_dst) in cancel_set {
-                      eprintln!("[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
-                      let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                      god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
-                  }
-                  for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
-                      eprintln!("[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
-                      let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                      god.insert_edge_simple(
-                          agg,
-                          degrade_dst,
-                          IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
-                          (),
-                      );
-                  }
-                  for (llm, exit_push_bv, exit_dst) in blocked_set {
-                      eprintln!(
-                          "[challenge_elim]      - Applying BlockedPush exit to {}, push_bv: {:?}, llm: {:?}",
-                          exit_dst, exit_push_bv, llm
-                      );
-                      let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                      god.insert_edge_simple(
-                          agg,
-                          exit_dst,
-                          IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
-                          (),
-                      );
-                  }
-
-                  // Since we handled the stable case, we can always remove the original edge.
-                  eprintln!(
-                      "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
-                      src, push_bv.clone(), dst
-                  );
-                  if remove_specific_edge(
-                      god,
-                      src,
-                      IntermediateTrie3EdgeKey::Push(push_bv.clone()),
-                      dst,
-                  ) {
-                      removed_this_round += 1;
-                  }
-      ```
-
-      This change should resolve all the failing tests and make the trie-based elimination behave correctly and consistently with the path-based reference implementation.
-
-      ### Git Diff
-
-      Here is the git diff for the change. You can apply this patch directly.
+      ### Git Diffs
 
       ```diff
       diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
-      index 1111111..2222222 100644
       --- a/src/constraint_precompute3_challenge_elimination.rs
       +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -897,104 +897,102 @@
+      @@ -405,10 +405,10 @@
+           initial_push_bv: &StateIDBV,
+           god: &IntermediateTrie3GodWrapper,
+       ) -> Vec<Exit> {
+      -    eprintln!(
+      +    crate::debug!(5,
+               "[challenge_elim]   - compute_push_elim_exits(start: {}, initial_push_bv: {:?})",
+               start, initial_push_bv
+      -    );
+      +    );
+           let mut exits: Vec<Exit> = Vec::new();
+           let mut q: VecDeque<BFSState> = VecDeque::new();
+           q.push_back(BFSState {
+      @@ -423,19 +423,19 @@
+           while let Some(state) = q.pop_front() {
+               steps += 1;
+               if steps % 10_000 == 0 {
+      -            eprintln!(
+      +            crate::debug!(5,
+                       "[challenge_elim]   - BFS progress: {} states explored (q_len: {}, visited: {}, exits: {}), guard {}",
+                       steps, q.len(), visited.len(), exits.len(), max_steps
+                   );
+               }
+               if steps > max_steps {
+      -            eprintln!("[challenge_elim] Warning: BFS step guard hit while eliminating a Push; breaking exploration to avoid non-termination.");
+      +            crate::debug!(5, "[challenge_elim] Warning: BFS step guard hit while eliminating a Push; breaking exploration to avoid non-termination.");
+                   break;
+               }
+       
+               let key = (state.node.as_usize(), state.push_bv.clone(), state.llm_bv.clone());
+               if !visited.insert(key) {
+                   if steps < 100 { // Log first few skips
+      -                 eprintln!("[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
+      +                 crate::debug!(5, "[challenge_elim]     - BFS skip visited state: node {}, push_bv {:?}, llm_bv {:?}", state.node, state.push_bv, state.llm_bv);
+                   }
+                   continue;
+               }
+      @@ -445,11 +445,11 @@
+               if let Some(read_guard) = state.node.read(god) {
+                   if read_guard.value.end {
+                       if steps < 100 {
+      -                    eprintln!("[challenge_elim]       - Found end node, creating BlockedPush exit.");
+      +                    crate::debug!(5, "[challenge_elim]       - Found end node, creating BlockedPush exit.");
                        }
-                   };
+                       exits.push(Exit::BlockedPush {
+                           llm: state.llm_bv.clone(),
+                           push_bv: state.push_bv.clone(),
+                           dst: state.node,
+                       });
+      @@ -460,12 +460,12 @@
+                   for (ek, dsts) in read_guard.children().iter() {
+                       if steps < 100 {
+      -                    eprintln!("[challenge_elim]       - Exploring edge {:?} to {} dests", ek, dsts.len());
+      +                    crate::debug!(5, "[challenge_elim]       - Exploring edge {:?} to {} dests", ek, dsts.len());
+                       }
+                       match ek {
+                           IntermediateTrie3EdgeKey::NoOp => {
+                               for (dst_idx, _ev) in dsts.iter() {
+                                   if steps < 100 {
+      -                                eprintln!("[challenge_elim]         - Enqueueing NoOp -> {}", dst_idx);
+      +                                crate::debug!(5, "[challenge_elim]         - Enqueueing NoOp -> {}", dst_idx);
+                                   }
+                                   q.push_back(BFSState {
+                                       node: *dst_idx,
+      @@ -480,7 +480,7 @@
+                               next_llm &= llm2.clone();
+                               for (dst_idx, _ev) in dsts.iter() {
+                                   if steps < 100 {
+      -                                eprintln!("[challenge_elim]         - Enqueueing CheckLLM -> {} with new llm_bv", dst_idx);
+      +                                crate::debug!(5, "[challenge_elim]         - Enqueueing CheckLLM -> {} with new llm_bv", dst_idx);
+                                   }
+                                   q.push_back(BFSState {
+                                       node: *dst_idx,
+      @@ -495,7 +495,7 @@
+                               // destination. That would violate the stack semantics used by the
+                               // path-based simplifier (which blocks when encountering another push).
+                               if steps < 100 {
+      -                            eprintln!("[challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.");
+      +                            crate::debug!(5, "[challenge_elim]       - Blocked by nested push. Creating BlockedPush exit.");
+                               }
+                               exits.push(Exit::BlockedPush {
+                                   llm: state.llm_bv.clone(),
+      @@ -511,7 +511,7 @@
+                                       0 => {
+                                           // Fold into push: A := A ∩ B; prune branch if disjoint.
+                                           if state.push_bv.is_disjoint(pop_bv) {
+      -                                        if steps < 100 {
+      -                                            eprintln!("[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
+      +                                        if steps < 100 {
+      +                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
+                                               }
+                                               // Invalid on this branch
+                                               continue;
+      @@ -520,7 +520,7 @@
+                                           let mut next_push = state.push_bv.clone();
+                                           next_push &= pop_bv.clone();
+                                           if steps < 100 {
+      -                                        eprintln!("[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", dst_idx);
+      +                                        crate::debug!(5, "[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", dst_idx);
+                                           }
+                                           q.push_back(BFSState {
+                                               node: *dst_idx,
+      @@ -532,11 +532,11 @@
+                                       1 => {
+                                           // Cancel if intersect; else branch invalid
+                                           if state.push_bv.is_disjoint(pop_bv) {
+      -                                        if steps < 100 {
+      -                                            eprintln!("[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
+      +                                        if steps < 100 {
+      +                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
+                                               }
+                                               continue;
+                                           }
+                                           if steps < 100 {
+      -                                        eprintln!("[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", dst_idx);
+      +                                        crate::debug!(5, "[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", dst_idx);
+                                           }
+                                           exits.push(Exit::Cancel {
+                                               llm: state.llm_bv.clone(),
+      @@ -548,7 +548,7 @@
+                                       _ => {
+                                           // Remove Push and decrement Pop.
+                                           if steps < 100 {
+      -                                        eprintln!("[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
+      +                                        crate::debug!(5, "[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
+                                           }
+                                           exits.push(Exit::DegradePop {
+                                               llm: state.llm_bv.clone(),
+      @@ -607,12 +607,12 @@
+               }
+       
+               if push_edges.is_empty() {
+      -            eprintln!("[challenge_elim] No pushes found; done.");
+      +            crate::debug!(5, "[challenge_elim] No pushes found; done.");
+                   break;
+               }
+       
+      -        eprintln!(
+      +        crate::debug!(5,
+                   "[challenge_elim] Round {}: attempting to eliminate {} push edge(s).",
+                   round,
+                   push_edges.len()
+      @@ -632,23 +632,23 @@
+                   processed += 1;
+                   let pct = (processed * 100) / total;
+                   if pct >= next_mark {
+      -                eprintln!(
+      +                crate::debug!(5,
+                           "[challenge_elim] Round {} progress: {}/{} ({}%)",
+                           round, processed, total, pct
+                       );
+                       next_mark += 10;
+                   }
+      -            eprintln!("[challenge_elim]  - Processing push edge {} --Push({:?})--> {}", src, push_bv, dst);
+      +            crate::debug!(5, "[challenge_elim]  - Processing push edge {} --Push({:?})--> {}", src, push_bv, dst);
+       
+                   // Compute or reuse exits for this (dst, push_bv)
+                   let exits = match exit_cache.get(&(dst.as_usize(), push_bv.clone())) {
+                       Some(v) => {
+      -                    eprintln!("[challenge_elim]    - Reusing {} exits from cache for (dst {}, push_bv {:?})", v.len(), dst, push_bv);
+      +                    crate::debug!(5, "[challenge_elim]    - Reusing {} exits from cache for (dst {}, push_bv {:?})", v.len(), dst, push_bv);
+                           v.clone()
+                       },
+                       None => {
+      -                    eprintln!("[challenge_elim]    - Computing exits for (dst {}, push_bv {:?})", dst, push_bv);
+      +                    crate::debug!(5, "[challenge_elim]    - Computing exits for (dst {}, push_bv {:?})", dst, push_bv);
+                           // BFS exploration to compute exits for (dst, push_bv)
+                           // Results are memoized per round to avoid repetition.
+                           let e = compute_push_elim_exits(dst, &push_bv, god);
+      -                    eprintln!("[challenge_elim]    - Found {} exits.", e.len());
+      +                    crate::debug!(5, "[challenge_elim]    - Found {} exits.", e.len());
+                           exit_cache.insert((dst.as_usize(), push_bv.clone()), e.clone());
+                           e
+                       }
+      @@ -656,7 +656,7 @@
                    // Deduplicate exits and detect any blocked branches.
-      -            let mut cancel_set: BTreeSet<(LLMTokenBV, IntermediatePrecomputeNode3Index)> =
-      -                BTreeSet::new();
-      -            let mut degrade_set: BTreeSet<(LLMTokenBV, usize, StateIDBV, IntermediatePrecomputeNode3Index)> =
-      -                BTreeSet::new();
-      -            let mut blocked_set: BTreeSet<(LLMTokenBV, StateIDBV, IntermediatePrecomputeNode3Index)> =
-      -                BTreeSet::new();
-      -            let mut saw_blocked = false;
-      -            for ex in exits.iter() {
-      -                match ex {
-      -                    Exit::Cancel { llm, dst } => {
-      -                        cancel_set.insert((llm.clone(), *dst));
-      -                    }
-      -                    Exit::DegradePop { llm, new_n, pop_bv, dst } => {
-      -                        degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
-      -                    }
-      -                    Exit::BlockedPush { llm, push_bv: exit_push_bv, dst } => {
-      -                        saw_blocked = true;
-      -                        blocked_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
-      -                    }
-      -                }
-      -            }
                    if exits.is_empty() {
-                       eprintln!("[challenge_elim]    - No exits found. Removing original push edge.");
+      -                eprintln!("[challenge_elim]    - No exits found. Removing original push edge.");
+      +                crate::debug!(5, "[challenge_elim]    - No exits found. Removing original push edge.");
                        // No viable continuations were found for this push under the stack semantics
                        // (e.g., every branch mismatched). This path is dead; remove the original push.
                        if remove_specific_edge(
-                           god,
-                           src,
-                           IntermediateTrie3EdgeKey::Push(push_bv.clone()),
-                           dst,
-                       ) {
-                           removed_this_round += 1;
-                       }
+      @@ -682,7 +682,7 @@
+                   }
+       
+                   if is_stable {
+      -                eprintln!("[challenge_elim]    - Push edge is stable, no changes made.");
+      +                crate::debug!(5, "[challenge_elim]    - Push edge is stable, no changes made.");
                        continue;
                    }
        
-      +            // Check for stability. A push is stable if all its exits are BlockedPush and they
-      +            // represent no-op transformations (i.e., same destination, same push bitvector, no LLM checks).
-      +            let mut is_stable = true;
-      +            for ex in &exits {
-      +                if let Exit::BlockedPush { llm, push_bv: exit_push_bv, dst: exit_dst } = ex {
-      +                    if *llm != LLMTokenBV::max_ones() || *exit_dst != dst || *exit_push_bv != push_bv {
-      +                        is_stable = false;
-      +                        break;
-      +                    }
-      +                } else {
-      +                    is_stable = false;
-      +                    break;
-      +                }
-      +            }
-      +
-      +            if is_stable {
-      +                eprintln!("[challenge_elim]    - Push edge is stable, no changes made.");
-      +                continue;
-      +            }
-      +
-      +            // If not stable, rewire all exits and remove the original edge.
-                   let cache = per_src_agg_cache
-                       .entry(src)
-                       .or_insert_with(BTreeMap::new);
+      @@ -706,12 +706,12 @@
+                   }
        
-      -            // Wire deduplicated exits from src via aggregator nodes.
-      -            // - For Cancel/Degrade: wire via aggregator nodes (deduplicated).
-      -            // - For BlockedPush: by default, preserve the original Push edge (to avoid blow-up),
-      -            //   EXCEPT for the safe Pop(0)-only case that ends at a leaf with no LLM aggregation:
-      -            //     we rewire src --Push(restricted_bv)--> leaf and drop the original edge.
-      -            //   If any blocked branch is not rewired, we must keep the original edge.
-      -            let mut must_keep_original_edge = false;
-      -
-      +            // Deduplicate exits before wiring.
-      +            let mut cancel_set = BTreeSet::new();
-      +            let mut degrade_set = BTreeSet::new();
-      +            let mut blocked_set = BTreeSet::new();
-      +            for ex in exits.iter() {
-      +                match ex {
-      +                    Exit::Cancel { llm, dst } => {
-      +                        cancel_set.insert((llm.clone(), *dst));
-      +                    }
-      +                    Exit::DegradePop { llm, new_n, pop_bv, dst } => {
-      +                        degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
-      +                    }
-      +                    Exit::BlockedPush { llm, push_bv: exit_push_bv, dst } => {
-      +                        blocked_set.insert((llm.clone(), exit_push_bv.clone(), *dst));
-      +                    }
-      +                }
-      +            }
-      +
                    for (llm, cancel_dst) in cancel_set {
-                       eprintln!("[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
+      -                eprintln!("[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
+      +                crate::debug!(5, "[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
                        let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                        god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
                    }
                    for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
-                       eprintln!("[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
+      -                eprintln!("[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
+      +                crate::debug!(5, "[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
                        let agg = get_or_create_aggregator_node(src, &llm, god, cache);
                        god.insert_edge_simple(
                            agg,
-                           degrade_dst,
-                           IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
-                           (),
+      @@ -722,7 +722,7 @@
                        );
                    }
-      -
-      -            // Handle BlockedPush exits conservatively:
-      -            // - If llm == max and exit_dst is a leaf, we can safely "skip" Pop(0) chains by
-      -            //   rewiring the push directly to the leaf with the restricted push_bv.
-      -            // - Otherwise, we keep the original edge to preserve the blocked branch.
                    for (llm, exit_push_bv, exit_dst) in blocked_set {
-      -                let mut rewired = false;
-                       eprintln!(
+      -                eprintln!(
+      +                crate::debug!(5,
                            "[challenge_elim]      - Considering BlockedPush exit to {}, push_bv: {:?}, llm: {:?}",
                            exit_dst, exit_push_bv, llm
                        );
-      -                if llm == LLMTokenBV::max_ones() {
-      -                    let is_leaf_node = if let Some(dst_guard) = exit_dst.read(god) {
-      -                        dst_guard.value.end
-      -                    } else {
-      -                        false
-      -                    };
-      -
-      -                    if is_leaf_node {
-      -                        eprintln!(
-      -                            "[challenge_elim]      - Applying BlockedPush exit by rewiring to leaf {}: {} --Push({:?})--> {}",
-      -                            exit_dst, src, exit_push_bv.clone(), exit_dst
-      -                        );
-      -                        // Directly wire src --Push(exit_push_bv)--> leaf,
-      -                        // effectively removing the Pop(0) that was folded into the push.
-      -                        god.insert_edge_simple(
-      -                            src,
-      -                            exit_dst,
-      -                            IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
-      -                            (),
-      -                        );
-      -                        rewired = true;
-      -                    }
-      -                }
-      -                if !rewired {
-      -                    eprintln!("[challenge_elim]      - BlockedPush exit to {} could not be rewired, must keep original edge.", exit_dst);
-      -                    // We did not rewire this blocked branch (e.g., nested Push or LLM-aggregated path),
-      -                    // so we must keep the original Push edge to preserve semantics.
-      -                    must_keep_original_edge = true;
-      -                }
-      -            }
-      -
-      -            // Remove the original src --Push(push_bv)--> dst edge now that rewiring is in place,
-      -            // unless we determined it must remain (to avoid deleting the only surviving representation).
-      -            if !must_keep_original_edge {
-      -                eprintln!(
-      -                    "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
-      -                    src, push_bv.clone(), dst
-      -                );
-      -                if remove_specific_edge(
-      -                    god,
-      -                    src,
-      -                    IntermediateTrie3EdgeKey::Push(push_bv.clone()),
-      -                    dst,
-      -                ) {
-      -                    removed_this_round += 1;
-      -                }
-      -            } else {
-      -                eprintln!(
-      -                    "[challenge_elim]    - Decision: Blocked branch not rewired. Keeping original edge {} --Push({:?})--> {}",
-      -                    src, push_bv, dst
-      -                );
-      -            }
-      +                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-      +                god.insert_edge_simple(
-      +                    agg,
-      +                    exit_dst,
-      +                    IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
-      +                    (),
-      +                );
-      +            }
-      +
-      +            // Since we handled the stable case, we can always remove the original edge.
-      +            eprintln!(
-      +                "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
-      +                src, push_bv.clone(), dst
-      +            );
-      +            if remove_specific_edge(
-      +                god,
-      +                src,
-      +                IntermediateTrie3EdgeKey::Push(push_bv.clone()),
-      +                dst,
-      +            ) {
-      +                removed_this_round += 1;
-      +            }
+      @@ -736,7 +736,7 @@
+                   }
+       
+                   // Since we handled the stable case, we can always remove the original edge.
+      -            eprintln!(
+      +            crate::debug!(5,
+                       "[challenge_elim]    - Decision: Rewiring complete. Removing original edge {} --Push({:?})--> {}",
+                       src, push_bv.clone(), dst
+                   );
+      @@ -748,7 +748,7 @@
+                   }
                }
        
-               eprintln!(
-
+      -        eprintln!(
+      +        crate::debug!(5,
+                   "[challenge_elim] Round {} removed {} push edge(s).",
+                   round, removed_this_round
+               );
       ```
     metadata:
   - user: |
@@ -6570,7 +5992,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix(elimination): Introduce stability
-      check for push edges and simplify exit rewiring logic"'
+  - user: 'Changes committed with message: "Refactor: Replace debug eprintln! calls
+      with crate::debug!(5, ...) in constraint elimination logic"'
     metadata:
 ...
