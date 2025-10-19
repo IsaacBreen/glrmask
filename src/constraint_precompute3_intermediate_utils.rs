@@ -112,6 +112,27 @@ pub fn optimize_intermediate_trie3(
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) {
+    let normalized_paths1: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
+        &god,
+        roots,
+        |idx, n| idx == *end_node,
+        |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
+        MAX_PATH_LEN,
+    )
+        .into_iter()
+        .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+        .collect();
+    println!("Has cycle? {}", Trie::has_cycle(&god, roots.iter().cloned()));
+    println!("Normalized paths before optimization:");
+    for (i, path) in normalized_paths1.iter().enumerate() {
+        print!("  Path {}: [", i + 1);
+        for (i, ek) in path.iter().enumerate() {
+            print!("{}", ek);
+            if i < path.len() - 1 { print!(", "); }
+        }
+        println!("]");
+    }
+
     return;
     if is_debug_level_enabled(2) {
         let mut stats = crate::constraint_extra::PrecomputeStats::default();
