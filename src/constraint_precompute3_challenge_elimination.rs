@@ -187,10 +187,22 @@ pub fn eliminate_pushes_and_pops(
     let (mut roots2, god2) = convert_to_intermediate2(roots, god);
 
     let mut iteration = 0;
+    let mut prev_num_nodes = usize::MAX;
     loop {
         iteration += 1;
         Trie::gc(&god2, &roots2.values().cloned().collect::<Vec<_>>());
         let all_nodes = Trie::all_nodes(&god2, &roots2.values().cloned().collect::<Vec<_>>());
+        let current_num_nodes = all_nodes.len();
+
+        if iteration > 1 {
+            assert!(
+                current_num_nodes < prev_num_nodes,
+                "Node count did not strictly decrease in iteration {}. Previous: {}, Current: {}",
+                iteration, prev_num_nodes, current_num_nodes
+            );
+        }
+        prev_num_nodes = current_num_nodes;
+
         let mut predecessors: HashMap<Intermediate2PrecomputeNode3Index, Vec<(Intermediate2PrecomputeNode3Index, Intermediate2Trie3EdgeKey, LLMTokenBV)>> = HashMap::new();
         let mut outgoing_push_counts: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
 
