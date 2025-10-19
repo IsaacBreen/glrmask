@@ -2148,13 +2148,13 @@ impl GrammarConstraint {
             &intermediate_trie3_god,
         );
 
-        println!("Final intermediate trie3:");
-        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-            .display_edge_keys_only()
-            .omit_nodes()
-            .omit_depth()
-            ;
-        println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+        // println!("Final intermediate trie3:");
+        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+        //     .display_edge_keys_only()
+        //     .omit_nodes()
+        //     .omit_depth()
+        //     ;
+        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
 
         // --- Convert intermediate trie to final Trie3 format ---
         crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");
@@ -2164,13 +2164,13 @@ impl GrammarConstraint {
             internal_max_llm_token,
         );
 
-        println!("Precompute3 trie before optimization:");
-        Self::_dump_precomputed3(
-            &precomputed3,
-            &stage_vocab.internal_to_original,
-            &llm_vocab.as_ref().unwrap().llm_token_map,
-            &trie3_god,
-        );
+        // println!("Precompute3 trie before optimization:");
+        // Self::_dump_precomputed3(
+        //     &precomputed3,
+        //     &stage_vocab.internal_to_original,
+        //     &llm_vocab.as_ref().unwrap().llm_token_map,
+        //     &trie3_god,
+        // );
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);

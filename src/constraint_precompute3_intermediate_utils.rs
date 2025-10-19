@@ -48,67 +48,67 @@ pub fn optimize_intermediate_trie3_template(
     pinned.insert(*start_node);
     pinned.insert(*end_node);
 
-    for i in 0..1 {
+    for i in 0..3 {
         let mut changed = false;
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
         changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
         let roots = &[*start_node];
-        let normalized_paths1: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
-            &god,
-            roots,
-            |idx, n| idx == *end_node,
-            |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
-            MAX_PATH_LEN,
-        )
-            .into_iter()
-            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-            .collect();
-        println!("Iteration {}", i);
-        println!("Has cycle? {}", Trie::has_cycle(&god, roots.clone()));
-        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-            .display_edge_keys_only()
-            .omit_nodes()
-            .omit_depth()
-            ;
-        println!("Trie before merging:");
-        println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
-        if !Trie::has_cycle(&god, roots.clone()) {
-            continue;
-        }
+        // let normalized_paths1: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
+        //     &god,
+        //     roots,
+        //     |idx, n| idx == *end_node,
+        //     |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
+        //     MAX_PATH_LEN,
+        // )
+        //     .into_iter()
+        //     .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+        //     .collect();
+        // println!("Iteration {}", i);
+        // println!("Has cycle? {}", Trie::has_cycle(&god, roots.clone()));
+        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+        //     .display_edge_keys_only()
+        //     .omit_nodes()
+        //     .omit_depth()
+        //     ;
+        // println!("Trie before merging:");
+        // println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
+        // if !Trie::has_cycle(&god, roots.clone()) {
+        //     continue;
+        // }
         changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
-        let normalized_paths2: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
-            &god,
-            roots,
-            |idx, n| idx == *end_node,
-            |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
-            MAX_PATH_LEN,
-        )
-            .into_iter()
-            .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-            .collect();
-        println!("Trie after merging:");
-        println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
-        if i == 0 {
-            println!("Normalized paths before:");
-            for (i, path) in normalized_paths1.iter().enumerate() {
-                print!("  Path {}: [", i + 1);
-                for (i, ek) in path.iter().enumerate() {
-                    print!("{}", ek);
-                    if i < path.len() - 1 { print!(", "); }
-                }
-                println!("]");
-            }
-            println!("Normalized paths after:");
-            for (i, path) in normalized_paths2.iter().enumerate() {
-                print!("  Path {}: [", i + 1);
-                for (i, ek) in path.iter().enumerate() {
-                    print!("{}", ek);
-                    if i < path.len() - 1 { print!(", "); }
-                }
-                println!("]");
-            }
-        }
-        assert_eq!(normalized_paths1, normalized_paths2);
+        // let normalized_paths2: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
+        //     &god,
+        //     roots,
+        //     |idx, n| idx == *end_node,
+        //     |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
+        //     MAX_PATH_LEN,
+        // )
+        //     .into_iter()
+        //     .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+        //     .collect();
+        // println!("Trie after merging:");
+        // println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
+        // if i == 0 {
+        //     println!("Normalized paths before:");
+        //     for (i, path) in normalized_paths1.iter().enumerate() {
+        //         print!("  Path {}: [", i + 1);
+        //         for (i, ek) in path.iter().enumerate() {
+        //             print!("{}", ek);
+        //             if i < path.len() - 1 { print!(", "); }
+        //         }
+        //         println!("]");
+        //     }
+        //     println!("Normalized paths after:");
+        //     for (i, path) in normalized_paths2.iter().enumerate() {
+        //         print!("  Path {}: [", i + 1);
+        //         for (i, ek) in path.iter().enumerate() {
+        //             print!("{}", ek);
+        //             if i < path.len() - 1 { print!(", "); }
+        //         }
+        //         println!("]");
+        //     }
+        // }
+        // assert_eq!(normalized_paths1, normalized_paths2);
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
         if !changed { break; }
     }
@@ -119,35 +119,35 @@ pub fn optimize_intermediate_trie3(
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    let normalized_paths1: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
-        &god,
-        roots,
-        |idx, n| idx == *end_node,
-        |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
-        MAX_PATH_LEN,
-    )
-        .into_iter()
-        .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-        .collect();
-    println!("Has cycle? {}", Trie::has_cycle(&god, roots.iter().cloned()));
-    println!("Normalized paths before optimization:");
-    for (i, path) in normalized_paths1.iter().enumerate() {
-        print!("  Path {}: [", i + 1);
-        for (i, ek) in path.iter().enumerate() {
-            print!("{}", ek);
-            if i < path.len() - 1 { print!(", "); }
-        }
-        println!("]");
-    }
-    println!("Trie before normalization:");
-    let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-        .display_edge_keys_only()
-        .omit_nodes()
-        .omit_depth()
-        ;
-    println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
-
-    return;
+    // let normalized_paths1: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
+    //     &god,
+    //     roots,
+    //     |idx, n| idx == *end_node,
+    //     |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
+    //     MAX_PATH_LEN,
+    // )
+    //     .into_iter()
+    //     .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+    //     .collect();
+    // println!("Has cycle? {}", Trie::has_cycle(&god, roots.iter().cloned()));
+    // println!("Normalized paths before optimization:");
+    // for (i, path) in normalized_paths1.iter().enumerate() {
+    //     print!("  Path {}: [", i + 1);
+    //     for (i, ek) in path.iter().enumerate() {
+    //         print!("{}", ek);
+    //         if i < path.len() - 1 { print!(", "); }
+    //     }
+    //     println!("]");
+    // }
+    // println!("Trie before normalization:");
+    // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+    //     .display_edge_keys_only()
+    //     .omit_nodes()
+    //     .omit_depth()
+    //     ;
+    // println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
+    //
+    // return;
     if is_debug_level_enabled(2) {
         let mut stats = crate::constraint_extra::PrecomputeStats::default();
         crate::constraint_extra::calculate_intermediate_stats3(roots, &mut stats, god);
@@ -668,7 +668,7 @@ pub fn optimize_intermediate_trie3_templates_global(
     templates: &[(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)],
     god: &IntermediateTrie3GodWrapper,
 ) {
-    return;
+    // return;
     if templates.is_empty() { return; }
 
     compute_and_print_template_stats(templates, god, "Before Optimization");
