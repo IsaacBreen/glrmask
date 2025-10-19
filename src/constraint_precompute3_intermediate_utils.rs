@@ -35,27 +35,6 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
     other_ops
 }
 
-pub fn optimize_intermediate_trie3_template(
-    start_node: &IntermediatePrecomputeNode3Index,
-    end_node: &IntermediatePrecomputeNode3Index,
-    god: &IntermediateTrie3GodWrapper,
-) {
-    let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-    pinned.insert(*start_node);
-    pinned.insert(*end_node);
-
-    for _ in 0..3 {
-        let mut changed = false;
-        changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
-        changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
-        changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
-        changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
-        if !changed {
-            break;
-        }
-    }
-}
-
 pub fn optimize_intermediate_trie3(
     roots: &[IntermediatePrecomputeNode3Index],
     end_node: &IntermediatePrecomputeNode3Index,
@@ -321,18 +300,10 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
         }
     }
 
-    // Extend the pinned set with all direct post-Pop nodes in this subgraph.
-    // Merging across a Pop boundary is not semantics-preserving for the subsequent
-    // push/pop elimination, because it moves the join point relative to Pops.
-    let mut pinned_ext = pinned.clone();
-    for (dst, preds) in &incoming {
-        if preds
-            .iter()
-            .any(|(_, ek)| matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _)))
-        {
-            pinned_ext.insert(*dst);
-        }
-    }
+    // NOTE: We used to pin all post-Pop nodes here to preserve structure for a later
+    // push/pop elimination pass, but it was too conservative and prevented almost all merging.
+    // The reachability checks below are sufficient to prevent invalid merges that would
+    // compromise path integrity.
 
     // Iterative color refinement on DAG-like structure (robust even if cycles appear).
     let mut color: HashMap<IntermediatePrecomputeNode3Index, u64> = HashMap::new();
@@ -471,12 +442,12 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
         let mut non_pinned: Vec<_> = nodes
             .iter()
             .cloned()
-            .filter(|n| !pinned_ext.contains(n))
+            .filter(|n| !pinned.contains(n))
             .collect();
         let mut pinned_nodes: Vec<_> = nodes
             .iter()
             .cloned()
-            .filter(|n| pinned_ext.contains(n))
+            .filter(|n| pinned.contains(n))
             .collect();
         non_pinned.sort(); // deterministic order
         pinned_nodes.sort(); // deterministic order
@@ -695,7 +666,8 @@ pub fn optimize_intermediate_trie3_templates_global(
 
     // A few global passes: compress NoOp chains and merge identical subgraphs across all templates,
     // then prune per template to drop detritus.
-    for _ in 0..3 {
+    for i in 0..10 {
+        // Increased passes for better convergence
         let mut changed = false;
         changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
         changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
@@ -703,6 +675,9 @@ pub fn optimize_intermediate_trie3_templates_global(
             changed |= prune_unproductive_nodes(&[*s], e, god);
         }
         if !changed {
+            if is_debug_level_enabled(2) {
+                println!("\nGlobal optimization converged after {} passes.", i + 1);
+            }
             break;
         }
     }
