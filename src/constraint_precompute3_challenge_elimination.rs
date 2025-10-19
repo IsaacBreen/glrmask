@@ -1,8 +1,8 @@
 // src/constraint_precompute3_challenge_elimination.rs
 use crate::constraint::IntermediatePrecomputedNodeContents3;
 use crate::constraint::{
-    IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3Edge,
-    IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV,
+    IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
+    IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV,
 };
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
@@ -35,35 +35,26 @@ fn debug_mismatches_enabled() -> bool {
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
-pub(crate) fn normalize_path(path: Vec<IntermediateTrie3Edge>) -> Vec<IntermediateTrie3Edge> {
+pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
     // IMPORTANT: DO NOT MODIFY THIS FUNCTION.
     let mut combined_llm_bv = LLMTokenBV::max_ones();
     let mut has_llm_check = false;
 
-    let mut other_ops: Vec<IntermediateTrie3Edge> = path
+    let mut other_ops: Vec<IntermediateTrie3EdgeKey> = path
         .into_iter()
-        .filter_map(|edge| {
-            let IntermediateTrie3Edge { key, state } = edge;
-            match key {
-                IntermediateTrie3EdgeKey::CheckLLM(bv) => {
-                    combined_llm_bv &= bv;
-                    has_llm_check = true;
-                    None // remove from path
-                }
-                IntermediateTrie3EdgeKey::NoOp => None,
-                other_key => Some(IntermediateTrie3Edge::new(other_key, state)),
+        .filter(|ek| {
+            if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek {
+                combined_llm_bv &= bv;
+                has_llm_check = true;
+                false // remove from path
+            } else {
+                !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
             }
         })
         .collect();
 
     if has_llm_check {
-        other_ops.insert(
-            0,
-            IntermediateTrie3Edge::new(
-                IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv),
-                None,
-            ),
-        );
+        other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
     }
 
     other_ops
@@ -84,8 +75,8 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3Edge>) -> Vec<Intermedia
 ///   newly modified pop may then pair with a push further to its left in a
 ///   subsequent pass.
 fn simplify_path(
-    stack: Vec<IntermediateTrie3Edge>,
-) -> Option<Vec<IntermediateTrie3Edge>> {
+    stack: Vec<IntermediateTrie3EdgeKey>,
+) -> Option<Vec<IntermediateTrie3EdgeKey>> {
     // IMPORTANT: DO NOT MODIFY THIS FUNCTION. It is the 'ground truth' for eliminating Push/Pop pairs.
     // If you are worried about this thing not behaving well with a 'stack' or something, you're probably misunderstanding the purpose of this code.
     // There is no 'stack' we're popping/pushing onto. I won't go into the details of what we're actually doing, but in the past people have
@@ -102,9 +93,9 @@ fn simplify_path(
         let mut push_idx = None;
         let mut pop_idx = None;
         for i in 0..ops.len() {
-            if matches!(ops[i].key, IntermediateTrie3EdgeKey::Push(_)) {
+            if matches!(ops[i], IntermediateTrie3EdgeKey::Push(_)) {
                 push_idx = Some(i);
-            } else if matches!(ops[i].key, IntermediateTrie3EdgeKey::Pop(_)) {
+            } else if let IntermediateTrie3EdgeKey::Pop(_, _) = ops[i] {
                 if push_idx.is_some() {
                     pop_idx = Some(i);
                     break;
@@ -116,27 +107,16 @@ fn simplify_path(
             let push_op = ops[p_idx].clone();
             let pop_op = ops[o_idx].clone();
 
-            if let (
-                IntermediateTrie3Edge {
-                    key: IntermediateTrie3EdgeKey::Push(push_bv),
-                    ..
-                },
-                IntermediateTrie3Edge {
-                    key: IntermediateTrie3EdgeKey::Pop(k),
-                    state: Some(pop_bv),
-                },
-            ) = (push_op, pop_op)
-            {
+            if let (IntermediateTrie3EdgeKey::Push(push_bv), IntermediateTrie3EdgeKey::Pop(k, pop_bv)) = (push_op, pop_op) {
                 match k {
                     0 => {
                         let mut new_push_bv = push_bv;
-                        new_push_bv &= &pop_bv;
+                        new_push_bv &= pop_bv;
                         if new_push_bv.is_empty() {
                             return None;
                         }
                         // Modify push, remove pop.
-                        ops[p_idx].key = IntermediateTrie3EdgeKey::Push(new_push_bv);
-                        ops[p_idx].state = None;
+                        ops[p_idx] = IntermediateTrie3EdgeKey::Push(new_push_bv);
                         ops.remove(o_idx);
                         changed = true;
                     }
@@ -153,24 +133,10 @@ fn simplify_path(
                         // Remove push, decrement pop.
                         ops.remove(p_idx);
                         // The pop is now at index o_idx - 1.
-                        let target_idx = o_idx - 1;
-                        ops[target_idx].key = IntermediateTrie3EdgeKey::Pop(k - 1);
-                        ops[target_idx].state = Some(pop_bv);
+                        ops[o_idx - 1] = IntermediateTrie3EdgeKey::Pop(k - 1, pop_bv);
                         changed = true;
                     }
                 }
-            } else if let (
-                IntermediateTrie3Edge {
-                    key: IntermediateTrie3EdgeKey::Push(_),
-                    ..
-                },
-                IntermediateTrie3Edge {
-                    key: IntermediateTrie3EdgeKey::Pop(_),
-                    state: None,
-                },
-            ) = (push_op, pop_op)
-            {
-                return None;
             }
         }
 
@@ -261,11 +227,8 @@ pub fn eliminate_pushes_and_pops_path_based(
     // 2. Simplify them.
     let mut simplified_paths = BTreeSet::new();
     for (_root_value, path_edges) in all_paths {
-        let edge_entries: Vec<_> = path_edges
-            .into_iter()
-            .map(|(ek, ev, _)| IntermediateTrie3Edge::new(ek, ev))
-            .collect();
-        if let Some(new_path) = simplify_path(edge_entries) {
+        let edge_keys: Vec<_> = path_edges.into_iter().map(|(ek, _, _)| ek).collect();
+        if let Some(new_path) = simplify_path(edge_keys) {
             simplified_paths.insert(new_path);
         }
     }
@@ -297,7 +260,7 @@ pub fn eliminate_pushes_and_pops_path_based(
         }
     }
 
-    let mut node_cache: BTreeMap<Vec<IntermediateTrie3Edge>, IntermediatePrecomputeNode3Index> =
+    let mut node_cache: BTreeMap<Vec<IntermediateTrie3EdgeKey>, IntermediatePrecomputeNode3Index> =
         BTreeMap::new();
     node_cache.insert(vec![], new_root);
 
@@ -320,12 +283,7 @@ pub fn eliminate_pushes_and_pops_path_based(
                 god.insert(Trie::new(content)).into()
             });
 
-            god.insert_edge_simple(
-                current_node_idx,
-                next_node_idx,
-                edge.key.clone(),
-                edge.state.clone(),
-            );
+            god.insert_edge_simple(current_node_idx, next_node_idx, edge.clone(), ());
             current_node_idx = next_node_idx;
         }
     }
@@ -497,7 +455,7 @@ pub fn eliminate_pushes_and_pops(
 fn get_normalized_paths(
     roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
-) -> BTreeSet<Vec<IntermediateTrie3Edge>> {
+) -> BTreeSet<Vec<IntermediateTrie3EdgeKey>> {
     let root_indices: Vec<_> = roots.values().cloned().collect();
     get_normalized_paths_for_vec(&root_indices, god)
 }
@@ -505,7 +463,7 @@ fn get_normalized_paths(
 pub(crate) fn get_normalized_paths_for_vec(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
-) -> BTreeSet<Vec<IntermediateTrie3Edge>> {
+) -> BTreeSet<Vec<IntermediateTrie3EdgeKey>> {
     IntermediatePrecomputeNode3::get_all_paths_with_cycles(
         god,
         &roots,
@@ -514,13 +472,7 @@ pub(crate) fn get_normalized_paths_for_vec(
         MAX_PATH_LEN,
     )
         .into_iter()
-        .map(|(_r, p)| {
-            let edges: Vec<_> = p
-                .into_iter()
-                .map(|(ek, ev, _)| IntermediateTrie3Edge::new(ek, ev))
-                .collect();
-            normalize_path(edges)
-        })
+        .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
         .collect()
 }
 
