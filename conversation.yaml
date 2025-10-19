@@ -618,6 +618,46 @@ local_system:
               // This assertion will then panic, which is expected by the test.
               assert_no_pops_reachable_from_pushes(&roots, &god);
           }
+
+          #[test]
+          fn test_eliminate_push_noop_pop_failure_case() {
+              let god = IntermediateTrie3GodWrapper::new();
+              
+              let mut node_map = HashMap::new();
+              // N101: Push source (Root)
+              // N102: Problematic node (Push in, Push out, NoOp out to Pop path)
+              // N103: NoOp target (Pop source)
+              // N104: Pop target
+              // N105: Push target / Cycle target
+              let node_ids = vec![101, 102, 103, 104, 105];
+              for id in node_ids {
+                  node_map.insert(id, Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))));
+              }
+
+              let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+
+              // N101 --Push(1)--> N102 (Incoming Push to N102)
+              god.insert_edge_simple(n(101), n(102), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+              
+              // N102 --NoOp--> N103 (NoOp out)
+              god.insert_edge_simple(n(102), n(103), IntermediateTrie3EdgeKey::NoOp, ());
+              
+              // N102 --Push(2)--> N105 (Push out - prevents N102 from being processed in the first loop)
+              god.insert_edge_simple(n(102), n(105), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
+
+              // N103 --Pop(1, ALL)--> N104 (Pop out - makes Pop reachable from N102)
+              god.insert_edge_simple(n(103), n(104), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
+
+              // N105 --CheckLLM(1)--> N101 (Cycle to keep nodes alive)
+              god.insert_edge_simple(n(105), n(101), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(1)), ());
+
+              let mut roots = BTreeMap::new();
+              roots.insert(TokenizerStateID(0), n(101));
+
+              eliminate_pushes_and_pops(&mut roots, &god);
+
+              assert_no_pops_reachable_from_pushes(&roots, &god);
+          }
       }
   prev_file_contents:
     src/constraint_precompute3_challenge_elimination.rs: |
@@ -826,7 +866,39 @@ local_system:
 
               let mut predecessors: HashMap<Intermediate2PrecomputeNode3Index, Vec<(Intermediate2PrecomputeNode3Index, Intermediate2Trie3EdgeKey, LLMTokenBV)>> = HashMap::new();
               let mut outgoing_push_counts: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
-              let mut has_outgoing_pop: HashMap<Intermediate2PrecomputeNode3Index, bool> = HashMap::new();
+
+              let mut pop_reachable_memo: HashMap<Intermediate2PrecomputeNode3Index, bool> = HashMap::new();
+              fn is_pop_reachable_dfs(
+                  node: Intermediate2PrecomputeNode3Index,
+                  god: &Intermediate2Trie3GodWrapper,
+                  memo: &mut HashMap<Intermediate2PrecomputeNode3Index, bool>,
+                  visiting: &mut HashSet<Intermediate2PrecomputeNode3Index>
+              ) -> bool {
+                  if let Some(&result) = memo.get(&node) { return result; }
+                  if !visiting.insert(node) { return false; }
+                  if let Some(guard) = node.read(god) {
+                      for (edge_key, dest_map) in guard.children() {
+                          if let Intermediate2Trie3EdgeKey::Pop(_, _) = edge_key {
+                              visiting.remove(&node);
+                              memo.insert(node, true);
+                              return true;
+                          }
+                          for child_idx in dest_map.keys() {
+                              if is_pop_reachable_dfs(*child_idx, god, memo, visiting) {
+                                  visiting.remove(&node);
+                                  memo.insert(node, true);
+                                  return true;
+                              }
+                          }
+                      }
+                  }
+                  visiting.remove(&node);
+                  memo.insert(node, false);
+                  false
+              }
+              for &node_idx in &all_nodes {
+                  is_pop_reachable_dfs(node_idx, &god2, &mut pop_reachable_memo, &mut HashSet::new());
+              }
 
               for &node_idx in &all_nodes {
                   outgoing_push_counts.entry(node_idx).or_insert(0);
@@ -834,9 +906,6 @@ local_system:
                       for (edge_key, dest_map) in guard.children() {
                           if let Intermediate2Trie3EdgeKey::Push(_) = edge_key {
                               *outgoing_push_counts.get_mut(&node_idx).unwrap() += dest_map.len();
-                          }
-                          if let Intermediate2Trie3EdgeKey::Pop(_, _) = edge_key {
-                              has_outgoing_pop.insert(node_idx, true);
                           }
                           for (child_idx, edge_val) in dest_map {
                               predecessors.entry(*child_idx).or_default().push((node_idx, edge_key.clone(), edge_val.clone()));
@@ -861,7 +930,7 @@ local_system:
               // and redirect the incoming push edges to the clone, while splicing pop edges at the same time.
               let mut nodes_to_clone: Vec<Intermediate2PrecomputeNode3Index> = Vec::new();
               for node_idx in &all_nodes {
-                  if has_outgoing_pop.get(node_idx).cloned().unwrap_or(false) {
+                  if *pop_reachable_memo.get(node_idx).unwrap_or(&false) {
                       if let Some(guard) = node_idx.read(&god2) {
                           if !guard.value.end {
                               if let Some(preds) = predecessors.get(node_idx) {
@@ -963,57 +1032,56 @@ local_system:
                       continue;
                   }
 
-                  // Collect outgoing edges, separating pop vs non-pop.
-                  let (outgoing_non_pop_edges, outgoing_pop_edges) = {
+                  // Partition outgoing edges. Edges on a pop-path that are not Pushes are splittable.
+                  // Edges not on a pop-path go to the clone. Push edges on a pop-path stay on the original.
+                  let (non_pop_path_edges, splittable_pop_path_edges) = {
                       let b_guard = b_idx.read(&god2).unwrap();
-                      let mut non_pop = Vec::new();
-                      let mut pop_edges = Vec::new();
+                      let mut non_pop = vec![];
+                      let mut splittable = vec![];
+
                       for (ek, dm) in b_guard.children() {
                           for (c_idx, ev) in dm {
-                              match ek {
-                                  Intermediate2Trie3EdgeKey::Pop(_, _) => pop_edges.push((ek.clone(), *c_idx, ev.clone())),
-                                  _ => non_pop.push((ek.clone(), *c_idx, ev.clone())),
+                              let is_pop_path = match ek {
+                                  Intermediate2Trie3EdgeKey::Pop(_, _) => true,
+                                  _ => *pop_reachable_memo.get(c_idx).unwrap_or(&false),
+                              };
+
+                              if !is_pop_path {
+                                  non_pop.push((ek.clone(), *c_idx, ev.clone()));
+                              } else if !matches!(ek, Intermediate2Trie3EdgeKey::Push(_)) {
+                                  splittable.push((ek.clone(), *c_idx, ev.clone()));
                               }
                           }
                       }
-                      (non_pop, pop_edges)
+                      (non_pop, splittable)
                   };
-                  if outgoing_pop_edges.is_empty() {
+
+                  if splittable_pop_path_edges.is_empty() {
                       continue;
                   }
 
                   changed = true;
 
                   // Create or reuse a "no-pop" clone for b_idx and copy non-pop edges.
-                  let clone_idx = if let Some(idx) = nopop_clone_map.get(&b_idx) {
-                      *idx
-                  } else {
+                  let clone_idx = *nopop_clone_map.entry(b_idx).or_insert_with(|| {
                       let b_value = b_idx.read(&god2).unwrap().value.clone();
                       let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(
                           Intermediate2PrecomputeNode3::new(b_value)
                       ));
-                      for (ek, c_idx, ev) in &outgoing_non_pop_edges {
+                      for (ek, c_idx, ev) in &non_pop_path_edges {
                           god2.insert_edge_simple(new_node, *c_idx, ek.clone(), ev.clone());
                       }
-                      nopop_clone_map.insert(b_idx, new_node);
                       new_node
-                  };
+                  });
 
                   // Redirect all incoming pushes A --push(S)--> b_idx to the clone.
                   for (a_idx, s, bv_ab) in &incoming_pushes {
-                      if let Some(mut a_guard) = a_idx.write(&god2) {
-                          if let Some(dest_map) = a_guard.children_mut().get_mut(&Intermediate2Trie3EdgeKey::Push(s.clone())) {
-                              dest_map.remove(&b_idx);
-                              if dest_map.is_empty() {
-                                  a_guard.children_mut().remove(&Intermediate2Trie3EdgeKey::Push(s.clone()));
-                              }
-                          }
-                      }
+                      god2.remove_edge(*a_idx, b_idx, &Intermediate2Trie3EdgeKey::Push(s.clone()));
                       god2.insert_edge_simple(*a_idx, clone_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), bv_ab.clone());
                   }
 
-                  // Splice pop edges: for each b_idx --pop--> c, add A --> c edges according to cancellation.
-                  for (op, c_idx, bv_bc) in &outgoing_pop_edges {
+                  // Splice splittable pop path edges
+                  for (op, c_idx, bv_bc) in &splittable_pop_path_edges {
                       for (a_idx, s, bv_ab) in &incoming_pushes {
                           let new_bv = bv_ab & bv_bc;
                           if new_bv.is_empty() { continue; }
@@ -1021,22 +1089,30 @@ local_system:
                               Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
                                   let intersection = s & s_prime;
                                   if !intersection.is_empty() {
-                                      let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
+                                      let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection.clone());
                                       god2.insert_edge_simple(*a_idx, *c_idx, new_edge_key, new_bv.clone());
                                   }
                               }
                               Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
                                   if !s.is_disjoint(s_prime) {
-                                      god2.insert_edge_simple(*a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv.clone());
+                                      god2.insert_edge_simple(*a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv.clone())
                                   }
                               }
                               Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
                                   let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
                                   god2.insert_edge_simple(*a_idx, *c_idx, new_edge_key, new_bv.clone());
                               }
-                              _ => { /* only pop edges should be here */ }
+                              Intermediate2Trie3EdgeKey::NoOp => {
+                                  god2.insert_edge_simple(*a_idx, *c_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv.clone());
+                              }
+                              _ => { /* Push edges are not splittable */ }
                           }
                       }
+                  }
+
+                  // Remove splittable edges from original node b_idx
+                  for (op, c_idx, _) in &splittable_pop_path_edges {
+                      god2.remove_edge(b_idx, *c_idx, op);
                   }
               }
 
@@ -1285,7 +1361,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -1931,182 +2007,6 @@ messages:
               // This assertion will then panic, which is expected by the test.
               assert_no_pops_reachable_from_pushes(&roots, &god);
           }
-      }
-
-      ```
-    metadata:
-      filename: src/constraint_precompute3_challenge_elimination.rs
-  - user: |+
-      Full graph:
-      --- Root State ID: 0 ---
-      Root Node 0
-      ├── Edge (NoOp): -> Node 1
-      │   └── Edge (NoOp): -> Node 2
-      │       ├── Edge (Pop(0, [0, 7, 13])): -> Node 3
-      │       │   └── Edge (Push(4)): -> Node 4
-      │       │       └── Edge (CheckLLM(2)): -> Node 5
-      │       ├── Edge (Pop(0, 3)): -> Node 6
-      │       │   └── Edge (Pop(1, [ALL])): -> Node 7
-      │       │       └── Edge (Pop(0, [7, 13])): -> Node 8
-      │       │           └── Edge (Push(0)): -> Node 9
-      │       │               └── Edge (Push(4)): -> Node 10
-      │       │                   └── Edge (CheckLLM(2)): -> Node 5 (Shared, already shown)
-      │       ├── Edge (Pop(0, 10)): -> Node 11
-      │       │   └── Edge (Pop(2, [ALL])): -> Node 12
-      │       │       └── Edge (Pop(0, 13)): -> Node 13
-      │       │           └── Edge (Push(7)): -> Node 9 (Shared, already shown)
-      │       └── Edge (Pop(0, 12)): -> Node 14
-      │           └── Edge (Pop(3, [ALL])): -> Node 15
-      │               └── Edge (Pop(0, 13)): -> Node 13 (Shared, already shown)
-      ├── Edge (NoOp): -> Node 16
-      │   └── Edge (NoOp): -> Node 17
-      │       ├── Edge (Pop(0, [0, 7, 13])): -> Node 18
-      │       │   └── Edge (Push(5)): -> Node 19
-      │       │       └── Edge (CheckLLM(1)): -> Node 5 (Shared, already shown)
-      │       ├── Edge (Pop(0, 3)): -> Node 20
-      │       │   └── Edge (Pop(1, [ALL])): -> Node 21
-      │       │       └── Edge (Pop(0, [7, 13])): -> Node 22
-      │       │           └── Edge (Push(0)): -> Node 23
-      │       │               └── Edge (Push(5)): -> Node 24
-      │       │                   └── Edge (CheckLLM(1)): -> Node 5 (Shared, already shown)
-      │       ├── Edge (Pop(0, 10)): -> Node 25
-      │       │   └── Edge (Pop(2, [ALL])): -> Node 26
-      │       │       └── Edge (Pop(0, 13)): -> Node 27
-      │       │           └── Edge (Push(7)): -> Node 23 (Shared, already shown)
-      │       └── Edge (Pop(0, 12)): -> Node 28
-      │           └── Edge (Pop(3, [ALL])): -> Node 29
-      │               └── Edge (Pop(0, 13)): -> Node 27 (Shared, already shown)
-      └── Edge (NoOp): -> Node 30
-          └── Edge (NoOp): -> Node 31
-              ├── Edge (Pop(0, [7, 13])): -> Node 32
-              │   └── Edge (CheckLLM(0)): -> Node 33
-              │       └── Edge (Pop(0, [7, 13])): -> Node 34
-              │           └── Edge (Push(0)): -> Node 35
-              │               └── Edge (Push(5)): -> Node 36
-              │                   └── Edge (CheckLLM(0)): -> Node 5 (Shared, already shown)
-              ├── Edge (Pop(0, 10)): -> Node 37
-              │   └── Edge (Pop(2, [ALL])): -> Node 38
-              │       └── Edge (Pop(0, 13)): -> Node 39
-              │           └── Edge (Push(7)): -> Node 40
-              │               └── Edge (CheckLLM(0)): -> Node 33 (Shared, already shown)
-              └── Edge (Pop(0, 12)): -> Node 41
-                  └── Edge (Pop(3, [ALL])): -> Node 42
-                      └── Edge (Pop(0, 13)): -> Node 39 (Shared, already shown)
-
-      --- Root State ID: 1 ---
-      Root Node 43
-      └── Edge (NoOp): -> Node 44
-          └── Edge (NoOp): -> Node 45
-              ├── Edge (Pop(0, [0, 7, 13])): -> Node 46
-              │   └── Edge (Push(5)): -> Node 47
-              │       └── Edge (CheckLLM(0..=2)): -> Node 5 (Shared, already shown)
-              ├── Edge (Pop(0, 3)): -> Node 48
-              │   └── Edge (Pop(1, [ALL])): -> Node 49
-              │       └── Edge (Pop(0, [7, 13])): -> Node 50
-              │           └── Edge (Push(0)): -> Node 51
-              │               └── Edge (Push(5)): -> Node 52
-              │                   └── Edge (CheckLLM(0..=2)): -> Node 5 (Shared, already shown)
-              ├── Edge (Pop(0, 10)): -> Node 53
-              │   └── Edge (Pop(2, [ALL])): -> Node 54
-              │       └── Edge (Pop(0, 13)): -> Node 55
-              │           └── Edge (Push(7)): -> Node 51 (Shared, already shown)
-              └── Edge (Pop(0, 12)): -> Node 56
-                  └── Edge (Pop(3, [ALL])): -> Node 57
-                      └── Edge (Pop(0, 13)): -> Node 55 (Shared, already shown)
-
-      --- Root State ID: 2 ---
-      Root Node 58
-
-      --- Root State ID: 3 ---
-      Root Node 59
-
-      --- Root State ID: 4 ---
-      Root Node 60
-
-      --- Root State ID: 5 ---
-      Root Node 61
-
-      --- Root State ID: 6 ---
-      Root Node 62
-
-      Segment:
-      --- Root State ID: 0 ---
-      Root Node 39
-      └── Edge (Push(7)): -> Node 40
-          └── Edge (CheckLLM(0)): -> Node 33
-              └── Edge (Pop(0, [7, 13])): -> Node 34
-                  └── Edge (Push(0)): -> Node 35
-                      └── Edge (Push(5)): -> Node 36
-                          └── Edge (CheckLLM(0)): -> Node 5
-
-
-
-      thread 'test_constraint_basic::test_js_simplified_ebnf_string' (10688178) panicked at src/constraint_precompute3_challenge_elimination.rs:472:29:
-      Assertion failed: Pop is reachable from a Push edge. Path: Node Trie2Index(39) --Push--> Node Trie2Index(40) --> ... --> Pop. Path to pop: [(Trie2Index { index: Index { index: 40 } }, "CheckLLM(0)"), (Trie2Index { index: Index { index: 33 } }, "Pop(0, [7, 13])")]
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: sep1::constraint_precompute3_challenge_elimination::assert_no_pops_reachable_from_pushes
-                   at ./src/constraint_precompute3_challenge_elimination.rs:472:29
-         3: sep1::constraint::GrammarConstraint::_process_and_rebuild_trie3_paths
-                   at ./src/constraint.rs:1895:9
-         4: sep1::constraint::GrammarConstraint::precompute3
-                   at ./src/constraint.rs:2150:9
-         5: sep1::constraint::GrammarConstraint::new_with_config
-                   at ./src/constraint.rs:1064:41
-         6: sep1::constraint::GrammarConstraint::from_compiled_grammar_with_config
-                   at ./src/constraint.rs:800:9
-         7: sep1::constraint::GrammarConstraint::from_compiled_grammar
-                   at ./src/constraint.rs:782:9
-         8: sep1::test_constraint_basic::test_js_simplified_ebnf_string
-                   at ./src/test_constraint_basic.rs:1599:22
-         9: sep1::test_constraint_basic::test_js_simplified_ebnf_string::{{closure}}
-                   at ./src/test_constraint_basic.rs:1575:40
-        10: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-        11: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-    metadata:
-  - user: Add a test to constraint_precompute3_challenge_eliminiation.rs that reproduces
-      this error.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      This issue appears to be caused by a scenario where a node has an incoming `Push` edge, an outgoing `Push` edge (which prevents it from being processed in the main elimination loop), and an outgoing non-push/non-pop edge (`NoOp` or `CheckLLM`) that eventually leads to a `Pop` edge. The current cloning logic only handles nodes with an *immediate* outgoing `Pop`, so the problematic node is neither processed nor cloned, leaving the `Push -> ... -> Pop` path intact.
-
-      To reproduce this, I will add a new test case that constructs the minimal graph exhibiting the structure: `Push -> NoOp -> Pop` where the intermediate node also has an outgoing `Push`.
-
-      ### Step-by-step instructions
-
-      1.  Open the file `src/constraint_precompute3_challenge_elimination.rs`.
-      2.  Append the following new test function, `test_eliminate_push_noop_pop_failure_case`, immediately after the existing `test_eliminate_push_pop_failure_case` function (around line 543).
-
-      **File: `src/constraint_precompute3_challenge_elimination.rs`**
-
-      ```rust
-      // ... (around line 543)
-              // This assertion will then panic, which is expected by the test.
-              assert_no_pops_reachable_from_pushes(&roots, &god);
-          }
 
           #[test]
           fn test_eliminate_push_noop_pop_failure_case() {
@@ -2143,14 +2043,110 @@ messages:
               let mut roots = BTreeMap::new();
               roots.insert(TokenizerStateID(0), n(101));
 
-              // This call is expected to fail to eliminate the push->noop->pop sequence
               eliminate_pushes_and_pops(&mut roots, &god);
 
-              // This assertion will then panic, which is expected by the test.
               assert_no_pops_reachable_from_pushes(&roots, &god);
           }
       }
+
       ```
+    metadata:
+      filename: src/constraint_precompute3_challenge_elimination.rs
+  - user: |+
+      [DEBUG] 2] src/constraint_precompute3_challenge_elimination.rs:421: Eliminating pushes/pops: iteration 1, processed 3 leaf nodes and 0 cloned nodes (total nodes: 5).
+      Full graph:
+      --- Root State ID: 0 ---
+      Root Node 0
+      └── Edge (Push(1)): -> Node 1
+          ├── Edge (Push(2)): -> Node 2
+          │   └── Edge (CheckLLM(1)): -> Node 0 (Cycle detected)
+          └── Edge (NoOp): -> Node 3
+              └── Edge (Pop(1, [ALL])): -> Node 4
+
+      Segment:
+      --- Root State ID: 0 ---
+      Root Node 0
+      └── Edge (Push(1)): -> Node 1
+          ├── Edge (Push(2)): -> Node 2
+          │   └── Edge (CheckLLM(1)): -> Node 0 (Cycle detected)
+          └── Edge (NoOp): -> Node 3
+              └── Edge (Pop(1, [ALL])): -> Node 4
+
+
+
+      thread 'constraint_precompute3_challenge_elimination::tests::test_eliminate_push_noop_pop_failure_case' (10692487) panicked at src/constraint_precompute3_challenge_elimination.rs:472:29:
+      Assertion failed: Pop is reachable from a Push edge. Path: Node Trie2Index(0) --Push--> Node Trie2Index(1) --> ... --> Pop. Path to pop: [(Trie2Index { index: Index { index: 1 } }, "NoOp"), (Trie2Index { index: Index { index: 3 } }, "Pop(1, [ALL])")]
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::constraint_precompute3_challenge_elimination::assert_no_pops_reachable_from_pushes
+                   at ./src/constraint_precompute3_challenge_elimination.rs:472:29
+         3: sep1::constraint_precompute3_challenge_elimination::tests::test_eliminate_push_noop_pop_failure_case
+                   at ./src/constraint_precompute3_challenge_elimination.rs:652:9
+         4: sep1::constraint_precompute3_challenge_elimination::tests::test_eliminate_push_noop_pop_failure_case::{{closure}}
+                   at ./src/constraint_precompute3_challenge_elimination.rs:616:51
+         5: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         6: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - user: The assumptions in `eliminate_pushes_and_pops` for node selection - namely
+      that the node has no outgoing push edges - allow us to guarantee that no new
+      intermediate nodes are created. But as the test (which currently fails) demonstrates,
+      there are cases this cannot handle. How can we handle these? We want to avoid
+      creating intermediate nodes. But if that's absolutely necessary in order to
+      make sure the assertion `assert_no_pops_reachable_from_pushes` succeed, we want
+      to create as few of them as possible (and if that's the case then the assertion
+      that the number of nodes never increases will need to be reviewed).
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. The current implementation of `eliminate_pushes_and_pops` fails to handle cases where a node with an incoming `Push` edge has a path to a `Pop` edge that doesn't begin with an immediate `Pop` edge, especially if that node also has an outgoing `Push` edge. This leads to a failure in the `assert_no_pops_reachable_from_pushes` assertion.
+
+      The fix involves making the elimination logic aware of `Pop` reachability, not just immediate `Pop` edges. Here are the step-by-step instructions to resolve the issue:
+
+      ### Step-by-step Instructions
+
+      1.  **File:** `src/constraint_precompute3_challenge_elimination.rs`
+      2.  **Function:** `eliminate_pushes_and_pops`
+
+      I will modify the function to correctly identify and process nodes that are on a `Push -> ... -> Pop` path, even when they have outgoing `Push` edges.
+
+      #### Detailed Changes:
+
+      1.  **Remove `has_outgoing_pop`:** This map is too simplistic as it only tracks immediate outgoing `Pop` edges. We will replace it with a full reachability analysis.
+
+      2.  **Add Pop Reachability Analysis:** Inside the main `loop`, before processing nodes, we will perform a DFS to determine for every node whether a `Pop` edge is reachable from it. The results will be stored in a `pop_reachable_memo` map.
+
+      3.  **Update `nodes_to_clone` Selection:** The logic for selecting which nodes to clone will be updated to use the `pop_reachable_memo`. A node will be a candidate for cloning if it has an incoming `Push` edge and a `Pop` edge is reachable from it.
+
+      4.  **Refine Cloning and Splicing Logic:** The core of the change is in how nodes selected for cloning are handled. The outgoing edges of such a node will be partitioned:
+          *   Edges leading to a "pop-free" part of the graph will be moved to a clone of the node.
+          *   Edges that are on a path to a `Pop` and are eligible for splicing (`NoOp` or `Pop` edges) will be spliced with incoming `Push` edges.
+          *   `Push` edges that are on a path to a `Pop` will be left on the original node. Since we redirect all incoming `Push` edges away from the original node, these paths will no longer be problematic.
+
+      This ensures that `Push -> ... -> Pop` paths are progressively eliminated, even in complex graph structures, leading to the `assert_no_pops_reachable_from_pushes` check passing.
+
+      Here is the git diff with the necessary changes.
 
       ### Git Diff
 
@@ -2158,51 +2154,185 @@ messages:
       diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
       --- a/src/constraint_precompute3_challenge_elimination.rs
       +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -541,4 +541,40 @@
-               // This assertion will then panic, which is expected by the test.
-               assert_no_pops_reachable_from_pushes(&roots, &god);
-           }
+      @@ -226,10 +226,39 @@
+               // Specialized cloning may increase nodes in order to eliminate push->pop reachability while preserving semantics.
+       
+               let mut predecessors: HashMap<Intermediate2PrecomputeNode3Index, Vec<(Intermediate2PrecomputeNode3Index, Intermediate2Trie3EdgeKey, LLMTokenBV)>> = HashMap::new();
+               let mut outgoing_push_counts: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
+      -        let mut has_outgoing_pop: HashMap<Intermediate2PrecomputeNode3Index, bool> = HashMap::new();
       +
-      +    #[test]
-      +    fn test_eliminate_push_noop_pop_failure_case() {
-      +        let god = IntermediateTrie3GodWrapper::new();
-      +        
-      +        let mut node_map = HashMap::new();
-      +        // N101: Push source (Root)
-      +        // N102: Problematic node (Push in, Push out, NoOp out to Pop path)
-      +        // N103: NoOp target (Pop source)
-      +        // N104: Pop target
-      +        // N105: Push target / Cycle target
-      +        let node_ids = vec![101, 102, 103, 104, 105];
-      +        for id in node_ids {
-      +            node_map.insert(id, Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))));
+      +        let mut pop_reachable_memo: HashMap<Intermediate2PrecomputeNode3Index, bool> = HashMap::new();
+      +        fn is_pop_reachable_dfs(
+      +            node: Intermediate2PrecomputeNode3Index,
+      +            god: &Intermediate2Trie3GodWrapper,
+      +            memo: &mut HashMap<Intermediate2PrecomputeNode3Index, bool>,
+      +            visiting: &mut HashSet<Intermediate2PrecomputeNode3Index>
+      +        ) -> bool {
+      +            if let Some(&result) = memo.get(&node) { return result; }
+      +            if !visiting.insert(node) { return false; }
+      +            if let Some(guard) = node.read(god) {
+      +                for (edge_key, dest_map) in guard.children() {
+      +                    if let Intermediate2Trie3EdgeKey::Pop(_, _) = edge_key {
+      +                        visiting.remove(&node);
+      +                        memo.insert(node, true);
+      +                        return true;
+      +                    }
+      +                    for child_idx in dest_map.keys() {
+      +                        if is_pop_reachable_dfs(*child_idx, god, memo, visiting) {
+      +                            visiting.remove(&node);
+      +                            memo.insert(node, true);
+      +                            return true;
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +            visiting.remove(&node);
+      +            memo.insert(node, false);
+      +            false
       +        }
+      +        for &node_idx in &all_nodes {
+      +            is_pop_reachable_dfs(node_idx, &god2, &mut pop_reachable_memo, &mut HashSet::new());
+      +        }
+       
+               for &node_idx in &all_nodes {
+                   outgoing_push_counts.entry(node_idx).or_insert(0);
+      @@ -238,9 +267,6 @@
+                           if let Intermediate2Trie3EdgeKey::Push(_) = edge_key {
+                               *outgoing_push_counts.get_mut(&node_idx).unwrap() += dest_map.len();
+                           }
+      -                    if let Intermediate2Trie3EdgeKey::Pop(_, _) = edge_key {
+      -                        has_outgoing_pop.insert(node_idx, true);
+      -                    }
+                           for (child_idx, edge_val) in dest_map {
+                               predecessors.entry(*child_idx).or_default().push((node_idx, edge_key.clone(), edge_val.clone()));
+                           }
+      @@ -262,7 +288,7 @@
+               // and redirect the incoming push edges to the clone, while splicing pop edges at the same time.
+               let mut nodes_to_clone: Vec<Intermediate2PrecomputeNode3Index> = Vec::new();
+               for node_idx in &all_nodes {
+      -            if has_outgoing_pop.get(node_idx).cloned().unwrap_or(false) {
+      +            if *pop_reachable_memo.get(node_idx).unwrap_or(&false) {
+                       if let Some(guard) = node_idx.read(&god2) {
+                           if !guard.value.end {
+                               if let Some(preds) = predecessors.get(node_idx) {
+      @@ -348,93 +374,90 @@
+                       continue;
+                   }
+       
+      -            // Collect outgoing edges, separating pop vs non-pop.
+      -            let (outgoing_non_pop_edges, outgoing_pop_edges) = {
+      +            // Partition outgoing edges. Edges on a pop-path that are not Pushes are splittable.
+      +            // Edges not on a pop-path go to the clone. Push edges on a pop-path stay on the original.
+      +            let (non_pop_path_edges, splittable_pop_path_edges) = {
+                       let b_guard = b_idx.read(&god2).unwrap();
+      -                let mut non_pop = Vec::new();
+      -                let mut pop_edges = Vec::new();
+      +                let mut non_pop = vec![];
+      +                let mut splittable = vec![];
       +
-      +        let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+                       for (ek, dm) in b_guard.children() {
+                           for (c_idx, ev) in dm {
+      -                        match ek {
+      -                            Intermediate2Trie3EdgeKey::Pop(_, _) => pop_edges.push((ek.clone(), *c_idx, ev.clone())),
+      -                            _ => non_pop.push((ek.clone(), *c_idx, ev.clone())),
+      +                        let is_pop_path = match ek {
+      +                            Intermediate2Trie3EdgeKey::Pop(_, _) => true,
+      +                            _ => *pop_reachable_memo.get(c_idx).unwrap_or(&false),
+      +                        };
       +
-      +        // N101 --Push(1)--> N102 (Incoming Push to N102)
-      +        god.insert_edge_simple(n(101), n(102), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
-      +        
-      +        // N102 --NoOp--> N103 (NoOp out)
-      +        god.insert_edge_simple(n(102), n(103), IntermediateTrie3EdgeKey::NoOp, ());
-      +        
-      +        // N102 --Push(2)--> N105 (Push out - prevents N102 from being processed in the first loop)
-      +        god.insert_edge_simple(n(102), n(105), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
+      +                        if !is_pop_path {
+      +                            non_pop.push((ek.clone(), *c_idx, ev.clone()));
+      +                        } else if !matches!(ek, Intermediate2Trie3EdgeKey::Push(_)) {
+      +                            splittable.push((ek.clone(), *c_idx, ev.clone()));
+                               }
+                           }
+                       }
+      -                (non_pop, pop_edges)
+      +                (non_pop, splittable)
+                   };
+      -            if outgoing_pop_edges.is_empty() {
       +
-      +        // N103 --Pop(1, ALL)--> N104 (Pop out - makes Pop reachable from N102)
-      +        god.insert_edge_simple(n(103), n(104), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
+      +            if splittable_pop_path_edges.is_empty() {
+                       continue;
+                   }
+       
+                   changed = true;
+       
+                   // Create or reuse a "no-pop" clone for b_idx and copy non-pop edges.
+      -            let clone_idx = if let Some(idx) = nopop_clone_map.get(&b_idx) {
+      -                *idx
+      -            } else {
+      +            let clone_idx = *nopop_clone_map.entry(b_idx).or_insert_with(|| {
+                       let b_value = b_idx.read(&god2).unwrap().value.clone();
+                       let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(
+                           Intermediate2PrecomputeNode3::new(b_value)
+                       ));
+      -                for (ek, c_idx, ev) in &outgoing_non_pop_edges {
+      +                for (ek, c_idx, ev) in &non_pop_path_edges {
+                           god2.insert_edge_simple(new_node, *c_idx, ek.clone(), ev.clone());
+                       }
+      -                nopop_clone_map.insert(b_idx, new_node);
+                       new_node
+      -            };
+      +            });
+       
+                   // Redirect all incoming pushes A --push(S)--> b_idx to the clone.
+                   for (a_idx, s, bv_ab) in &incoming_pushes {
+      -                if let Some(mut a_guard) = a_idx.write(&god2) {
+      -                    if let Some(dest_map) = a_guard.children_mut().get_mut(&Intermediate2Trie3EdgeKey::Push(s.clone())) {
+      -                        dest_map.remove(&b_idx);
+      -                        if dest_map.is_empty() {
+      -                            a_guard.children_mut().remove(&Intermediate2Trie3EdgeKey::Push(s.clone()));
+      -                        }
+      -                    }
+      -                }
+      +                god2.remove_edge(*a_idx, b_idx, &Intermediate2Trie3EdgeKey::Push(s.clone()));
+                       god2.insert_edge_simple(*a_idx, clone_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), bv_ab.clone());
+                   }
+       
+      -            // Splice pop edges: for each b_idx --pop--> c, add A --> c edges according to cancellation.
+      -            for (op, c_idx, bv_bc) in &outgoing_pop_edges {
+      +            // Splice splittable pop path edges
+      +            for (op, c_idx, bv_bc) in &splittable_pop_path_edges {
+                       for (a_idx, s, bv_ab) in &incoming_pushes {
+                           let new_bv = bv_ab & bv_bc;
+                           if new_bv.is_empty() { continue; }
+                           match op {
+                               Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
+                                   let intersection = s & s_prime;
+                                   if !intersection.is_empty() {
+      -                                let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
+      +                                let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection.clone());
+                                       god2.insert_edge_simple(*a_idx, *c_idx, new_edge_key, new_bv.clone());
+                                   }
+                               }
+                               Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
+                                   if !s.is_disjoint(s_prime) {
+      -                                god2.insert_edge_simple(*a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv.clone());
+      +                                god2.insert_edge_simple(*a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv.clone())
+                                   }
+                               }
+                               Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
+                                   let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
+                                   god2.insert_edge_simple(*a_idx, *c_idx, new_edge_key, new_bv.clone());
+                               }
+      -                        _ => { /* only pop edges should be here */ }
+      +                        Intermediate2Trie3EdgeKey::NoOp => {
+      +                            god2.insert_edge_simple(*a_idx, *c_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv.clone());
+      +                        }
+      +                        _ => { /* Push edges are not splittable */ }
+                           }
+                       }
+                   }
       +
-      +        // N105 --CheckLLM(1)--> N101 (Cycle to keep nodes alive)
-      +        god.insert_edge_simple(n(105), n(101), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(1)), ());
-      +
-      +        let mut roots = BTreeMap::new();
-      +        roots.insert(TokenizerStateID(0), n(101));
-      +
-      +        eliminate_pushes_and_pops(&mut roots, &god);
-      +
-      +        assert_no_pops_reachable_from_pushes(&roots, &god);
-      +    }
-       }
+      +            // Remove splittable edges from original node b_idx
+      +            for (op, c_idx, _) in &splittable_pop_path_edges {
+      +                god2.remove_edge(b_idx, *c_idx, op);
+      +            }
+               }
+       
+               if changed {
+
       ```
     metadata:
   - user: |
@@ -2214,7 +2344,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
     metadata:
-  - user: 'Changes committed with message: "Test: Add test case for push->noop->pop
-      elimination failure when intermediate node has outgoing push"'
+  - user: 'Changes committed with message: "Fix push/pop elimination by using full
+      pop-reachability for node cloning and splicing"'
     metadata:
 ...
