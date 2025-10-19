@@ -253,129 +253,9 @@ fn compress_noop_only_nodes(
     changed
 }
 
-/// Eliminates NoOp (epsilon) edges by hoisting non-NoOp transitions from
-/// each node's NoOp-closure, then removing all NoOp edges. This is a standard
-/// ε-elimination for NFAs and is semantics-preserving because NoOp is ε.
-pub(crate) fn eliminate_noop_epsilon_in_subgraph(
-    start_nodes: &[IntermediatePrecomputeNode3Index],
-    god: &IntermediateTrie3GodWrapper,
-) -> bool {
-    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
-    if all_nodes_vec.is_empty() {
-        return false;
-    }
-    let all_nodes_in_subgraph: HashSet<_> = all_nodes_vec.into_iter().collect();
-
-    // Build NoOp adjacency within subgraph
-    let mut noop_adj: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> =
-        HashMap::new();
-    for n in &all_nodes_in_subgraph {
-        if let Some(g) = n.read(god) {
-            if let Some(dm) = g.children().get(&crate::constraint::IntermediateTrie3EdgeKey::NoOp) {
-                let mut succs: Vec<IntermediatePrecomputeNode3Index> = dm
-                    .keys()
-                    .cloned()
-                    .filter(|dst| all_nodes_in_subgraph.contains(dst))
-                    .collect();
-                if !succs.is_empty() {
-                    succs.sort();
-                    succs.dedup();
-                    noop_adj.insert(*n, succs);
-                }
-            }
-        }
-    }
-
-    if noop_adj.is_empty() {
-        return false;
-    }
-
-    let mut changed = false;
-
-    // For each node that has NoOp successors, compute closure and hoist non-NoOp edges
-    for src in &all_nodes_in_subgraph {
-        if !noop_adj.contains_key(src) {
-            continue;
-        }
-        // BFS over NoOp edges to compute closure
-        let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-        let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
-        visited.insert(*src);
-        q.push_back(*src);
-        while let Some(cur) = q.pop_front() {
-            if let Some(succs) = noop_adj.get(&cur) {
-                for s in succs {
-                    if visited.insert(*s) {
-                        q.push_back(*s);
-                    }
-                }
-            }
-        }
-
-        // Aggregate non-NoOp edges from closure
-        let mut to_add: HashMap<
-            crate::constraint::IntermediateTrie3EdgeKey,
-            HashSet<IntermediatePrecomputeNode3Index>,
-        > = HashMap::new();
-        for m in &visited {
-            if let Some(gm) = m.read(god) {
-                for (ek, dm) in gm.children() {
-                    if matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::NoOp) {
-                        continue;
-                    }
-                    for (dst, _) in dm {
-                        if all_nodes_in_subgraph.contains(dst) {
-                            to_add.entry(ek.clone()).or_default().insert(*dst);
-                        }
-                    }
-                }
-            }
-        }
-
-        if !to_add.is_empty() {
-            if let Some(mut w) = src.write(god) {
-                for (ek, dests) in to_add {
-                    let dest_map = w.children_mut().entry(ek).or_default();
-                    for d in dests {
-                        if dest_map.get(&d).is_none() {
-                            dest_map.insert(d, ());
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Remove all NoOp edges from the subgraph
-    for n in &all_nodes_in_subgraph {
-        let had_noop = if let Some(g) = n.read(god) {
-            g.children()
-                .get(&crate::constraint::IntermediateTrie3EdgeKey::NoOp)
-                .map(|dm| !dm.is_empty())
-                .unwrap_or(false)
-        } else {
-            false
-        };
-        if had_noop {
-            if let Some(mut w) = n.write(god) {
-                w.children_mut()
-                    .retain(|ek, _| !matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::NoOp));
-            }
-            changed = true;
-        }
-    }
-
-    changed
-}
-
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct NodeSignature {
     end: bool,
-    // The sorted, deduped list of Pop edge-keys that enter this node.
-    // Including this prevents unsafe merges across different Pop contexts
-    // while still allowing merges when Pop-context is identical.
-    incoming_pop_keys: Vec<crate::constraint::IntermediateTrie3EdgeKey>,
     // For determinism: edge keys sorted; each has sorted child-colors
     edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
 }
@@ -441,29 +321,7 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
         }
     }
 
-    // Compute incoming Pop-key signatures: sorted, deduped list of Pop edge-keys that enter each node.
-    // This allows safe merges of post-Pop nodes only when their Pop-contexts are identical, avoiding
-    // unsafe joins while still enabling cross-template sharing.
-    let mut incoming_pop_sig: HashMap<
-        IntermediatePrecomputeNode3Index,
-        Vec<crate::constraint::IntermediateTrie3EdgeKey>,
-    > = HashMap::new();
-    for (dst, preds) in &incoming {
-        let mut pops: Vec<crate::constraint::IntermediateTrie3EdgeKey> = preds
-            .iter()
-            .filter_map(|(_, ek)| {
-                if matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _)) {
-                    Some(ek.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        pops.sort();
-        pops.dedup();
-        incoming_pop_sig.insert(*dst, pops);
-    }
-    // No blanket pinning of post-Pop nodes. We rely on incoming_pop_sig to guard merges.
+    // Use pinned set as-is for global cross-template optimization
     let pinned_ext = pinned.clone();
 
     // Iterative color refinement on DAG-like structure (robust even if cycles appear).
@@ -489,7 +347,6 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
 
         let sig = NodeSignature {
             end: end_flag,
-            incoming_pop_keys: incoming_pop_sig.get(n).cloned().unwrap_or_default(),
             edges: out_sig_part,
         };
         let len = next_color.len();
@@ -524,7 +381,6 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
             // Ignore incoming context for equivalence; only outgoing structure + end flag matters.
             let sig = NodeSignature {
                 end: end_flag,
-                incoming_pop_keys: incoming_pop_sig.get(n).cloned().unwrap_or_default(),
                 edges: edges_sig,
             };
             let len = interner.len();
@@ -739,6 +595,198 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     any_changed
 }
 
+/// Hash-consing based structural merge. 
+/// Computes a structural hash for each node bottom-up and merges nodes with identical hashes.
+/// This is more aggressive than color refinement and can find more sharing across templates.
+fn hash_cons_structural_merge(
+    start_nodes: &[IntermediatePrecomputeNode3Index],
+    pinned: &HashSet<IntermediatePrecomputeNode3Index>,
+    god: &IntermediateTrie3GodWrapper,
+) -> bool {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    let all_nodes: Vec<_> = Trie::all_nodes(god, start_nodes);
+    if all_nodes.is_empty() {
+        return false;
+    }
+    let node_set: HashSet<_> = all_nodes.iter().copied().collect();
+    
+    // Build outgoing/incoming adjacency within subgraph
+    let mut outgoing: HashMap<
+        IntermediatePrecomputeNode3Index, 
+        Vec<(IntermediateTrie3EdgeKey, Vec<IntermediatePrecomputeNode3Index>)>
+    > = HashMap::new();
+    let mut incoming: HashMap<
+        IntermediatePrecomputeNode3Index, 
+        Vec<(IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey)>
+    > = HashMap::new();
+    
+    for &n in &node_set {
+        if let Some(g) = n.read(god) {
+            for (ek, dm) in g.children() {
+                let mut kids: Vec<_> = dm.keys().filter(|k| node_set.contains(k)).copied().collect();
+                kids.sort();
+                if !kids.is_empty() {
+                    outgoing.entry(n).or_default().push((ek.clone(), kids.clone()));
+                    for kid in kids {
+                        incoming.entry(kid).or_default().push((n, ek.clone()));
+                    }
+                }
+            }
+        }
+    }
+    
+    // Sort outgoing edges for determinism
+    for edges in outgoing.values_mut() {
+        edges.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    
+    // Compute levels (distance from leaves) to process bottom-up
+    let mut level: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
+    for _ in 0..100 {
+        let mut changed = false;
+        for &n in &node_set {
+            let child_level = outgoing.get(&n)
+                .map(|edges| {
+                    edges.iter()
+                        .flat_map(|(_, kids)| kids.iter())
+                        .filter_map(|k| level.get(k).copied())
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            let new_level = if outgoing.contains_key(&n) { child_level + 1 } else { 0 };
+            if level.get(&n).copied().unwrap_or(usize::MAX) != new_level {
+                level.insert(n, new_level);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    
+    let max_level = level.values().copied().max().unwrap_or(0);
+    
+    // Bottom-up hash computation and merging
+    let mut node_hash: HashMap<IntermediatePrecomputeNode3Index, u64> = HashMap::new();
+    let mut hash_to_nodes: HashMap<u64, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
+    
+    // Process level by level (leaves first)
+    for lv in 0..=max_level {
+        let mut nodes_at_level: Vec<_> = node_set.iter()
+            .filter(|n| level.get(n).copied().unwrap_or(0) == lv)
+            .copied()
+            .collect();
+        nodes_at_level.sort();
+        
+        for n in nodes_at_level {
+            let mut hasher = DefaultHasher::new();
+            
+            // Hash end flag
+            if let Some(g) = n.read(god) {
+                g.value.end.hash(&mut hasher);
+            }
+            
+            // Hash outgoing structure (edge keys and child hashes)
+            if let Some(edges) = outgoing.get(&n) {
+                for (ek, kids) in edges {
+                    ek.hash(&mut hasher);
+                    for kid in kids {
+                        node_hash.get(kid).unwrap_or(&0).hash(&mut hasher);
+                    }
+                }
+            }
+            
+            let h = hasher.finish();
+            node_hash.insert(n, h);
+            hash_to_nodes.entry(h).or_default().push(n);
+        }
+    }
+    
+    // Build representative mapping (merge nodes with same hash)
+    let mut rep: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = HashMap::new();
+    let mut merge_count = 0;
+    
+    for (h, nodes) in &hash_to_nodes {
+        if nodes.len() <= 1 {
+            continue;
+        }
+        
+        // Find canonical: prefer pinned nodes, then lowest index for determinism
+        let canonical = nodes.iter()
+            .min_by_key(|n| (!pinned.contains(n), *n))
+            .copied()
+            .unwrap();
+        
+        for &n in nodes {
+            rep.insert(n, canonical);
+            if n != canonical {
+                merge_count += 1;
+            }
+        }
+        
+        if is_debug_level_enabled(3) && nodes.len() > 1 {
+            println!("  Hash {:016x}: merging {} nodes into {:?}", h, nodes.len(), canonical);
+        }
+    }
+    
+    if merge_count == 0 {
+        return false;
+    }
+    
+    if is_debug_level_enabled(3) {
+        println!("Hash-cons merge: {} nodes merged", merge_count);
+    }
+    
+    // Redirect all edges to use canonical representatives
+    
+    // Collect all edges to add to canonical nodes
+    let mut edges_to_add: HashMap<
+        (IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey), 
+        HashSet<IntermediatePrecomputeNode3Index>
+    > = HashMap::new();
+    
+    for (src, edges) in &outgoing {
+        let rep_src = rep.get(src).copied().unwrap_or(*src);
+        for (ek, kids) in edges {
+            for kid in kids {
+                let rep_kid = rep.get(kid).copied().unwrap_or(*kid);
+                edges_to_add.entry((rep_src, ek.clone())).or_default().insert(rep_kid);
+            }
+        }
+    }
+    
+    // Apply edge updates
+    for ((src, ek), dests) in edges_to_add {
+        if let Some(mut w) = src.write(god) {
+            let dest_map = w.children_mut().entry(ek).or_default();
+            for d in dests {
+                dest_map.insert(d, ());
+            }
+        }
+    }
+    
+    // Redirect incoming edges from merged nodes to their representatives
+    for (node, node_rep) in &rep {
+        if node != node_rep {
+            if let Some(preds) = incoming.get(node) {
+                for (pred, ek) in preds {
+                    let rep_pred = rep.get(pred).copied().unwrap_or(*pred);
+                    if let Some(mut w) = rep_pred.write(god) {
+                        let dest_map = w.children_mut().entry(ek.clone()).or_default();
+                        dest_map.remove(node);
+                        dest_map.insert(*node_rep, ());
+                    }
+                }
+            }
+        }
+    }
+    
+    true
+}
+
 fn compute_and_print_template_stats(
     templates: &[(
         IntermediatePrecomputeNode3Index,
@@ -827,18 +875,30 @@ pub fn optimize_intermediate_trie3_templates_global(
         pinned.insert(*e);
     }
 
-    // A few global passes: compress NoOp chains and merge identical subgraphs across all templates,
-    // then prune per template to drop detritus.
-    for _ in 0..6 {
+    // Multiple global passes with different strategies:
+    // 1. Hash-consing merge (aggressive, finds identical substructures)
+    // 2. Structural merge (color refinement based)
+    // 3. NoOp compression
+    // 4. Per-template pruning
+    for iteration in 0..7 {
         let mut changed = false;
-        // First eliminate NoOp epsilon transitions globally, to expose more sharing opportunities.
-        // changed |= eliminate_noop_epsilon_in_subgraph(&start_nodes, god);
+        
+        if is_debug_level_enabled(3) {
+            println!("\n=== Optimization iteration {} ===", iteration);
+        }
+        
+        changed |= hash_cons_structural_merge(&start_nodes, &pinned, god);
         changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
         changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
+        
         for (s, e) in templates {
             changed |= prune_unproductive_nodes(&[*s], e, god);
         }
+        
         if !changed {
+            if is_debug_level_enabled(3) {
+                println!("Converged after {} iterations", iteration + 1);
+            }
             break;
         }
     }
