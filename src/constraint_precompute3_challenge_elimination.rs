@@ -353,7 +353,9 @@ pub fn assert_no_pops_reachable_from_pushes(
                                 .display_edge_keys_only()
                                 .omit_depth()
                                 ;
+                            eprintln!("Full graph:");
                             eprintln!("{}", Trie::pretty_print_with_options(god, roots.values().cloned().collect::<Vec<_>>().as_slice(), &options));
+                            eprintln!("Segment:");
                             eprintln!("{}", Trie::pretty_print_with_options(god, &[node_idx], &options));
                             panic!("Assertion failed: Pop is reachable from a Push edge. Path: Node {} --Push--> Node {} --> ... --> Pop. Path to pop: {:?}", node_idx, child_idx, path);
                         }
