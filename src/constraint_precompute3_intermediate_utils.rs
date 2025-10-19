@@ -393,7 +393,7 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     // push/pop elimination, because it moves the join point relative to Pops.
     let mut pinned_ext = pinned.clone();
     for (dst, preds) in &incoming {
-        if preds.iter().any(|(_, ek)| matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _))) {
+        if preds.iter().any(|(_, ek)| matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_))) {
             pinned_ext.insert(*dst);
         }
     }
