@@ -253,9 +253,129 @@ fn compress_noop_only_nodes(
     changed
 }
 
+/// Eliminates NoOp (epsilon) edges by hoisting non-NoOp transitions from
+/// each node's NoOp-closure, then removing all NoOp edges. This is a standard
+/// ε-elimination for NFAs and is semantics-preserving because NoOp is ε.
+pub(crate) fn eliminate_noop_epsilon_in_subgraph(
+    start_nodes: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) -> bool {
+    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
+    if all_nodes_vec.is_empty() {
+        return false;
+    }
+    let all_nodes_in_subgraph: HashSet<_> = all_nodes_vec.into_iter().collect();
+
+    // Build NoOp adjacency within subgraph
+    let mut noop_adj: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> =
+        HashMap::new();
+    for n in &all_nodes_in_subgraph {
+        if let Some(g) = n.read(god) {
+            if let Some(dm) = g.children().get(&crate::constraint::IntermediateTrie3EdgeKey::NoOp) {
+                let mut succs: Vec<IntermediatePrecomputeNode3Index> = dm
+                    .keys()
+                    .cloned()
+                    .filter(|dst| all_nodes_in_subgraph.contains(dst))
+                    .collect();
+                if !succs.is_empty() {
+                    succs.sort();
+                    succs.dedup();
+                    noop_adj.insert(*n, succs);
+                }
+            }
+        }
+    }
+
+    if noop_adj.is_empty() {
+        return false;
+    }
+
+    let mut changed = false;
+
+    // For each node that has NoOp successors, compute closure and hoist non-NoOp edges
+    for src in &all_nodes_in_subgraph {
+        if !noop_adj.contains_key(src) {
+            continue;
+        }
+        // BFS over NoOp edges to compute closure
+        let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+        let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
+        visited.insert(*src);
+        q.push_back(*src);
+        while let Some(cur) = q.pop_front() {
+            if let Some(succs) = noop_adj.get(&cur) {
+                for s in succs {
+                    if visited.insert(*s) {
+                        q.push_back(*s);
+                    }
+                }
+            }
+        }
+
+        // Aggregate non-NoOp edges from closure
+        let mut to_add: HashMap<
+            crate::constraint::IntermediateTrie3EdgeKey,
+            HashSet<IntermediatePrecomputeNode3Index>,
+        > = HashMap::new();
+        for m in &visited {
+            if let Some(gm) = m.read(god) {
+                for (ek, dm) in gm.children() {
+                    if matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::NoOp) {
+                        continue;
+                    }
+                    for (dst, _) in dm {
+                        if all_nodes_in_subgraph.contains(dst) {
+                            to_add.entry(ek.clone()).or_default().insert(*dst);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !to_add.is_empty() {
+            if let Some(mut w) = src.write(god) {
+                for (ek, dests) in to_add {
+                    let dest_map = w.children_mut().entry(ek).or_default();
+                    for d in dests {
+                        if dest_map.get(&d).is_none() {
+                            dest_map.insert(d, ());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove all NoOp edges from the subgraph
+    for n in &all_nodes_in_subgraph {
+        let had_noop = if let Some(g) = n.read(god) {
+            g.children()
+                .get(&crate::constraint::IntermediateTrie3EdgeKey::NoOp)
+                .map(|dm| !dm.is_empty())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if had_noop {
+            if let Some(mut w) = n.write(god) {
+                w.children_mut()
+                    .retain(|ek, _| !matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::NoOp));
+            }
+            changed = true;
+        }
+    }
+
+    changed
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct NodeSignature {
     end: bool,
+    // The sorted, deduped list of Pop edge-keys that enter this node.
+    // Including this prevents unsafe merges across different Pop contexts
+    // while still allowing merges when Pop-context is identical.
+    incoming_pop_keys: Vec<crate::constraint::IntermediateTrie3EdgeKey>,
     // For determinism: edge keys sorted; each has sorted child-colors
     edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
 }
@@ -321,18 +441,30 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
         }
     }
 
-    // Extend the pinned set with all direct post-Pop nodes in this subgraph.
-    // Merging across a Pop boundary is not semantics-preserving for the subsequent
-    // push/pop elimination, because it moves the join point relative to Pops.
-    let mut pinned_ext = pinned.clone();
+    // Compute incoming Pop-key signatures: sorted, deduped list of Pop edge-keys that enter each node.
+    // This allows safe merges of post-Pop nodes only when their Pop-contexts are identical, avoiding
+    // unsafe joins while still enabling cross-template sharing.
+    let mut incoming_pop_sig: HashMap<
+        IntermediatePrecomputeNode3Index,
+        Vec<crate::constraint::IntermediateTrie3EdgeKey>,
+    > = HashMap::new();
     for (dst, preds) in &incoming {
-        if preds
+        let mut pops: Vec<crate::constraint::IntermediateTrie3EdgeKey> = preds
             .iter()
-            .any(|(_, ek)| matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _)))
-        {
-            pinned_ext.insert(*dst);
-        }
+            .filter_map(|(_, ek)| {
+                if matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _)) {
+                    Some(ek.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        pops.sort();
+        pops.dedup();
+        incoming_pop_sig.insert(*dst, pops);
     }
+    // No blanket pinning of post-Pop nodes. We rely on incoming_pop_sig to guard merges.
+    let pinned_ext = pinned.clone();
 
     // Iterative color refinement on DAG-like structure (robust even if cycles appear).
     let mut color: HashMap<IntermediatePrecomputeNode3Index, u64> = HashMap::new();
@@ -357,6 +489,7 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
 
         let sig = NodeSignature {
             end: end_flag,
+            incoming_pop_keys: incoming_pop_sig.get(n).cloned().unwrap_or_default(),
             edges: out_sig_part,
         };
         let len = next_color.len();
@@ -391,6 +524,7 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
             // Ignore incoming context for equivalence; only outgoing structure + end flag matters.
             let sig = NodeSignature {
                 end: end_flag,
+                incoming_pop_keys: incoming_pop_sig.get(n).cloned().unwrap_or_default(),
                 edges: edges_sig,
             };
             let len = interner.len();
@@ -695,8 +829,10 @@ pub fn optimize_intermediate_trie3_templates_global(
 
     // A few global passes: compress NoOp chains and merge identical subgraphs across all templates,
     // then prune per template to drop detritus.
-    for _ in 0..3 {
+    for _ in 0..6 {
         let mut changed = false;
+        // First eliminate NoOp epsilon transitions globally, to expose more sharing opportunities.
+        changed |= eliminate_noop_epsilon_in_subgraph(&start_nodes, god);
         changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
         changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
         for (s, e) in templates {

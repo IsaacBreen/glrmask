@@ -42,6 +42,27 @@ local_system:
           other_ops
       }
 
+      pub fn optimize_intermediate_trie3_template(
+          start_node: &IntermediatePrecomputeNode3Index,
+          end_node: &IntermediatePrecomputeNode3Index,
+          god: &IntermediateTrie3GodWrapper,
+      ) {
+          let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+          pinned.insert(*start_node);
+          pinned.insert(*end_node);
+
+          for _ in 0..3 {
+              let mut changed = false;
+              changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
+              changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
+              changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
+              changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
+              if !changed {
+                  break;
+              }
+          }
+      }
+
       pub fn optimize_intermediate_trie3(
           roots: &[IntermediatePrecomputeNode3Index],
           end_node: &IntermediatePrecomputeNode3Index,
@@ -836,6 +857,27 @@ local_system:
           other_ops
       }
 
+      pub fn optimize_intermediate_trie3_template(
+          start_node: &IntermediatePrecomputeNode3Index,
+          end_node: &IntermediatePrecomputeNode3Index,
+          god: &IntermediateTrie3GodWrapper,
+      ) {
+          let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+          pinned.insert(*start_node);
+          pinned.insert(*end_node);
+
+          for _ in 0..3 {
+              let mut changed = false;
+              changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
+              changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
+              changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
+              changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
+              if !changed {
+                  break;
+              }
+          }
+      }
+
       pub fn optimize_intermediate_trie3(
           roots: &[IntermediatePrecomputeNode3Index],
           end_node: &IntermediatePrecomputeNode3Index,
@@ -1591,9 +1633,9 @@ local_system:
               assert_eq!(paths_before, paths_after);
           }
       }
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
   core_guidance_inserted: true
-  prev_apply_mode: git-llm
+  prev_apply_mode: llm
 system:
   message: |-
     You are a helpful assistant.
@@ -1601,7 +1643,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -1610,7 +1652,7 @@ system:
     - gf
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -1669,6 +1711,27 @@ messages:
           }
 
           other_ops
+      }
+
+      pub fn optimize_intermediate_trie3_template(
+          start_node: &IntermediatePrecomputeNode3Index,
+          end_node: &IntermediatePrecomputeNode3Index,
+          god: &IntermediateTrie3GodWrapper,
+      ) {
+          let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+          pinned.insert(*start_node);
+          pinned.insert(*end_node);
+
+          for _ in 0..3 {
+              let mut changed = false;
+              changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
+              changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
+              changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
+              changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
+              if !changed {
+                  break;
+              }
+          }
       }
 
       pub fn optimize_intermediate_trie3(
@@ -2551,20 +2614,17 @@ messages:
       Two precompute tries are equivalent if their normalized paths are equivalent.
     metadata:
   - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
+      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
+                  - Give concrete, step-by-step edits the user can apply.
+                  - Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
                   Additional general constraints:
       - Do not split your response across multiple messages.
       - Avoid local cache/config advice; focus on actionable fixes or outputs.
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: git-llm
+      mode: llm
       phase: default
   - assistant: |-
       Below are the concrete steps and the exact patch to improve the global optimization quality while preserving correctness. The key changes are:
@@ -3438,49 +3498,5 @@ messages:
        mod tests {
       *** End Patch
       ```
-    metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode) after iterative fixes:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Error: Could not determine filename for diff block 1. Skipping.
-      Diff content start:
-      *** Begin Patch
-      *** Update File: src/constraint_precompute3_intermediate_utils.rs
-      @@
-       use crate::datastructures::ordered_hash_map::Retain;
-       use crate::datastructures::trie::Trie;
-       use crate::r#macro::...
-
-
-      ---
-
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Git apply failed after iterative fixes. Fallback to LLM apply:
-      Git apply output:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Error: Could not determine filename for diff block 1. Skipping.
-      Diff content start:
-      *** Begin Patch
-      *** Update File: src/constraint_precompute3_intermediate_utils.rs
-      @@
-       use crate::datastructures::ordered_hash_map::Retain;
-       use crate::datastructures::trie::Trie;
-       use crate::r#macro::...
-
-
-      LLM apply output:
-      Using model 'cp' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      No JSON action block found, but no file actions seem required based on context. Proceeding.
-      Found 0 code blocks with filepaths in attempt 1.
-      No file actions specified in JSON. Nothing to apply.
     metadata:
 ...
