@@ -319,9 +319,6 @@ pub fn eliminate_pushes_and_pops(
                 god2.remove_edge(*a_idx, b_idx, edge_key);
             }
 
-            // Remove all outgoing edges from B. This makes B a sink for any other paths.
-            b_idx.write(&god2).unwrap().children_mut().clear();
-
             // Create new "shortcut" edges from A to C.
             for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
                 let s = match push_key {
