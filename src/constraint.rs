@@ -2128,6 +2128,14 @@ impl GrammarConstraint {
             },
         );
 
+        // Ensure that the only node with end == true is trie3_end
+        for node in Trie::all_nodes(&intermediate_trie3_god, &intermediate_precomputed3.values().cloned().collect::<Vec<_>>()) {
+            let contents = &node.read(&intermediate_trie3_god).unwrap().value;
+            if contents.end {
+                assert_eq!(node, trie3_end);
+            }
+        }
+
         // --- New: Optimize intermediate trie before path processing ---
         crate::debug!(2, "Optimizing intermediate trie3...");
         let intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
