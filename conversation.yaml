@@ -3809,6 +3809,12 @@ local_system:
               self = self.omit_edges();
               self
           }
+
+          /// Sets `show_max_depth` to `false`, omitting the max depth from the output.
+          pub fn omit_depth(mut self) -> Self {
+              self.show_max_depth = false;
+              self
+          }
       }
 
       // Add this impl block for pretty-printing functionality
@@ -9208,5 +9214,68 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Add methods to PrettyPrintOptions
       for key-only/value-only edge formatting"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: And something for omitting depth.
+    metadata:
+  - assistant: |-
+      You are correct. The ability to easily toggle the `max_depth` display is essential for a flexible pretty-printer.
+
+      Here are the step-by-step instructions to add the `omit_depth()` method to `PrettyPrintOptions`, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      #### File: `src/datastructures/trie.rs`
+
+      1.  **Insert `omit_depth()` Method:**
+          Inside the `impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T>` block, insert the following method after the `omit_all()` method (around line 1184).
+
+          ```rust
+          // ... (after omit_all)
+
+          /// Sets `show_max_depth` to `false`, omitting the max depth from the output.
+          pub fn omit_depth(mut self) -> Self {
+              self.show_max_depth = false;
+              self
+          }
+          ```
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@ -1184,4 +1184,11 @@
+               self = self.omit_edges();
+               self
+           }
+      +
+      +    /// Sets `show_max_depth` to `false`, omitting the max depth from the output.
+      +    pub fn omit_depth(mut self) -> Self {
+      +        self.show_max_depth = false;
+      +        self
+      +    }
+       }
+       
+       // Add this impl block for pretty-printing functionality
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+    metadata:
+  - user: 'Changes committed with message: "refactor: Consolidate all PrettyPrintOptions
+      utility methods"'
     metadata:
 ...

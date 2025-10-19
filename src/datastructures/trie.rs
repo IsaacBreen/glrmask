@@ -1209,6 +1209,12 @@ impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T> {
         self = self.omit_edges();
         self
     }
+
+    /// Sets `show_max_depth` to `false`, omitting the max depth from the output.
+    pub fn omit_depth(mut self) -> Self {
+        self.show_max_depth = false;
+        self
+    }
 }
 
 // Add this impl block for pretty-printing functionality
