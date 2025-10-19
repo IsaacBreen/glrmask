@@ -3,6 +3,8 @@ use crate::datastructures::trie::{Trie};
 use crate::tokenizer::TokenizerStateID;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
+use indicatif::{ProgressBar, ProgressStyle, ProgressDrawTarget};
+use crate::profiler::PROGRESS_BAR_ENABLED;
 
 pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
@@ -11,7 +13,19 @@ pub fn eliminate_pushes_and_pops(
     // This is a complex graph transformation. We will do it iteratively until a fixed point is reached.
     // The core idea is to find a sequence A --push--> B --op--> C and replace it.
     // We select B nodes that have no outgoing push edges to ensure that part of the graph is "stable".
+    let pb = ProgressBar::new_spinner();
+    if PROGRESS_BAR_ENABLED {
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] Eliminating pushes/pops... (iteration {pos})")
+                .expect("progress-bar style"),
+        );
+    } else {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+
     loop {
+        pb.inc(1);
         let all_nodes = Trie::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>());
         let mut predecessors: HashMap<IntermediatePrecomputeNode3Index, Vec<(IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey)>> = HashMap::new();
         let mut outgoing_push_counts: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
@@ -120,6 +134,7 @@ pub fn eliminate_pushes_and_pops(
         }
     }
 
+    pb.finish_and_clear();
     Trie::gc(god, &roots.values().cloned().collect::<Vec<_>>());
 }
 
