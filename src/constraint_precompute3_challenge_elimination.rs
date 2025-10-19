@@ -33,7 +33,11 @@ pub fn eliminate_pushes_and_pops(
         let mut nodes_to_process: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
         for node_idx in &all_nodes {
             if outgoing_push_counts.get(node_idx).cloned().unwrap_or(0) == 0 {
-                nodes_to_process.push(*node_idx);
+                if let Some(guard) = node_idx.read(god) {
+                    if !guard.value.end {
+                        nodes_to_process.push(*node_idx);
+                    }
+                }
             }
         }
 
