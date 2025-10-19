@@ -234,83 +234,72 @@ pub fn eliminate_pushes_and_pops(
         let mut changed = false;
         let num_nodes_to_process = nodes_to_process.len();
 
-        let mut modifications: HashMap<Intermediate2PrecomputeNode3Index, (Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index)>, Vec<(Intermediate2Trie3EdgeKey, LLMTokenBV, Intermediate2PrecomputeNode3Index)>)> = HashMap::new();
+        for b_idx in nodes_to_process {
+            let incoming_pushes = if let Some(preds) = predecessors.get(&b_idx) {
+                preds.iter().filter_map(|(pred_idx, edge_key, edge_val)| {
+                    if let Intermediate2Trie3EdgeKey::Push(s) = edge_key {
+                        Some((*pred_idx, s.clone(), edge_val.clone()))
+                    } else {
+                        None
+                    }
+                }).collect::<Vec<_>>()
+            } else {
+                continue;
+            };
+            if incoming_pushes.is_empty() {
+                continue;
+            }
 
-        for &b_idx in &nodes_to_process {
-             let incoming_pushes = if let Some(preds) = predecessors.get(&b_idx) {
-                 preds.iter().filter_map(|(pred_idx, edge_key, edge_val)| {
-                     if let Intermediate2Trie3EdgeKey::Push(s) = edge_key {
-                         Some((*pred_idx, s.clone(), edge_val.clone()))
-                     } else {
-                         None
-                     }
-                 }).collect::<Vec<_>>()
-             } else {
-                 continue;
-             };
-             if incoming_pushes.is_empty() {
-                 continue;
-             }
- 
-             let outgoing_edges = {
-                 let b_guard = b_idx.read(&god2).unwrap();
-                 b_guard.children().clone().into_iter().flat_map(|(ek, dm)| {
-                     dm.iter().map(move |(c_idx, ev)| (ek.clone(), *c_idx, ev.clone())).collect::<Vec<_>>()
-                 }).collect::<Vec<_>>()
-             };
- 
-             if !outgoing_edges.is_empty() {
-                 changed = true;
-             }
- 
-             for (a_idx, s, bv_ab) in incoming_pushes {
-                 let (to_remove, to_add) = modifications.entry(a_idx).or_default();
-                 to_remove.push((Intermediate2Trie3EdgeKey::Push(s.clone()), b_idx));
- 
-                 for (op, c_idx, bv_bc) in &outgoing_edges {
-                     let new_bv = &bv_ab & bv_bc;
-                     if new_bv.is_empty() { continue; }
- 
-                     match op {
-                         Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node B has an outgoing push edge but was selected for processing."),
-                         Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
-                             let intersection = &s & s_prime;
-                             if !intersection.is_empty() {
-                                 let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
-                                 to_add.push((new_edge_key, new_bv.clone(), *c_idx));
-                             }
-                         }
-                         Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
-                             if !s.is_disjoint(s_prime) {
-                                 to_add.push((Intermediate2Trie3EdgeKey::NoOp, new_bv.clone(), *c_idx));
-                             }
-                         }
-                         Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
-                             let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
-                             to_add.push((new_edge_key, new_bv.clone(), *c_idx));
-                         }
-                         Intermediate2Trie3EdgeKey::NoOp => {
-                             to_add.push((Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv.clone(), *c_idx));
-                         },
-                     }
-                 }
-             }
-        }
+            let outgoing_edges = {
+                let b_guard = b_idx.read(&god2).unwrap();
+                b_guard.children().clone().into_iter().flat_map(|(ek, dm)| {
+                    dm.iter().map(move |(c_idx, ev)| (ek.clone(), *c_idx, ev.clone())).collect::<Vec<_>>()
+                }).collect::<Vec<_>>()
+            };
 
-        for (node_idx, (removals, additions)) in modifications {
-             if let Some(mut guard) = node_idx.write(&god2) {
-                 for (key, dest) in removals {
-                     if let Some(dest_map) = guard.children_mut().get_mut(&key) {
-                         dest_map.remove(&dest);
-                         if dest_map.is_empty() {
-                             guard.children_mut().remove(&key);
-                         }
-                     }
-                 }
-                 for (key, val, dest) in additions {
-                     guard.force_insert_to_node(key, val, dest);
-                 }
-             }
+            if !outgoing_edges.is_empty() {
+                changed = true;
+            }
+
+            for (a_idx, s, bv_ab) in incoming_pushes {
+                // Remove the edge A --push(S)--> B
+                if let Some(mut a_guard) = a_idx.write(&god2) {
+                    if let Some(dest_map) = a_guard.children_mut().get_mut(&Intermediate2Trie3EdgeKey::Push(s.clone())) {
+                        dest_map.remove(&b_idx);
+                        if dest_map.is_empty() {
+                            a_guard.children_mut().remove(&Intermediate2Trie3EdgeKey::Push(s.clone()));
+                        }
+                    }
+                }
+
+                for (op, c_idx, bv_bc) in &outgoing_edges {
+                    let new_bv = &bv_ab & bv_bc;
+                    if new_bv.is_empty() { continue; }
+
+                    match op {
+                        Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node B has an outgoing push edge but was selected for processing."),
+                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
+                            let intersection = &s & s_prime;
+                            if !intersection.is_empty() {
+                                let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
+                                a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                            }
+                        }
+                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
+                            if !s.is_disjoint(s_prime) {
+                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, *c_idx);
+                            }
+                        }
+                        Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
+                            let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
+                            a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                        }
+                        Intermediate2Trie3EdgeKey::NoOp => {
+                            a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
+                        },
+                    }
+                }
+            }
         }
 
         if changed {
