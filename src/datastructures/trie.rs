@@ -1154,6 +1154,25 @@ impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T> {
         self = self.display_edges();
         self
     }
+
+    /// Sets the node value formatter to always return `None`, omitting node values from the output.
+    pub fn omit_nodes(mut self) -> Self {
+        self.format_node = Box::new(|_idx, _val| None);
+        self
+    }
+
+    /// Sets the edge formatter to always return `None`, omitting edge information from the output.
+    pub fn omit_edges(mut self) -> Self {
+        self.format_edge = Box::new(|_src, _dst, _ek, _ev| None);
+        self
+    }
+
+    /// Sets both node and edge formatters to always return `None`, omitting all custom formatting.
+    pub fn omit_all(mut self) -> Self {
+        self = self.omit_nodes();
+        self = self.omit_edges();
+        self
+    }
 }
 
 // Add this impl block for pretty-printing functionality

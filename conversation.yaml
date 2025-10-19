@@ -3754,6 +3754,25 @@ local_system:
               self = self.display_edges();
               self
           }
+
+          /// Sets the node value formatter to always return `None`, omitting node values from the output.
+          pub fn omit_nodes(mut self) -> Self {
+              self.format_node = Box::new(|_idx, _val| None);
+              self
+          }
+
+          /// Sets the edge formatter to always return `None`, omitting edge information from the output.
+          pub fn omit_edges(mut self) -> Self {
+              self.format_edge = Box::new(|_src, _dst, _ek, _ev| None);
+              self
+          }
+
+          /// Sets both node and edge formatters to always return `None`, omitting all custom formatting.
+          pub fn omit_all(mut self) -> Self {
+              self = self.omit_nodes();
+              self = self.omit_edges();
+              self
+          }
       }
 
       // Add this impl block for pretty-printing functionality
@@ -8938,5 +8957,94 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Add utility methods to PrettyPrintOptions
       for Debug/Display formatting"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Similarly, add methods for omitting nodes/edges.
+    metadata:
+  - assistant: |-
+      This is a logical extension to the utility methods. I will add `omit_nodes()`, `omit_edges()`, and `omit_all()` to the `PrettyPrintOptions` struct.
+
+      Here are the step-by-step instructions and the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      #### File: `src/datastructures/trie.rs`
+
+      1.  **Insert Omitting Methods:**
+          Inside the `impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T>` block (starting around line 1100), insert the following methods after the existing `display_all` method.
+
+          ```rust
+          // ... (after display_all)
+
+          /// Sets the node value formatter to always return `None`, omitting node values from the output.
+          pub fn omit_nodes(mut self) -> Self {
+              self.format_node = Box::new(|_idx, _val| None);
+              self
+          }
+
+          /// Sets the edge formatter to always return `None`, omitting edge information from the output.
+          pub fn omit_edges(mut self) -> Self {
+              self.format_edge = Box::new(|_src, _dst, _ek, _ev| None);
+              self
+          }
+
+          /// Sets both node and edge formatters to always return `None`, omitting all custom formatting.
+          pub fn omit_all(mut self) -> Self {
+              self = self.omit_nodes();
+              self = self.omit_edges();
+              self
+          }
+          ```
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@ -1154,6 +1154,24 @@
+               self = self.display_edges();
+               self
+           }
+      +
+      +    /// Sets the node value formatter to always return `None`, omitting node values from the output.
+      +    pub fn omit_nodes(mut self) -> Self {
+      +        self.format_node = Box::new(|_idx, _val| None);
+      +        self
+      +    }
+      +
+      +    /// Sets the edge formatter to always return `None`, omitting edge information from the output.
+      +    pub fn omit_edges(mut self) -> Self {
+      +        self.format_edge = Box::new(|_src, _dst, _ek, _ev| None);
+      +        self
+      +    }
+      +
+      +    /// Sets both node and edge formatters to always return `None`, omitting all custom formatting.
+      +    pub fn omit_all(mut self) -> Self {
+      +        self = self.omit_nodes();
+      +        self = self.omit_edges();
+      +        self
+      +    }
+       }
+       
+       // Add this impl block for pretty-printing functionality
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+    metadata:
+  - user: 'Changes committed with message: "feat: Add methods to PrettyPrintOptions
+      to omit node/edge formatting"'
     metadata:
 ...
