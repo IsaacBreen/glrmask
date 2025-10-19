@@ -4,7 +4,6 @@ use crate::constraint::{
     IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
     IntermediateTrie3GodWrapper, LLMTokenBV,
 };
-use crate::constraint_precompute3_challenge_elimination::get_normalized_paths_for_vec;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
