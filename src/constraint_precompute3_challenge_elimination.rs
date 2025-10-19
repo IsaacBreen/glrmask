@@ -230,7 +230,169 @@ pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    todo!()
+    // 1. Convert to Intermediate2 format, which moves token constraints to edge values.
+    let (roots2, god2) = convert_to_intermediate2(roots, god);
+
+    // 2. Main loop: find and process nodes until no more candidates exist.
+    loop {
+        let all_nodes = Intermediate2PrecomputeNode3::all_nodes(
+            &god2,
+            &roots2.values().cloned().collect::<Vec<_>>(),
+        );
+
+        // To efficiently find incoming edges, we build a reverse adjacency list.
+        let mut reverse_adj: HashMap<
+            Intermediate2PrecomputeNode3Index,
+            Vec<(
+                Intermediate2PrecomputeNode3Index,
+                Intermediate2Trie3EdgeKey,
+                LLMTokenBV,
+            )>,
+        > = HashMap::new();
+        for &u in &all_nodes {
+            if let Some(u_guard) = u.read(&god2) {
+                for (edge_key, dest_map) in u_guard.children() {
+                    for (&v, edge_val) in dest_map {
+                        reverse_adj
+                            .entry(v)
+                            .or_default()
+                            .push((u, edge_key.clone(), edge_val.clone()));
+                    }
+                }
+            }
+        }
+
+        // Find a candidate node 'B' to process:
+        // - Not an end state.
+        // - Has at least one incoming Push edge.
+        // - Has no outgoing Push edges.
+        let mut node_to_process = None;
+        for &b_idx in &all_nodes {
+            let b_guard = b_idx.read(&god2).unwrap();
+            if b_guard.value.end {
+                continue;
+            }
+
+            let has_outgoing_push = b_guard
+                .children()
+                .keys()
+                .any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
+            if has_outgoing_push {
+                continue;
+            }
+
+            if let Some(incoming_edges) = reverse_adj.get(&b_idx) {
+                let has_incoming_push = incoming_edges
+                    .iter()
+                    .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
+                if has_incoming_push {
+                    node_to_process = Some(b_idx);
+                    break;
+                }
+            }
+        }
+
+        if let Some(b_idx) = node_to_process {
+            // Gather information about B's incoming pushes and all outgoing edges.
+            let incoming_pushes: Vec<_> = reverse_adj
+                .get(&b_idx)
+                .unwrap()
+                .iter()
+                .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+                .cloned()
+                .collect();
+
+            let outgoing_edges: Vec<_> = b_idx
+                .read(&god2)
+                .unwrap()
+                .children()
+                .iter()
+                .flat_map(|(k, dest_map)| {
+                    dest_map
+                        .iter()
+                        .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
+                })
+                .collect();
+
+            // Remove all incoming push edges to B.
+            for (a_idx, edge_key, _) in &incoming_pushes {
+                god2.remove_edge(*a_idx, b_idx, edge_key);
+            }
+
+            // Remove all outgoing edges from B. This makes B a sink for any other paths.
+            b_idx.write(&god2).unwrap().children_mut().clear();
+
+            // Create new "shortcut" edges from A to C.
+            for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
+                let s = match push_key {
+                    Intermediate2Trie3EdgeKey::Push(s) => s,
+                    _ => unreachable!(),
+                };
+
+                for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
+                    let new_tokens = tokens_a_b & tokens_b_c;
+                    if new_tokens.is_empty() {
+                        continue;
+                    }
+
+                    match op_key {
+                        Intermediate2Trie3EdgeKey::Pop(n, s_prime) => {
+                            if *n == 0 {
+                                // Check top of stack
+                                let new_s = s & s_prime;
+                                if !new_s.is_empty() {
+                                    let new_key = Intermediate2Trie3EdgeKey::Push(new_s);
+                                    god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
+                                }
+                            } else if *n == 1 {
+                                // Pop
+                                if !s.is_disjoint(s_prime) {
+                                    // S intersects S'
+                                    let new_key = Intermediate2Trie3EdgeKey::NoOp;
+                                    god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
+                                }
+                            } else {
+                                // n > 1
+                                let new_key = Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone());
+                                god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
+                            }
+                        }
+                        Intermediate2Trie3EdgeKey::Push(_) => {
+                            unreachable!("Node to process should not have outgoing pushes")
+                        }
+                        Intermediate2Trie3EdgeKey::NoOp => {
+                            let new_key = Intermediate2Trie3EdgeKey::Push(s.clone());
+                            god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
+                        }
+                    }
+                }
+            }
+        } else {
+            // No more nodes to process, optimization is complete.
+            break;
+        }
+    }
+
+    // 3. Convert back to the original Trie format.
+    let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
+
+    // 4. The function signature requires modifying `god` in place.
+    // We clear the original `god` and deep-copy the new graph into it.
+    let mut sids_in_order = Vec::new();
+    let mut new_roots_vec = Vec::new();
+    for (&sid, &root_idx) in &new_roots1_map {
+        sids_in_order.push(sid);
+        new_roots_vec.push(root_idx);
+    }
+
+    god.clear();
+    let (final_roots_vec, _map) =
+        IntermediatePrecomputeNode3::deep_copy_subtrees_into(&new_god1, god, &new_roots_vec);
+
+    roots.clear();
+    for (sid, final_root_idx) in sids_in_order.iter().zip(final_roots_vec.iter()) {
+        roots.insert(*sid, *final_root_idx);
+    }
 }
 
 // --- Assertion and Test Helpers (Unchanged) ---
