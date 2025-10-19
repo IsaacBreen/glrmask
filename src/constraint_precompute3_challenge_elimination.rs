@@ -362,15 +362,19 @@ pub fn eliminate_pushes_and_pops(
             changed = true;
 
             // Create or reuse a "no-pop" clone for b_idx and copy non-pop edges.
-            let clone_idx = *nopop_clone_map.entry(b_idx).or_insert_with(|| {
+            let clone_idx = if let Some(idx) = nopop_clone_map.get(&b_idx) {
+                *idx
+            } else {
+                let b_value = b_idx.read(&god2).unwrap().value.clone();
                 let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(
-                    Intermediate2PrecomputeNode3::new(b_idx.read(&god2).unwrap().value.clone())
+                    Intermediate2PrecomputeNode3::new(b_value)
                 ));
                 for (ek, c_idx, ev) in &outgoing_non_pop_edges {
                     god2.insert_edge_simple(new_node, *c_idx, ek.clone(), ev.clone());
                 }
+                nopop_clone_map.insert(b_idx, new_node);
                 new_node
-            });
+            };
 
             // Redirect all incoming pushes A --push(S)--> b_idx to the clone.
             for (a_idx, s, bv_ab) in &incoming_pushes {
