@@ -190,24 +190,20 @@ pub fn eliminate_pushes_and_pops(
     let (mut roots2, god2) = convert_to_intermediate2(roots, god);
 
     let mut iteration = 0;
-    let mut prev_num_nodes = usize::MAX;
+    // Map used to reuse "no-pop" clones for nodes that receive pushes but also have outgoing pushes.
+    let mut nopop_clone_map: HashMap<Intermediate2PrecomputeNode3Index, Intermediate2PrecomputeNode3Index> = HashMap::new();
     loop {
         iteration += 1;
         Trie::gc(&god2, &roots2.values().cloned().collect::<Vec<_>>());
         let all_nodes = Trie::all_nodes(&god2, &roots2.values().cloned().collect::<Vec<_>>());
         let current_num_nodes = all_nodes.len();
 
-        if iteration > 1 {
-            assert!(
-                current_num_nodes <= prev_num_nodes,
-                "Node count increased in iteration {}. Previous: {}, Current: {}",
-                iteration, prev_num_nodes, current_num_nodes
-            );
-        }
-        prev_num_nodes = current_num_nodes;
+        // Note: we no longer assert monotonicity of node count here.
+        // Specialized cloning may increase nodes in order to eliminate push->pop reachability while preserving semantics.
 
         let mut predecessors: HashMap<Intermediate2PrecomputeNode3Index, Vec<(Intermediate2PrecomputeNode3Index, Intermediate2Trie3EdgeKey, LLMTokenBV)>> = HashMap::new();
         let mut outgoing_push_counts: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
+        let mut has_outgoing_pop: HashMap<Intermediate2PrecomputeNode3Index, bool> = HashMap::new();
 
         for &node_idx in &all_nodes {
             outgoing_push_counts.entry(node_idx).or_insert(0);
@@ -215,6 +211,9 @@ pub fn eliminate_pushes_and_pops(
                 for (edge_key, dest_map) in guard.children() {
                     if let Intermediate2Trie3EdgeKey::Push(_) = edge_key {
                         *outgoing_push_counts.get_mut(&node_idx).unwrap() += dest_map.len();
+                    }
+                    if let Intermediate2Trie3EdgeKey::Pop(_, _) = edge_key {
+                        has_outgoing_pop.insert(node_idx, true);
                     }
                     for (child_idx, edge_val) in dest_map {
                         predecessors.entry(*child_idx).or_default().push((node_idx, edge_key.clone(), edge_val.clone()));
@@ -229,6 +228,24 @@ pub fn eliminate_pushes_and_pops(
                 if let Some(guard) = node_idx.read(&god2) {
                     if !guard.value.end {
                         nodes_to_process.push(*node_idx);
+                    }
+                }
+            }
+        }
+
+        // Identify nodes that both have an outgoing pop and are immediate successors of push edges,
+        // even if they also have outgoing pushes. We'll clone these nodes into a "no-pop" variant
+        // and redirect the incoming push edges to the clone, while splicing pop edges at the same time.
+        let mut nodes_to_clone: Vec<Intermediate2PrecomputeNode3Index> = Vec::new();
+        for node_idx in &all_nodes {
+            if has_outgoing_pop.get(node_idx).cloned().unwrap_or(false) {
+                if let Some(guard) = node_idx.read(&god2) {
+                    if !guard.value.end {
+                        if let Some(preds) = predecessors.get(node_idx) {
+                            if preds.iter().any(|(_, ek, _)| matches!(ek, Intermediate2Trie3EdgeKey::Push(_))) {
+                                nodes_to_clone.push(*node_idx);
+                            }
+                        }
                     }
                 }
             }
@@ -305,8 +322,99 @@ pub fn eliminate_pushes_and_pops(
             }
         }
 
+        // Handle nodes that need cloning (incoming pushes present, and have outgoing pops, possibly also pushes)
+        let num_nodes_to_clone = nodes_to_clone.len();
+        for b_idx in nodes_to_clone {
+            let incoming_pushes = if let Some(preds) = predecessors.get(&b_idx) {
+                preds.iter().filter_map(|(pred_idx, edge_key, edge_val)| {
+                    if let Intermediate2Trie3EdgeKey::Push(s) = edge_key {
+                        Some((*pred_idx, s.clone(), edge_val.clone()))
+                    } else {
+                        None
+                    }
+                }).collect::<Vec<_>>()
+            } else {
+                continue;
+            };
+            if incoming_pushes.is_empty() {
+                continue;
+            }
+
+            // Collect outgoing edges, separating pop vs non-pop.
+            let (outgoing_non_pop_edges, outgoing_pop_edges) = {
+                let b_guard = b_idx.read(&god2).unwrap();
+                let mut non_pop = Vec::new();
+                let mut pop_edges = Vec::new();
+                for (ek, dm) in b_guard.children() {
+                    for (c_idx, ev) in dm {
+                        match ek {
+                            Intermediate2Trie3EdgeKey::Pop(_, _) => pop_edges.push((ek.clone(), *c_idx, ev.clone())),
+                            _ => non_pop.push((ek.clone(), *c_idx, ev.clone())),
+                        }
+                    }
+                }
+                (non_pop, pop_edges)
+            };
+            if outgoing_pop_edges.is_empty() {
+                continue;
+            }
+
+            changed = true;
+
+            // Create or reuse a "no-pop" clone for b_idx and copy non-pop edges.
+            let clone_idx = *nopop_clone_map.entry(b_idx).or_insert_with(|| {
+                let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(
+                    Intermediate2PrecomputeNode3::new(b_idx.read(&god2).unwrap().value.clone())
+                ));
+                for (ek, c_idx, ev) in &outgoing_non_pop_edges {
+                    god2.insert_edge_simple(new_node, *c_idx, ek.clone(), ev.clone());
+                }
+                new_node
+            });
+
+            // Redirect all incoming pushes A --push(S)--> b_idx to the clone.
+            for (a_idx, s, bv_ab) in &incoming_pushes {
+                if let Some(mut a_guard) = a_idx.write(&god2) {
+                    if let Some(dest_map) = a_guard.children_mut().get_mut(&Intermediate2Trie3EdgeKey::Push(s.clone())) {
+                        dest_map.remove(&b_idx);
+                        if dest_map.is_empty() {
+                            a_guard.children_mut().remove(&Intermediate2Trie3EdgeKey::Push(s.clone()));
+                        }
+                    }
+                }
+                god2.insert_edge_simple(*a_idx, clone_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), bv_ab.clone());
+            }
+
+            // Splice pop edges: for each b_idx --pop--> c, add A --> c edges according to cancellation.
+            for (op, c_idx, bv_bc) in &outgoing_pop_edges {
+                for (a_idx, s, bv_ab) in &incoming_pushes {
+                    let new_bv = bv_ab & bv_bc;
+                    if new_bv.is_empty() { continue; }
+                    match op {
+                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
+                            let intersection = s & s_prime;
+                            if !intersection.is_empty() {
+                                let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
+                                god2.insert_edge_simple(*a_idx, *c_idx, new_edge_key, new_bv.clone());
+                            }
+                        }
+                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
+                            if !s.is_disjoint(s_prime) {
+                                god2.insert_edge_simple(*a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv.clone());
+                            }
+                        }
+                        Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
+                            let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
+                            god2.insert_edge_simple(*a_idx, *c_idx, new_edge_key, new_bv.clone());
+                        }
+                        _ => { /* only pop edges should be here */ }
+                    }
+                }
+            }
+        }
+
         if changed {
-            crate::debug!(2, "Eliminating pushes/pops: iteration {}, processed {} nodes.", iteration, num_nodes_to_process);
+            crate::debug!(2, "Eliminating pushes/pops: iteration {}, processed {} leaf nodes and {} cloned nodes (total nodes: {}).", iteration, num_nodes_to_process, num_nodes_to_clone, current_num_nodes);
         }
 
         if !changed {
