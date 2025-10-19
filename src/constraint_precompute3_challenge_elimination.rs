@@ -930,6 +930,9 @@ fn run_trie_based_elimination(
         return;
     }
 
+    // Track all gate nodes we create to avoid reprocessing already-gated pushes in later rounds.
+    let mut cyclic_gate_nodes: BTreeSet<usize> = BTreeSet::new();
+
     let mut round: usize = 0;
     loop {
         round += 1;
@@ -944,7 +947,11 @@ fn run_trie_based_elimination(
                 for (ek, dsts) in read_guard.children().iter() {
                     if let IntermediateTrie3EdgeKey::Push(bv) = ek {
                         for (dst_idx, _ev) in dsts.iter() {
-                            push_edges.push((*src, bv.clone(), *dst_idx));
+                            // Skip pushes that already point to a gate node; those are "stable"
+                            // under our gate compression and should not be reprocessed.
+                            if !cyclic_gate_nodes.contains(&dst_idx.as_usize()) {
+                                push_edges.push((*src, bv.clone(), *dst_idx));
+                            }
                         }
                     }
                 }
@@ -981,6 +988,13 @@ fn run_trie_based_elimination(
         let mut pushes_rewired_this_round: usize = 0;
 
         for (src, push_bv, dst) in push_edges {
+            // Safety: if this push already points to a known gate, skip it entirely.
+            // Gate pushes are intentionally terminal (compressed) and should not be reprocessed,
+            // otherwise we risk oscillation or infinite rounds.
+            if cyclic_gate_nodes.contains(&dst.as_usize()) {
+                continue;
+            }
+
             processed += 1;
             let pct = (processed * 100) / total;
             if pct >= next_mark {
@@ -1139,6 +1153,7 @@ fn run_trie_based_elimination(
                         None => {
                             let g: IntermediatePrecomputeNode3Index = god
                                 .insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))
+                                // Gate node: record it so we never reprocess pushes to it.
                                 .into();
                             gate_cache.insert(gate_key.clone(), g);
                             g
@@ -1146,6 +1161,9 @@ fn run_trie_based_elimination(
                     };
 
                     // Ensure the Push from aggregator to the gate exists (single Push per group).
+                    // Also ensure the gate is recorded globally for future rounds.
+                    cyclic_gate_nodes.insert(gate.as_usize());
+
                     god.insert_edge_simple(
                         agg,
                         gate,
