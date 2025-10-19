@@ -1886,9 +1886,13 @@ impl GrammarConstraint {
         intermediate_precomputed3: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
         intermediate_trie3_god: &IntermediateTrie3GodWrapper,
     ) {
-        // The complex logic of path extraction, elimination, and trie rebuilding
-        // is now encapsulated in the trie-based elimination function.
         eliminate_pushes_and_pops(
+            intermediate_precomputed3,
+            intermediate_trie3_god,
+        );
+        // After elimination, assert that no pop operations are reachable from any push operations.
+        // This is a key invariant that the elimination process should establish.
+        crate::constraint_precompute3_challenge_elimination::assert_no_pops_reachable_from_pushes(
             intermediate_precomputed3,
             intermediate_trie3_god,
         );
