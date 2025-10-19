@@ -611,4 +611,44 @@ mod tests {
         // This assertion will then panic, which is expected by the test.
         assert_no_pops_reachable_from_pushes(&roots, &god);
     }
+
+    #[test]
+    fn test_eliminate_push_noop_pop_failure_case() {
+        let god = IntermediateTrie3GodWrapper::new();
+        
+        let mut node_map = HashMap::new();
+        // N101: Push source (Root)
+        // N102: Problematic node (Push in, Push out, NoOp out to Pop path)
+        // N103: NoOp target (Pop source)
+        // N104: Pop target
+        // N105: Push target / Cycle target
+        let node_ids = vec![101, 102, 103, 104, 105];
+        for id in node_ids {
+            node_map.insert(id, Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))));
+        }
+
+        let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+
+        // N101 --Push(1)--> N102 (Incoming Push to N102)
+        god.insert_edge_simple(n(101), n(102), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+        
+        // N102 --NoOp--> N103 (NoOp out)
+        god.insert_edge_simple(n(102), n(103), IntermediateTrie3EdgeKey::NoOp, ());
+        
+        // N102 --Push(2)--> N105 (Push out - prevents N102 from being processed in the first loop)
+        god.insert_edge_simple(n(102), n(105), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
+
+        // N103 --Pop(1, ALL)--> N104 (Pop out - makes Pop reachable from N102)
+        god.insert_edge_simple(n(103), n(104), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
+
+        // N105 --CheckLLM(1)--> N101 (Cycle to keep nodes alive)
+        god.insert_edge_simple(n(105), n(101), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(1)), ());
+
+        let mut roots = BTreeMap::new();
+        roots.insert(TokenizerStateID(0), n(101));
+
+        eliminate_pushes_and_pops(&mut roots, &god);
+
+        assert_no_pops_reachable_from_pushes(&roots, &god);
+    }
 }
