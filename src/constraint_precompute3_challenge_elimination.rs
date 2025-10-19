@@ -349,6 +349,11 @@ pub fn assert_no_pops_reachable_from_pushes(
                     for child_idx in dest_map.keys() {
                         if *pop_reachable_memo.get(child_idx).unwrap_or(&false) {
                             let path = find_path_to_pop( *child_idx, god, &pop_reachable_memo);
+                            let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+                                .display_edge_keys_only()
+                                .omit_depth()
+                                ;
+                            eprintln!("{}", Trie::pretty_print_with_options(god, &[node_idx], &options));
                             panic!("Assertion failed: Pop is reachable from a Push edge. Path: Node {} --Push--> Node {} --> ... --> Pop. Path to pop: {:?}", node_idx, child_idx, path);
                         }
                     }
