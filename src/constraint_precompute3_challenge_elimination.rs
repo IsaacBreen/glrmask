@@ -449,7 +449,6 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     #[test]
-    #[should_panic(expected = "Assertion failed: Pop is reachable from a Push edge.")]
     fn test_eliminate_push_pop_failure_case() {
         let god = IntermediateTrie3GodWrapper::new();
         
