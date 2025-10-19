@@ -136,6 +136,12 @@ impl HybridBitset {
         }
     }
 
+    pub fn from_item(item: usize) -> Self {
+        HybridBitset {
+            inner: cache::intern_l1(RangeSetBlaze::from_iter([item..=item])),
+        }
+    }
+
     /// A bitset is simple if it has a small number of ranges, making operations fast
     /// enough that caching overhead is not worthwhile.
     pub fn is_simple(&self) -> bool {

@@ -470,7 +470,7 @@ mod tests {
         god.insert_edge_simple(n(13), n(14), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
         
         // From node 14
-        god.insert_edge_simple(n(14), n(15), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::all()), ());
+        god.insert_edge_simple(n(14), n(15), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
         god.insert_edge_simple(n(14), n(16), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(4)), ());
 
         // From node 15
@@ -492,7 +492,7 @@ mod tests {
         god.insert_edge_simple(n(16), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(2)), ());
 
         let mut roots = BTreeMap::new();
-        roots.insert(0 as TokenizerStateID, n(13));
+        roots.insert(TokenizerStateID(0), n(13));
 
         // This call is expected to fail to eliminate the push->pop sequence
         eliminate_pushes_and_pops(&mut roots, &god);
