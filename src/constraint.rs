@@ -24,7 +24,7 @@ use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc, Acc};
 use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
-use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
+use crate::datastructures::trie::{EdgeInserter, MergeableEdgeValue, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
@@ -112,10 +112,32 @@ pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, Precompute
 // New types for intermediate trie 3
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IntermediateTrie3EdgeKey {
-    Pop(usize, StateIDBV),
     Push(StateIDBV),
+    Pop(usize),
+    CheckState(StateIDBV),
     CheckLLM(LLMTokenBV),
     NoOp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IntermediateTrie3Edge {
+    pub key: IntermediateTrie3EdgeKey,
+    pub state: Option<StateIDBV>,
+}
+
+impl IntermediateTrie3Edge {
+    pub fn new(key: IntermediateTrie3EdgeKey, state: Option<StateIDBV>) -> Self {
+        Self { key, state }
+    }
+}
+
+impl Default for IntermediateTrie3Edge {
+    fn default() -> Self {
+        Self {
+            key: IntermediateTrie3EdgeKey::NoOp,
+            state: None,
+        }
+    }
 }
 
 impl Display for IntermediateTrie3EdgeKey {
@@ -154,8 +176,9 @@ impl Display for IntermediateTrie3EdgeKey {
         }
 
         match self {
-            IntermediateTrie3EdgeKey::Pop(n, bv) => write!(f, "Pop({}, {})", n, format_bv(bv)),
             IntermediateTrie3EdgeKey::Push(bv) => write!(f, "Push({})", format_bv(bv)),
+            IntermediateTrie3EdgeKey::Pop(n) => write!(f, "Pop({})", n),
+            IntermediateTrie3EdgeKey::CheckState(bv) => write!(f, "CheckState({})", format_bv(bv)),
             IntermediateTrie3EdgeKey::CheckLLM(bv) => write!(f, "CheckLLM({})", format_bv(bv)),
             IntermediateTrie3EdgeKey::NoOp => write!(f, "NoOp"),
         }
@@ -179,9 +202,24 @@ impl IntermediatePrecomputedNodeContents3 {
     }
 }
 
-pub type IntermediatePrecomputeNode3 = Trie<IntermediateTrie3EdgeKey, (), IntermediatePrecomputedNodeContents3>;
+pub type IntermediateTrie3EdgeValue = Option<StateIDBV>;
+pub type IntermediatePrecomputeNode3 = Trie<IntermediateTrie3EdgeKey, IntermediateTrie3EdgeValue, IntermediatePrecomputedNodeContents3>;
 pub type IntermediatePrecomputeNode3Index = Trie2Index;
-pub type IntermediateTrie3GodWrapper = GodWrapper<IntermediateTrie3EdgeKey, (), IntermediatePrecomputedNodeContents3>;
+pub type IntermediateTrie3GodWrapper = GodWrapper<IntermediateTrie3EdgeKey, IntermediateTrie3EdgeValue, IntermediatePrecomputedNodeContents3>;
+
+impl MergeableEdgeValue for Option<StateIDBV> {
+    fn merge(&mut self, other: Self) {
+        match (self, other) {
+            (Some(ref mut current), Some(incoming)) => {
+                *current |= &incoming;
+            }
+            (None, some) => {
+                *self = some;
+            }
+            (Some(_), None) => {}
+        }
+    }
+}
 
 // Original Trie3 types remain for the final structure
 pub type PrecomputeNode3 = Trie<(isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
