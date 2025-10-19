@@ -1,42 +1,217 @@
-use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey, IntermediatePrecomputedNodeContents3};
-use crate::datastructures::trie::{Trie};
+use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey, IntermediatePrecomputedNodeContents3, StateIDBV, LLMTokenBV};
+use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index};
 use crate::tokenizer::TokenizerStateID;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::Display;
+use std::fmt::{self, Display, Formatter};
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Intermediate2Trie3EdgeKey {
+    Pop(usize, StateIDBV),
+    Push(StateIDBV),
+    NoOp,
+}
+
+impl Display for Intermediate2Trie3EdgeKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // Helper to format HybridBitset into ranges
+        fn format_bv(bv: &StateIDBV) -> String {
+            if bv.is_empty() {
+                return "[]".to_string();
+            }
+            if bv.is_all() {
+                return "[ALL]".to_string();
+            }
+
+            const MAX_RANGES_TO_SHOW: usize = 10;
+            let total_ranges = bv.inner().ranges_len();
+
+            let mut parts: Vec<String> = bv.iter_ranges().take(MAX_RANGES_TO_SHOW).map(|(start, end)| {
+                if start == end {
+                    format!("{}", start)
+                } else if end == usize::MAX {
+                    format!("{}..", start)
+                } else {
+                    format!("{}..={}", start, end)
+                }
+            }).collect();
+
+            if total_ranges > MAX_RANGES_TO_SHOW {
+                parts.push(format!("... ({} more ranges)", total_ranges - MAX_RANGES_TO_SHOW));
+            }
+
+            if total_ranges > 1 {
+                format!("[{}]", parts.join(", "))
+            } else {
+                parts.join(", ")
+            }
+        }
+
+        match self {
+            Intermediate2Trie3EdgeKey::Pop(n, bv) => write!(f, "Pop({}, {})", n, format_bv(bv)),
+            Intermediate2Trie3EdgeKey::Push(bv) => write!(f, "Push({})", format_bv(bv)),
+            Intermediate2Trie3EdgeKey::NoOp => write!(f, "NoOp"),
+        }
+    }
+}
+
+pub type Intermediate2PrecomputeNode3 = Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
+pub type Intermediate2PrecomputeNode3Index = Trie2Index;
+pub type Intermediate2Trie3GodWrapper = GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
+
+fn convert_to_intermediate2(
+    roots1: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+    god1: &IntermediateTrie3GodWrapper,
+) -> (BTreeMap<TokenizerStateID, Intermediate2PrecomputeNode3Index>, Intermediate2Trie3GodWrapper) {
+    let god2 = Intermediate2Trie3GodWrapper::new();
+    let mut roots2 = BTreeMap::new();
+    let mut node_map: HashMap<IntermediatePrecomputeNode3Index, Intermediate2PrecomputeNode3Index> = HashMap::new();
+    let mut q: std::collections::VecDeque<IntermediatePrecomputeNode3Index> = std::collections::VecDeque::new();
+
+    for (sid, root1) in roots1 {
+        let root2 = Intermediate2PrecomputeNode3Index::new(god2.insert(
+            Intermediate2PrecomputeNode3::new(root1.read(god1).unwrap().value.clone())
+        ));
+        roots2.insert(*sid, root2);
+        node_map.insert(*root1, root2);
+        q.push_back(*root1);
+    }
+
+    let mut visited = HashSet::new();
+    while let Some(idx1) = q.pop_front() {
+        if !visited.insert(idx1) { continue; }
+
+        let idx2 = *node_map.get(&idx1).unwrap();
+        let guard1 = idx1.read(god1).unwrap();
+
+        for (edge_key1, dest_map1) in guard1.children() {
+            for (child1_idx, _) in dest_map1 {
+                let child2_idx = *node_map.entry(*child1_idx).or_insert_with(|| {
+                    let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(
+                        Intermediate2PrecomputeNode3::new(child1_idx.read(god1).unwrap().value.clone())
+                    ));
+                    q.push_back(*child1_idx);
+                    new_node
+                });
+
+                let (edge_key2, edge_value2) = match edge_key1 {
+                    IntermediateTrie3EdgeKey::Pop(n, s) => (Intermediate2Trie3EdgeKey::Pop(*n, s.clone()), LLMTokenBV::max_ones()),
+                    IntermediateTrie3EdgeKey::Push(s) => (Intermediate2Trie3EdgeKey::Push(s.clone()), LLMTokenBV::max_ones()),
+                    IntermediateTrie3EdgeKey::NoOp => (Intermediate2Trie3EdgeKey::NoOp, LLMTokenBV::max_ones()),
+                    IntermediateTrie3EdgeKey::CheckLLM(bv) => (Intermediate2Trie3EdgeKey::NoOp, bv.clone()),
+                };
+
+                let mut guard2 = idx2.write(&god2).unwrap();
+                guard2.force_insert_to_node(edge_key2, edge_value2, child2_idx);
+            }
+        }
+    }
+
+    (roots2, god2)
+}
+
+fn convert_from_intermediate2(
+    roots2: &BTreeMap<TokenizerStateID, Intermediate2PrecomputeNode3Index>,
+    god2: &Intermediate2Trie3GodWrapper,
+) -> (BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>, IntermediateTrie3GodWrapper) {
+    let god1 = IntermediateTrie3GodWrapper::new();
+    let mut roots1 = BTreeMap::new();
+    let mut node_map: HashMap<Intermediate2PrecomputeNode3Index, IntermediatePrecomputeNode3Index> = HashMap::new();
+    let mut q: std::collections::VecDeque<Intermediate2PrecomputeNode3Index> = std::collections::VecDeque::new();
+
+    for (sid, root2) in roots2 {
+        let root1 = IntermediatePrecomputeNode3Index::new(god1.insert(
+            IntermediatePrecomputeNode3::new(root2.read(god2).unwrap().value.clone())
+        ));
+        roots1.insert(*sid, root1);
+        node_map.insert(*root2, root1);
+        q.push_back(*root2);
+    }
+
+    let mut visited = HashSet::new();
+    while let Some(idx2) = q.pop_front() {
+        if !visited.insert(idx2) { continue; }
+
+        let idx1 = *node_map.get(&idx2).unwrap();
+        let guard2 = idx2.read(god2).unwrap();
+
+        for (edge_key2, dest_map2) in guard2.children() {
+            for (child2_idx, edge_value2) in dest_map2 {
+                let child1_idx = *node_map.entry(*child2_idx).or_insert_with(|| {
+                    let new_node = IntermediatePrecomputeNode3Index::new(god1.insert(
+                        IntermediatePrecomputeNode3::new(child2_idx.read(god2).unwrap().value.clone())
+                    ));
+                    q.push_back(*child2_idx);
+                    new_node
+                });
+
+                let mut guard1 = idx1.write(&god1).unwrap();
+                if edge_value2.is_all() {
+                    let edge_key1 = match edge_key2 {
+                        Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
+                        Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
+                        Intermediate2Trie3EdgeKey::NoOp => IntermediateTrie3EdgeKey::NoOp,
+                    };
+                    guard1.force_insert_to_node(edge_key1, (), child1_idx);
+                } else {
+                    match edge_key2 {
+                        Intermediate2Trie3EdgeKey::NoOp => {
+                            guard1.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                        }
+                        _ => {
+                            // This case requires inserting an intermediate node.
+                            let intermediate_node = IntermediatePrecomputeNode3Index::new(god1.insert(
+                                IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())
+                            ));
+                            let edge_key1_op = match edge_key2 {
+                                Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
+                                Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
+                                _ => unreachable!(),
+                            };
+                            guard1.force_insert_to_node(edge_key1_op, (), intermediate_node);
+                            let mut inter_guard = intermediate_node.write(&god1).unwrap();
+                            inter_guard.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (roots1, god1)
+}
 
 pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    // This is a complex graph transformation. We will do it iteratively until a fixed point is reached.
-    // The core idea is to find a sequence A --push--> B --op--> C and replace it.
-    // We select B nodes that have no outgoing push edges to ensure that part of the graph is "stable".
+    let (mut roots2, god2) = convert_to_intermediate2(roots, god);
+
     let mut iteration = 0;
     loop {
         iteration += 1;
-        Trie::gc(god, &roots.values().cloned().collect::<Vec<_>>());
-        let all_nodes = Trie::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>());
-        let mut predecessors: HashMap<IntermediatePrecomputeNode3Index, Vec<(IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey)>> = HashMap::new();
-        let mut outgoing_push_counts: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
+        Trie::gc(&god2, &roots2.values().cloned().collect::<Vec<_>>());
+        let all_nodes = Trie::all_nodes(&god2, &roots2.values().cloned().collect::<Vec<_>>());
+        let mut predecessors: HashMap<Intermediate2PrecomputeNode3Index, Vec<(Intermediate2PrecomputeNode3Index, Intermediate2Trie3EdgeKey, LLMTokenBV)>> = HashMap::new();
+        let mut outgoing_push_counts: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
 
         for &node_idx in &all_nodes {
             outgoing_push_counts.entry(node_idx).or_insert(0);
-            if let Some(guard) = node_idx.read(god) {
+            if let Some(guard) = node_idx.read(&god2) {
                 for (edge_key, dest_map) in guard.children() {
-                    if let IntermediateTrie3EdgeKey::Push(_) = edge_key {
+                    if let Intermediate2Trie3EdgeKey::Push(_) = edge_key {
                         *outgoing_push_counts.get_mut(&node_idx).unwrap() += dest_map.len();
                     }
-                    for (child_idx, _) in dest_map {
-                        predecessors.entry(*child_idx).or_default().push((node_idx, edge_key.clone()));
+                    for (child_idx, edge_val) in dest_map {
+                        predecessors.entry(*child_idx).or_default().push((node_idx, edge_key.clone(), edge_val.clone()));
                     }
                 }
             }
         }
 
-        let mut nodes_to_process: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
+        let mut nodes_to_process: Vec<Intermediate2PrecomputeNode3Index> = Vec::new();
         for node_idx in &all_nodes {
             if outgoing_push_counts.get(node_idx).cloned().unwrap_or(0) == 0 {
-                if let Some(guard) = node_idx.read(god) {
+                if let Some(guard) = node_idx.read(&god2) {
                     if !guard.value.end {
                         nodes_to_process.push(*node_idx);
                     }
@@ -49,9 +224,9 @@ pub fn eliminate_pushes_and_pops(
 
         for b_idx in nodes_to_process {
             let incoming_pushes = if let Some(preds) = predecessors.get(&b_idx) {
-                preds.iter().filter_map(|(pred_idx, edge_key)| {
-                    if let IntermediateTrie3EdgeKey::Push(s) = edge_key {
-                        Some((*pred_idx, s.clone()))
+                preds.iter().filter_map(|(pred_idx, edge_key, edge_val)| {
+                    if let Intermediate2Trie3EdgeKey::Push(s) = edge_key {
+                        Some((*pred_idx, s.clone(), edge_val.clone()))
                     } else {
                         None
                     }
@@ -59,15 +234,14 @@ pub fn eliminate_pushes_and_pops(
             } else {
                 continue;
             };
-
             if incoming_pushes.is_empty() {
                 continue;
             }
 
             let outgoing_edges = {
-                let b_guard = b_idx.read(god).unwrap();
+                let b_guard = b_idx.read(&god2).unwrap();
                 b_guard.children().clone().into_iter().flat_map(|(ek, dm)| {
-                    dm.keys().map(move |c_idx| (ek.clone(), *c_idx)).collect::<Vec<_>>()
+                    dm.iter().map(move |(c_idx, ev)| (ek.clone(), *c_idx, ev.clone())).collect::<Vec<_>>()
                 }).collect::<Vec<_>>()
             };
 
@@ -75,45 +249,48 @@ pub fn eliminate_pushes_and_pops(
                 changed = true;
             }
 
-            for (a_idx, s) in incoming_pushes {
+            for (a_idx, s, bv_ab) in incoming_pushes {
                 // Remove the edge A --push(S)--> B
-                if let Some(mut a_guard) = a_idx.write(god) {
-                    if let Some(dest_map) = a_guard.children_mut().get_mut(&IntermediateTrie3EdgeKey::Push(s.clone())) {
+                if let Some(mut a_guard) = a_idx.write(&god2) {
+                    if let Some(dest_map) = a_guard.children_mut().get_mut(&Intermediate2Trie3EdgeKey::Push(s.clone())) {
                         dest_map.remove(&b_idx);
                         if dest_map.is_empty() {
-                            a_guard.children_mut().remove(&IntermediateTrie3EdgeKey::Push(s.clone()));
+                            a_guard.children_mut().remove(&Intermediate2Trie3EdgeKey::Push(s.clone()));
                         }
                     }
                 }
 
-                for (op, c_idx) in &outgoing_edges {
+                for (op, c_idx, bv_bc) in &outgoing_edges {
+                    let new_bv = &bv_ab & bv_bc;
+                    if new_bv.is_empty() { continue; }
+
                     match op {
-                        IntermediateTrie3EdgeKey::Push(_) => unreachable!("Node B has an outgoing push edge but was selected for processing."),
-                        IntermediateTrie3EdgeKey::Pop(0, s_prime) => {
+                        Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node B has an outgoing push edge but was selected for processing."),
+                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
                             let intersection = &s & s_prime;
                             if !intersection.is_empty() {
-                                let new_edge_key = IntermediateTrie3EdgeKey::Push(intersection);
-                                a_idx.write(god).unwrap().force_insert_to_node(new_edge_key, (), *c_idx);
+                                let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
+                                a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
                             }
                         }
-                        IntermediateTrie3EdgeKey::Pop(1, s_prime) => {
+                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
                             if !s.is_disjoint(s_prime) {
-                                a_idx.write(god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), *c_idx);
+                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, *c_idx);
                             }
                         }
-                        IntermediateTrie3EdgeKey::Pop(n, s_prime) if *n > 1 => {
-                            let new_edge_key = IntermediateTrie3EdgeKey::Pop(*n - 1, s_prime.clone());
-                            a_idx.write(god).unwrap().force_insert_to_node(new_edge_key, (), *c_idx);
+                        Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
+                            let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
+                            a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
                         }
-                        IntermediateTrie3EdgeKey::CheckLLM(l) => {
-                            let b_prime_idx = IntermediatePrecomputeNode3Index::new(god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                            a_idx.write(god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(l.clone()), (), b_prime_idx);
-                            b_prime_idx.write(god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(s.clone()), (), *c_idx);
-                        }
-                        IntermediateTrie3EdgeKey::NoOp => {
-                            a_idx.write(god).unwrap().force_insert_to_node(IntermediateTrie3EdgeKey::Push(s.clone()), (), *c_idx);
-                        }
-                        _ => {}
+                        Intermediate2Trie3EdgeKey::NoOp => {
+                            if bv_bc.is_all() {
+                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
+                            } else {
+                                let b_prime_idx = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
+                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, b_prime_idx);
+                                b_prime_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), LLMTokenBV::max_ones(), *c_idx);
+                            }
+                        },
                     }
                 }
             }
@@ -126,6 +303,19 @@ pub fn eliminate_pushes_and_pops(
         if !changed {
             break;
         }
+    }
+
+    let (final_roots1_map, final_god1) = convert_from_intermediate2(&roots2, &god2);
+
+    let sids: Vec<_> = final_roots1_map.keys().cloned().collect();
+    let old_roots: Vec<_> = final_roots1_map.values().cloned().collect();
+
+    god.clear();
+    let (new_roots_vec, _map) = Trie::deep_copy_subtrees_into(&final_god1, god, &old_roots);
+
+    roots.clear();
+    for (sid, new_root) in sids.into_iter().zip(new_roots_vec.into_iter()) {
+        roots.insert(sid, new_root);
     }
 
     Trie::gc(god, &roots.values().cloned().collect::<Vec<_>>());
