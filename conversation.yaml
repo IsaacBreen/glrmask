@@ -2930,7 +2930,7 @@ local_system:
 
     src/constraint_precompute3_challenge_elimination.rs: |
       use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey, IntermediatePrecomputedNodeContents3, StateIDBV, LLMTokenBV};
-      use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index};
+      use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index, MergeableEdgeValue};
       use crate::tokenizer::TokenizerStateID;
       use std::collections::{BTreeMap, HashMap, HashSet};
       use std::fmt::{self, Display, Formatter};
@@ -2985,6 +2985,12 @@ local_system:
           }
       }
 
+      impl MergeableEdgeValue for LLMTokenBV {
+          fn merge(&mut self, other: Self) {
+              *self |= &other;
+          }
+      }
+
       pub type Intermediate2PrecomputeNode3 = Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
       pub type Intermediate2PrecomputeNode3Index = Trie2Index;
       pub type Intermediate2Trie3GodWrapper = GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
@@ -3031,8 +3037,7 @@ local_system:
                           IntermediateTrie3EdgeKey::CheckLLM(bv) => (Intermediate2Trie3EdgeKey::NoOp, bv.clone()),
                       };
 
-                      let mut guard2 = idx2.write(&god2).unwrap();
-                      guard2.force_insert_to_node(edge_key2, edge_value2, child2_idx);
+                      god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
                   }
               }
           }
@@ -3075,18 +3080,17 @@ local_system:
                           new_node
                       });
 
-                      let mut guard1 = idx1.write(&god1).unwrap();
                       if edge_value2.is_all() {
                           let edge_key1 = match edge_key2 {
                               Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
                               Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
                               Intermediate2Trie3EdgeKey::NoOp => IntermediateTrie3EdgeKey::NoOp,
                           };
-                          guard1.force_insert_to_node(edge_key1, (), child1_idx);
+                          god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());
                       } else {
                           match edge_key2 {
                               Intermediate2Trie3EdgeKey::NoOp => {
-                                  guard1.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                                  god1.insert_edge_simple(idx1, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
                               }
                               _ => {
                                   // This case requires inserting an intermediate node.
@@ -3098,9 +3102,8 @@ local_system:
                                       Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
                                       _ => unreachable!(),
                                   };
-                                  guard1.force_insert_to_node(edge_key1_op, (), intermediate_node);
-                                  let mut inter_guard = intermediate_node.write(&god1).unwrap();
-                                  inter_guard.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                                  god1.insert_edge_simple(idx1, intermediate_node, edge_key1_op, ());
+                                  god1.insert_edge_simple(intermediate_node, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
                               }
                           }
                       }
@@ -3213,20 +3216,20 @@ local_system:
                                   let intersection = &s & s_prime;
                                   if !intersection.is_empty() {
                                       let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                                      god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
                                   }
                               }
                               Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
                                   if !s.is_disjoint(s_prime) {
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, *c_idx);
+                                      god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv);
                                   }
                               }
                               Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
                                   let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
-                                  a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                                  god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
                               }
                               Intermediate2Trie3EdgeKey::NoOp => {
-                                  a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
+                                  god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv);
                               },
                           }
                       }
@@ -3277,6 +3280,14 @@ local_system:
                           for child_idx in dest_map.keys() {
                               if *pop_reachable_memo.get(child_idx).unwrap_or(&false) {
                                   let path = find_path_to_pop( *child_idx, god, &pop_reachable_memo);
+                                  let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+                                      .display_edge_keys_only()
+                                      .omit_depth()
+                                      ;
+                                  eprintln!("Full graph:");
+                                  eprintln!("{}", Trie::pretty_print_with_options(god, roots.values().cloned().collect::<Vec<_>>().as_slice(), &options));
+                                  eprintln!("Segment:");
+                                  eprintln!("{}", Trie::pretty_print_with_options(god, &[node_idx], &options));
                                   panic!("Assertion failed: Pop is reachable from a Push edge. Path: Node {} --Push--> Node {} --> ... --> Pop. Path to pop: {:?}", node_idx, child_idx, path);
                               }
                           }
@@ -6635,6 +6646,14 @@ local_system:
                           for child_idx in dest_map.keys() {
                               if *pop_reachable_memo.get(child_idx).unwrap_or(&false) {
                                   let path = find_path_to_pop( *child_idx, god, &pop_reachable_memo);
+                                  let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+                                      .display_edge_keys_only()
+                                      .omit_depth()
+                                      ;
+                                  eprintln!("Full graph:");
+                                  eprintln!("{}", Trie::pretty_print_with_options(god, roots.values().cloned().collect::<Vec<_>>().as_slice(), &options));
+                                  eprintln!("Segment:");
+                                  eprintln!("{}", Trie::pretty_print_with_options(god, &[node_idx], &options));
                                   panic!("Assertion failed: Pop is reachable from a Push edge. Path: Node {} --Push--> Node {} --> ... --> Pop. Path to pop: {:?}", node_idx, child_idx, path);
                               }
                           }
@@ -6716,6 +6735,68 @@ local_system:
               }
           }
           path
+      }
+
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+          use crate::constraint::{IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, StateIDBV};
+          use crate::datastructures::trie::Trie;
+          use crate::tokenizer::TokenizerStateID;
+          use std::collections::{BTreeMap, HashMap};
+
+          #[test]
+          #[should_panic(expected = "Assertion failed: Pop is reachable from a Push edge.")]
+          fn test_eliminate_push_pop_failure_case() {
+              let god = IntermediateTrie3GodWrapper::new();
+              
+              let mut node_map = HashMap::new();
+              let node_ids = vec![5, 6, 7, 8, 9, 13, 14, 15, 16];
+              for id in node_ids {
+                  node_map.insert(id, Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))));
+              }
+
+              let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+
+              // Add edges to replicate the graph structure from the panic log's "Segment"
+              // Path that causes the issue: 13 --Push--> 14 --Pop--> 15
+              // Node 14 also has another outgoing Push to 16, which prevents the current
+              // implementation of `eliminate_pushes_and_pops` from processing node 14.
+              
+              // From node 13
+              god.insert_edge_simple(n(13), n(14), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+              
+              // From node 14
+              god.insert_edge_simple(n(14), n(15), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::all()), ());
+              god.insert_edge_simple(n(14), n(16), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(4)), ());
+
+              // From node 15
+              god.insert_edge_simple(n(15), n(5), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+              
+              // From node 5
+              god.insert_edge_simple(n(5), n(6), IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)), ());
+
+              // From node 6
+              god.insert_edge_simple(n(6), n(7), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+              
+              // From node 7
+              god.insert_edge_simple(n(7), n(8), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
+              
+              // From node 8
+              god.insert_edge_simple(n(8), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+              
+              // From node 16
+              god.insert_edge_simple(n(16), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(2)), ());
+
+              let mut roots = BTreeMap::new();
+              roots.insert(0 as TokenizerStateID, n(13));
+
+              // This call is expected to fail to eliminate the push->pop sequence
+              eliminate_pushes_and_pops(&mut roots, &god);
+
+              // This assertion will then panic, which is expected by the test.
+              assert_no_pops_reachable_from_pushes(&roots, &god);
+          }
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -9689,7 +9770,7 @@ messages:
   - user: |-
       ```rust 'src/constraint_precompute3_challenge_elimination.rs'
       use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey, IntermediatePrecomputedNodeContents3, StateIDBV, LLMTokenBV};
-      use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index};
+      use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index, MergeableEdgeValue};
       use crate::tokenizer::TokenizerStateID;
       use std::collections::{BTreeMap, HashMap, HashSet};
       use std::fmt::{self, Display, Formatter};
@@ -9744,6 +9825,12 @@ messages:
           }
       }
 
+      impl MergeableEdgeValue for LLMTokenBV {
+          fn merge(&mut self, other: Self) {
+              *self |= &other;
+          }
+      }
+
       pub type Intermediate2PrecomputeNode3 = Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
       pub type Intermediate2PrecomputeNode3Index = Trie2Index;
       pub type Intermediate2Trie3GodWrapper = GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
@@ -9790,8 +9877,7 @@ messages:
                           IntermediateTrie3EdgeKey::CheckLLM(bv) => (Intermediate2Trie3EdgeKey::NoOp, bv.clone()),
                       };
 
-                      let mut guard2 = idx2.write(&god2).unwrap();
-                      guard2.force_insert_to_node(edge_key2, edge_value2, child2_idx);
+                      god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
                   }
               }
           }
@@ -9834,18 +9920,17 @@ messages:
                           new_node
                       });
 
-                      let mut guard1 = idx1.write(&god1).unwrap();
                       if edge_value2.is_all() {
                           let edge_key1 = match edge_key2 {
                               Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
                               Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
                               Intermediate2Trie3EdgeKey::NoOp => IntermediateTrie3EdgeKey::NoOp,
                           };
-                          guard1.force_insert_to_node(edge_key1, (), child1_idx);
+                          god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());
                       } else {
                           match edge_key2 {
                               Intermediate2Trie3EdgeKey::NoOp => {
-                                  guard1.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                                  god1.insert_edge_simple(idx1, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
                               }
                               _ => {
                                   // This case requires inserting an intermediate node.
@@ -9857,9 +9942,8 @@ messages:
                                       Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
                                       _ => unreachable!(),
                                   };
-                                  guard1.force_insert_to_node(edge_key1_op, (), intermediate_node);
-                                  let mut inter_guard = intermediate_node.write(&god1).unwrap();
-                                  inter_guard.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                                  god1.insert_edge_simple(idx1, intermediate_node, edge_key1_op, ());
+                                  god1.insert_edge_simple(intermediate_node, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
                               }
                           }
                       }
@@ -9972,20 +10056,20 @@ messages:
                                   let intersection = &s & s_prime;
                                   if !intersection.is_empty() {
                                       let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                                      god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
                                   }
                               }
                               Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
                                   if !s.is_disjoint(s_prime) {
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, *c_idx);
+                                      god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv);
                                   }
                               }
                               Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
                                   let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
-                                  a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                                  god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
                               }
                               Intermediate2Trie3EdgeKey::NoOp => {
-                                  a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
+                                  god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv);
                               },
                           }
                       }
@@ -10036,6 +10120,14 @@ messages:
                           for child_idx in dest_map.keys() {
                               if *pop_reachable_memo.get(child_idx).unwrap_or(&false) {
                                   let path = find_path_to_pop( *child_idx, god, &pop_reachable_memo);
+                                  let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+                                      .display_edge_keys_only()
+                                      .omit_depth()
+                                      ;
+                                  eprintln!("Full graph:");
+                                  eprintln!("{}", Trie::pretty_print_with_options(god, roots.values().cloned().collect::<Vec<_>>().as_slice(), &options));
+                                  eprintln!("Segment:");
+                                  eprintln!("{}", Trie::pretty_print_with_options(god, &[node_idx], &options));
                                   panic!("Assertion failed: Pop is reachable from a Push edge. Path: Node {} --Push--> Node {} --> ... --> Pop. Path to pop: {:?}", node_idx, child_idx, path);
                               }
                           }
@@ -10122,8 +10214,123 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_challenge_elimination.rs
-  - user: In `src/constraint_precompute3_challenge_elimination.rs`, rather than `force_insert_to_node`,
-      use `insert_edge_simple`.
+  - user: |+
+      Full graph:
+      --- Root State ID: 0 ---
+      Root Node 0
+      ├── Edge (NoOp): -> Node 1
+      │   └── Edge (NoOp): -> Node 2
+      │       ├── Edge (Pop(0, 1)): -> Node 3
+      │       │   ├── Edge (Pop(1, [ALL])): -> Node 4
+      │       │   │   └── Edge (CheckLLM(0)): -> Node 5
+      │       │   │       └── Edge (Pop(0, 5)): -> Node 6
+      │       │   │           └── Edge (Push(1)): -> Node 7
+      │       │   │               └── Edge (Push(2)): -> Node 8
+      │       │   │                   └── Edge (CheckLLM(0)): -> Node 9
+      │       │   └── Edge (Push(4)): -> Node 10
+      │       │       └── Edge (CheckLLM(2)): -> Node 9 (Shared, already shown)
+      │       ├── Edge (Pop(0, 3)): -> Node 11
+      │       │   └── Edge (Pop(1, [ALL])): -> Node 12
+      │       │       └── Edge (Pop(0, 5)): -> Node 13
+      │       │           └── Edge (Push(1)): -> Node 14
+      │       │               ├── Edge (Pop(1, [ALL])): -> Node 15
+      │       │               │   └── Edge (CheckLLM(0)): -> Node 5 (Shared, already shown)
+      │       │               └── Edge (Push(4)): -> Node 16
+      │       │                   └── Edge (CheckLLM(2)): -> Node 9 (Shared, already shown)
+      │       ├── Edge (Pop(0, 4)): -> Node 17
+      │       │   └── Edge (Pop(2, [ALL])): -> Node 18
+      │       │       └── Edge (Pop(0, 5)): -> Node 13 (Shared, already shown)
+      │       └── Edge (Pop(0, 5)): -> Node 19
+      │           ├── Edge (Push(3)): -> Node 20
+      │           │   └── Edge (CheckLLM(2)): -> Node 9 (Shared, already shown)
+      │           └── Edge (CheckLLM(0)): -> Node 21
+      │               └── Edge (Pop(0, 5)): -> Node 6 (Shared, already shown)
+      ├── Edge (NoOp): -> Node 22
+      │   └── Edge (NoOp): -> Node 23
+      │       ├── Edge (Pop(0, 1)): -> Node 24
+      │       │   └── Edge (Push(2)): -> Node 25
+      │       │       └── Edge (CheckLLM(3)): -> Node 9 (Shared, already shown)
+      │       ├── Edge (Pop(0, 3)): -> Node 26
+      │       │   └── Edge (Pop(1, [ALL])): -> Node 27
+      │       │       └── Edge (Pop(0, 5)): -> Node 28
+      │       │           └── Edge (Push(1)): -> Node 29
+      │       │               └── Edge (Push(2)): -> Node 30
+      │       │                   └── Edge (CheckLLM(3)): -> Node 9 (Shared, already shown)
+      │       ├── Edge (Pop(0, 4)): -> Node 31
+      │       │   └── Edge (Pop(2, [ALL])): -> Node 32
+      │       │       └── Edge (Pop(0, 5)): -> Node 28 (Shared, already shown)
+      │       └── Edge (Pop(0, 5)): -> Node 33
+      │           └── Edge (Push(0)): -> Node 34
+      │               └── Edge (CheckLLM(3)): -> Node 9 (Shared, already shown)
+      └── Edge (NoOp): -> Node 35
+          └── Edge (NoOp): -> Node 36
+              ├── Edge (Pop(0, 0)): -> Node 37
+              │   └── Edge (Pop(1, [ALL])): -> Node 38
+              │       └── Edge (Pop(0, 5)): -> Node 39
+              │           └── Edge (Push(6)): -> Node 40
+              │               └── Edge (Push(7)): -> Node 41
+              │                   └── Edge (CheckLLM(1)): -> Node 9 (Shared, already shown)
+              ├── Edge (Pop(0, 2)): -> Node 42
+              │   └── Edge (Pop(2, [ALL])): -> Node 43
+              │       └── Edge (Pop(0, 5)): -> Node 39 (Shared, already shown)
+              └── Edge (Pop(0, 6)): -> Node 44
+                  └── Edge (Push(7)): -> Node 45
+                      └── Edge (CheckLLM(1)): -> Node 9 (Shared, already shown)
+
+      --- Root State ID: 1 ---
+      Root Node 46
+
+      --- Root State ID: 2 ---
+      Root Node 47
+
+      --- Root State ID: 3 ---
+      Root Node 48
+
+      Segment:
+      --- Root State ID: 0 ---
+      Root Node 13
+      └── Edge (Push(1)): -> Node 14
+          ├── Edge (Pop(1, [ALL])): -> Node 15
+          │   └── Edge (CheckLLM(0)): -> Node 5
+          │       └── Edge (Pop(0, 5)): -> Node 6
+          │           └── Edge (Push(1)): -> Node 7
+          │               └── Edge (Push(2)): -> Node 8
+          │                   └── Edge (CheckLLM(0)): -> Node 9
+          └── Edge (Push(4)): -> Node 16
+              └── Edge (CheckLLM(2)): -> Node 9 (Shared, already shown)
+
+
+
+      thread 'test_constraint_basic::test_constraint_expression_trivial_direct' (10610927) panicked at src/constraint_precompute3_challenge_elimination.rs:360:29:
+      Assertion failed: Pop is reachable from a Push edge. Path: Node Trie2Index(13) --Push--> Node Trie2Index(14) --> ... --> Pop. Path to pop: [(Trie2Index { index: Index { index: 14 } }, "Pop(1, [ALL])")]
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::constraint_precompute3_challenge_elimination::assert_no_pops_reachable_from_pushes
+                   at ./src/constraint_precompute3_challenge_elimination.rs:360:29
+         3: sep1::constraint::GrammarConstraint::_process_and_rebuild_trie3_paths
+                   at ./src/constraint.rs:1895:9
+         4: sep1::constraint::GrammarConstraint::precompute3
+                   at ./src/constraint.rs:2150:9
+         5: sep1::constraint::GrammarConstraint::new_with_config
+                   at ./src/constraint.rs:1064:41
+         6: sep1::constraint::GrammarConstraint::new
+                   at ./src/constraint.rs:842:9
+         7: sep1::test_constraint_basic::test_constraint_expression_trivial_direct
+                   at ./src/test_constraint_basic.rs:2667:22
+         8: sep1::test_constraint_basic::test_constraint_expression_trivial_direct::{{closure}}
+                   at ./src/test_constraint_basic.rs:2631:47
+         9: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+        10: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - user: Add a test to constraint_precompute3_challenge_eliminiation.rs that reproduces
+      this error.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -10142,166 +10349,157 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to make the requested changes, followed by the git diffs.
+      Of course. Here are the step-by-step instructions to add a test case that reproduces the error, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      #### File: `src/constraint_precompute3_challenge_elimination.rs`
+      1.  **Open the file `src/constraint_precompute3_challenge_elimination.rs`**.
 
-      1.  At the top of the file, modify the `use` statement for `crate::datastructures::trie` to also import `MergeableEdgeValue`:
+      2.  **Add a new test module** at the very end of the file. This involves adding a `#[cfg(test)]` block with the necessary `use` statements and the test function itself.
 
-          ```rust
-          use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index, MergeableEdgeValue};
-          ```
-
-      2.  After the `impl Display for Intermediate2Trie3EdgeKey` block (around line 51), add an implementation of `MergeableEdgeValue` for `LLMTokenBV`. This will define how edge values are merged when using `insert_edge_simple`.
+      3.  **Paste the following code** at the end of `src/constraint_precompute3_challenge_elimination.rs`:
 
           ```rust
-          impl MergeableEdgeValue for LLMTokenBV {
-              fn merge(&mut self, other: Self) {
-                  *self |= &other;
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+              use crate::constraint::{IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, StateIDBV};
+              use crate::datastructures::trie::Trie;
+              use crate::tokenizer::TokenizerStateID;
+              use std::collections::{BTreeMap, HashMap};
+          
+              #[test]
+              #[should_panic(expected = "Assertion failed: Pop is reachable from a Push edge.")]
+              fn test_eliminate_push_pop_failure_case() {
+                  let god = IntermediateTrie3GodWrapper::new();
+                  
+                  let mut node_map = HashMap::new();
+                  let node_ids = vec![5, 6, 7, 8, 9, 13, 14, 15, 16];
+                  for id in node_ids {
+                      node_map.insert(id, Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))));
+                  }
+          
+                  let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+          
+                  // Add edges to replicate the graph structure from the panic log's "Segment"
+                  // Path that causes the issue: 13 --Push--> 14 --Pop--> 15
+                  // Node 14 also has another outgoing Push to 16, which prevents the current
+                  // implementation of `eliminate_pushes_and_pops` from processing node 14.
+                  
+                  // From node 13
+                  god.insert_edge_simple(n(13), n(14), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+                  
+                  // From node 14
+                  god.insert_edge_simple(n(14), n(15), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::all()), ());
+                  god.insert_edge_simple(n(14), n(16), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(4)), ());
+          
+                  // From node 15
+                  god.insert_edge_simple(n(15), n(5), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+                  
+                  // From node 5
+                  god.insert_edge_simple(n(5), n(6), IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)), ());
+          
+                  // From node 6
+                  god.insert_edge_simple(n(6), n(7), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+                  
+                  // From node 7
+                  god.insert_edge_simple(n(7), n(8), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
+                  
+                  // From node 8
+                  god.insert_edge_simple(n(8), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+                  
+                  // From node 16
+                  god.insert_edge_simple(n(16), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(2)), ());
+          
+                  let mut roots = BTreeMap::new();
+                  roots.insert(0 as TokenizerStateID, n(13));
+          
+                  // This call is expected to fail to eliminate the push->pop sequence
+                  eliminate_pushes_and_pops(&mut roots, &god);
+          
+                  // This assertion will then panic, which is expected by the test.
+                  assert_no_pops_reachable_from_pushes(&roots, &god);
               }
           }
           ```
 
-      3.  In the `convert_to_intermediate2` function, find the following lines:
+      This test constructs the specific graph structure that caused the panic and asserts that the panic occurs. This will help validate any future fix for the underlying issue in `eliminate_pushes_and_pops`.
 
-          ```rust
-          let mut guard2 = idx2.write(&god2).unwrap();
-          guard2.force_insert_to_node(edge_key2, edge_value2, child2_idx);
-          ```
+      ### Git Diff
 
-          Replace them with a single call to `insert_edge_simple`:
-
-          ```rust
-          god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
-          ```
-
-      4.  In the `convert_from_intermediate2` function, locate and remove this line to release the unnecessary write lock:
-
-          ```rust
-          let mut guard1 = idx1.write(&god1).unwrap();
-          ```
-
-      5.  Still in `convert_from_intermediate2`, replace all calls that used `guard1.force_insert_to_node` with `god1.insert_edge_simple`:
-          *   Change `guard1.force_insert_to_node(edge_key1, (), child1_idx);` to `god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());`
-          *   Change `guard1.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);` to `god1.insert_edge_simple(idx1, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());`
-          *   Replace the two `force_insert_to_node` calls for the intermediate node case with two `insert_edge_simple` calls.
-
-      6.  In the `eliminate_pushes_and_pops` function, inside the `match op` block, replace all four calls to `force_insert_to_node` with `insert_edge_simple`. For example, change:
-
-          ```rust
-          a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
-          ```
-
-          to:
-
-          ```rust
-          god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
-          ```
-
-          Apply this pattern to all four occurrences within the `match` statement.
-
-      ### Git Diffs
-
-      Here are the git diffs to apply the changes:
+      Here is the git diff for the changes:
 
       ```diff
       diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
+      index 038d167..9767f33 100644
       --- a/src/constraint_precompute3_challenge_elimination.rs
       +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -1,5 +1,5 @@
-       use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey, IntermediatePrecomputedNodeContents3, StateIDBV, LLMTokenBV};
-      -use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index};
-      +use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index, MergeableEdgeValue};
-       use crate::tokenizer::TokenizerStateID;
-       use std::collections::{BTreeMap, HashMap, HashSet};
-       use std::fmt::{self, Display, Formatter};
-      @@ -51,6 +51,12 @@
+      @@ -403,3 +403,64 @@
            }
+           path
        }
-       
-      +impl MergeableEdgeValue for LLMTokenBV {
-      +    fn merge(&mut self, other: Self) {
-      +        *self |= &other;
+      +
+      +#[cfg(test)]
+      +mod tests {
+      +    use super::*;
+      +    use crate::constraint::{IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, StateIDBV};
+      +    use crate::datastructures::trie::Trie;
+      +    use crate::tokenizer::TokenizerStateID;
+      +    use std::collections::{BTreeMap, HashMap};
+      +
+      +    #[test]
+      +    #[should_panic(expected = "Assertion failed: Pop is reachable from a Push edge.")]
+      +    fn test_eliminate_push_pop_failure_case() {
+      +        let god = IntermediateTrie3GodWrapper::new();
+      +        
+      +        let mut node_map = HashMap::new();
+      +        let node_ids = vec![5, 6, 7, 8, 9, 13, 14, 15, 16];
+      +        for id in node_ids {
+      +            node_map.insert(id, Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))));
+      +        }
+      +
+      +        let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+      +
+      +        // Add edges to replicate the graph structure from the panic log's "Segment"
+      +        // Path that causes the issue: 13 --Push--> 14 --Pop--> 15
+      +        // Node 14 also has another outgoing Push to 16, which prevents the current
+      +        // implementation of `eliminate_pushes_and_pops` from processing node 14.
+      +        
+      +        // From node 13
+      +        god.insert_edge_simple(n(13), n(14), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+      +        
+      +        // From node 14
+      +        god.insert_edge_simple(n(14), n(15), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::all()), ());
+      +        god.insert_edge_simple(n(14), n(16), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(4)), ());
+      +
+      +        // From node 15
+      +        god.insert_edge_simple(n(15), n(5), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+      +        
+      +        // From node 5
+      +        god.insert_edge_simple(n(5), n(6), IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)), ());
+      +
+      +        // From node 6
+      +        god.insert_edge_simple(n(6), n(7), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+      +        
+      +        // From node 7
+      +        god.insert_edge_simple(n(7), n(8), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
+      +        
+      +        // From node 8
+      +        god.insert_edge_simple(n(8), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+      +        
+      +        // From node 16
+      +        god.insert_edge_simple(n(16), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(2)), ());
+      +
+      +        let mut roots = BTreeMap::new();
+      +        roots.insert(0 as TokenizerStateID, n(13));
+      +
+      +        // This call is expected to fail to eliminate the push->pop sequence
+      +        eliminate_pushes_and_pops(&mut roots, &god);
+      +
+      +        // This assertion will then panic, which is expected by the test.
+      +        assert_no_pops_reachable_from_pushes(&roots, &god);
       +    }
       +}
-      +
-       pub type Intermediate2PrecomputeNode3 = Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
-       pub type Intermediate2PrecomputeNode3Index = Trie2Index;
-       pub type Intermediate2Trie3GodWrapper = GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
-      @@ -98,8 +104,7 @@
-                           IntermediateTrie3EdgeKey::CheckLLM(bv) => (Intermediate2Trie3EdgeKey::NoOp, bv.clone()),
-                       };
-       
-      -                let mut guard2 = idx2.write(&god2).unwrap();
-      -                guard2.force_insert_to_node(edge_key2, edge_value2, child2_idx);
-      +                god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
-                   }
-               }
-           }
-      @@ -135,29 +140,27 @@
-                           new_node
-                       });
-       
-      -                let mut guard1 = idx1.write(&god1).unwrap();
-                       if edge_value2.is_all() {
-                           let edge_key1 = match edge_key2 {
-                               Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
-                               Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
-                               Intermediate2Trie3EdgeKey::NoOp => IntermediateTrie3EdgeKey::NoOp,
-                           };
-      -                    guard1.force_insert_to_node(edge_key1, (), child1_idx);
-      +                    god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());
-                       } else {
-                           match edge_key2 {
-                               Intermediate2Trie3EdgeKey::NoOp => {
-      -                            guard1.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
-      +                            god1.insert_edge_simple(idx1, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
-                               }
-                               _ => {
-                                   // This case requires inserting an intermediate node.
-                                   let intermediate_node = IntermediatePrecomputeNode3Index::new(god1.insert(
-                                       IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())
-                                   ));
-                                   let edge_key1_op = match edge_key2 {
-                                       Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
-                                       Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
-                                       _ => unreachable!(),
-                                   };
-      -                            guard1.force_insert_to_node(edge_key1_op, (), intermediate_node);
-      -                            let mut inter_guard = intermediate_node.write(&god1).unwrap();
-      -                            inter_guard.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
-      +                            god1.insert_edge_simple(idx1, intermediate_node, edge_key1_op, ());
-      +                            god1.insert_edge_simple(intermediate_node, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
-                               }
-                           }
-                       }
-      @@ -263,22 +266,22 @@
-                                   let intersection = &s & s_prime;
-                                   if !intersection.is_empty() {
-                                       let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
-      -                                a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
-      +                                god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
-                                   }
-                               }
-                               Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
-                                   if !s.is_disjoint(s_prime) {
-      -                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, *c_idx);
-      +                                god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv);
-                                   }
-                               }
-                               Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
-                                   let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
-      -                            a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
-      +                            god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
-                               }
-                               Intermediate2Trie3EdgeKey::NoOp => {
-      -                            a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
-      +                            god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv);
-                               },
-                           }
-                       }
 
       ```
     metadata:
@@ -10314,7 +10512,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Use insert_edge_simple for edge
-      insertion in push/pop elimination logic"'
+  - user: 'Changes committed with message: "test: Add test case to reproduce panic
+      in push/pop elimination"'
     metadata:
 ...

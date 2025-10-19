@@ -439,3 +439,65 @@ fn find_path_to_pop(
     }
     path
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constraint::{IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, StateIDBV};
+    use crate::datastructures::trie::Trie;
+    use crate::tokenizer::TokenizerStateID;
+    use std::collections::{BTreeMap, HashMap};
+
+    #[test]
+    #[should_panic(expected = "Assertion failed: Pop is reachable from a Push edge.")]
+    fn test_eliminate_push_pop_failure_case() {
+        let god = IntermediateTrie3GodWrapper::new();
+        
+        let mut node_map = HashMap::new();
+        let node_ids = vec![5, 6, 7, 8, 9, 13, 14, 15, 16];
+        for id in node_ids {
+            node_map.insert(id, Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))));
+        }
+
+        let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+
+        // Add edges to replicate the graph structure from the panic log's "Segment"
+        // Path that causes the issue: 13 --Push--> 14 --Pop--> 15
+        // Node 14 also has another outgoing Push to 16, which prevents the current
+        // implementation of `eliminate_pushes_and_pops` from processing node 14.
+        
+        // From node 13
+        god.insert_edge_simple(n(13), n(14), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+        
+        // From node 14
+        god.insert_edge_simple(n(14), n(15), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::all()), ());
+        god.insert_edge_simple(n(14), n(16), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(4)), ());
+
+        // From node 15
+        god.insert_edge_simple(n(15), n(5), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+        
+        // From node 5
+        god.insert_edge_simple(n(5), n(6), IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)), ());
+
+        // From node 6
+        god.insert_edge_simple(n(6), n(7), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+        
+        // From node 7
+        god.insert_edge_simple(n(7), n(8), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
+        
+        // From node 8
+        god.insert_edge_simple(n(8), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+        
+        // From node 16
+        god.insert_edge_simple(n(16), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(2)), ());
+
+        let mut roots = BTreeMap::new();
+        roots.insert(0 as TokenizerStateID, n(13));
+
+        // This call is expected to fail to eliminate the push->pop sequence
+        eliminate_pushes_and_pops(&mut roots, &god);
+
+        // This assertion will then panic, which is expected by the test.
+        assert_no_pops_reachable_from_pushes(&roots, &god);
+    }
+}
