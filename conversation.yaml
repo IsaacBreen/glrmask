@@ -295,7 +295,7 @@ local_system:
               // - Not an end state.
               // - Has at least one incoming Push edge.
               // - Has no outgoing Push edges.
-              let mut node_to_process = None;
+              let mut nodes_to_process = Vec::new();
               for &b_idx in &all_nodes {
                   let b_guard = b_idx.read(&god2).unwrap();
                   if b_guard.value.end {
@@ -315,68 +315,80 @@ local_system:
                           .iter()
                           .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
                       if has_incoming_push {
-                          node_to_process = Some(b_idx);
-                          break;
+                          nodes_to_process.push(b_idx);
                       }
                   }
               }
 
-              if let Some(b_idx) = node_to_process {
+              if !nodes_to_process.is_empty() {
                   println!(
-                      "  Found standard candidate node to process: {}",
-                      b_idx
+                      "  Found {} standard candidate nodes to process.",
+                      nodes_to_process.len()
                   );
-                  // Gather information about B's incoming pushes and all outgoing edges.
-                  let incoming_pushes: Vec<_> = reverse_adj
-                      .get(&b_idx)
-                      .unwrap()
-                      .iter()
-                      .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-                      .cloned()
-                      .collect();
 
-                  let outgoing_edges: Vec<_> = b_idx
-                      .read(&god2)
-                      .unwrap()
-                      .children()
-                      .iter()
-                      .flat_map(|(k, dest_map)| {
-                          dest_map
-                              .iter()
-                              .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
-                      })
-                      .collect();
+                  let mut edges_to_remove = Vec::new();
+                  let mut edges_to_add = Vec::new();
 
-                  // Remove all incoming push edges to B.
-                  for (a_idx, edge_key, _) in &incoming_pushes {
-                      god2.remove_edge(*a_idx, b_idx, edge_key);
-                  }
+                  for &b_idx in &nodes_to_process {
+                      // Gather information about B's incoming pushes and all outgoing edges.
+                      let incoming_pushes: Vec<_> = reverse_adj
+                          .get(&b_idx)
+                          .unwrap()
+                          .iter()
+                          .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+                          .cloned()
+                          .collect();
 
-                  // Create new "shortcut" edges from A to C.
-                  for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
-                      let s = match push_key {
-                          Intermediate2Trie3EdgeKey::Push(s) => s,
-                          _ => unreachable!(),
-                      };
+                      let outgoing_edges: Vec<_> = b_idx
+                          .read(&god2)
+                          .unwrap()
+                          .children()
+                          .iter()
+                          .flat_map(|(k, dest_map)| {
+                              dest_map
+                                  .iter()
+                                  .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
+                          })
+                          .collect();
 
-                      for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
-                          let new_tokens = tokens_a_b & tokens_b_c;
-                          if new_tokens.is_empty() {
-                              continue;
-                          }
+                      // Remove all incoming push edges to B.
+                      for (a_idx, edge_key, _) in &incoming_pushes {
+                          edges_to_remove.push((*a_idx, b_idx, edge_key.clone()));
+                      }
 
-                          let new_key_opt = match op_key {
-                              Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
-                              Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
-                              Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
-                              Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
-                              Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
+                      // Create new "shortcut" edges from A to C.
+                      for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
+                          let s = match push_key {
+                              Intermediate2Trie3EdgeKey::Push(s) => s,
+                              _ => unreachable!(),
                           };
 
-                          if let Some(new_key) = new_key_opt {
-                              god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
+                          for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
+                              let new_tokens = tokens_a_b & tokens_b_c;
+                              if new_tokens.is_empty() {
+                                  continue;
+                              }
+
+                              let new_key_opt = match op_key {
+                                  Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
+                                  Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
+                                  Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
+                                  Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
+                                  Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
+                              };
+
+                              if let Some(new_key) = new_key_opt {
+                                  edges_to_add.push((*a_idx, *c_idx, new_key, new_tokens));
+                              }
                           }
                       }
+                  }
+
+                  for (u, v, k) in edges_to_remove {
+                      god2.remove_edge(u, v, &k);
+                  }
+                  for (u, v, k, val) in edges_to_add {
+                      god2.insert_edge_simple(u, v, k, val);
                   }
               } else {
                   // No candidate with "incoming Push" and "no outgoing Push".
@@ -1098,7 +1110,7 @@ local_system:
                   // and at least one incoming Push. This creates exactly one new node,
                   // moving all non-Push outgoing edges to it and duplicating all incoming
                   // edges to preserve behavior. Then retry the main loop.
-                  let mut split_candidate = None;
+                  let mut split_candidates = Vec::new();
                   for &b_idx in &all_nodes {
                       let b_guard = b_idx.read(&god2).unwrap();
                       if b_guard.value.end {
@@ -1123,13 +1135,16 @@ local_system:
                                   .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
                           });
                       if has_incoming_push {
-                          split_candidate = Some(b_idx);
-                          break;
+                          split_candidates.push(b_idx);
                       }
                   }
 
-                  if let Some(b_idx) = split_candidate {
-                      println!("  No standard candidate. Found split candidate: {}", b_idx);
+                  if !split_candidates.is_empty() {
+                      println!(
+                          "  No standard candidate. Found {} split candidates to process.",
+                          split_candidates.len()
+                      );
+                      for &b_idx in &split_candidates {
                       // Create the new "non-push" clone node
                       let b_value = b_idx.read(&god2).unwrap().value.clone();
                       let b_np_idx = Intermediate2PrecomputeNode3Index::new(
@@ -1159,10 +1174,11 @@ local_system:
                       }
 
                       // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable
-                      if let Some(incoming) = reverse_adj.get(&b_idx) {
+                          if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
                           for (a_idx, k, val) in incoming {
-                              god2.insert_edge_simple(*a_idx, b_np_idx, k.clone(), val.clone());
+                                  god2.insert_edge_simple(a_idx, b_np_idx, k.clone(), val.clone());
                           }
+                      }
                       }
 
                       // Now that we've split, try again from the top to pick up a standard candidate.
@@ -1752,7 +1768,7 @@ messages:
               // - Not an end state.
               // - Has at least one incoming Push edge.
               // - Has no outgoing Push edges.
-              let mut node_to_process = None;
+              let mut nodes_to_process = Vec::new();
               for &b_idx in &all_nodes {
                   let b_guard = b_idx.read(&god2).unwrap();
                   if b_guard.value.end {
@@ -1772,68 +1788,80 @@ messages:
                           .iter()
                           .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
                       if has_incoming_push {
-                          node_to_process = Some(b_idx);
-                          break;
+                          nodes_to_process.push(b_idx);
                       }
                   }
               }
 
-              if let Some(b_idx) = node_to_process {
+              if !nodes_to_process.is_empty() {
                   println!(
-                      "  Found standard candidate node to process: {}",
-                      b_idx
+                      "  Found {} standard candidate nodes to process.",
+                      nodes_to_process.len()
                   );
-                  // Gather information about B's incoming pushes and all outgoing edges.
-                  let incoming_pushes: Vec<_> = reverse_adj
-                      .get(&b_idx)
-                      .unwrap()
-                      .iter()
-                      .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-                      .cloned()
-                      .collect();
 
-                  let outgoing_edges: Vec<_> = b_idx
-                      .read(&god2)
-                      .unwrap()
-                      .children()
-                      .iter()
-                      .flat_map(|(k, dest_map)| {
-                          dest_map
-                              .iter()
-                              .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
-                      })
-                      .collect();
+                  let mut edges_to_remove = Vec::new();
+                  let mut edges_to_add = Vec::new();
 
-                  // Remove all incoming push edges to B.
-                  for (a_idx, edge_key, _) in &incoming_pushes {
-                      god2.remove_edge(*a_idx, b_idx, edge_key);
-                  }
+                  for &b_idx in &nodes_to_process {
+                      // Gather information about B's incoming pushes and all outgoing edges.
+                      let incoming_pushes: Vec<_> = reverse_adj
+                          .get(&b_idx)
+                          .unwrap()
+                          .iter()
+                          .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+                          .cloned()
+                          .collect();
 
-                  // Create new "shortcut" edges from A to C.
-                  for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
-                      let s = match push_key {
-                          Intermediate2Trie3EdgeKey::Push(s) => s,
-                          _ => unreachable!(),
-                      };
+                      let outgoing_edges: Vec<_> = b_idx
+                          .read(&god2)
+                          .unwrap()
+                          .children()
+                          .iter()
+                          .flat_map(|(k, dest_map)| {
+                              dest_map
+                                  .iter()
+                                  .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
+                          })
+                          .collect();
 
-                      for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
-                          let new_tokens = tokens_a_b & tokens_b_c;
-                          if new_tokens.is_empty() {
-                              continue;
-                          }
+                      // Remove all incoming push edges to B.
+                      for (a_idx, edge_key, _) in &incoming_pushes {
+                          edges_to_remove.push((*a_idx, b_idx, edge_key.clone()));
+                      }
 
-                          let new_key_opt = match op_key {
-                              Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
-                              Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
-                              Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
-                              Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
-                              Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
+                      // Create new "shortcut" edges from A to C.
+                      for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
+                          let s = match push_key {
+                              Intermediate2Trie3EdgeKey::Push(s) => s,
+                              _ => unreachable!(),
                           };
 
-                          if let Some(new_key) = new_key_opt {
-                              god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
+                          for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
+                              let new_tokens = tokens_a_b & tokens_b_c;
+                              if new_tokens.is_empty() {
+                                  continue;
+                              }
+
+                              let new_key_opt = match op_key {
+                                  Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
+                                  Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
+                                  Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
+                                  Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
+                                  Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
+                              };
+
+                              if let Some(new_key) = new_key_opt {
+                                  edges_to_add.push((*a_idx, *c_idx, new_key, new_tokens));
+                              }
                           }
                       }
+                  }
+
+                  for (u, v, k) in edges_to_remove {
+                      god2.remove_edge(u, v, &k);
+                  }
+                  for (u, v, k, val) in edges_to_add {
+                      god2.insert_edge_simple(u, v, k, val);
                   }
               } else {
                   // No candidate with "incoming Push" and "no outgoing Push".
@@ -2172,17 +2200,17 @@ messages:
           --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
           --from-precompute0 .cache/pc0/js_simplified0_5_gpt2.json.gz
       Loading vocabulary from cache: .cache/vocabs/vocab.json
-      Temporary vocabulary saved to: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmp3izdg1dt.json
+      Temporary vocabulary saved to: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmp2s260tzp.json
       Building compiler with 'cargo build --release'...
          Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-          Finished `release` profile [optimized] target(s) in 25.71s
+          Finished `release` profile [optimized] target(s) in 26.44s
       Build successful.
       Loading from precompute0 cache: .cache/pc0/js_simplified0_5_gpt2.json.gz
 
-      Running compiler: ENABLE_PROGRESS_BAR=1 target/release/grammar-compiler --grammar src/js_simplified0_5.ebnf --vocab /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmp3izdg1dt.json --output .cache/test_vocabs/js_constraint.json.gz --load-precompute0 .cache/pc0/js_simplified0_5_gpt2.json.gz
+      Running compiler: ENABLE_PROGRESS_BAR=1 target/release/grammar-compiler --grammar src/js_simplified0_5.ebnf --vocab /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmp2s260tzp.json --output .cache/test_vocabs/js_constraint.json.gz --load-precompute0 .cache/pc0/js_simplified0_5_gpt2.json.gz
       Loading grammar from: "src/js_simplified0_5.ebnf"
       [DEBUG] 2] src/interface/interface.rs:716: Augmented start_production_name: "start'"
-      Converting grammar expressions to productions: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 58/58 [00:00<00:00, 81014.98it/s]Removing always-null terminals: {}
+      Converting grammar expressions to productions: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 58/58 [00:00<00:00, 205279.94it/s]Removing always-null terminals: {}
       Processing may-be-null terminals: {}
       Compiling grammar...
       [DEBUG] 2] src/interface/interface.rs:1080: Building tokenizer from definition
@@ -2226,7 +2254,7 @@ messages:
       Grammar compiled successfully.
       --- Stored Below-Bottom Cache Statistics ---
       Cache is empty.
-      Loading vocabulary from: "/var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmp3izdg1dt.json"
+      Loading vocabulary from: "/var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmp2s260tzp.json"
       Vocabulary loaded (50256 tokens, max ID: 50256).
 
       Constructing GrammarConstraint...
@@ -2301,16 +2329,16 @@ messages:
       [DEBUG] 2] src/constraint_precompute1_utils.rs:1300: Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
       [DEBUG] 2] src/constraint_precompute1_utils.rs:1355: Trie1 end-reachability: total=457, productive=445, prunable=12
       [DEBUG] 2] src/constraint_precompute1_utils.rs:1391: Finished end-reachability pruning in Trie1.
-      Trie1 Merge Hash Iter 17: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 448/448 [00:00<00:00, 462590.56it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      Trie1 Merge Hash Iter 17: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 448/448 [00:00<00:00, 467824.06it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
       [DEBUG] 2] src/constraint_precompute1_utils.rs:1300: Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
       [DEBUG] 2] src/constraint_precompute1_utils.rs:1355: Trie1 end-reachability: total=318, productive=317, prunable=1
       [DEBUG] 2] src/constraint_precompute1_utils.rs:1391: Finished end-reachability pruning in Trie1.
       [DEBUG] 2] src/constraint_precompute1_utils.rs:954: Merging equivalent LLM tokens in Trie1...
-      Trie1 Merge Tokens (Refine): 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1003/1003 [00:00<00:00, 9112.40it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:1038: Trie1: merged LLM tokens. Before: 50256, After: 1483. (48773 merged)
-      Trie1 Merge (Update Vocab):  62%|████████████████████████████████████████████████████████████████████████████████████▌                                                    | 30053/48773 [00:09<00:06, 3057.83it/s]grammar-compiler(1193,0x205f74800) malloc: Failed to allocate segment from range group - out of space
-      Trie1 Reorder (Count Frequencies): 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1003/1003 [00:00<00:00, 1607049.88it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:1205: Done computing frequencies.
-      Trie1 Reorder (Vocab 2): 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 50256/50256 [00:00<00:00, 10687838.00it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:1289: Trie1 reordering complete. Ranges reduced from 290939 to 16894. New max internal token ID: 1482
-      Trie1 Merge Hash Iter 17: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 318/318 [00:00<00:00, 831009.75it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      Trie1 Merge Tokens (Refine): 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1003/1003 [00:00<00:00, 10403.67it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:1038: Trie1: merged LLM tokens. Before: 50256, After: 1483. (48773 merged)
+      Trie1 Merge (Update Vocab):  64%|████████████████████████████████████████████████████████████████████████████████████████▎                                                | 31334/48773 [00:09<00:05, 3257.59it/s]grammar-compiler(1900,0x205f74800) malloc: Failed to allocate segment from range group - out of space
+      Trie1 Reorder (Count Frequencies): 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1003/1003 [00:00<00:00, 1961697.00it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:1205: Done computing frequencies.
+      Trie1 Reorder (Vocab 2): 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 50256/50256 [00:00<00:00, 11304915.00it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:1289: Trie1 reordering complete. Ranges reduced from 290939 to 16894. New max internal token ID: 1482
+      Trie1 Merge Hash Iter 17: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 318/318 [00:00<00:00, 861982.50it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
       [DEBUG] 2] src/constraint_precompute1_utils.rs:1300: Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
       [DEBUG] 2] src/constraint_precompute1_utils.rs:1355: Trie1 end-reachability: total=318, productive=317, prunable=1
       [DEBUG] 2] src/constraint_precompute1_utils.rs:1391: Finished end-reachability pruning in Trie1.
@@ -2528,7 +2556,7 @@ messages:
         Nodes shared by >= 2 templates: 0 (0.0%)
       --------------------------------------------
 
-      Traversing edges: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3732/3732 [00:01<00:00, 2340.39it/s][DEBUG] 2] src/constraint.rs:2144: Optimizing intermediate trie3...
+      Traversing edges: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3732/3732 [00:01<00:00, 2410.99it/s][DEBUG] 2] src/constraint.rs:2144: Optimizing intermediate trie3...
       --- Intermediate Precomputation 3 Statistics (Before Optimization) ---
 
       Node Counts Breakdown:
@@ -2552,157 +2580,426 @@ messages:
       Intermediate graph node count: 696607
 
       Loop 1: starting with 696607 nodes.
-        Found standard candidate node to process: Trie2Index(117589)
+        Found 2212 standard candidate nodes to process.
 
-      Loop 2: starting with 696606 nodes.
-        Found standard candidate node to process: Trie2Index(243488)
+      Loop 2: starting with 694395 nodes.
+        Found 3644 standard candidate nodes to process.
 
-      Loop 3: starting with 696605 nodes.
-        Found standard candidate node to process: Trie2Index(117639)
+      Loop 3: starting with 690751 nodes.
+        Found 1326 standard candidate nodes to process.
 
-      Loop 4: starting with 696604 nodes.
-        Found standard candidate node to process: Trie2Index(243523)
+      Loop 4: starting with 689584 nodes.
+        Found 1326 standard candidate nodes to process.
 
-      Loop 5: starting with 696603 nodes.
-        Found standard candidate node to process: Trie2Index(243524)
+      Loop 5: starting with 405152 nodes.
+        Found 10797 standard candidate nodes to process.
 
-      Loop 6: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2219)
+      Loop 6: starting with 401982 nodes.
+        Found 266 standard candidate nodes to process.
 
-      Loop 7: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2220)
+      Loop 7: starting with 401700 nodes.
+        Found 611 standard candidate nodes to process.
 
-      Loop 8: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2221)
+      Loop 8: starting with 401065 nodes.
+        Found 299 standard candidate nodes to process.
 
-      Loop 9: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2222)
+      Loop 9: starting with 400865 nodes.
+        Found 24 standard candidate nodes to process.
 
-      Loop 10: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2223)
+      Loop 10: starting with 400865 nodes.
+        Found 42 standard candidate nodes to process.
 
-      Loop 11: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2224)
+      Loop 11: starting with 400865 nodes.
+        Found 17 standard candidate nodes to process.
 
-      Loop 12: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2225)
+      Loop 12: starting with 400865 nodes.
+        Found 31 standard candidate nodes to process.
 
-      Loop 13: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2226)
+      Loop 13: starting with 400865 nodes.
+        Found 11 standard candidate nodes to process.
 
-      Loop 14: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2227)
+      Loop 14: starting with 400865 nodes.
+        Found 20 standard candidate nodes to process.
 
-      Loop 15: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2228)
+      Loop 15: starting with 400865 nodes.
+        Found 8 standard candidate nodes to process.
 
-      Loop 16: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2229)
+      Loop 16: starting with 400865 nodes.
+        Found 15 standard candidate nodes to process.
 
-      Loop 17: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2230)
+      Loop 17: starting with 400865 nodes.
+        Found 5 standard candidate nodes to process.
 
-      Loop 18: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2231)
+      Loop 18: starting with 400865 nodes.
+        Found 10 standard candidate nodes to process.
 
-      Loop 19: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2232)
+      Loop 19: starting with 400865 nodes.
+        Found 2 standard candidate nodes to process.
 
-      Loop 20: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2233)
+      Loop 20: starting with 400865 nodes.
+        Found 5 standard candidate nodes to process.
 
-      Loop 21: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2234)
+      Loop 21: starting with 400865 nodes.
+        No standard candidate. Found split candidate: Trie2Index(233069)
 
-      Loop 22: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2235)
+      Loop 22: starting with 400866 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 23: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2236)
+      Loop 23: starting with 400866 nodes.
+        Found 71 standard candidate nodes to process.
 
-      Loop 24: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2237)
+      Loop 24: starting with 400866 nodes.
+        Found 6 standard candidate nodes to process.
 
-      Loop 25: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2238)
+      Loop 25: starting with 400866 nodes.
+        No standard candidate. Found split candidate: Trie2Index(233523)
 
-      Loop 26: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2239)
+      Loop 26: starting with 400867 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 27: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2240)
+      Loop 27: starting with 400867 nodes.
+        Found 70 standard candidate nodes to process.
 
-      Loop 28: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2241)
+      Loop 28: starting with 400867 nodes.
+        Found 8 standard candidate nodes to process.
 
-      Loop 29: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2242)
+      Loop 29: starting with 400867 nodes.
+        No standard candidate. Found split candidate: Trie2Index(239694)
 
-      Loop 30: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2243)
+      Loop 30: starting with 400868 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 31: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2244)
+      Loop 31: starting with 400868 nodes.
+        No standard candidate. Found split candidate: Trie2Index(239909)
 
-      Loop 32: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2245)
+      Loop 32: starting with 400869 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 33: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2246)
+      Loop 33: starting with 400869 nodes.
+        Found 22 standard candidate nodes to process.
 
-      Loop 34: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2247)
+      Loop 34: starting with 400869 nodes.
+        No standard candidate. Found split candidate: Trie2Index(240351)
 
-      Loop 35: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2248)
+      Loop 35: starting with 400870 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 36: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2249)
+      Loop 36: starting with 400870 nodes.
+        No standard candidate. Found split candidate: Trie2Index(240996)
 
-      Loop 37: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2250)
+      Loop 37: starting with 400871 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 38: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2251)
+      Loop 38: starting with 400871 nodes.
+        No standard candidate. Found split candidate: Trie2Index(241211)
 
-      Loop 39: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2252)
+      Loop 39: starting with 400872 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 40: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2253)
+      Loop 40: starting with 400872 nodes.
+        No standard candidate. Found split candidate: Trie2Index(241426)
 
-      Loop 41: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2254)
+      Loop 41: starting with 400873 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 42: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2255)
+      Loop 42: starting with 400873 nodes.
+        Found 22 standard candidate nodes to process.
 
-      Loop 43: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2256)
+      Loop 43: starting with 400873 nodes.
+        No standard candidate. Found split candidate: Trie2Index(241641)
 
-      Loop 44: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2257)
+      Loop 44: starting with 400874 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 45: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2258)
+      Loop 45: starting with 400874 nodes.
+        Found 22 standard candidate nodes to process.
 
-      Loop 46: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2259)
+      Loop 46: starting with 400874 nodes.
+        No standard candidate. Found split candidate: Trie2Index(242333)
 
-      Loop 47: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2260)
+      Loop 47: starting with 400875 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 48: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2261)
+      Loop 48: starting with 400875 nodes.
+        No standard candidate. Found split candidate: Trie2Index(242978)
 
-      Loop 49: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2262)
+      Loop 49: starting with 400876 nodes.
+        Found 1 standard candidate nodes to process.
 
-      Loop 50: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2263)
+      Loop 50: starting with 400876 nodes.
+        No standard candidate. Found split candidate: Trie2Index(248027)
 
-      Loop 51: starting with 696602 nodes.
-        Found standard candidate node to process: Trie2Index(2264)
+      Loop 51: starting with 400877 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 52: starting with 400877 nodes.
+        Found 41 standard candidate nodes to process.
+
+      Loop 53: starting with 400877 nodes.
+        Found 5 standard candidate nodes to process.
+
+      Loop 54: starting with 400877 nodes.
+        No standard candidate. Found split candidate: Trie2Index(254435)
+
+      Loop 55: starting with 400878 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 56: starting with 400878 nodes.
+        Found 12 standard candidate nodes to process.
+
+      Loop 57: starting with 400878 nodes.
+        No standard candidate. Found split candidate: Trie2Index(254650)
+
+      Loop 58: starting with 400879 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 59: starting with 400879 nodes.
+        Found 12 standard candidate nodes to process.
+
+      Loop 60: starting with 400879 nodes.
+        No standard candidate. Found split candidate: Trie2Index(255737)
+
+      Loop 61: starting with 400880 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 62: starting with 400880 nodes.
+        No standard candidate. Found split candidate: Trie2Index(255952)
+
+      Loop 63: starting with 400881 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 64: starting with 400881 nodes.
+        No standard candidate. Found split candidate: Trie2Index(256167)
+
+      Loop 65: starting with 400882 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 66: starting with 400882 nodes.
+        No standard candidate. Found split candidate: Trie2Index(256382)
+
+      Loop 67: starting with 400883 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 68: starting with 400883 nodes.
+        No standard candidate. Found split candidate: Trie2Index(233226)
+
+      Loop 69: starting with 400884 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 70: starting with 400884 nodes.
+        No standard candidate. Found split candidate: Trie2Index(233655)
+
+      Loop 71: starting with 400885 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 72: starting with 400885 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234251)
+
+      Loop 73: starting with 400886 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 74: starting with 400886 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234918)
+
+      Loop 75: starting with 400887 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 76: starting with 400887 nodes.
+        No standard candidate. Found split candidate: Trie2Index(248184)
+
+      Loop 77: starting with 400888 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 78: starting with 400888 nodes.
+        No standard candidate. Found split candidate: Trie2Index(233219)
+
+      Loop 79: starting with 400889 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 80: starting with 400889 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234235)
+
+      Loop 81: starting with 400890 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 82: starting with 400890 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234970)
+
+      Loop 83: starting with 400891 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 84: starting with 400891 nodes.
+        No standard candidate. Found split candidate: Trie2Index(248177)
+
+      Loop 85: starting with 400892 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 86: starting with 400892 nodes.
+        No standard candidate. Found split candidate: Trie2Index(233220)
+
+      Loop 87: starting with 400893 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 88: starting with 400893 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234236)
+
+      Loop 89: starting with 400894 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 90: starting with 400894 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234971)
+
+      Loop 91: starting with 400895 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 92: starting with 400895 nodes.
+        No standard candidate. Found split candidate: Trie2Index(248178)
+
+      Loop 93: starting with 400896 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 94: starting with 400896 nodes.
+        No standard candidate. Found split candidate: Trie2Index(233105)
+
+      Loop 95: starting with 400897 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 96: starting with 400897 nodes.
+        No standard candidate. Found split candidate: Trie2Index(233561)
+
+      Loop 97: starting with 400898 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 98: starting with 400898 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234133)
+
+      Loop 99: starting with 400899 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 100: starting with 400899 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234368)
+
+      Loop 101: starting with 400900 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 102: starting with 400900 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234546)
+
+      Loop 103: starting with 400901 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 104: starting with 400901 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234724)
+
+      Loop 105: starting with 400902 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 106: starting with 400902 nodes.
+        No standard candidate. Found split candidate: Trie2Index(237887)
+
+      Loop 107: starting with 400903 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 108: starting with 400903 nodes.
+        No standard candidate. Found split candidate: Trie2Index(238064)
+
+      Loop 109: starting with 400904 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 110: starting with 400904 nodes.
+        No standard candidate. Found split candidate: Trie2Index(238241)
+
+      Loop 111: starting with 400905 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 112: starting with 400905 nodes.
+        No standard candidate. Found split candidate: Trie2Index(248063)
+
+      Loop 113: starting with 400906 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 114: starting with 400906 nodes.
+        No standard candidate. Found split candidate: Trie2Index(249109)
+
+      Loop 115: starting with 400907 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 116: starting with 400907 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234132)
+
+      Loop 117: starting with 400908 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 118: starting with 400908 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234153)
+
+      Loop 119: starting with 400909 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 120: starting with 400909 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234309)
+
+      Loop 121: starting with 400910 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 122: starting with 400910 nodes.
+        No standard candidate. Found split candidate: Trie2Index(241899)
+
+      Loop 123: starting with 400911 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 124: starting with 400911 nodes.
+        No standard candidate. Found split candidate: Trie2Index(256640)
+
+      Loop 125: starting with 400912 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 126: starting with 400912 nodes.
+        Found 7 standard candidate nodes to process.
+
+      Loop 127: starting with 400912 nodes.
+        No standard candidate. Found split candidate: Trie2Index(233072)
+
+      Loop 128: starting with 400913 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 129: starting with 400913 nodes.
+        No standard candidate. Found split candidate: Trie2Index(248030)
+
+      Loop 130: starting with 400914 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 131: starting with 400914 nodes.
+        Found 20 standard candidate nodes to process.
+
+      Loop 132: starting with 400914 nodes.
+        No standard candidate. Found split candidate: Trie2Index(234895)
+
+      Loop 133: starting with 400915 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 134: starting with 400915 nodes.
+        No standard candidate. Found split candidate: Trie2Index(235442)
+
+      Loop 135: starting with 400916 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 136: starting with 400916 nodes.
+        No standard candidate. Found split candidate: Trie2Index(249636)
+
+      Loop 137: starting with 400917 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 138: starting with 400917 nodes.
+        No standard candidate. Found split candidate: Trie2Index(250183)
+
+      Loop 139: starting with 400918 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 140: starting with 400918 nodes.
+        No standard candidate. Found split candidate: Trie2Index(235196)
+
+      Loop 141: starting with 400919 nodes.
       ^C^CCleaned up temporary vocabulary file.
       Traceback (most recent call last):
         File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/subprocess.py", line 1264, in wait
@@ -2755,195 +3052,89 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The performance issue you're seeing is because the push/pop elimination loop processes only one node at a time. With a graph of nearly 700,000 nodes, this is incredibly slow. The fix is to modify the algorithm to find all eligible "standard candidate" nodes in one pass and then process them as a single batch. This drastically reduces the number of iterations and expensive operations like rebuilding the reverse adjacency list.
+      Hello! Dealing with performance bottlenecks in complex graph transformations can be tricky. The issue you're facing with `eliminate_pushes_and_pops` taking too long seems to stem from an inefficient fallback strategy that processes only one "split candidate" node at a time. This leads to a huge number of iterations, each recalculating expensive data structures like the reverse adjacency list.
 
-      Here are the step-by-step instructions to apply the optimization.
+      To fix this, I'll modify the algorithm to find and process all viable "split candidates" in a single batch per iteration. This will drastically reduce the number of loops required for the optimization to complete.
+
+      Here are the step-by-step instructions to apply the changes:
 
       ### Step-by-step Instructions
 
-      In the file `src/constraint_precompute3_challenge_elimination.rs`:
+      In the file `src/constraint_precompute3_challenge_elimination.rs`, you will modify the `eliminate_pushes_and_pops` function:
 
-      1.  Navigate to the `eliminate_pushes_and_pops` function.
-      2.  Inside the main `loop`, find the logic that identifies a single candidate node to process. It begins with the line:
-          ```rust
-          let mut node_to_process = None;
-          ```
-      3.  You will replace this logic to collect *all* candidate nodes at once. Change `node_to_process` to a `Vec` named `nodes_to_process`.
-          ```rust
-          let mut nodes_to_process = Vec::new();
-          ```
-      4.  In the loop that follows (`for &b_idx in &all_nodes`), remove the `break;` statement and instead add the candidate `b_idx` to your new `nodes_to_process` vector.
-      5.  Change the condition that processes the node from `if let Some(b_idx) = node_to_process` to check if your new vector is not empty: `if !nodes_to_process.is_empty()`.
-      6.  Inside this `if` block, you will now batch the graph modifications:
-          *   Create two new vectors, `edges_to_remove` and `edges_to_add`.
-          *   Wrap the existing processing logic in a new loop that iterates over `nodes_to_process`.
-          *   Inside this new loop, instead of calling `god2.remove_edge(...)` and `god2.insert_edge_simple(...)` directly, collect the parameters for these calls into your `edges_to_remove` and `edges_to_add` vectors.
-          *   After the loop over `nodes_to_process` finishes, add two final loops that iterate through `edges_to_remove` and `edges_to_add` to apply all the collected changes to the graph in one go.
-      7.  Finally, update the log message to print the number of candidate nodes found in the batch.
+      1.  **Locate the Fallback Logic:** Navigate to the `else` block that follows the main `if !nodes_to_process.is_empty() { ... }` block. This section handles the case where no "standard" candidates can be processed and begins around line 396.
 
-      This change ensures that we perform one large, efficient update per iteration of the main loop, rather than hundreds of thousands of tiny, inefficient ones.
+      2.  **Batch Candidate Collection:**
+          *   Change the variable `let mut split_candidate = None;` to `let mut split_candidates = Vec::new();`.
+          *   In the loop that iterates through `all_nodes` to find candidates, replace `split_candidate = Some(b_idx); break;` with `split_candidates.push(b_idx);` to collect all candidates instead of stopping at the first one.
+
+      3.  **Batch Candidate Processing:**
+          *   Replace the condition `if let Some(b_idx) = split_candidate` with `if !split_candidates.is_empty()`.
+          *   Update the corresponding `println!` to report the number of candidates found, e.g., `println!("  No standard candidate. Found {} split candidates to process.", split_candidates.len());`.
+          *   Wrap the node-splitting logic within a `for &b_idx in &split_candidates { ... }` loop to process every candidate found in the batch.
+          *   To ensure memory safety while modifying the graph, clone the list of incoming edges before iterating over it. Change the line `if let Some(incoming) = reverse_adj.get(&b_idx)` to `if let Some(incoming) = reverse_adj.get(&b_idx).cloned()`.
+
+      These changes will ensure that when the algorithm needs to split nodes, it does so for all possible candidates at once, making the process much more efficient.
 
       ### Git Diff
 
-      Here is the git diff to apply these changes directly.
+      Here is the git diff to apply these changes directly:
 
       ```diff
       diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
+      index 721516e..9463945 100644
       --- a/src/constraint_precompute3_challenge_elimination.rs
       +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -311,11 +311,11 @@
-               // - Not an end state.
-               // - Has at least one incoming Push edge.
-               // - Has no outgoing Push edges.
-      -        let mut node_to_process = None;
-      +        let mut nodes_to_process = Vec::new();
-               for &b_idx in &all_nodes {
-                   let b_guard = b_idx.read(&god2).unwrap();
-                   if b_guard.value.end {
-                       continue;
-                   }
-       
-                   let has_outgoing_push = b_guard
-                       .children()
-                       .keys()
-                       .any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
-                   if has_outgoing_push {
-                       continue;
-                   }
-       
-                   if let Some(incoming_edges) = reverse_adj.get(&b_idx) {
-                       let has_incoming_push = incoming_edges
-                           .iter()
-                           .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
+      @@ -395,7 +395,7 @@
+                   // moving all non-Push outgoing edges to it and duplicating all incoming
+                   // edges to preserve behavior. Then retry the main loop.
+      -            let mut split_candidate = None;
+      +            let mut split_candidates = Vec::new();
+                   for &b_idx in &all_nodes {
+                       let b_guard = b_idx.read(&god2).unwrap();
+                       if b_guard.value.end {
+      @@ -417,16 +417,18 @@
+                                   .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+                           });
                        if has_incoming_push {
-      -                    node_to_process = Some(b_idx);
+      -                    split_candidate = Some(b_idx);
       -                    break;
-      +                    nodes_to_process.push(b_idx);
+      +                    split_candidates.push(b_idx);
                        }
                    }
-               }
        
-      -        if let Some(b_idx) = node_to_process {
-      +        if !nodes_to_process.is_empty() {
-                   println!(
-      -                "  Found standard candidate node to process: {}",
-      -                b_idx
-      +                "  Found {} standard candidate nodes to process.",
-      +                nodes_to_process.len()
-                   );
-      -            // Gather information about B's incoming pushes and all outgoing edges.
-      -            let incoming_pushes: Vec<_> = reverse_adj
-      -                .get(&b_idx)
-      -                .unwrap()
-      -                .iter()
-      -                .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-      -                .cloned()
-      -                .collect();
+      -            if let Some(b_idx) = split_candidate {
+      -                println!("  No standard candidate. Found split candidate: {}", b_idx);
+      +            if !split_candidates.is_empty() {
+      +                println!(
+      +                    "  No standard candidate. Found {} split candidates to process.",
+      +                    split_candidates.len()
+      +                );
+      +                for &b_idx in &split_candidates {
+                       // Create the new "non-push" clone node
+                       let b_value = b_idx.read(&god2).unwrap().value.clone();
+                       let b_np_idx = Intermediate2PrecomputeNode3Index::new(
+                           god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
+                       );
+      @@ -453,11 +455,12 @@
+                       }
        
-      -            let outgoing_edges: Vec<_> = b_idx
-      -                .read(&god2)
-      -                .unwrap()
-      -                .children()
-      -                .iter()
-      -                .flat_map(|(k, dest_map)| {
-      -                    dest_map
-      -                        .iter()
-      -                        .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
-      -                })
-      -                .collect();
-      +            let mut edges_to_remove = Vec::new();
-      +            let mut edges_to_add = Vec::new();
-       
-      -            // Remove all incoming push edges to B.
-      -            for (a_idx, edge_key, _) in &incoming_pushes {
-      -                god2.remove_edge(*a_idx, b_idx, edge_key);
-      -            }
-      +            for &b_idx in &nodes_to_process {
-      +                // Gather information about B's incoming pushes and all outgoing edges.
-      +                let incoming_pushes: Vec<_> = reverse_adj
-      +                    .get(&b_idx)
-      +                    .unwrap()
-      +                    .iter()
-      +                    .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-      +                    .cloned()
-      +                    .collect();
-       
-      -            // Create new "shortcut" edges from A to C.
-      -            for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
-      -                let s = match push_key {
-      -                    Intermediate2Trie3EdgeKey::Push(s) => s,
-      -                    _ => unreachable!(),
-      -                };
-      +                let outgoing_edges: Vec<_> = b_idx
-      +                    .read(&god2)
-      +                    .unwrap()
-      +                    .children()
-      +                    .iter()
-      +                    .flat_map(|(k, dest_map)| {
-      +                        dest_map
-      +                            .iter()
-      +                            .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
-      +                    })
-      +                    .collect();
-       
-      -                for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
-      -                    let new_tokens = tokens_a_b & tokens_b_c;
-      -                    if new_tokens.is_empty() {
-      -                        continue;
-      -                    }
-      +                // Remove all incoming push edges to B.
-      +                for (a_idx, edge_key, _) in &incoming_pushes {
-      +                    edges_to_remove.push((*a_idx, b_idx, edge_key.clone()));
-      +                }
-       
-      -                    let new_key_opt = match op_key {
-      -                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
-      -                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
-      -                        Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
-      -                        Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
-      -                        Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
-      -                    };
-      +                // Create new "shortcut" edges from A to C.
-      +                for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
-      +                    let s = match push_key {
-      +                        Intermediate2Trie3EdgeKey::Push(s) => s,
-      +                        _ => unreachable!(),
-      +                    };
-       
-      -                    if let Some(new_key) = new_key_opt {
-      -                        god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
-      +                    for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
-      +                        let new_tokens = tokens_a_b & tokens_b_c;
-      +                        if new_tokens.is_empty() {
-      +                            continue;
-      +                        }
-      +
-      +                        let new_key_opt = match op_key {
-      +                            Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
-      +                            Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
-      +                            Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
-      +                            Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
-      +                            Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
-      +                        };
-      +
-      +                        if let Some(new_key) = new_key_opt {
-      +                            edges_to_add.push((*a_idx, *c_idx, new_key, new_tokens));
-      +                        }
+                       // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable
+      -                if let Some(incoming) = reverse_adj.get(&b_idx) {
+      +                    if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
+                           for (a_idx, k, val) in incoming {
+      -                        god2.insert_edge_simple(*a_idx, b_np_idx, k.clone(), val.clone());
+      +                            god2.insert_edge_simple(a_idx, b_np_idx, k.clone(), val.clone());
                            }
                        }
-                   }
-      +
-      +            for (u, v, k) in edges_to_remove {
-      +                god2.remove_edge(u, v, &k);
-      +            }
-      +            for (u, v, k, val) in edges_to_add {
-      +                god2.insert_edge_simple(u, v, k, val);
-      +            }
-               } else {
-                   // No candidate with "incoming Push" and "no outgoing Push".
-                   // Fallback: split a node that has both Push and non-Push outgoing edges
+      +                }
+       
+                       // Now that we've split, try again from the top to pick up a standard candidate.
+                       continue;
 
       ```
+
+      Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -2954,7 +3145,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
     metadata:
-  - user: 'Changes committed with message: "Optimization: Process standard push/pop
-      elimination candidates in a batch to reduce loop iterations."'
+  - user: 'Changes committed with message: "Optimize push/pop elimination by batch
+      processing split candidates in fallback logic"'
     metadata:
 ...

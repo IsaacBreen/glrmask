@@ -389,7 +389,7 @@ pub fn eliminate_pushes_and_pops(
             // and at least one incoming Push. This creates exactly one new node,
             // moving all non-Push outgoing edges to it and duplicating all incoming
             // edges to preserve behavior. Then retry the main loop.
-            let mut split_candidate = None;
+            let mut split_candidates = Vec::new();
             for &b_idx in &all_nodes {
                 let b_guard = b_idx.read(&god2).unwrap();
                 if b_guard.value.end {
@@ -414,13 +414,16 @@ pub fn eliminate_pushes_and_pops(
                             .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
                     });
                 if has_incoming_push {
-                    split_candidate = Some(b_idx);
-                    break;
+                    split_candidates.push(b_idx);
                 }
             }
 
-            if let Some(b_idx) = split_candidate {
-                println!("  No standard candidate. Found split candidate: {}", b_idx);
+            if !split_candidates.is_empty() {
+                println!(
+                    "  No standard candidate. Found {} split candidates to process.",
+                    split_candidates.len()
+                );
+                for &b_idx in &split_candidates {
                 // Create the new "non-push" clone node
                 let b_value = b_idx.read(&god2).unwrap().value.clone();
                 let b_np_idx = Intermediate2PrecomputeNode3Index::new(
@@ -450,10 +453,11 @@ pub fn eliminate_pushes_and_pops(
                 }
 
                 // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable
-                if let Some(incoming) = reverse_adj.get(&b_idx) {
+                    if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
                     for (a_idx, k, val) in incoming {
-                        god2.insert_edge_simple(*a_idx, b_np_idx, k.clone(), val.clone());
+                            god2.insert_edge_simple(a_idx, b_np_idx, k.clone(), val.clone());
                     }
+                }
                 }
 
                 // Now that we've split, try again from the top to pick up a standard candidate.
