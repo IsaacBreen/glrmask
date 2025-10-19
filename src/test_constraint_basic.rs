@@ -1493,7 +1493,7 @@ fn test_constraint_expression_unbalanced_parens2() {
     );
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed2();
+    constraint.dump_precomputed3();
 
     // Initial state and step
     let mut state = constraint.init();
