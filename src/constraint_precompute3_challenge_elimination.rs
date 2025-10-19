@@ -335,35 +335,23 @@ pub fn eliminate_pushes_and_pops(
                         continue;
                     }
 
-                    match op_key {
+                    let new_key_opt = match op_key {
+                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
+                            let new_s = s & s_prime;
+                            (!new_s.is_empty()).then_some(Intermediate2Trie3EdgeKey::Push(new_s))
+                        }
+                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
+                            (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp)
+                        }
                         Intermediate2Trie3EdgeKey::Pop(n, s_prime) => {
-                            if *n == 0 {
-                                // Check top of stack
-                                let new_s = s & s_prime;
-                                if !new_s.is_empty() {
-                                    let new_key = Intermediate2Trie3EdgeKey::Push(new_s);
-                                    god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
-                                }
-                            } else if *n == 1 {
-                                // Pop
-                                if !s.is_disjoint(s_prime) {
-                                    // S intersects S'
-                                    let new_key = Intermediate2Trie3EdgeKey::NoOp;
-                                    god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
-                                }
-                            } else {
-                                // n > 1
-                                let new_key = Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone());
-                                god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
-                            }
+                            Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone()))
                         }
-                        Intermediate2Trie3EdgeKey::Push(_) => {
-                            unreachable!("Node to process should not have outgoing pushes")
-                        }
-                        Intermediate2Trie3EdgeKey::NoOp => {
-                            let new_key = Intermediate2Trie3EdgeKey::Push(s.clone());
-                            god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
-                        }
+                        Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
+                        Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
+                    };
+
+                    if let Some(new_key) = new_key_opt {
+                        god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
                     }
                 }
             }
