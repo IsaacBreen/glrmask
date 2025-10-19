@@ -341,7 +341,6 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     pinned: &std::collections::HashSet<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
-    // return false;
     use std::collections::{HashMap, VecDeque};
 
     let all_nodes_vec = Trie::all_nodes(god, start_nodes);
