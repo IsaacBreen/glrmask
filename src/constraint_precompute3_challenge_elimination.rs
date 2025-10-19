@@ -14,6 +14,7 @@ pub fn eliminate_pushes_and_pops(
     let mut iteration = 0;
     loop {
         iteration += 1;
+        Trie::gc(god, &roots.values().cloned().collect::<Vec<_>>());
         let all_nodes = Trie::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>());
         let mut predecessors: HashMap<IntermediatePrecomputeNode3Index, Vec<(IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey)>> = HashMap::new();
         let mut outgoing_push_counts: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
