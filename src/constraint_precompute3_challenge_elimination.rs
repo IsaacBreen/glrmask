@@ -481,6 +481,7 @@ fn check_mismatch(
     god: &IntermediateTrie3GodWrapper,
     roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
 ) -> bool {
+    eprintln!("Checking for mismatch...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     if roots_vec.is_empty() {
         return false;
