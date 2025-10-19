@@ -107,39 +107,34 @@ fn simplify_path(
             let push_op = ops[p_idx].clone();
             let pop_op = ops[o_idx].clone();
 
-            if let (IntermediateTrie3EdgeKey::Push(push_bv), IntermediateTrie3EdgeKey::Pop(k)) = (push_op, pop_op) {
-                // The logic for Pop(k) depends on the next operation, which must be a CheckState.
-                if let Some(IntermediateTrie3EdgeKey::CheckState(pop_bv)) = ops.get(o_idx + 1) {
-                    match k {
-                        0 => {
-                            let mut new_push_bv = push_bv;
-                            new_push_bv &= pop_bv.clone();
-                            if new_push_bv.is_empty() {
-                                return None;
-                            }
-                            // Modify push, remove pop and checkstate.
-                            ops[p_idx] = IntermediateTrie3EdgeKey::Push(new_push_bv);
-                            ops.remove(o_idx + 1); // remove CheckState first
-                            ops.remove(o_idx);     // then remove Pop
-                            changed = true;
+            if let (IntermediateTrie3EdgeKey::Push(push_bv), IntermediateTrie3EdgeKey::Pop(k, pop_bv)) = (push_op, pop_op) {
+                match k {
+                    0 => {
+                        let mut new_push_bv = push_bv;
+                        new_push_bv &= pop_bv;
+                        if new_push_bv.is_empty() {
+                            return None;
                         }
-                        1 => {
-                            if push_bv.is_disjoint(pop_bv) {
-                                return None;
-                            }
-                            // Remove push, pop, and checkstate.
-                            ops.remove(o_idx + 1); // remove CheckState
-                            ops.remove(o_idx);     // remove Pop
-                            ops.remove(p_idx);     // remove Push
-                            changed = true;
+                        // Modify push, remove pop.
+                        ops[p_idx] = IntermediateTrie3EdgeKey::Push(new_push_bv);
+                        ops.remove(o_idx);
+                        changed = true;
+                    }
+                    1 => {
+                        if push_bv.is_disjoint(&pop_bv) {
+                            return None;
                         }
-                        _ => { // k > 1
-                            // Remove push, decrement pop. CheckState is untouched.
-                            ops.remove(p_idx);
-                            // The pop is now at index o_idx - 1.
-                            ops[o_idx - 1] = IntermediateTrie3EdgeKey::Pop(k - 1);
-                            changed = true;
-                        }
+                        // Remove both. Pop is at a higher index.
+                        ops.remove(o_idx);
+                        ops.remove(p_idx);
+                        changed = true;
+                    }
+                    _ => { // k > 1
+                        // Remove push, decrement pop.
+                        ops.remove(p_idx);
+                        // The pop is now at index o_idx - 1.
+                        ops[o_idx - 1] = IntermediateTrie3EdgeKey::Pop(k - 1, pop_bv);
+                        changed = true;
                     }
                 }
             }
@@ -795,77 +790,60 @@ fn compute_push_elim_exits(
                         });
                         // Do not traverse past a nested push for this elimination.
                     }
-                    IntermediateTrie3EdgeKey::Pop(n) => {
+                    IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
                         let n_val = *n;
                         for (dst_idx, _ev) in dsts.iter() {
-                            let mut found_check_state = false;
-                            if let Some(dst_guard) = dst_idx.read(god) {
-                                for (next_ek, next_dsts) in dst_guard.children().iter() {
-                                    if let IntermediateTrie3EdgeKey::CheckState(pop_bv) = next_ek {
-                                        found_check_state = true;
-                                        for (final_dst_idx, _final_ev) in next_dsts.iter() {
-                                            match n_val {
-                                                0 => {
-                                                    // Fold into push: A := A ∩ B; prune branch if disjoint.
-                                                    if state.push_bv.is_disjoint(pop_bv) {
-                                                        if steps < 100 {
-                                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
-                                                        }
-                                                        // Invalid on this branch
-                                                        continue;
-                                                    }
-                                                    let mut next_push = state.push_bv.clone();
-                                                    next_push &= pop_bv.clone();
-                                                    if steps < 100 {
-                                                        crate::debug!(5, "[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", final_dst_idx);
-                                                    }
-                                                    q.push_back(BFSState {
-                                                        node: *final_dst_idx,
-                                                        push_bv: next_push,
-                                                        llm_bv: state.llm_bv.clone(),
-                                                    });
-                                                }
-                                                1 => {
-                                                    // Cancel if intersect; else branch invalid
-                                                    if state.push_bv.is_disjoint(pop_bv) {
-                                                        if steps < 100 {
-                                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
-                                                        }
-                                                        continue;
-                                                    }
-                                                    if steps < 100 {
-                                                        crate::debug!(5, "[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", final_dst_idx);
-                                                    }
-                                                    exits.push(Exit::Cancel {
-                                                        llm: state.llm_bv.clone(),
-                                                        dst: *final_dst_idx,
-                                                    });
-                                                    // Do not explore past a Pop(1) for this elimination.
-                                                }
-                                                _ => {
-                                                    // Remove Push and decrement Pop.
-                                                    if steps < 100 {
-                                                        crate::debug!(5, "[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
-                                                    }
-                                                    exits.push(Exit::DegradePop {
-                                                        llm: state.llm_bv.clone(),
-                                                        new_n: n_val - 1,
-                                                        pop_bv: pop_bv.clone(),
-                                                        dst: *dst_idx, // The destination is the node *before* the CheckState
-                                                    });
-                                                    // Do not explore past a Pop(n>1) for this elimination.
-                                                }
-                                            }
+                            match n_val {
+                                0 => {
+                                    // Fold into push: A := A ∩ B; prune branch if disjoint.
+                                    if state.push_bv.is_disjoint(pop_bv) {
+                                        if steps < 100 {
+                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
                                         }
+                                        // Invalid on this branch
+                                        continue;
                                     }
+                                    let mut next_push = state.push_bv.clone();
+                                    next_push &= pop_bv.clone();
+                                    if steps < 100 {
+                                        crate::debug!(5, "[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", dst_idx);
+                                    }
+                                    q.push_back(BFSState {
+                                        node: *dst_idx,
+                                        push_bv: next_push,
+                                        llm_bv: state.llm_bv.clone(),
+                                    });
                                 }
-                            }
-                            if !found_check_state {
-                                q.push_back(BFSState {
-                                    node: *dst_idx,
-                                    push_bv: state.push_bv.clone(),
-                                    llm_bv: state.llm_bv.clone(),
-                                });
+                                1 => {
+                                    // Cancel if intersect; else branch invalid
+                                    if state.push_bv.is_disjoint(pop_bv) {
+                                        if steps < 100 {
+                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
+                                        }
+                                        continue;
+                                    }
+                                    if steps < 100 {
+                                        crate::debug!(5, "[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", dst_idx);
+                                    }
+                                    exits.push(Exit::Cancel {
+                                        llm: state.llm_bv.clone(),
+                                        dst: *dst_idx,
+                                    });
+                                    // Do not explore past a Pop(1) for this elimination.
+                                }
+                                _ => {
+                                    // Remove Push and decrement Pop.
+                                    if steps < 100 {
+                                        crate::debug!(5, "[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
+                                    }
+                                    exits.push(Exit::DegradePop {
+                                        llm: state.llm_bv.clone(),
+                                        new_n: n_val - 1,
+                                        pop_bv: pop_bv.clone(),
+                                        dst: *dst_idx,
+                                    });
+                                    // Do not explore past a Pop(n>1) for this elimination.
+                                }
                             }
                         }
                     }
@@ -910,19 +888,8 @@ fn node_has_immediate_matching_pop(
 ) -> bool {
     if let Some(r) = node.read(god) {
         for (ek, _dsts) in r.children() {
-            if let IntermediateTrie3EdgeKey::Pop(n) = ek {
-                if *n == 1 {
-                    // Check destinations of this Pop(1) for a matching CheckState
-                    for (dst, _) in _dsts {
-                        if let Some(dst_r) = dst.read(god) {
-                            for (next_ek, _) in dst_r.children() {
-                                if let IntermediateTrie3EdgeKey::CheckState(pop_bv) = next_ek {
-                                    if !push_bv.is_disjoint(pop_bv) { return true; }
-                                }
-                            }
-                        }
-                    }
-                }
+            if let IntermediateTrie3EdgeKey::Pop(n, pop_bv) = ek {
+                if *n == 1 && !push_bv.is_disjoint(pop_bv) { return true; }
             }
         }
     }
@@ -944,13 +911,12 @@ fn prune_leading_pops(
         let u = q[head];
         head += 1;
 
-
-            if let Some(guard) = u.read(god) {
-                for (ek, dsts) in guard.children() {
-                    if let IntermediateTrie3EdgeKey::Pop(_) = ek {
-                        for (v, _) in dsts {
-                            edges_to_remove.push((u, ek.clone(), *v));
-                        }
+        if let Some(guard) = u.read(god) {
+            for (ek, dsts) in guard.children() {
+                if let IntermediateTrie3EdgeKey::Pop(_, _) = ek {
+                    for (v, _) in dsts {
+                        edges_to_remove.push((u, ek.clone(), *v));
+                    }
                 } else if !matches!(ek, IntermediateTrie3EdgeKey::Push(_)) {
                     for (v, _) in dsts {
                         if visited.insert(*v) {
@@ -1164,7 +1130,7 @@ fn run_trie_based_elimination(
                 god.insert_edge_simple(
                     agg,
                     degrade_dst,
-                    IntermediateTrie3EdgeKey::Pop(new_n),
+                    IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
                     (),
                 );
             }

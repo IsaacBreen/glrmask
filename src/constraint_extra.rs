@@ -790,9 +790,8 @@ pub fn calculate_intermediate_stats3(
                 stats.final_num_occupied_some_edge_keys += 1;
             }
             match edge_key {
-                IntermediateTrie3EdgeKey::Pop(_) => {}
+                IntermediateTrie3EdgeKey::Pop(_, bv) => { stats.final_total_ranges_in_bvs += bv.inner().ranges_len(); }
                 IntermediateTrie3EdgeKey::Push(bv) => { stats.final_total_ranges_in_bvs += bv.inner().ranges_len(); }
-                IntermediateTrie3EdgeKey::CheckState(bv) => { stats.final_total_ranges_in_bvs += bv.inner().ranges_len(); }
                 IntermediateTrie3EdgeKey::CheckLLM(bv) => { stats.final_total_ranges_in_bvs += bv.inner().ranges_len(); }
                 IntermediateTrie3EdgeKey::NoOp => {}
             }
