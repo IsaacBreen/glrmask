@@ -1225,7 +1225,6 @@ where
         arena: &Arena<Self>,
         roots: &[Trie2Index],
         options: &PrettyPrintOptions<EK, EV, T>,
-        root_titles: Option<&[String]>,
     ) -> String {
         let mut output = String::new();
         let mut printed_nodes = HashSet::new();
@@ -1234,13 +1233,7 @@ where
             if i > 0 {
                 output.push_str("\n");
             }
-            if let Some(titles) = root_titles {
-                if let Some(title) = titles.get(i) {
-                    output.push_str(&format!("--- {} ---\n", title));
-                }
-            } else {
-                output.push_str(&format!("--- Root State ID: {} ---\n", i));
-            }
+            output.push_str(&format!("--- Root State ID: {} ---\n", i));
 
             let root_guard = match root.read(arena) {
                 Some(g) => g,
@@ -1312,14 +1305,15 @@ where
         roots.sort();
 
         if roots.is_empty() {
+            // This case handles graphs with no nodes of in-degree 0 (e.g., all nodes are in cycles).
             let mut output = String::from("[Warning: No nodes with in-degree 0 found. Graph may contain only cycles.]\n[Printing from all nodes as roots.]\n\n");
             let mut sorted_nodes = all_node_indices;
             sorted_nodes.sort();
-            output.push_str(&Self::pretty_print_with_options(arena, &sorted_nodes, options, None));
+            output.push_str(&Self::pretty_print_with_options(arena, &sorted_nodes, options));
             return output;
         }
 
-        Self::pretty_print_with_options(arena, &roots, options, None)
+        Self::pretty_print_with_options(arena, &roots, options)
     }
 
     fn pretty_print_children_recursive(
