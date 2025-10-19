@@ -1092,6 +1092,70 @@ impl<'a, EK: Debug, EV: Debug, T> Default for PrettyPrintOptions<'a, EK, EV, T> 
     }
 }
 
+impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T> {
+    /// Sets the node value formatter to use `T: Debug`.
+    pub fn debug_nodes(mut self) -> Self
+    where
+        T: Debug,
+    {
+        self.format_node = Box::new(|_idx, val| Some(format!("{:?}", val)));
+        self
+    }
+
+    /// Sets the node value formatter to use `T: Display`.
+    pub fn display_nodes(mut self) -> Self
+    where
+        T: Display,
+    {
+        self.format_node = Box::new(|_idx, val| Some(format!("{}", val)));
+        self
+    }
+
+    /// Sets the edge formatter to use `EK: Debug` and `EV: Debug`.
+    pub fn debug_edges(mut self) -> Self
+    where
+        EK: Debug,
+        EV: Debug,
+    {
+        self.format_edge = Box::new(|_src, _dst, ek, ev| Some(format!("{:?}, {:?}", ek, ev)));
+        self
+    }
+
+    /// Sets the edge formatter to use `EK: Display` and `EV: Display`.
+    pub fn display_edges(mut self) -> Self
+    where
+        EK: Display,
+        EV: Display,
+    {
+        self.format_edge = Box::new(|_src, _dst, ek, ev| Some(format!("{}, {}", ek, ev)));
+        self
+    }
+
+    /// Sets both node and edge formatters to use `Debug`.
+    pub fn debug_all(mut self) -> Self
+    where
+        T: Debug,
+        EK: Debug,
+        EV: Debug,
+    {
+        self = self.debug_nodes();
+        self = self.debug_edges();
+        self
+    }
+
+    /// Sets both node and edge formatters to use `Display`.
+    pub fn display_all(mut self) -> Self
+    where
+        T: Display,
+        EK: Display,
+        EV: Display,
+    {
+        self = self.display_nodes();
+        self = self.display_edges();
+        self
+    }
+}
+
 // Add this impl block for pretty-printing functionality
 impl<EK, EV, T> Trie<EK, EV, T>
 where

@@ -3692,6 +3692,70 @@ local_system:
           }
       }
 
+      impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T> {
+          /// Sets the node value formatter to use `T: Debug`.
+          pub fn debug_nodes(mut self) -> Self
+          where
+              T: Debug,
+          {
+              self.format_node = Box::new(|_idx, val| Some(format!("{:?}", val)));
+              self
+          }
+
+          /// Sets the node value formatter to use `T: Display`.
+          pub fn display_nodes(mut self) -> Self
+          where
+              T: Display,
+          {
+              self.format_node = Box::new(|_idx, val| Some(format!("{}", val)));
+              self
+          }
+
+          /// Sets the edge formatter to use `EK: Debug` and `EV: Debug`.
+          pub fn debug_edges(mut self) -> Self
+          where
+              EK: Debug,
+              EV: Debug,
+          {
+              self.format_edge = Box::new(|_src, _dst, ek, ev| Some(format!("{:?}, {:?}", ek, ev)));
+              self
+          }
+
+          /// Sets the edge formatter to use `EK: Display` and `EV: Display`.
+          pub fn display_edges(mut self) -> Self
+          where
+              EK: Display,
+              EV: Display,
+          {
+              self.format_edge = Box::new(|_src, _dst, ek, ev| Some(format!("{}, {}", ek, ev)));
+              self
+          }
+
+          /// Sets both node and edge formatters to use `Debug`.
+          pub fn debug_all(mut self) -> Self
+          where
+              T: Debug,
+              EK: Debug,
+              EV: Debug,
+          {
+              self = self.debug_nodes();
+              self = self.debug_edges();
+              self
+          }
+
+          /// Sets both node and edge formatters to use `Display`.
+          pub fn display_all(mut self) -> Self
+          where
+              T: Display,
+              EK: Display,
+              EV: Display,
+          {
+              self = self.display_nodes();
+              self = self.display_edges();
+              self
+          }
+      }
+
       // Add this impl block for pretty-printing functionality
       impl<EK, EV, T> Trie<EK, EV, T>
       where
@@ -8695,5 +8759,184 @@ messages:
     metadata:
   - user: 'Changes committed with message: "refactor: Remove `root_titles` parameter
       from Trie pretty-print functions"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Add methods like display_all(), display_nodes(), display_edges(), debug_all(),
+      debug_nodes(), debug_edges() to PrettyPrintOptions, that sets the closure for
+      nodes/edges/both to Debug or Display.
+    metadata:
+  - assistant: |-
+      This is a useful set of utility methods for the new `PrettyPrintOptions` struct.
+
+      Here are the step-by-step instructions to add the requested methods to `PrettyPrintOptions`, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      #### File: `src/datastructures/trie.rs`
+
+      1.  **Insert `impl PrettyPrintOptions` block:**
+          Immediately after the `impl Default for PrettyPrintOptions` block (around line 1092), insert the following `impl` block containing the new convenience methods.
+
+          ```rust
+          impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T> {
+              /// Sets the node value formatter to use `T: Debug`.
+              pub fn debug_nodes(mut self) -> Self
+              where
+                  T: Debug,
+              {
+                  self.format_node = Box::new(|_idx, val| Some(format!("{:?}", val)));
+                  self
+              }
+
+              /// Sets the node value formatter to use `T: Display`.
+              pub fn display_nodes(mut self) -> Self
+              where
+                  T: Display,
+              {
+                  self.format_node = Box::new(|_idx, val| Some(format!("{}", val)));
+                  self
+              }
+
+              /// Sets the edge formatter to use `EK: Debug` and `EV: Debug`.
+              pub fn debug_edges(mut self) -> Self
+              where
+                  EK: Debug,
+                  EV: Debug,
+              {
+                  self.format_edge = Box::new(|_src, _dst, ek, ev| Some(format!("{:?}, {:?}", ek, ev)));
+                  self
+              }
+
+              /// Sets the edge formatter to use `EK: Display` and `EV: Display`.
+              pub fn display_edges(mut self) -> Self
+              where
+                  EK: Display,
+                  EV: Display,
+              {
+                  self.format_edge = Box::new(|_src, _dst, ek, ev| Some(format!("{}, {}", ek, ev)));
+                  self
+              }
+
+              /// Sets both node and edge formatters to use `Debug`.
+              pub fn debug_all(mut self) -> Self
+              where
+                  T: Debug,
+                  EK: Debug,
+                  EV: Debug,
+              {
+                  self = self.debug_nodes();
+                  self = self.debug_edges();
+                  self
+              }
+
+              /// Sets both node and edge formatters to use `Display`.
+              pub fn display_all(mut self) -> Self
+              where
+                  T: Display,
+                  EK: Display,
+                  EV: Display,
+              {
+                  self = self.display_nodes();
+                  self = self.display_edges();
+                  self
+              }
+          }
+          ```
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@ -1090,6 +1090,58 @@
+                   format_edge: Box::new(|_src, _dst, ek, ev| Some(format!("{:?}, {:?}", ek, ev))),
+               }
+           }
+      +}
+      +
+      +impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T> {
+      +    /// Sets the node value formatter to use `T: Debug`.
+      +    pub fn debug_nodes(mut self) -> Self
+      +    where
+      +        T: Debug,
+      +    {
+      +        self.format_node = Box::new(|_idx, val| Some(format!("{:?}", val)));
+      +        self
+      +    }
+      +
+      +    /// Sets the node value formatter to use `T: Display`.
+      +    pub fn display_nodes(mut self) -> Self
+      +    where
+      +        T: Display,
+      +    {
+      +        self.format_node = Box::new(|_idx, val| Some(format!("{}", val)));
+      +        self
+      +    }
+      +
+      +    /// Sets the edge formatter to use `EK: Debug` and `EV: Debug`.
+      +    pub fn debug_edges(mut self) -> Self
+      +    where
+      +        EK: Debug,
+      +        EV: Debug,
+      +    {
+      +        self.format_edge = Box::new(|_src, _dst, ek, ev| Some(format!("{:?}, {:?}", ek, ev)));
+      +        self
+      +    }
+      +
+      +    /// Sets the edge formatter to use `EK: Display` and `EV: Display`.
+      +    pub fn display_edges(mut self) -> Self
+      +    where
+      +        EK: Display,
+      +        EV: Display,
+      +    {
+      +        self.format_edge = Box::new(|_src, _dst, ek, ev| Some(format!("{}, {}", ek, ev)));
+      +        self
+      +    }
+      +
+      +    /// Sets both node and edge formatters to use `Debug`.
+      +    pub fn debug_all(mut self) -> Self
+      +    where
+      +        T: Debug,
+      +        EK: Debug,
+      +        EV: Debug,
+      +    {
+      +        self = self.debug_nodes();
+      +        self = self.debug_edges();
+      +        self
+      +    }
+      +
+      +    /// Sets both node and edge formatters to use `Display`.
+      +    pub fn display_all(mut self) -> Self
+      +    where
+      +        T: Display,
+      +        EK: Display,
+      +        EV: Display,
+      +    {
+      +        self = self.display_nodes();
+      +        self = self.display_edges();
+      +        self
+      +    }
+       }
+       
+       // Add this impl block for pretty-printing functionality
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+    metadata:
+  - user: 'Changes committed with message: "feat: Add utility methods to PrettyPrintOptions
+      for Debug/Display formatting"'
     metadata:
 ...
