@@ -1131,6 +1131,42 @@ impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T> {
         self
     }
 
+    /// Sets the edge formatter to use only `EK: Display`.
+    pub fn display_edge_keys_only(mut self) -> Self
+    where
+        EK: Display,
+    {
+        self.format_edge = Box::new(|_src, _dst, ek, _ev| Some(format!("{}", ek)));
+        self
+    }
+
+    /// Sets the edge formatter to use only `EK: Debug`.
+    pub fn debug_edge_keys_only(mut self) -> Self
+    where
+        EK: Debug,
+    {
+        self.format_edge = Box::new(|_src, _dst, ek, _ev| Some(format!("{:?}", ek)));
+        self
+    }
+
+    /// Sets the edge formatter to use only `EV: Display`.
+    pub fn display_edge_values_only(mut self) -> Self
+    where
+        EV: Display,
+    {
+        self.format_edge = Box::new(|_src, _dst, _ek, ev| Some(format!("{}", ev)));
+        self
+    }
+
+    /// Sets the edge formatter to use only `EV: Debug`.
+    pub fn debug_edge_values_only(mut self) -> Self
+    where
+        EV: Debug,
+    {
+        self.format_edge = Box::new(|_src, _dst, _ek, ev| Some(format!("{:?}", ev)));
+        self
+    }
+
     /// Sets both node and edge formatters to use `Debug`.
     pub fn debug_all(mut self) -> Self
     where

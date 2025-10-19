@@ -3731,6 +3731,42 @@ local_system:
               self
           }
 
+          /// Sets the edge formatter to use only `EK: Display`.
+          pub fn display_edge_keys_only(mut self) -> Self
+          where
+              EK: Display,
+          {
+              self.format_edge = Box::new(|_src, _dst, ek, _ev| Some(format!("{}", ek)));
+              self
+          }
+
+          /// Sets the edge formatter to use only `EK: Debug`.
+          pub fn debug_edge_keys_only(mut self) -> Self
+          where
+              EK: Debug,
+          {
+              self.format_edge = Box::new(|_src, _dst, ek, _ev| Some(format!("{:?}", ek)));
+              self
+          }
+
+          /// Sets the edge formatter to use only `EV: Display`.
+          pub fn display_edge_values_only(mut self) -> Self
+          where
+              EV: Display,
+          {
+              self.format_edge = Box::new(|_src, _dst, _ek, ev| Some(format!("{}", ev)));
+              self
+          }
+
+          /// Sets the edge formatter to use only `EV: Debug`.
+          pub fn debug_edge_values_only(mut self) -> Self
+          where
+              EV: Debug,
+          {
+              self.format_edge = Box::new(|_src, _dst, _ek, ev| Some(format!("{:?}", ev)));
+              self
+          }
+
           /// Sets both node and edge formatters to use `Debug`.
           pub fn debug_all(mut self) -> Self
           where
@@ -9046,5 +9082,131 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Add methods to PrettyPrintOptions
       to omit node/edge formatting"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Also add methods `display_edge_values_only()`, `display_edge_keys_only()`,
+      `debug_edge_values_only()` etc.
+    metadata:
+  - assistant: |-
+      This is a great set of methods for fine-grained control over edge formatting.
+
+      Here are the step-by-step instructions to add the requested methods to `PrettyPrintOptions`, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      #### File: `src/datastructures/trie.rs`
+
+      1.  **Insert Edge Key/Value Only Methods:**
+          Inside the `impl<'a, EK, EV, T> PrettyPrintOptions<'a, EK, EV, T>` block, insert the following methods after `display_edges` (around line 1139).
+
+          ```rust
+          // ... (after display_edges)
+
+          /// Sets the edge formatter to use only `EK: Display`.
+          pub fn display_edge_keys_only(mut self) -> Self
+          where
+              EK: Display,
+          {
+              self.format_edge = Box::new(|_src, _dst, ek, _ev| Some(format!("{}", ek)));
+              self
+          }
+
+          /// Sets the edge formatter to use only `EK: Debug`.
+          pub fn debug_edge_keys_only(mut self) -> Self
+          where
+              EK: Debug,
+          {
+              self.format_edge = Box::new(|_src, _dst, ek, _ev| Some(format!("{:?}", ek)));
+              self
+          }
+
+          /// Sets the edge formatter to use only `EV: Display`.
+          pub fn display_edge_values_only(mut self) -> Self
+          where
+              EV: Display,
+          {
+              self.format_edge = Box::new(|_src, _dst, _ek, ev| Some(format!("{}", ev)));
+              self
+          }
+
+          /// Sets the edge formatter to use only `EV: Debug`.
+          pub fn debug_edge_values_only(mut self) -> Self
+          where
+              EV: Debug,
+          {
+              self.format_edge = Box::new(|_src, _dst, _ek, ev| Some(format!("{:?}", ev)));
+              self
+          }
+
+          // ... (before debug_all)
+          ```
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@ -1139,6 +1139,42 @@
+               self
+           }
+       
+      +    /// Sets the edge formatter to use only `EK: Display`.
+      +    pub fn display_edge_keys_only(mut self) -> Self
+      +    where
+      +        EK: Display,
+      +    {
+      +        self.format_edge = Box::new(|_src, _dst, ek, _ev| Some(format!("{}", ek)));
+      +        self
+      +    }
+      +
+      +    /// Sets the edge formatter to use only `EK: Debug`.
+      +    pub fn debug_edge_keys_only(mut self) -> Self
+      +    where
+      +        EK: Debug,
+      +    {
+      +        self.format_edge = Box::new(|_src, _dst, ek, _ev| Some(format!("{:?}", ek)));
+      +        self
+      +    }
+      +
+      +    /// Sets the edge formatter to use only `EV: Display`.
+      +    pub fn display_edge_values_only(mut self) -> Self
+      +    where
+      +        EV: Display,
+      +    {
+      +        self.format_edge = Box::new(|_src, _dst, _ek, ev| Some(format!("{}", ev)));
+      +        self
+      +    }
+      +
+      +    /// Sets the edge formatter to use only `EV: Debug`.
+      +    pub fn debug_edge_values_only(mut self) -> Self
+      +    where
+      +        EV: Debug,
+      +    {
+      +        self.format_edge = Box::new(|_src, _dst, _ek, ev| Some(format!("{:?}", ev)));
+      +        self
+      +    }
+      +
+           /// Sets both node and edge formatters to use `Debug`.
+           pub fn debug_all(mut self) -> Self
+           where
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+    metadata:
+  - user: 'Changes committed with message: "feat: Add methods to PrettyPrintOptions
+      for key-only/value-only edge formatting"'
     metadata:
 ...
