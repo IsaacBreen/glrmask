@@ -288,7 +288,7 @@ pub fn eliminate_pushes_and_pops(
         // - Not an end state.
         // - Has at least one incoming Push edge.
         // - Has no outgoing Push edges.
-        let mut node_to_process = None;
+        let mut nodes_to_process = Vec::new();
         for &b_idx in &all_nodes {
             let b_guard = b_idx.read(&god2).unwrap();
             if b_guard.value.end {
@@ -308,68 +308,80 @@ pub fn eliminate_pushes_and_pops(
                     .iter()
                     .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
                 if has_incoming_push {
-                    node_to_process = Some(b_idx);
-                    break;
+                    nodes_to_process.push(b_idx);
                 }
             }
         }
 
-        if let Some(b_idx) = node_to_process {
+        if !nodes_to_process.is_empty() {
             println!(
-                "  Found standard candidate node to process: {}",
-                b_idx
+                "  Found {} standard candidate nodes to process.",
+                nodes_to_process.len()
             );
-            // Gather information about B's incoming pushes and all outgoing edges.
-            let incoming_pushes: Vec<_> = reverse_adj
-                .get(&b_idx)
-                .unwrap()
-                .iter()
-                .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-                .cloned()
-                .collect();
 
-            let outgoing_edges: Vec<_> = b_idx
-                .read(&god2)
-                .unwrap()
-                .children()
-                .iter()
-                .flat_map(|(k, dest_map)| {
-                    dest_map
-                        .iter()
-                        .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
-                })
-                .collect();
+            let mut edges_to_remove = Vec::new();
+            let mut edges_to_add = Vec::new();
 
-            // Remove all incoming push edges to B.
-            for (a_idx, edge_key, _) in &incoming_pushes {
-                god2.remove_edge(*a_idx, b_idx, edge_key);
-            }
+            for &b_idx in &nodes_to_process {
+                // Gather information about B's incoming pushes and all outgoing edges.
+                let incoming_pushes: Vec<_> = reverse_adj
+                    .get(&b_idx)
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+                    .cloned()
+                    .collect();
 
-            // Create new "shortcut" edges from A to C.
-            for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
-                let s = match push_key {
-                    Intermediate2Trie3EdgeKey::Push(s) => s,
-                    _ => unreachable!(),
-                };
+                let outgoing_edges: Vec<_> = b_idx
+                    .read(&god2)
+                    .unwrap()
+                    .children()
+                    .iter()
+                    .flat_map(|(k, dest_map)| {
+                        dest_map
+                            .iter()
+                            .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
+                    })
+                    .collect();
 
-                for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
-                    let new_tokens = tokens_a_b & tokens_b_c;
-                    if new_tokens.is_empty() {
-                        continue;
-                    }
+                // Remove all incoming push edges to B.
+                for (a_idx, edge_key, _) in &incoming_pushes {
+                    edges_to_remove.push((*a_idx, b_idx, edge_key.clone()));
+                }
 
-                    let new_key_opt = match op_key {
-                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
-                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
-                        Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
-                        Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
-                        Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
+                // Create new "shortcut" edges from A to C.
+                for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
+                    let s = match push_key {
+                        Intermediate2Trie3EdgeKey::Push(s) => s,
+                        _ => unreachable!(),
                     };
 
-                    if let Some(new_key) = new_key_opt {
-                        god2.insert_edge_simple(*a_idx, *c_idx, new_key, new_tokens);
+                    for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
+                        let new_tokens = tokens_a_b & tokens_b_c;
+                        if new_tokens.is_empty() {
+                            continue;
+                        }
+
+                        let new_key_opt = match op_key {
+                            Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
+                            Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
+                            Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
+                            Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
+                            Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
+                        };
+
+                        if let Some(new_key) = new_key_opt {
+                            edges_to_add.push((*a_idx, *c_idx, new_key, new_tokens));
+                        }
                     }
                 }
+            }
+
+            for (u, v, k) in edges_to_remove {
+                god2.remove_edge(u, v, &k);
+            }
+            for (u, v, k, val) in edges_to_add {
+                god2.insert_edge_simple(u, v, k, val);
             }
         } else {
             // No candidate with "incoming Push" and "no outgoing Push".
