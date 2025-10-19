@@ -2728,6 +2728,33 @@ where
                 .or_insert(edge_value);
         }
     }
+
+    /// Removes the edge from `src` to `dst` with the given `edge_key`.
+    ///
+    /// Returns the removed edge value if the edge existed, otherwise `None`.
+    pub fn remove_edge(
+        &self,
+        src: Trie2Index,
+        dst: Trie2Index,
+        edge_key: &EK,
+    ) -> Option<EV> {
+        let mut src_guard = match src.write(self) {
+            Some(g) => g,
+            None => return None, // Source node not found
+        };
+
+        let removed_ev = src_guard
+            .children
+            .get_mut(edge_key)
+            .and_then(|dest_map| dest_map.remove(&dst));
+
+        // Clean up the BTreeMap entry if the OrderedHashMap is now empty
+        if removed_ev.is_some() && src_guard.children.get(edge_key).map_or(false, |m| m.is_empty()) {
+            src_guard.children.remove(edge_key);
+        }
+
+        removed_ev
+    }
 }
 
 pub type GodWrapper<EK, EV, T> = Arena<Trie<EK, EV, T>>;
