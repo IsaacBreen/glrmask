@@ -133,8 +133,10 @@ pub fn optimize_intermediate_trie3(
         println!("]");
     }
     println!("Trie before normalization:");
-    let mut options = crate::datastructures::trie::PrettyPrintOptions::default();
-    options.display_all();
+    let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+        .display_edge_keys_only()
+        .omit_nodes()
+        ;
     println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
 
     return;
