@@ -1452,7 +1452,6 @@ fn test_constraint_expression_unbalanced_parens() {
 #[test]
 fn test_constraint_expression_unbalanced_parens2() {
     let mut llm_token_map = LLMTokenMap::new();
-    // llm_token_map.insert(b"(i".to_vec(), LLMTokenID(2));
     llm_token_map.insert(b"$".to_vec(), LLMTokenID(3));
 
     // Tokenizer regex for grammar tokens '(', 'i', '$'
