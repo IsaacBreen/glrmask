@@ -74,7 +74,7 @@ pub fn optimize_intermediate_trie3_template(
         // if !Trie::has_cycle(&god, roots.clone()) {
         //     continue;
         // }
-        changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god, true);
+        changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
         // let normalized_paths2: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
         //     &god,
         //     roots,
@@ -333,136 +333,6 @@ fn compress_noop_only_nodes(
     changed
 }
 
-// Eliminates NoOp (epsilon) transitions by propagating all non-NoOp edges from the epsilon-closure
-// of each node back to the node and then removing its NoOp edges. Semantics-preserving for NFAs.
-// Returns true if the graph was changed.
-fn eliminate_noop_epsilon_transitions(
-    start_nodes: &[IntermediatePrecomputeNode3Index],
-    god: &IntermediateTrie3GodWrapper,
-) -> bool {
-    use std::collections::{HashMap, HashSet, VecDeque};
-
-    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
-    if all_nodes_vec.is_empty() {
-        return false;
-    }
-    let all_nodes_in_subgraph: HashSet<_> = all_nodes_vec.iter().copied().collect();
-
-    // Snapshot NoOp adjacency and non-NoOp edges for stable iteration
-    let mut noop_adj: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
-    let mut non_noop_edges: HashMap<
-        IntermediatePrecomputeNode3Index,
-        Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<IntermediatePrecomputeNode3Index>)>
-    > = HashMap::new();
-    let mut end_flags: HashMap<IntermediatePrecomputeNode3Index, bool> = HashMap::new();
-
-    for n in &all_nodes_in_subgraph {
-        if let Some(g) = n.read(god) {
-            end_flags.insert(*n, g.value.end);
-            let mut nn_edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<IntermediatePrecomputeNode3Index>)> = Vec::new();
-            let mut noop_kids: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
-            for (ek, dm) in g.children() {
-                let mut kids: Vec<_> = dm.keys().cloned().filter(|k| all_nodes_in_subgraph.contains(k)).collect();
-                kids.sort();
-                match ek {
-                    crate::constraint::IntermediateTrie3EdgeKey::NoOp => {
-                        noop_kids.extend(kids);
-                    }
-                    _ => {
-                        nn_edges.push((ek.clone(), kids));
-                    }
-                }
-            }
-            if !noop_kids.is_empty() {
-                noop_adj.insert(*n, noop_kids);
-            }
-            if !nn_edges.is_empty() {
-                non_noop_edges.insert(*n, nn_edges);
-            }
-        }
-    }
-
-    if noop_adj.is_empty() {
-        return false;
-    }
-
-    let mut any_changed = false;
-    let noop_key = crate::constraint::IntermediateTrie3EdgeKey::NoOp;
-
-    // For each node with NoOp edges: compute its epsilon-closure and propagate non-NoOp edges and end flags.
-    for u in &all_nodes_in_subgraph {
-        if !noop_adj.contains_key(u) {
-            continue;
-        }
-
-        // BFS over NoOp-only edges (from snapshot)
-        let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-        let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
-        visited.insert(*u);
-        if let Some(kids) = noop_adj.get(u) {
-            for k in kids {
-                if visited.insert(*k) {
-                    q.push_back(*k);
-                }
-            }
-        }
-        while let Some(x) = q.pop_front() {
-            if let Some(kids) = noop_adj.get(&x) {
-                for k in kids {
-                    if visited.insert(*k) {
-                        q.push_back(*k);
-                    }
-                }
-            }
-        }
-
-        // Accumulate edges to add: union of all non-NoOp outgoing edges from closure nodes
-        let mut to_add: HashMap<
-            crate::constraint::IntermediateTrie3EdgeKey,
-            HashSet<IntermediatePrecomputeNode3Index>
-        > = HashMap::new();
-        let mut end_should_be_true = false;
-        for v in &visited {
-            if *end_flags.get(v).unwrap_or(&false) {
-                end_should_be_true = true;
-            }
-            if let Some(edges) = non_noop_edges.get(v) {
-                for (ek, kids) in edges {
-                    let entry = to_add.entry(ek.clone()).or_default();
-                    for d in kids {
-                        entry.insert(*d);
-                    }
-                }
-            }
-        }
-
-        // Apply changes to graph
-        if let Some(mut w) = u.write(god) {
-            // Propagate end flag
-            if end_should_be_true && !w.value.end {
-                w.value.end = true;
-                any_changed = true;
-            }
-            // Add collected non-NoOp edges
-            for (ek, dests) in to_add {
-                let dest_map = w.children_mut().entry(ek).or_default();
-                for d in dests {
-                    if dest_map.get(&d).is_none() {
-                        dest_map.insert(d, ());
-                        any_changed = true;
-                    }
-                }
-            }
-            // Remove all NoOp edges from this node
-            if w.children_mut().remove(&noop_key).is_some() {
-                any_changed = true;
-            }
-        }
-    }
-
-    any_changed
-}
-
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct NodeSignature {
     end: bool,
@@ -476,7 +346,6 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     start_nodes: &[IntermediatePrecomputeNode3Index],
     pinned: &std::collections::HashSet<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
-    preserve_pop_joins: bool,
 ) -> bool {
     use std::collections::{HashMap, VecDeque};
 
@@ -518,34 +387,13 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
         }
     }
 
-    // Optionally extend the pinned set with "post-Pop join" nodes in this subgraph.
-    // Template-level passes keep these pinned; global passes allow merging across them.
+    // Extend the pinned set with all direct post-Pop nodes in this subgraph.
+    // Merging across a Pop boundary is not semantics-preserving for the subsequent
+    // push/pop elimination, because it moves the join point relative to Pops.
     let mut pinned_ext = pinned.clone();
-    if preserve_pop_joins {
-        for (dst, preds) in &incoming {
-            let mut pop_preds: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-            let mut pop_kinds: HashSet<crate::constraint::IntermediateTrie3EdgeKey> = HashSet::new();
-            let mut has_pop = false;
-            let mut has_non_pop = false;
-            for (pred, ek) in preds {
-                match ek {
-                    crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _) => {
-                        has_pop = true;
-                        pop_preds.insert(*pred);
-                        pop_kinds.insert(ek.clone());
-                    }
-                    _ => {
-                        has_non_pop = true;
-                    }
-                }
-            }
-            let is_post_pop_join =
-                (has_pop && has_non_pop)
-                || pop_preds.len() >= 2
-                || pop_kinds.len() >= 2;
-            if is_post_pop_join {
-                pinned_ext.insert(*dst);
-            }
+    for (dst, preds) in &incoming {
+        if preds.iter().any(|(_, ek)| matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _))) {
+            pinned_ext.insert(*dst);
         }
     }
 
@@ -569,7 +417,7 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     }
 
     // Refine up to a bounded number of iterations or until convergence
-    let max_iters = 64;
+    let max_iters = 16;
     for _ in 0..max_iters {
         let mut changed = false;
         let mut interner: HashMap<NodeSignature, u64> = HashMap::new();
@@ -841,34 +689,15 @@ pub fn optimize_intermediate_trie3_templates_global(
         pinned.insert(*e);
     }
 
-    // Pre-pass: prune and eliminate epsilon-transitions to expose sharing opportunities.
-    for (s, e) in templates {
-        prune_unproductive_nodes(&[*s], e, god);
-    }
-    eliminate_noop_epsilon_transitions(&start_nodes, god);
-    for (s, e) in templates {
-        prune_unproductive_nodes(&[*s], e, god);
-    }
-
-    // Fixed-point global optimization:
-    //  - Merge identical subgraphs (without preserving Pop joins globally)
-    //  - Eliminate epsilon transitions again (cheap if none)
-    //  - Compress trivial NoOp-only nodes (should be rare after elimination)
-    //  - Prune per-template
-    //  - Merge again to capture new sharing
-    for _ in 0..8 {
+    // A few global passes: compress NoOp chains and merge identical subgraphs across all templates,
+    // then prune per template to drop detritus.
+    for _ in 0..3 {
         let mut changed = false;
-        // Merge first to maximize sharing opportunities
-        changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god, false);
-        // Eliminate NoOps to expose further merges (no-op if none)
-        changed |= eliminate_noop_epsilon_transitions(&start_nodes, god);
-        // Compress trivial NoOp-only nodes (defensive; often no-ops after elimination)
         changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
+        changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
         for (s, e) in templates {
             changed |= prune_unproductive_nodes(&[*s], e, god);
         }
-        // Merge again after pruning/elimination
-        changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god, false);
         if !changed {
             break;
         }
@@ -944,7 +773,7 @@ mod tests {
         let mut pinned = HashSet::new();
         pinned.insert(start_node);
         pinned.insert(end_node);
-        structural_merge_nodes_in_subgraph(roots, &pinned, &god, true);
+        structural_merge_nodes_in_subgraph(roots, &pinned, &god);
         let paths_after: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&god, roots, |idx, _n| idx == end_node).into_iter().map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect())).collect();
         assert_eq!(paths_before, paths_after);
     }
