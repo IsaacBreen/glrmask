@@ -72,6 +72,8 @@ pub type Intermediate2PrecomputeNode3Index = Trie2Index;
 pub type Intermediate2Trie3GodWrapper =
     GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
 
+// This conversion function remains the same. It simplifies the graph by
+// moving token constraints into edge values.
 fn convert_to_intermediate2(
     roots1: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god1: &IntermediateTrie3GodWrapper,
@@ -136,6 +138,7 @@ fn convert_to_intermediate2(
     (roots2, god2)
 }
 
+// This conversion function also remains the same.
 fn convert_from_intermediate2(
     roots2: &BTreeMap<TokenizerStateID, Intermediate2PrecomputeNode3Index>,
     god2: &Intermediate2Trie3GodWrapper,
@@ -223,86 +226,8 @@ fn convert_from_intermediate2(
     (roots1, god1)
 }
 
-// Helper: Determine if a Pop is reachable from a node (memoized DFS)
-fn compute_pop_reachability(
-    all_nodes: &[Intermediate2PrecomputeNode3Index],
-    god2: &Intermediate2Trie3GodWrapper,
-) -> HashMap<Intermediate2PrecomputeNode3Index, bool> {
-    fn dfs(
-        node: Intermediate2PrecomputeNode3Index,
-        god2: &Intermediate2Trie3GodWrapper,
-        memo: &mut HashMap<Intermediate2PrecomputeNode3Index, bool>,
-        visiting: &mut HashSet<Intermediate2PrecomputeNode3Index>,
-    ) -> bool {
-        if let Some(&result) = memo.get(&node) {
-            return result;
-        }
-        if !visiting.insert(node) {
-            return false;
-        }
-
-        let mut reaches_pop = false;
-        if let Some(guard) = node.read(god2) {
-            for (key, dest_map) in guard.children() {
-                if matches!(key, Intermediate2Trie3EdgeKey::Pop(_, _)) {
-                    reaches_pop = true;
-                    break;
-                }
-                for child in dest_map.keys() {
-                    if dfs(*child, god2, memo, visiting) {
-                        reaches_pop = true;
-                        break;
-                    }
-                }
-                if reaches_pop {
-                    break;
-                }
-            }
-        }
-
-        visiting.remove(&node);
-        memo.insert(node, reaches_pop);
-        reaches_pop
-    }
-
-    let mut memo = HashMap::new();
-    for &node in all_nodes {
-        dfs(node, god2, &mut memo, &mut HashSet::new());
-    }
-    memo
-}
-
-// Helper: Classify edges into spliceable (can be spliced through) and non-spliceable
-fn classify_edges(
-    node: Intermediate2PrecomputeNode3Index,
-    god2: &Intermediate2Trie3GodWrapper,
-    pop_reachable: &HashMap<Intermediate2PrecomputeNode3Index, bool>,
-) -> (
-    Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)>,
-    Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)>,
-) {
-    let mut spliceable = Vec::new();
-    let mut non_spliceable = Vec::new();
-
-    if let Some(guard) = node.read(god2) {
-        for (key, dest_map) in guard.children() {
-            for (child, bv) in dest_map {
-                let leads_to_pop = matches!(key, Intermediate2Trie3EdgeKey::Pop(_, _))
-                    || *pop_reachable.get(child).unwrap_or(&false);
-                
-                if !matches!(key, Intermediate2Trie3EdgeKey::Push(_)) && leads_to_pop {
-                    spliceable.push((key.clone(), *child, bv.clone()));
-                } else {
-                    non_spliceable.push((key.clone(), *child, bv.clone()));
-                }
-            }
-        }
-    }
-
-    (spliceable, non_spliceable)
-}
-
-// Helper: Rewrite an edge key when splicing through a Push
+// Helper: Rewrite an edge key when splicing through a Push.
+// This implements the core transformation logic.
 fn splice_edge(
     push_states: &StateIDBV,
     edge_key: &Intermediate2Trie3EdgeKey,
@@ -313,15 +238,24 @@ fn splice_edge(
         }
         Intermediate2Trie3EdgeKey::Pop(0, states) => {
             let inter = push_states & states;
-            (!inter.is_empty()).then(|| Intermediate2Trie3EdgeKey::Push(inter))
+            if inter.is_empty() {
+                None
+            } else {
+                Some(Intermediate2Trie3EdgeKey::Push(inter))
+            }
         }
         Intermediate2Trie3EdgeKey::Pop(1, states) => {
-            (!push_states.is_disjoint(states)).then(|| Intermediate2Trie3EdgeKey::NoOp)
+            if push_states.is_disjoint(states) {
+                None
+            } else {
+                Some(Intermediate2Trie3EdgeKey::NoOp)
+            }
         }
         Intermediate2Trie3EdgeKey::Pop(n, states) if *n >= 2 => {
             Some(Intermediate2Trie3EdgeKey::Pop(*n - 1, states.clone()))
         }
-        _ => None,
+        // A Push followed by another Push is not a valid splice target in this algorithm.
+        Intermediate2Trie3EdgeKey::Push(_) => None,
     }
 }
 
@@ -330,79 +264,92 @@ pub fn eliminate_pushes_and_pops(
     god: &IntermediateTrie3GodWrapper,
 ) {
     let (mut roots2, god2) = convert_to_intermediate2(roots, god);
-    let mut node_clones: HashMap<Intermediate2PrecomputeNode3Index, Intermediate2PrecomputeNode3Index> = HashMap::new();
 
     loop {
         let roots_vec: Vec<_> = roots2.values().cloned().collect();
         Trie::gc(&god2, &roots_vec);
         let all_nodes = Trie::all_nodes(&god2, &roots_vec);
 
-        // Build incoming Push edge map
-        let mut incoming_pushes: HashMap<
-            Intermediate2PrecomputeNode3Index,
-            Vec<(Intermediate2PrecomputeNode3Index, StateIDBV, LLMTokenBV)>,
-        > = HashMap::new();
+        let mut changed = false;
+        let mut candidate_node = None;
 
-        for &src in &all_nodes {
-            if let Some(guard) = src.read(&god2) {
-                for (key, dest_map) in guard.children() {
-                    if let Intermediate2Trie3EdgeKey::Push(states) = key {
-                        for (dst, bv) in dest_map {
-                            incoming_pushes.entry(*dst).or_default().push((src, states.clone(), bv.clone()));
-                        }
-                    }
+        // Find a candidate node `B` that has incoming pushes but no outgoing pushes.
+        for &node_b in &all_nodes {
+            let guard_b = node_b.read(&god2).unwrap();
+            let has_outgoing_push = guard_b
+                .children()
+                .keys()
+                .any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
+
+            if has_outgoing_push {
+                continue;
+            }
+
+            let has_incoming_push = all_nodes.iter().any(|&node_a| {
+                if let Some(guard_a) = node_a.read(&god2) {
+                    guard_a.children().iter().any(|(key, dest_map)| {
+                        matches!(key, Intermediate2Trie3EdgeKey::Push(_)) && dest_map.contains_key(&node_b)
+                    })
+                } else {
+                    false
                 }
+            });
+
+            if has_incoming_push {
+                candidate_node = Some(node_b);
+                break;
             }
         }
 
-        let pop_reachable = compute_pop_reachability(&all_nodes, &god2);
-        let mut changed = false;
-
-        for &node in &all_nodes {
-            let Some(incoming) = incoming_pushes.get(&node).filter(|v| !v.is_empty()) else {
-                continue;
-            };
-
-            let (spliceable, non_spliceable) = classify_edges(node, &god2, &pop_reachable);
-            if spliceable.is_empty() {
-                continue;
-            }
-
+        if let Some(node_b) = candidate_node {
             changed = true;
 
-            // Create clone if needed for non-spliceable edges
-            let clone = (!non_spliceable.is_empty()).then(|| {
-                *node_clones.entry(node).or_insert_with(|| {
-                    let value = node.read(&god2).unwrap().value.clone();
-                    let clone = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(value)));
-                    for (key, child, bv) in &non_spliceable {
-                        god2.insert_edge_simple(clone, *child, key.clone(), bv.clone());
+            // Collect all incoming push edges to `node_b`.
+            let mut incoming_pushes = Vec::new();
+            for &node_a in &all_nodes {
+                if let Some(guard_a) = node_a.read(&god2) {
+                    if let Some(dest_map) = guard_a.children().get(&Intermediate2Trie3EdgeKey::Push(StateIDBV::new())) {
+                         for (key, dest_map) in guard_a.children() {
+                             if let Intermediate2Trie3EdgeKey::Push(states) = key {
+                                 if let Some(bv) = dest_map.get(&node_b) {
+                                     incoming_pushes.push((node_a, states.clone(), bv.clone()));
+                                 }
+                             }
+                         }
                     }
-                    clone
-                })
-            });
-
-            // Splice each incoming Push edge
-            for (src, push_states, push_bv) in incoming {
-                god2.remove_edge(*src, node, &Intermediate2Trie3EdgeKey::Push(push_states.clone()));
-
-                if let Some(clone) = clone {
-                    god2.insert_edge_simple(*src, clone, Intermediate2Trie3EdgeKey::Push(push_states.clone()), push_bv.clone());
                 }
+            }
 
-                for (edge_key, child, edge_bv) in &spliceable {
-                    let combined_bv = push_bv & edge_bv;
-                    if !combined_bv.is_empty() {
-                        if let Some(new_key) = splice_edge(push_states, edge_key) {
-                            god2.insert_edge_simple(*src, *child, new_key, combined_bv);
+            // Collect all outgoing edges from `node_b`.
+            let outgoing_edges: Vec<_> = node_b
+                .read(&god2)
+                .unwrap()
+                .children()
+                .iter()
+                .flat_map(|(key, dest_map)| {
+                    dest_map.iter().map(move |(child, bv)| (key.clone(), *child, bv.clone()))
+                })
+                .collect();
+
+            // For each incoming push `A -> B`, splice it with every outgoing edge `B -> C`.
+            for (node_a, push_states, push_bv) in &incoming_pushes {
+                // Remove the original edge `A --Push--> B`.
+                god2.remove_edge(*node_a, node_b, &Intermediate2Trie3EdgeKey::Push(push_states.clone()));
+
+                // Create new spliced edges `A --> C`.
+                for (op_key, node_c, op_bv) in &outgoing_edges {
+                    if let Some(new_key) = splice_edge(push_states, op_key) {
+                        let combined_bv = push_bv & op_bv;
+                        if !combined_bv.is_empty() {
+                            god2.insert_edge_simple(*node_a, *node_c, new_key, combined_bv);
                         }
                     }
                 }
             }
 
-            // Remove spliced edges from original node
-            for (key, child, _) in &spliceable {
-                god2.remove_edge(node, *child, key);
+            // Remove all of `node_b`'s original outgoing edges, making it an orphan.
+            for (op_key, node_c, _) in &outgoing_edges {
+                god2.remove_edge(node_b, *node_c, op_key);
             }
         }
 
@@ -411,7 +358,7 @@ pub fn eliminate_pushes_and_pops(
         }
     }
 
-    // Convert back to original format
+    // Convert back to original format and update the original graph.
     let (final_roots, final_god) = convert_from_intermediate2(&roots2, &god2);
     let state_ids: Vec<_> = final_roots.keys().cloned().collect();
     let old_indices: Vec<_> = final_roots.values().cloned().collect();
@@ -426,6 +373,9 @@ pub fn eliminate_pushes_and_pops(
 
     Trie::gc(god, &roots.values().cloned().collect::<Vec<_>>());
 }
+
+
+// --- Assertion and Test Helpers (Unchanged) ---
 
 pub fn assert_no_pops_reachable_from_pushes(
     roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
