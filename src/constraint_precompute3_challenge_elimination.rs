@@ -262,45 +262,41 @@ pub fn eliminate_pushes_and_pops(
             }
 
             for (a_idx, s, bv_ab) in incoming_pushes {
+                // Remove the edge A --push(S)--> B
                 if let Some(mut a_guard) = a_idx.write(&god2) {
-                    // Remove the edge A --Push(s)--> B; avoid double-borrowing children_mut()
-                    let push_key = Intermediate2Trie3EdgeKey::Push(s.clone());
-                    let mut remove_entire_entry = false;
-                    if let Some(dest_map) = a_guard.children_mut().get_mut(&push_key) {
+                    if let Some(dest_map) = a_guard.children_mut().get_mut(&Intermediate2Trie3EdgeKey::Push(s.clone())) {
                         dest_map.remove(&b_idx);
                         if dest_map.is_empty() {
-                            remove_entire_entry = true;
+                            a_guard.children_mut().remove(&Intermediate2Trie3EdgeKey::Push(s.clone()));
                         }
                     }
-                    if remove_entire_entry {
-                        a_guard.children_mut().remove(&push_key);
-                    }
+                }
 
-                    // Redirect through B's outgoing edges using the same write guard
-                    for (op, c_idx, bv_bc) in &outgoing_edges {
-                        let new_bv = &bv_ab & bv_bc;
-                        if new_bv.is_empty() { continue; }
+                for (op, c_idx, bv_bc) in &outgoing_edges {
+                    let new_bv = &bv_ab & bv_bc;
+                    if new_bv.is_empty() { continue; }
 
-                        match op {
-                            Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node B has an outgoing push edge but was selected for processing."),
-                            Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
-                                let intersection = &s & s_prime;
-                                if !intersection.is_empty() {
-                                    a_guard.force_insert_to_node(Intermediate2Trie3EdgeKey::Push(intersection), new_bv.clone(), *c_idx);
-                                }
+                    match op {
+                        Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node B has an outgoing push edge but was selected for processing."),
+                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
+                            let intersection = &s & s_prime;
+                            if !intersection.is_empty() {
+                                let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
+                                a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
                             }
-                            Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
-                                if !s.is_disjoint(s_prime) {
-                                    a_guard.force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv.clone(), *c_idx);
-                                }
-                            }
-                            Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
-                                a_guard.force_insert_to_node(Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone()), new_bv.clone(), *c_idx);
-                            }
-                            Intermediate2Trie3EdgeKey::NoOp => {
-                                a_guard.force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv.clone(), *c_idx);
-                            },
                         }
+                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
+                            if !s.is_disjoint(s_prime) {
+                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, *c_idx);
+                            }
+                        }
+                        Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
+                            let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
+                            a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                        }
+                        Intermediate2Trie3EdgeKey::NoOp => {
+                            a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
+                        },
                     }
                 }
             }
