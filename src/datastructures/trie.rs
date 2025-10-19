@@ -1070,6 +1070,28 @@ where
     }
 }
 
+/// Options for customizing the output of `pretty_print_with_options`.
+pub struct PrettyPrintOptions<'a, EK, EV, T> {
+    /// Whether to show the `max_depth` of each node.
+    pub show_max_depth: bool,
+    /// A closure to format the value `T` of a node.
+    /// It receives the node's index and value, and can return a string to be appended.
+    pub format_node: Box<dyn Fn(Trie2Index, &T) -> Option<String> + 'a>,
+    /// A closure to format the edge information (key `EK` and value `EV`).
+    /// It receives source and destination indices, and the edge key/value.
+    pub format_edge: Box<dyn Fn(Trie2Index, Trie2Index, &EK, &EV) -> Option<String> + 'a>,
+}
+
+impl<'a, EK: Debug, EV: Debug, T> Default for PrettyPrintOptions<'a, EK, EV, T> {
+    fn default() -> Self {
+        PrettyPrintOptions {
+            show_max_depth: true,
+            format_node: Box::new(|_idx, _val| None),
+            format_edge: Box::new(|_src, _dst, ek, ev| Some(format!("{:?}, {:?}", ek, ev))),
+        }
+    }
+}
+
 // Add this impl block for pretty-printing functionality
 impl<EK, EV, T> Trie<EK, EV, T>
 where
@@ -1079,7 +1101,7 @@ where
 {
     /// Pretty-prints the trie structure starting from the given roots into a String.
     /// Handles shared subtrees and cycles to avoid infinite loops and redundant output.
-    pub fn pretty_print(arena: &Arena<Self>, roots: &[Trie2Index]) -> String {
+        pub fn pretty_print(arena: &Arena<Self>, roots: &[Trie2Index]) -> String {
         let mut output = String::new();
         let mut printed_nodes = HashSet::new();
 
@@ -1196,6 +1218,196 @@ where
         }
 
         visiting.remove(&node_idx.as_usize());
+    }
+
+    /// Pretty-prints the trie structure with advanced formatting options.
+    pub fn pretty_print_with_options(
+        arena: &Arena<Self>,
+        roots: &[Trie2Index],
+        options: &PrettyPrintOptions<EK, EV, T>,
+        root_titles: Option<&[String]>,
+    ) -> String {
+        let mut output = String::new();
+        let mut printed_nodes = HashSet::new();
+
+        for (i, &root) in roots.iter().enumerate() {
+            if i > 0 {
+                output.push_str("\n");
+            }
+            if let Some(titles) = root_titles {
+                if let Some(title) = titles.get(i) {
+                    output.push_str(&format!("--- {} ---\n", title));
+                }
+            } else {
+                output.push_str(&format!("--- Root State ID: {} ---\n", i));
+            }
+
+            let root_guard = match root.read(arena) {
+                Some(g) => g,
+                None => {
+                    output.push_str(&format!("Root Node {} [Invalid Index]\n", root.as_usize()));
+                    continue;
+                }
+            };
+
+            let mut root_line = format!("Root Node {}", root.as_usize());
+            if options.show_max_depth {
+                root_line.push_str(&format!(" (max_depth: {})", root_guard.max_depth));
+            }
+            if let Some(formatted) = (options.format_node)(root, &root_guard.value) {
+                root_line.push_str(&format!(" {}", formatted));
+            }
+            output.push_str(&root_line);
+            output.push_str("\n");
+
+            printed_nodes.insert(root.as_usize());
+            let mut visiting = HashSet::new();
+            visiting.insert(root.as_usize());
+
+            Self::pretty_print_children_recursive(
+                root,
+                arena,
+                "",
+                &mut visiting,
+                &mut printed_nodes,
+                &mut output,
+                options,
+            );
+        }
+        output
+    }
+
+    /// Pretty-prints the entire trie structure in the arena with advanced formatting options.
+    pub fn pretty_print_arena_with_options(
+        arena: &Arena<Self>,
+        options: &PrettyPrintOptions<EK, EV, T>,
+    ) -> String {
+        let all_node_indices: Vec<Trie2Index> =
+            arena.indices().into_iter().map(Trie2Index::from).collect();
+        if all_node_indices.is_empty() {
+            return "[Arena is empty]\n".to_string();
+        }
+
+        let mut in_degrees: std::collections::HashMap<Trie2Index, usize> =
+            all_node_indices.iter().map(|&idx| (idx, 0)).collect();
+
+        for &node_idx in &all_node_indices {
+            if let Some(guard) = node_idx.read(arena) {
+                for dest_map in guard.children.values() {
+                    for &child_idx in dest_map.keys() {
+                        if let Some(degree) = in_degrees.get_mut(&child_idx) {
+                            *degree += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut roots: Vec<Trie2Index> = in_degrees
+            .iter()
+            .filter(|(_, &degree)| degree == 0)
+            .map(|(&idx, _)| idx)
+            .collect();
+
+        roots.sort();
+
+        if roots.is_empty() {
+            let mut output = String::from("[Warning: No nodes with in-degree 0 found. Graph may contain only cycles.]\n[Printing from all nodes as roots.]\n\n");
+            let mut sorted_nodes = all_node_indices;
+            sorted_nodes.sort();
+            output.push_str(&Self::pretty_print_with_options(arena, &sorted_nodes, options, None));
+            return output;
+        }
+
+        Self::pretty_print_with_options(arena, &roots, options, None)
+    }
+
+    fn pretty_print_children_recursive(
+        node_idx: Trie2Index,
+        arena: &Arena<Self>,
+        prefix: &str,
+        visiting: &mut HashSet<usize>,
+        printed_nodes: &mut HashSet<usize>,
+        output: &mut String,
+        options: &PrettyPrintOptions<EK, EV, T>,
+    ) {
+        let node_guard = match node_idx.read(arena) {
+            Some(guard) => guard,
+            None => return, // Should have been handled before call
+        };
+
+        let children_edges: Vec<_> = node_guard
+            .children
+            .iter()
+            .flat_map(|(ek, dest_map)| {
+                dest_map
+                    .iter()
+                    .map(move |(child_idx, ev)| (ek, ev, *child_idx))
+            })
+            .collect();
+
+        let num_children = children_edges.len();
+        for (i, (ek, ev, child_idx)) in children_edges.iter().enumerate() {
+            let is_last_child = i == num_children - 1;
+            let connector = if is_last_child { "└── " } else { "├── " };
+
+            let mut line = format!("{}{}", prefix, connector);
+            if let Some(edge_str) = (options.format_edge)(node_idx, *child_idx, ek, ev) {
+                line.push_str(&format!("Edge ({}): -> ", edge_str));
+            } else {
+                line.push_str("Edge: -> ");
+            }
+            line.push_str(&format!("Node {}", child_idx.as_usize()));
+
+            let child_guard = match child_idx.read(arena) {
+                Some(g) => g,
+                None => {
+                    line.push_str(" [Invalid Index]");
+                    output.push_str(&line);
+                    output.push_str("\n");
+                    continue;
+                }
+            };
+
+            if options.show_max_depth {
+                line.push_str(&format!(" (max_depth: {})", child_guard.max_depth));
+            }
+            if let Some(node_str) = (options.format_node)(*child_idx, &child_guard.value) {
+                line.push_str(&format!(" {}", node_str));
+            }
+
+            if visiting.contains(&child_idx.as_usize()) {
+                line.push_str(" (Cycle detected)");
+                output.push_str(&line);
+                output.push_str("\n");
+                continue;
+            }
+            if printed_nodes.contains(&child_idx.as_usize()) {
+                line.push_str(" (Shared, already shown)");
+                output.push_str(&line);
+                output.push_str("\n");
+                continue;
+            }
+
+            output.push_str(&line);
+            output.push_str("\n");
+
+            visiting.insert(child_idx.as_usize());
+            printed_nodes.insert(child_idx.as_usize());
+
+            let new_prefix = format!("{}{}", prefix, if is_last_child { "    " } else { "│   " });
+            Self::pretty_print_children_recursive(
+                *child_idx,
+                arena,
+                &new_prefix,
+                visiting,
+                printed_nodes,
+                output,
+                options,
+            );
+
+            visiting.remove(&child_idx.as_usize());
+        }
     }
 }
 
