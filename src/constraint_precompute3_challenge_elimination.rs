@@ -1,5 +1,5 @@
 use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey, IntermediatePrecomputedNodeContents3, StateIDBV, LLMTokenBV};
-use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index};
+use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index, MergeableEdgeValue};
 use crate::tokenizer::TokenizerStateID;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
@@ -54,6 +54,12 @@ impl Display for Intermediate2Trie3EdgeKey {
     }
 }
 
+impl MergeableEdgeValue for LLMTokenBV {
+    fn merge(&mut self, other: Self) {
+        *self |= &other;
+    }
+}
+
 pub type Intermediate2PrecomputeNode3 = Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
 pub type Intermediate2PrecomputeNode3Index = Trie2Index;
 pub type Intermediate2Trie3GodWrapper = GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
@@ -100,8 +106,7 @@ fn convert_to_intermediate2(
                     IntermediateTrie3EdgeKey::CheckLLM(bv) => (Intermediate2Trie3EdgeKey::NoOp, bv.clone()),
                 };
 
-                let mut guard2 = idx2.write(&god2).unwrap();
-                guard2.force_insert_to_node(edge_key2, edge_value2, child2_idx);
+                god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
             }
         }
     }
@@ -144,18 +149,17 @@ fn convert_from_intermediate2(
                     new_node
                 });
 
-                let mut guard1 = idx1.write(&god1).unwrap();
                 if edge_value2.is_all() {
                     let edge_key1 = match edge_key2 {
                         Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
                         Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
                         Intermediate2Trie3EdgeKey::NoOp => IntermediateTrie3EdgeKey::NoOp,
                     };
-                    guard1.force_insert_to_node(edge_key1, (), child1_idx);
+                    god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());
                 } else {
                     match edge_key2 {
                         Intermediate2Trie3EdgeKey::NoOp => {
-                            guard1.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                            god1.insert_edge_simple(idx1, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
                         }
                         _ => {
                             // This case requires inserting an intermediate node.
@@ -167,9 +171,8 @@ fn convert_from_intermediate2(
                                 Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
                                 _ => unreachable!(),
                             };
-                            guard1.force_insert_to_node(edge_key1_op, (), intermediate_node);
-                            let mut inter_guard = intermediate_node.write(&god1).unwrap();
-                            inter_guard.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                            god1.insert_edge_simple(idx1, intermediate_node, edge_key1_op, ());
+                            god1.insert_edge_simple(intermediate_node, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
                         }
                     }
                 }
@@ -282,20 +285,20 @@ pub fn eliminate_pushes_and_pops(
                             let intersection = &s & s_prime;
                             if !intersection.is_empty() {
                                 let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
-                                a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                                god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
                             }
                         }
                         Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
                             if !s.is_disjoint(s_prime) {
-                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, *c_idx);
+                                god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv);
                             }
                         }
                         Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
                             let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
-                            a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                            god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
                         }
                         Intermediate2Trie3EdgeKey::NoOp => {
-                            a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
+                            god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv);
                         },
                     }
                 }

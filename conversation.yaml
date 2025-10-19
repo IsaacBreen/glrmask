@@ -3118,10 +3118,22 @@ local_system:
           let (mut roots2, god2) = convert_to_intermediate2(roots, god);
 
           let mut iteration = 0;
+          let mut prev_num_nodes = usize::MAX;
           loop {
               iteration += 1;
               Trie::gc(&god2, &roots2.values().cloned().collect::<Vec<_>>());
               let all_nodes = Trie::all_nodes(&god2, &roots2.values().cloned().collect::<Vec<_>>());
+              let current_num_nodes = all_nodes.len();
+
+              if iteration > 1 {
+                  assert!(
+                      current_num_nodes <= prev_num_nodes,
+                      "Node count increased in iteration {}. Previous: {}, Current: {}",
+                      iteration, prev_num_nodes, current_num_nodes
+                  );
+              }
+              prev_num_nodes = current_num_nodes;
+
               let mut predecessors: HashMap<Intermediate2PrecomputeNode3Index, Vec<(Intermediate2PrecomputeNode3Index, Intermediate2Trie3EdgeKey, LLMTokenBV)>> = HashMap::new();
               let mut outgoing_push_counts: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
 
@@ -3214,13 +3226,7 @@ local_system:
                                   a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
                               }
                               Intermediate2Trie3EdgeKey::NoOp => {
-                                  if bv_bc.is_all() {
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
-                                  } else {
-                                      let b_prime_idx = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, b_prime_idx);
-                                      b_prime_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), LLMTokenBV::max_ones(), *c_idx);
-                                  }
+                                  a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
                               },
                           }
                       }
@@ -6279,7 +6285,7 @@ local_system:
 
     src/constraint_precompute3_challenge_elimination.rs: |
       use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey, IntermediatePrecomputedNodeContents3, StateIDBV, LLMTokenBV};
-      use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index};
+      use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index, MergeableEdgeValue};
       use crate::tokenizer::TokenizerStateID;
       use std::collections::{BTreeMap, HashMap, HashSet};
       use std::fmt::{self, Display, Formatter};
@@ -6334,6 +6340,12 @@ local_system:
           }
       }
 
+      impl MergeableEdgeValue for LLMTokenBV {
+          fn merge(&mut self, other: Self) {
+              *self |= &other;
+          }
+      }
+
       pub type Intermediate2PrecomputeNode3 = Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
       pub type Intermediate2PrecomputeNode3Index = Trie2Index;
       pub type Intermediate2Trie3GodWrapper = GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
@@ -6380,8 +6392,7 @@ local_system:
                           IntermediateTrie3EdgeKey::CheckLLM(bv) => (Intermediate2Trie3EdgeKey::NoOp, bv.clone()),
                       };
 
-                      let mut guard2 = idx2.write(&god2).unwrap();
-                      guard2.force_insert_to_node(edge_key2, edge_value2, child2_idx);
+                      god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
                   }
               }
           }
@@ -6424,18 +6435,17 @@ local_system:
                           new_node
                       });
 
-                      let mut guard1 = idx1.write(&god1).unwrap();
                       if edge_value2.is_all() {
                           let edge_key1 = match edge_key2 {
                               Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
                               Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
                               Intermediate2Trie3EdgeKey::NoOp => IntermediateTrie3EdgeKey::NoOp,
                           };
-                          guard1.force_insert_to_node(edge_key1, (), child1_idx);
+                          god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());
                       } else {
                           match edge_key2 {
                               Intermediate2Trie3EdgeKey::NoOp => {
-                                  guard1.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                                  god1.insert_edge_simple(idx1, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
                               }
                               _ => {
                                   // This case requires inserting an intermediate node.
@@ -6447,9 +6457,8 @@ local_system:
                                       Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
                                       _ => unreachable!(),
                                   };
-                                  guard1.force_insert_to_node(edge_key1_op, (), intermediate_node);
-                                  let mut inter_guard = intermediate_node.write(&god1).unwrap();
-                                  inter_guard.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+                                  god1.insert_edge_simple(idx1, intermediate_node, edge_key1_op, ());
+                                  god1.insert_edge_simple(intermediate_node, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
                               }
                           }
                       }
@@ -6476,8 +6485,8 @@ local_system:
 
               if iteration > 1 {
                   assert!(
-                      current_num_nodes < prev_num_nodes,
-                      "Node count did not strictly decrease in iteration {}. Previous: {}, Current: {}",
+                      current_num_nodes <= prev_num_nodes,
+                      "Node count increased in iteration {}. Previous: {}, Current: {}",
                       iteration, prev_num_nodes, current_num_nodes
                   );
               }
@@ -6562,26 +6571,20 @@ local_system:
                                   let intersection = &s & s_prime;
                                   if !intersection.is_empty() {
                                       let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                                      god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
                                   }
                               }
                               Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
                                   if !s.is_disjoint(s_prime) {
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, *c_idx);
+                                      god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv);
                                   }
                               }
                               Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
                                   let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
-                                  a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+                                  god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
                               }
                               Intermediate2Trie3EdgeKey::NoOp => {
-                                  if bv_bc.is_all() {
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
-                                  } else {
-                                      let b_prime_idx = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, b_prime_idx);
-                                      b_prime_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), LLMTokenBV::max_ones(), *c_idx);
-                                  }
+                                  god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv);
                               },
                           }
                       }
@@ -6724,7 +6727,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -9874,10 +9877,22 @@ messages:
           let (mut roots2, god2) = convert_to_intermediate2(roots, god);
 
           let mut iteration = 0;
+          let mut prev_num_nodes = usize::MAX;
           loop {
               iteration += 1;
               Trie::gc(&god2, &roots2.values().cloned().collect::<Vec<_>>());
               let all_nodes = Trie::all_nodes(&god2, &roots2.values().cloned().collect::<Vec<_>>());
+              let current_num_nodes = all_nodes.len();
+
+              if iteration > 1 {
+                  assert!(
+                      current_num_nodes <= prev_num_nodes,
+                      "Node count increased in iteration {}. Previous: {}, Current: {}",
+                      iteration, prev_num_nodes, current_num_nodes
+                  );
+              }
+              prev_num_nodes = current_num_nodes;
+
               let mut predecessors: HashMap<Intermediate2PrecomputeNode3Index, Vec<(Intermediate2PrecomputeNode3Index, Intermediate2Trie3EdgeKey, LLMTokenBV)>> = HashMap::new();
               let mut outgoing_push_counts: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
 
@@ -9970,13 +9985,7 @@ messages:
                                   a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
                               }
                               Intermediate2Trie3EdgeKey::NoOp => {
-                                  if bv_bc.is_all() {
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
-                                  } else {
-                                      let b_prime_idx = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                                      a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, b_prime_idx);
-                                      b_prime_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), LLMTokenBV::max_ones(), *c_idx);
-                                  }
+                                  a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
                               },
                           }
                       }
@@ -10113,9 +10122,8 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_challenge_elimination.rs
-  - user: In `eliminate_pushes_and_pops`, the number of nodes left (after garbage
-      collection) should always decrease from iteration to iteration. Assert that
-      this is the case.
+  - user: In `src/constraint_precompute3_challenge_elimination.rs`, rather than `force_insert_to_node`,
+      use `insert_edge_simple`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -10134,79 +10142,167 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      This change introduces an assertion to ensure that the number of reachable nodes in the graph strictly decreases after each iteration of the push/pop elimination loop. This is a strong check for the convergence and correctness of the graph simplification process.
+      Here are the step-by-step instructions to make the requested changes, followed by the git diffs.
 
-      Here are the step-by-step instructions:
+      ### Step-by-step Instructions
 
-      ### `src/constraint_precompute3_challenge_elimination.rs`
+      #### File: `src/constraint_precompute3_challenge_elimination.rs`
 
-      1.  Open the file `src/constraint_precompute3_challenge_elimination.rs`.
-      2.  Locate the `eliminate_pushes_and_pops` function definition (around line 133).
-      3.  Inside this function, initialize a variable `prev_num_nodes` to `usize::MAX` before the `loop` block.
-      4.  Inside the `loop` block, after the `Trie::gc` and `Trie::all_nodes` calls, calculate `current_num_nodes` and insert the assertion logic to check for a strict decrease.
-      5.  Update `prev_num_nodes` with `current_num_nodes` for the next iteration.
+      1.  At the top of the file, modify the `use` statement for `crate::datastructures::trie` to also import `MergeableEdgeValue`:
 
-      Apply the following changes starting around line 136:
+          ```rust
+          use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index, MergeableEdgeValue};
+          ```
 
-      ```rust
-      // src/constraint_precompute3_challenge_elimination.rs
+      2.  After the `impl Display for Intermediate2Trie3EdgeKey` block (around line 51), add an implementation of `MergeableEdgeValue` for `LLMTokenBV`. This will define how edge values are merged when using `insert_edge_simple`.
 
-      pub fn eliminate_pushes_and_pops(
-          roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-          god: &IntermediateTrie3GodWrapper,
-      ) {
-          let (mut roots2, god2) = convert_to_intermediate2(roots, god);
-
-          let mut iteration = 0;
-          let mut prev_num_nodes = usize::MAX; // ADD THIS LINE
-          loop {
-              iteration += 1;
-              Trie::gc(&god2, &roots2.values().cloned().collect::<Vec<_>>());
-              let all_nodes = Trie::all_nodes(&god2, &roots2.values().cloned().collect::<Vec<_>>());
-              let current_num_nodes = all_nodes.len(); // ADD THIS LINE
-
-              if iteration > 1 { // ADD THIS BLOCK
-                  assert!(
-                      current_num_nodes < prev_num_nodes,
-                      "Node count did not strictly decrease in iteration {}. Previous: {}, Current: {}",
-                      iteration, prev_num_nodes, current_num_nodes
-                  );
+          ```rust
+          impl MergeableEdgeValue for LLMTokenBV {
+              fn merge(&mut self, other: Self) {
+                  *self |= &other;
               }
-              prev_num_nodes = current_num_nodes; // ADD THIS LINE
+          }
+          ```
 
-              let mut predecessors: HashMap<Intermediate2PrecomputeNode3Index, Vec<(Intermediate2PrecomputeNode3Index, Intermediate2Trie3EdgeKey, LLMTokenBV)>> = HashMap::new();
-      // ...
-      ```
+      3.  In the `convert_to_intermediate2` function, find the following lines:
 
-      Here are the corresponding git diffs:
+          ```rust
+          let mut guard2 = idx2.write(&god2).unwrap();
+          guard2.force_insert_to_node(edge_key2, edge_value2, child2_idx);
+          ```
+
+          Replace them with a single call to `insert_edge_simple`:
+
+          ```rust
+          god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
+          ```
+
+      4.  In the `convert_from_intermediate2` function, locate and remove this line to release the unnecessary write lock:
+
+          ```rust
+          let mut guard1 = idx1.write(&god1).unwrap();
+          ```
+
+      5.  Still in `convert_from_intermediate2`, replace all calls that used `guard1.force_insert_to_node` with `god1.insert_edge_simple`:
+          *   Change `guard1.force_insert_to_node(edge_key1, (), child1_idx);` to `god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());`
+          *   Change `guard1.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);` to `god1.insert_edge_simple(idx1, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());`
+          *   Replace the two `force_insert_to_node` calls for the intermediate node case with two `insert_edge_simple` calls.
+
+      6.  In the `eliminate_pushes_and_pops` function, inside the `match op` block, replace all four calls to `force_insert_to_node` with `insert_edge_simple`. For example, change:
+
+          ```rust
+          a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+          ```
+
+          to:
+
+          ```rust
+          god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
+          ```
+
+          Apply this pattern to all four occurrences within the `match` statement.
+
+      ### Git Diffs
+
+      Here are the git diffs to apply the changes:
 
       ```diff
       diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
       --- a/src/constraint_precompute3_challenge_elimination.rs
       +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -134,10 +134,20 @@
-           let (mut roots2, god2) = convert_to_intermediate2(roots, god);
+      @@ -1,5 +1,5 @@
+       use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey, IntermediatePrecomputedNodeContents3, StateIDBV, LLMTokenBV};
+      -use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index};
+      +use crate::datastructures::trie::{Trie, GodWrapper, Trie2Index, MergeableEdgeValue};
+       use crate::tokenizer::TokenizerStateID;
+       use std::collections::{BTreeMap, HashMap, HashSet};
+       use std::fmt::{self, Display, Formatter};
+      @@ -51,6 +51,12 @@
+           }
+       }
        
-           let mut iteration = 0;
-      +    let mut prev_num_nodes = usize::MAX;
-           loop {
-               iteration += 1;
-               Trie::gc(&god2, &roots2.values().cloned().collect::<Vec<_>>());
-               let all_nodes = Trie::all_nodes(&god2, &roots2.values().cloned().collect::<Vec<_>>());
-      +        let current_num_nodes = all_nodes.len();
+      +impl MergeableEdgeValue for LLMTokenBV {
+      +    fn merge(&mut self, other: Self) {
+      +        *self |= &other;
+      +    }
+      +}
       +
-      +        if iteration > 1 {
-      +            assert!(
-      +                current_num_nodes < prev_num_nodes,
-      +                "Node count did not strictly decrease in iteration {}. Previous: {}, Current: {}",
-      +                iteration, prev_num_nodes, current_num_nodes
-      +            );
-      +        }
-      +        prev_num_nodes = current_num_nodes;
-      +
-               let mut predecessors: HashMap<Intermediate2PrecomputeNode3Index, Vec<(Intermediate2PrecomputeNode3Index, Intermediate2Trie3EdgeKey, LLMTokenBV)>> = HashMap::new();
-               let mut outgoing_push_counts: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
+       pub type Intermediate2PrecomputeNode3 = Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
+       pub type Intermediate2PrecomputeNode3Index = Trie2Index;
+       pub type Intermediate2Trie3GodWrapper = GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
+      @@ -98,8 +104,7 @@
+                           IntermediateTrie3EdgeKey::CheckLLM(bv) => (Intermediate2Trie3EdgeKey::NoOp, bv.clone()),
+                       };
        
+      -                let mut guard2 = idx2.write(&god2).unwrap();
+      -                guard2.force_insert_to_node(edge_key2, edge_value2, child2_idx);
+      +                god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
+                   }
+               }
+           }
+      @@ -135,29 +140,27 @@
+                           new_node
+                       });
+       
+      -                let mut guard1 = idx1.write(&god1).unwrap();
+                       if edge_value2.is_all() {
+                           let edge_key1 = match edge_key2 {
+                               Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
+                               Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
+                               Intermediate2Trie3EdgeKey::NoOp => IntermediateTrie3EdgeKey::NoOp,
+                           };
+      -                    guard1.force_insert_to_node(edge_key1, (), child1_idx);
+      +                    god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());
+                       } else {
+                           match edge_key2 {
+                               Intermediate2Trie3EdgeKey::NoOp => {
+      -                            guard1.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+      +                            god1.insert_edge_simple(idx1, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
+                               }
+                               _ => {
+                                   // This case requires inserting an intermediate node.
+                                   let intermediate_node = IntermediatePrecomputeNode3Index::new(god1.insert(
+                                       IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())
+                                   ));
+                                   let edge_key1_op = match edge_key2 {
+                                       Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
+                                       Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
+                                       _ => unreachable!(),
+                                   };
+      -                            guard1.force_insert_to_node(edge_key1_op, (), intermediate_node);
+      -                            let mut inter_guard = intermediate_node.write(&god1).unwrap();
+      -                            inter_guard.force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), (), child1_idx);
+      +                            god1.insert_edge_simple(idx1, intermediate_node, edge_key1_op, ());
+      +                            god1.insert_edge_simple(intermediate_node, child1_idx, IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()), ());
+                               }
+                           }
+                       }
+      @@ -263,22 +266,22 @@
+                                   let intersection = &s & s_prime;
+                                   if !intersection.is_empty() {
+                                       let new_edge_key = Intermediate2Trie3EdgeKey::Push(intersection);
+      -                                a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+      +                                god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
+                                   }
+                               }
+                               Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
+                                   if !s.is_disjoint(s_prime) {
+      -                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, *c_idx);
+      +                                god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::NoOp, new_bv);
+                                   }
+                               }
+                               Intermediate2Trie3EdgeKey::Pop(n @ 2.., s_prime) => {
+                                   let new_edge_key = Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone());
+      -                            a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
+      +                            god2.insert_edge_simple(a_idx, *c_idx, new_edge_key, new_bv);
+                               }
+                               Intermediate2Trie3EdgeKey::NoOp => {
+      -                            a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
+      +                            god2.insert_edge_simple(a_idx, *c_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv);
+                               },
+                           }
+                       }
+
       ```
     metadata:
   - user: |
@@ -10218,7 +10314,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
     metadata:
-  - user: 'Changes committed with message: "Assert node count strictly decreases in
-      each push/pop elimination iteration"'
+  - user: 'Changes committed with message: "Refactor: Use insert_edge_simple for edge
+      insertion in push/pop elimination logic"'
     metadata:
 ...
