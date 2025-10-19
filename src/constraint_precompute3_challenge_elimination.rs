@@ -1929,19 +1929,37 @@ mod tests {
         }
 
         let mut current_node = root;
-        for (i, edge) in path.iter().enumerate() {
+        for (i, edge) in path.into_iter().enumerate() { // Changed to into_iter() to consume edge
             let is_last = i == path.len() - 1;
             let content = if is_last {
                 IntermediatePrecomputedNodeContents3::leaf()
             } else {
                 IntermediatePrecomputedNodeContents3::internal()
             };
-            let next_node = god.insert(Trie::new(content)).into();
-            current_node
-                .write(god)
-                .unwrap()
-                .force_insert_to_node(edge.clone(), (), next_node);
-            current_node = next_node;
+
+            match edge {
+                IntermediateTrie3EdgeKey::Pop(k, bv) => { // Handle old Pop(k, bv)
+                    let next_node_check = god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())).into();
+                    current_node
+                        .write(god)
+                        .unwrap()
+                        .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv), (), next_node_check);
+                    let next_node_pop = god.insert(Trie::new(content)).into();
+                    next_node_check
+                        .write(god)
+                        .unwrap()
+                        .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(k), (), next_node_pop);
+                    current_node = next_node_pop;
+                },
+                _ => {
+                    let next_node = god.insert(Trie::new(content)).into();
+                    current_node
+                        .write(god)
+                        .unwrap()
+                        .force_insert_to_node(edge, (), next_node);
+                    current_node = next_node;
+                }
+            }
         }
         root
     }
