@@ -387,12 +387,31 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
         }
     }
 
-    // Extend the pinned set with all direct post-Pop nodes in this subgraph.
-    // Merging across a Pop boundary is not semantics-preserving for the subsequent
-    // push/pop elimination, because it moves the join point relative to Pops.
+    // Extend the pinned set only with "post-Pop join" nodes in this subgraph.
+    // We pin a node if it is the convergence point of multiple Pop flows or
+    // if it mixes Pop and non-Pop predecessors. This preserves Pop join
+    // boundaries for downstream push/pop elimination while still allowing
+    // aggressive sharing elsewhere.
     let mut pinned_ext = pinned.clone();
     for (dst, preds) in &incoming {
-        if preds.iter().any(|(_, ek)| matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _))) {
+        let mut pop_preds: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+        let mut pop_kinds: HashSet<crate::constraint::IntermediateTrie3EdgeKey> = HashSet::new();
+        let mut has_pop = false;
+        let mut has_non_pop = false;
+        for (pred, ek) in preds {
+            match ek {
+                crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _) => {
+                    has_pop = true;
+                    pop_preds.insert(*pred);
+                    pop_kinds.insert(ek.clone());
+                }
+                _ => {
+                    has_non_pop = true;
+                }
+            }
+        }
+        let is_post_pop_join = (has_pop && has_non_pop) || pop_preds.len() >= 2 || pop_kinds.len() >= 2;
+        if is_post_pop_join {
             pinned_ext.insert(*dst);
         }
     }
@@ -691,10 +710,11 @@ pub fn optimize_intermediate_trie3_templates_global(
 
     // A few global passes: compress NoOp chains and merge identical subgraphs across all templates,
     // then prune per template to drop detritus.
-    for _ in 0..3 {
+    for _ in 0..8 {
         let mut changed = false;
-        changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
+        // Merge first to maximize sharing opportunities, then compress, then prune.
         changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
+        changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
         for (s, e) in templates {
             changed |= prune_unproductive_nodes(&[*s], e, god);
         }
