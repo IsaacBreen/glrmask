@@ -346,8 +346,83 @@ pub fn eliminate_pushes_and_pops(
                 }
             }
         } else {
-            // No more nodes to process, optimization is complete.
-            break;
+            // No candidate with "incoming Push" and "no outgoing Push".
+            // Fallback: split a node that has both Push and non-Push outgoing edges
+            // and at least one incoming Push. This creates exactly one new node,
+            // moving all non-Push outgoing edges to it and duplicating all incoming
+            // edges to preserve behavior. Then retry the main loop.
+            let mut split_candidate = None;
+            for &b_idx in &all_nodes {
+                let b_guard = b_idx.read(&god2).unwrap();
+                if b_guard.value.end {
+                    continue;
+                }
+                let mut has_outgoing_push = false;
+                let mut has_outgoing_nonpush = false;
+                for k in b_guard.children().keys() {
+                    match k {
+                        Intermediate2Trie3EdgeKey::Push(_) => has_outgoing_push = true,
+                        _ => has_outgoing_nonpush = true,
+                    }
+                }
+                if !(has_outgoing_push && has_outgoing_nonpush) {
+                    continue;
+                }
+                let has_incoming_push = reverse_adj
+                    .get(&b_idx)
+                    .map_or(false, |incoming| {
+                        incoming
+                            .iter()
+                            .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+                    });
+                if has_incoming_push {
+                    split_candidate = Some(b_idx);
+                    break;
+                }
+            }
+
+            if let Some(b_idx) = split_candidate {
+                // Create the new "non-push" clone node
+                let b_value = b_idx.read(&god2).unwrap().value.clone();
+                let b_np_idx = Intermediate2PrecomputeNode3Index::new(
+                    god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
+                );
+
+                // Move all non-push outgoing edges from b_idx -> (...) to b_np_idx -> (...)
+                let mut to_move: Vec<(
+                    Intermediate2Trie3EdgeKey,
+                    Intermediate2PrecomputeNode3Index,
+                    LLMTokenBV,
+                )> = Vec::new();
+                if let Some(b_guard) = b_idx.read(&god2) {
+                    for (edge_key, dest_map) in b_guard.children() {
+                        if !matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
+                            for (&c_idx, val) in dest_map {
+                                to_move.push((edge_key.clone(), c_idx, val.clone()));
+                            }
+                        }
+                    }
+                }
+                for (k, c_idx, val) in &to_move {
+                    god2.insert_edge_simple(b_np_idx, *c_idx, k.clone(), val.clone());
+                }
+                for (k, c_idx, _) in &to_move {
+                    god2.remove_edge(b_idx, *c_idx, k);
+                }
+
+                // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable
+                if let Some(incoming) = reverse_adj.get(&b_idx) {
+                    for (a_idx, k, val) in incoming {
+                        god2.insert_edge_simple(*a_idx, b_np_idx, k.clone(), val.clone());
+                    }
+                }
+
+                // Now that we've split, try again from the top to pick up a standard candidate.
+                continue;
+            } else {
+                // No more nodes to process and no viable split candidate: stop.
+                break;
+            }
         }
     }
 
