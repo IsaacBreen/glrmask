@@ -1477,6 +1477,7 @@ fn test_constraint_expression_unbalanced_parens2() {
     grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1490,14 +1491,16 @@ fn test_constraint_expression_unbalanced_parens2() {
         token_name_map,
         3,
     );
-    // constraint.dump_precomputed1();
+    constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
+    constraint.dump_precomputed2();
 
     // Initial state and step
     let mut state = constraint.init();
 
     // Commit "(i"
     state.commit_bytes(b"(i");
+    println!("state: {}", state);
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, HybridBitset::from_iter(vec![3]));
