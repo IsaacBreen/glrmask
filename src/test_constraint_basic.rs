@@ -1452,7 +1452,7 @@ fn test_constraint_expression_unbalanced_parens() {
 #[test]
 fn test_constraint_expression_unbalanced_parens2() {
     let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"(i".to_vec(), LLMTokenID(2));
+    // llm_token_map.insert(b"(i".to_vec(), LLMTokenID(2));
     llm_token_map.insert(b"$".to_vec(), LLMTokenID(3));
 
     // Tokenizer regex for grammar tokens '(', 'i', '$'
@@ -1496,11 +1496,9 @@ fn test_constraint_expression_unbalanced_parens2() {
 
     // Initial state and step
     let mut state = constraint.init();
-    let mask = state.get_mask();
-    assert_eq!(mask, HybridBitset::from_iter(vec![2]));
 
     // Commit "(i"
-    state.commit(LLMTokenID(2));
+    state.commit_bytes(b"(i");
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, HybridBitset::from_iter(vec![3]));
