@@ -78,23 +78,25 @@ pub fn optimize_intermediate_trie3_template(
             .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
             .collect();
         // println!("Trie after merging: {}", Trie::pretty_print(&god, roots));
-        println!("Normalized paths before:");
-        for (i, path) in normalized_paths1.iter().enumerate() {
-            print!("  Path {}: [", i + 1);
-            for (i, ek) in path.iter().enumerate() {
-                print!("{}", ek);
-                if i < path.len() - 1 { print!(", "); }
+        if i == 1 {
+            println!("Normalized paths before:");
+            for (i, path) in normalized_paths1.iter().enumerate() {
+                print!("  Path {}: [", i + 1);
+                for (i, ek) in path.iter().enumerate() {
+                    print!("{}", ek);
+                    if i < path.len() - 1 { print!(", "); }
+                }
+                println!("]");
             }
-            println!("]");
-        }
-        println!("Normalized paths after:");
-        for (i, path) in normalized_paths2.iter().enumerate() {
-            print!("  Path {}: [", i + 1);
-            for (i, ek) in path.iter().enumerate() {
-                print!("{}", ek);
-                if i < path.len() - 1 { print!(", "); }
+            println!("Normalized paths after:");
+            for (i, path) in normalized_paths2.iter().enumerate() {
+                print!("  Path {}: [", i + 1);
+                for (i, ek) in path.iter().enumerate() {
+                    print!("{}", ek);
+                    if i < path.len() - 1 { print!(", "); }
+                }
+                println!("]");
             }
-            println!("]");
         }
         assert_eq!(normalized_paths1, normalized_paths2);
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
