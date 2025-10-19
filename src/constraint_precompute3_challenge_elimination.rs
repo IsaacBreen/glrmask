@@ -295,13 +295,7 @@ pub fn eliminate_pushes_and_pops(
                             a_idx.write(&god2).unwrap().force_insert_to_node(new_edge_key, new_bv, *c_idx);
                         }
                         Intermediate2Trie3EdgeKey::NoOp => {
-                            if bv_bc.is_all() {
-                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
-                            } else {
-                                let b_prime_idx = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                                a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::NoOp, new_bv, b_prime_idx);
-                                b_prime_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), LLMTokenBV::max_ones(), *c_idx);
-                            }
+                            a_idx.write(&god2).unwrap().force_insert_to_node(Intermediate2Trie3EdgeKey::Push(s.clone()), new_bv, *c_idx);
                         },
                     }
                 }
