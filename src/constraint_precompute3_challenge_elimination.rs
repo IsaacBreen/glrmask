@@ -878,6 +878,23 @@ fn remove_specific_edge(
     false
 }
 
+/// Returns true if `node` has an immediate Pop(1, B) edge such that B intersects `push_bv`.
+/// In such a case, keeping a BlockedPush rewiring to `node` would leave a Pop reachable
+/// from a Push, which violates the post-elimination invariant. We must favor Cancel instead.
+fn node_has_immediate_matching_pop(
+    god: &IntermediateTrie3GodWrapper,
+    node: IntermediatePrecomputeNode3Index,
+    push_bv: &StateIDBV,
+) -> bool {
+    if let Some(r) = node.read(god) {
+        for (ek, _dsts) in r.children() {
+            if let IntermediateTrie3EdgeKey::Pop(n, pop_bv) = ek {
+                if *n == 1 && !push_bv.is_disjoint(pop_bv) { return true; }
+            }
+        }
+    }
+    false
+}
 /// Traverses the graph from the roots along non-Push edges and removes any Pop edges found.
 /// Such pops would occur on an empty stack and are therefore invalid. Returns the number of
 /// individual edges removed.
@@ -1089,6 +1106,18 @@ fn run_trie_based_elimination(
                     }
                 }
             }
+
+            // Suppress BlockedPush exits that would wire a Push to a node which can immediately
+            // cancel it via Pop(1, B) with intersecting bitsets. Keeping such a push would leave
+            // a Pop reachable from a Push, violating the invariant.
+            let blocked_acyclic_set: BTreeSet<_> = blocked_acyclic_set
+                .into_iter()
+                .filter(|(_llm, exit_push_bv, exit_dst)| !node_has_immediate_matching_pop(god, *exit_dst, exit_push_bv))
+                .collect();
+            let blocked_cyclic_set: BTreeSet<_> = blocked_cyclic_set
+                .into_iter()
+                .filter(|(_llm, exit_push_bv, exit_dst)| !node_has_immediate_matching_pop(god, *exit_dst, exit_push_bv))
+                .collect();
 
             for (llm, cancel_dst) in cancel_set {
                 crate::debug!(5, "[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
