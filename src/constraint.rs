@@ -2164,6 +2164,14 @@ impl GrammarConstraint {
             internal_max_llm_token,
         );
 
+        println!("Precompute3 trie before optimization:");
+        Self::_dump_precomputed3(
+            &precomputed3,
+            &stage_vocab.internal_to_original,
+            &llm_vocab.as_ref().unwrap().llm_token_map,
+            &trie3_god,
+        );
+
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
         optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
