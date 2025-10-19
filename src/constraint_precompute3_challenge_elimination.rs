@@ -251,34 +251,32 @@ pub fn eliminate_pushes_and_pops(
                 Some(v) if !v.is_empty() => v.clone(),
                 _ => continue,
             };
-            if !*pop_memo.get(&b).unwrap_or(&false) {
-                continue;
-            }
 
             // Classify outgoing edges from B.
-            let mut keep_edges: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
-            let mut split_edges: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
+            let mut spliceable_edges: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
+            let mut non_spliceable_edges: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
             if let Some(guard) = b.read(&god2) {
                 for (ek, dm) in guard.children() {
                     for (c, ev) in dm {
                         let on_pop_path = matches!(ek, Intermediate2Trie3EdgeKey::Pop(_, _))
                             || *pop_memo.get(c).unwrap_or(&false);
                         if on_pop_path && !matches!(ek, Intermediate2Trie3EdgeKey::Push(_)) {
-                            split_edges.push((ek.clone(), *c, ev.clone()));
+                            spliceable_edges.push((ek.clone(), *c, ev.clone()));
                         } else {
-                            keep_edges.push((ek.clone(), *c, ev.clone()));
+                            non_spliceable_edges.push((ek.clone(), *c, ev.clone()));
                         }
                     }
                 }
             }
 
-            if split_edges.is_empty() {
+            if spliceable_edges.is_empty() {
                 continue;
             }
             changed = true;
 
-            // Optionally create/reuse a clone that keeps only non-pop-path edges.
-            let clone_idx_opt = if keep_edges.is_empty() {
+            // Create a clone for all non-spliceable edges. This clone represents the
+            // "surface" of B for paths that don't immediately resolve a Push.
+            let clone_idx_opt = if non_spliceable_edges.is_empty() {
                 None
             } else {
                 let clone_idx = *clone_for.entry(b).or_insert_with(|| {
@@ -286,7 +284,7 @@ pub fn eliminate_pushes_and_pops(
                     let new_node = Intermediate2PrecomputeNode3Index::new(
                         god2.insert(Intermediate2PrecomputeNode3::new(b_value))
                     );
-                    for (ek, c, ev) in &keep_edges {
+                    for (ek, c, ev) in &non_spliceable_edges {
                         god2.insert_edge_simple(new_node, *c, ek.clone(), ev.clone());
                     }
                     new_node
@@ -294,17 +292,16 @@ pub fn eliminate_pushes_and_pops(
                 Some(clone_idx)
             };
 
-            // Redirect/remove A --Push(S)--> B to A --Push(S)--> clone (if clone exists).
+            // For each incoming push to B, redirect it to the clone (if it exists)
+            // and splice it with the spliceable edges.
             for (a, s, bv_ab) in &incoming_pushes {
                 god2.remove_edge(*a, b, &Intermediate2Trie3EdgeKey::Push(s.clone()));
                 if let Some(clone_idx) = clone_idx_opt {
                     god2.insert_edge_simple(*a, clone_idx, Intermediate2Trie3EdgeKey::Push(s.clone()), bv_ab.clone());
                 }
-            }
 
-            // Splice compositions for split edges (NoOp/Pop encountered on a pop-path).
-            for (op, c, bv_bc) in &split_edges {
-                for (a, s, bv_ab) in &incoming_pushes {
+                // Splice with spliceable edges
+                for (op, c, bv_bc) in &spliceable_edges {
                     let new_bv = bv_ab & bv_bc;
                     if new_bv.is_empty() { continue; }
                     match op {
@@ -327,13 +324,14 @@ pub fn eliminate_pushes_and_pops(
                                 god2.insert_edge_simple(*a, *c, Intermediate2Trie3EdgeKey::Pop(*n - 1, s_prime.clone()), new_bv.clone());
                             }
                         }
-                        Intermediate2Trie3EdgeKey::Push(_) => { /* not part of split_edges */ }
+                        Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Push edges are not spliceable"),
                     }
                 }
             }
 
-            // Remove split edges from B; keep only the non-pop-path surface.
-            for (op, c, _) in &split_edges {
+            // Remove the now-spliced edges from B. B is now only connected to non-spliceable
+            // edges, but its incoming pushes have been redirected to the clone.
+            for (op, c, _) in &spliceable_edges {
                 god2.remove_edge(b, *c, op);
             }
         }
@@ -522,10 +520,9 @@ mod tests {
         let mut roots = BTreeMap::new();
         roots.insert(TokenizerStateID(0), n(13));
 
-        // This call is expected to fail to eliminate the push->pop sequence
         eliminate_pushes_and_pops(&mut roots, &god);
 
-        // This assertion will then panic, which is expected by the test.
+        // This assertion should now pass.
         assert_no_pops_reachable_from_pushes(&roots, &god);
     }
 
