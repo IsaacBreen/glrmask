@@ -136,6 +136,7 @@ pub fn optimize_intermediate_trie3(
     let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
         .display_edge_keys_only()
         .omit_nodes()
+        .omit_depth()
         ;
     println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
 
