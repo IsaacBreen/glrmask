@@ -1,5 +1,4 @@
 // src/constraint_precompute3_intermediate_utils.rs
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use crate::constraint::{
     IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
     IntermediateTrie3GodWrapper, LLMTokenBV,
@@ -7,8 +6,7 @@ use crate::constraint::{
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
-
-const MAX_PATH_LEN: usize = 10; // Increased for complex test cases
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -42,74 +40,19 @@ pub fn optimize_intermediate_trie3_template(
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    use std::collections::HashSet;
     let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
     pinned.insert(*start_node);
     pinned.insert(*end_node);
 
-    for i in 0..3 {
+    for _ in 0..3 {
         let mut changed = false;
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
         changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
-        let roots = &[*start_node];
-        // let normalized_paths1: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
-        //     &god,
-        //     roots,
-        //     |idx, n| idx == *end_node,
-        //     |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
-        //     MAX_PATH_LEN,
-        // )
-        //     .into_iter()
-        //     .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-        //     .collect();
-        // println!("Iteration {}", i);
-        // println!("Has cycle? {}", Trie::has_cycle(&god, roots.clone()));
-        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-        //     .display_edge_keys_only()
-        //     .omit_nodes()
-        //     .omit_depth()
-        //     ;
-        // println!("Trie before merging:");
-        // println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
-        // if !Trie::has_cycle(&god, roots.clone()) {
-        //     continue;
-        // }
         changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
-        // let normalized_paths2: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
-        //     &god,
-        //     roots,
-        //     |idx, n| idx == *end_node,
-        //     |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
-        //     MAX_PATH_LEN,
-        // )
-        //     .into_iter()
-        //     .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-        //     .collect();
-        // println!("Trie after merging:");
-        // println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
-        // if i == 0 {
-        //     println!("Normalized paths before:");
-        //     for (i, path) in normalized_paths1.iter().enumerate() {
-        //         print!("  Path {}: [", i + 1);
-        //         for (i, ek) in path.iter().enumerate() {
-        //             print!("{}", ek);
-        //             if i < path.len() - 1 { print!(", "); }
-        //         }
-        //         println!("]");
-        //     }
-        //     println!("Normalized paths after:");
-        //     for (i, path) in normalized_paths2.iter().enumerate() {
-        //         print!("  Path {}: [", i + 1);
-        //         for (i, ek) in path.iter().enumerate() {
-        //             print!("{}", ek);
-        //             if i < path.len() - 1 { print!(", "); }
-        //         }
-        //         println!("]");
-        //     }
-        // }
-        // assert_eq!(normalized_paths1, normalized_paths2);
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
 }
 
@@ -118,35 +61,6 @@ pub fn optimize_intermediate_trie3(
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    // let normalized_paths1: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
-    //     &god,
-    //     roots,
-    //     |idx, n| idx == *end_node,
-    //     |ek, _, _| !matches!(ek, IntermediateTrie3EdgeKey::NoOp | IntermediateTrie3EdgeKey::CheckLLM(_)),
-    //     MAX_PATH_LEN,
-    // )
-    //     .into_iter()
-    //     .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
-    //     .collect();
-    // println!("Has cycle? {}", Trie::has_cycle(&god, roots.iter().cloned()));
-    // println!("Normalized paths before optimization:");
-    // for (i, path) in normalized_paths1.iter().enumerate() {
-    //     print!("  Path {}: [", i + 1);
-    //     for (i, ek) in path.iter().enumerate() {
-    //         print!("{}", ek);
-    //         if i < path.len() - 1 { print!(", "); }
-    //     }
-    //     println!("]");
-    // }
-    // println!("Trie before normalization:");
-    // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-    //     .display_edge_keys_only()
-    //     .omit_nodes()
-    //     .omit_depth()
-    //     ;
-    // println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
-    //
-    // return;
     if is_debug_level_enabled(2) {
         let mut stats = crate::constraint_extra::PrecomputeStats::default();
         crate::constraint_extra::calculate_intermediate_stats3(roots, &mut stats, god);
@@ -174,7 +88,8 @@ fn prune_unproductive_nodes(
     let all_nodes_in_subgraph: HashSet<_> = all_nodes_vec.into_iter().collect();
 
     // Build reverse adjacency map for the subgraph
-    let mut incoming: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
+    let mut incoming: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> =
+        HashMap::new();
     for src in &all_nodes_in_subgraph {
         if let Some(g) = src.read(god) {
             for (_ek, dm) in g.children() {
@@ -207,8 +122,7 @@ fn prune_unproductive_nodes(
         }
     }
 
-    let prunable_count = all_nodes_in_subgraph.len() - productive.len();
-    if prunable_count == 0 {
+    if all_nodes_in_subgraph.len() == productive.len() {
         return false;
     }
 
@@ -234,25 +148,26 @@ fn prune_unproductive_nodes(
     changed
 }
 
-// Compress nodes whose outgoing edges are all NoOp by bypassing them.
-// Pinned nodes are never removed (e.g., template start/end).
+/// Compresses nodes whose outgoing edges are all NoOp by bypassing them.
+/// Pinned nodes are never removed (e.g., template start/end).
 fn compress_noop_only_nodes(
     start_nodes: &[IntermediatePrecomputeNode3Index],
-    pinned: &std::collections::HashSet<IntermediatePrecomputeNode3Index>,
+    pinned: &HashSet<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
-    use std::collections::HashMap;
-
     let all_nodes_vec = Trie::all_nodes(god, start_nodes);
     if all_nodes_vec.is_empty() {
         return false;
     }
-    let all_nodes_in_subgraph: std::collections::HashSet<_> = all_nodes_vec.into_iter().collect();
+    let all_nodes_in_subgraph: HashSet<_> = all_nodes_vec.into_iter().collect();
 
     // Build incoming map with edge keys
     let mut incoming: HashMap<
         IntermediatePrecomputeNode3Index,
-        Vec<(IntermediatePrecomputeNode3Index, crate::constraint::IntermediateTrie3EdgeKey)>
+        Vec<(
+            IntermediatePrecomputeNode3Index,
+            crate::constraint::IntermediateTrie3EdgeKey,
+        )>,
     > = HashMap::new();
 
     for src in &all_nodes_in_subgraph {
@@ -260,7 +175,10 @@ fn compress_noop_only_nodes(
             for (ek, dm) in g.children() {
                 for (dst, _) in dm {
                     if all_nodes_in_subgraph.contains(dst) {
-                        incoming.entry(*dst).or_default().push((*src, ek.clone()));
+                        incoming
+                            .entry(*dst)
+                            .or_default()
+                            .push((*src, ek.clone()));
                     }
                 }
             }
@@ -270,7 +188,9 @@ fn compress_noop_only_nodes(
     // Identify compressible nodes: non-pinned, non-end, and all outgoing edges are NoOp
     let mut compressible: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
     for n in &all_nodes_in_subgraph {
-        if pinned.contains(n) { continue; }
+        if pinned.contains(n) {
+            continue;
+        }
         if let Some(g) = n.read(god) {
             if g.value.end {
                 continue;
@@ -304,7 +224,7 @@ fn compress_noop_only_nodes(
         let noop_dests: Vec<IntermediatePrecomputeNode3Index> = if let Some(g) = n.read(god) {
             g.children()
                 .get(&crate::constraint::IntermediateTrie3EdgeKey::NoOp)
-                .map(|dm| dm.keys().cloned().collect::<Vec<_>>())
+                .map(|dm| dm.keys().cloned().collect())
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -340,32 +260,40 @@ struct NodeSignature {
     edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)>,
 }
 
-// Merge structurally equivalent nodes within the reachable subgraph, except pinned nodes.
-// Works across multiple roots if provided.
+/// Merges structurally equivalent nodes within the reachable subgraph, except pinned nodes.
+/// Works across multiple roots if provided.
 pub(crate) fn structural_merge_nodes_in_subgraph(
     start_nodes: &[IntermediatePrecomputeNode3Index],
-    pinned: &std::collections::HashSet<IntermediatePrecomputeNode3Index>,
+    pinned: &HashSet<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
-    use std::collections::{HashMap, VecDeque};
-
     let all_nodes_vec = Trie::all_nodes(god, start_nodes);
     if all_nodes_vec.is_empty() {
         return false;
     }
-    let all_nodes_in_subgraph: std::collections::HashSet<_> = all_nodes_vec.clone().into_iter().collect();
+    let all_nodes_in_subgraph: HashSet<_> = all_nodes_vec.into_iter().collect();
 
     // Snapshot outgoing children for each node within the subgraph for stable iteration
     let mut outgoing: HashMap<
         IntermediatePrecomputeNode3Index,
-        Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<IntermediatePrecomputeNode3Index>)>
+        Vec<(
+            crate::constraint::IntermediateTrie3EdgeKey,
+            Vec<IntermediatePrecomputeNode3Index>,
+        )>,
     > = HashMap::new();
 
     for n in &all_nodes_in_subgraph {
         if let Some(g) = n.read(god) {
-            let mut edges: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<IntermediatePrecomputeNode3Index>)> = Vec::new();
+            let mut edges: Vec<(
+                crate::constraint::IntermediateTrie3EdgeKey,
+                Vec<IntermediatePrecomputeNode3Index>,
+            )> = Vec::new();
             for (ek, dm) in g.children() {
-                let mut kids: Vec<_> = dm.keys().cloned().filter(|k| all_nodes_in_subgraph.contains(k)).collect();
+                let mut kids: Vec<_> = dm
+                    .keys()
+                    .cloned()
+                    .filter(|k| all_nodes_in_subgraph.contains(k))
+                    .collect();
                 kids.sort(); // ensure deterministic order of children
                 edges.push((ek.clone(), kids));
             }
@@ -377,12 +305,18 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     // Build incoming (pred, edge_key) list for rewrites
     let mut incoming: HashMap<
         IntermediatePrecomputeNode3Index,
-        Vec<(IntermediatePrecomputeNode3Index, crate::constraint::IntermediateTrie3EdgeKey)>
+        Vec<(
+            IntermediatePrecomputeNode3Index,
+            crate::constraint::IntermediateTrie3EdgeKey,
+        )>,
     > = HashMap::new();
     for (src, edges) in &outgoing {
         for (ek, kids) in edges {
             for k in kids {
-                incoming.entry(*k).or_default().push((*src, ek.clone()));
+                incoming
+                    .entry(*k)
+                    .or_default()
+                    .push((*src, ek.clone()));
             }
         }
     }
@@ -392,7 +326,10 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     // push/pop elimination, because it moves the join point relative to Pops.
     let mut pinned_ext = pinned.clone();
     for (dst, preds) in &incoming {
-        if preds.iter().any(|(_, ek)| matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _))) {
+        if preds
+            .iter()
+            .any(|(_, ek)| matches!(ek, crate::constraint::IntermediateTrie3EdgeKey::Pop(_, _)))
+        {
             pinned_ext.insert(*dst);
         }
     }
@@ -403,32 +340,48 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
 
     // Seed: base color by end flag and out-degree patterns only (ignore incoming context).
     for n in &all_nodes_in_subgraph {
-        let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
-        let out_deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing.get(n)
+        let end_flag = if let Some(g) = n.read(god) {
+            g.value.end
+        } else {
+            false
+        };
+        let out_deg_summary: Vec<(crate::constraint::IntermediateTrie3EdgeKey, usize)> = outgoing
+            .get(n)
             .map(|v| v.iter().map(|(ek, kids)| (ek.clone(), kids.len())).collect())
             .unwrap_or_default();
-        let mut out_sig_part: Vec<_> = out_deg_summary.into_iter().map(|(ek, cnt)| (ek, vec![cnt as u64])).collect();
+        let mut out_sig_part: Vec<_> = out_deg_summary
+            .into_iter()
+            .map(|(ek, cnt)| (ek, vec![cnt as u64]))
+            .collect();
         out_sig_part.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let sig = NodeSignature { end: end_flag, edges: out_sig_part };
+        let sig = NodeSignature {
+            end: end_flag,
+            edges: out_sig_part,
+        };
         let len = next_color.len();
         let id = *next_color.entry(sig).or_insert(len as u64 + 1);
         color.insert(*n, id);
     }
 
     // Refine up to a bounded number of iterations or until convergence
-    let max_iters = 16;
-    for _ in 0..max_iters {
+    for _ in 0..16 {
         let mut changed = false;
         let mut interner: HashMap<NodeSignature, u64> = HashMap::new();
         let mut new_color: HashMap<IntermediatePrecomputeNode3Index, u64> = HashMap::new();
 
         for n in &all_nodes_in_subgraph {
-            let end_flag = if let Some(g) = n.read(god) { g.value.end } else { false };
-            let mut edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> = Vec::new();
+            let end_flag = if let Some(g) = n.read(god) {
+                g.value.end
+            } else {
+                false
+            };
+            let mut edges_sig: Vec<(crate::constraint::IntermediateTrie3EdgeKey, Vec<u64>)> =
+                Vec::new();
             if let Some(edges) = outgoing.get(n) {
                 for (ek, kids) in edges {
-                    let mut kid_colors: Vec<u64> = kids.iter().map(|k| *color.get(k).unwrap_or(&0)).collect();
+                    let mut kid_colors: Vec<u64> =
+                        kids.iter().map(|k| *color.get(k).unwrap_or(&0)).collect();
                     kid_colors.sort_unstable();
                     edges_sig.push((ek.clone(), kid_colors));
                 }
@@ -436,7 +389,10 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
             }
 
             // Ignore incoming context for equivalence; only outgoing structure + end flag matters.
-            let sig = NodeSignature { end: end_flag, edges: edges_sig };
+            let sig = NodeSignature {
+                end: end_flag,
+                edges: edges_sig,
+            };
             let len = interner.len();
             let id = *interner.entry(sig).or_insert(len as u64 + 1);
             if color.get(n).copied().unwrap_or(0) != id {
@@ -460,54 +416,70 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     let mut any_changed = false;
 
     // Helper: reachability check within the current subgraph snapshot, memoized.
-    let mut reach_memo: HashMap<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index), bool> = HashMap::new();
-    let mut is_reachable = |src: IntermediatePrecomputeNode3Index, dst: IntermediatePrecomputeNode3Index| -> bool {
-        if src == dst {
-            return true;
-        }
-        if let Some(&cached) = reach_memo.get(&(src, dst)) {
-            return cached;
-        }
-        let mut found = false;
-        let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-        let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
-        visited.insert(src);
-        q.push_back(src);
-        while let Some(n) = q.pop_front() {
-            if let Some(edges) = outgoing.get(&n) {
-                'edge_loop: for (_ek, kids) in edges {
-                    for k in kids {
-                        if *k == dst {
-                            found = true;
-                            break 'edge_loop;
-                        }
-                        if visited.insert(*k) {
-                            q.push_back(*k);
+    let mut reach_memo: HashMap<
+        (
+            IntermediatePrecomputeNode3Index,
+            IntermediatePrecomputeNode3Index,
+        ),
+        bool,
+    > = HashMap::new();
+    let mut is_reachable =
+        |src: IntermediatePrecomputeNode3Index, dst: IntermediatePrecomputeNode3Index| -> bool {
+            if src == dst {
+                return true;
+            }
+            if let Some(&cached) = reach_memo.get(&(src, dst)) {
+                return cached;
+            }
+            let mut found = false;
+            let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+            let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
+            visited.insert(src);
+            q.push_back(src);
+            while let Some(n) = q.pop_front() {
+                if let Some(edges) = outgoing.get(&n) {
+                    'edge_loop: for (_ek, kids) in edges {
+                        for k in kids {
+                            if *k == dst {
+                                found = true;
+                                break 'edge_loop;
+                            }
+                            if visited.insert(*k) {
+                                q.push_back(*k);
+                            }
                         }
                     }
                 }
+                if found {
+                    break;
+                }
             }
-            if found {
-                break;
-            }
-        }
-        reach_memo.insert((src, dst), found);
-        found
-    };
+            reach_memo.insert((src, dst), found);
+            found
+        };
 
     // Build representative map that respects pinned nodes and avoids merging nodes
     // that are reachable from one another (in either direction).
     // - All pinned nodes map to themselves (never merged).
     // - Non-pinned nodes: greedily merge into a canonical only if they are pairwise
     //   non-reachable with that canonical (prevents creating self-loops and losing paths).
-    let mut rep: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = HashMap::new();
+    let mut rep: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
+        HashMap::new();
     let mut victims: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
     for (_c, nodes) in groups {
         // Partition by pinned status
-        let mut non_pinned: Vec<_> = nodes.iter().cloned().filter(|n| !pinned_ext.contains(n)).collect();
-        let mut pinned_nodes: Vec<_> = nodes.iter().cloned().filter(|n| pinned_ext.contains(n)).collect();
-        non_pinned.sort();    // deterministic order
-        pinned_nodes.sort();  // deterministic order
+        let mut non_pinned: Vec<_> = nodes
+            .iter()
+            .cloned()
+            .filter(|n| !pinned_ext.contains(n))
+            .collect();
+        let mut pinned_nodes: Vec<_> = nodes
+            .iter()
+            .cloned()
+            .filter(|n| pinned_ext.contains(n))
+            .collect();
+        non_pinned.sort(); // deterministic order
+        pinned_nodes.sort(); // deterministic order
 
         // Pinned nodes are always their own representative
         for p in pinned_nodes {
@@ -535,16 +507,24 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     // Union outgoing edges from all nodes into their representative, mapping destinations to representatives.
     // Do this only for edges within the reachable subgraph snapshot.
     let mut to_add: HashMap<
-        (IntermediatePrecomputeNode3Index, crate::constraint::IntermediateTrie3EdgeKey),
-        HashSet<IntermediatePrecomputeNode3Index>
+        (
+            IntermediatePrecomputeNode3Index,
+            crate::constraint::IntermediateTrie3EdgeKey,
+        ),
+        HashSet<IntermediatePrecomputeNode3Index>,
     > = HashMap::new();
     for (src, edges) in &outgoing {
         let rep_src = rep.get(src).copied().unwrap_or(*src);
         for (ek, kids) in edges {
             for dst in kids {
                 let rep_dst = rep.get(dst).copied().unwrap_or(*dst);
-                if all_nodes_in_subgraph.contains(&rep_src) && all_nodes_in_subgraph.contains(&rep_dst) {
-                    to_add.entry((rep_src, ek.clone())).or_default().insert(rep_dst);
+                if all_nodes_in_subgraph.contains(&rep_src)
+                    && all_nodes_in_subgraph.contains(&rep_dst)
+                {
+                    to_add
+                        .entry((rep_src, ek.clone()))
+                        .or_default()
+                        .insert(rep_dst);
                 }
             }
         }
@@ -562,12 +542,16 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
     }
 
     // Retarget representative nodes' existing edges to point to representatives (within subgraph).
-    let canonicals_set: HashSet<IntermediatePrecomputeNode3Index> = rep.values().copied().collect();
+    let canonicals_set: HashSet<IntermediatePrecomputeNode3Index> =
+        rep.values().copied().collect();
     for src_rep in canonicals_set {
         if let Some(g) = src_rep.read(god) {
             let mut moves: HashMap<
                 crate::constraint::IntermediateTrie3EdgeKey,
-                Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>
+                Vec<(
+                    IntermediatePrecomputeNode3Index,
+                    IntermediatePrecomputeNode3Index,
+                )>,
             > = HashMap::new();
             for (ek, dm) in g.children() {
                 for (dst, _) in dm {
@@ -592,7 +576,9 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
                             dest_map.insert(new, ());
                             local_changed = true;
                         }
-                        if local_changed { any_changed = true; }
+                        if local_changed {
+                            any_changed = true;
+                        }
                     }
                 }
             }
@@ -620,11 +606,16 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
 }
 
 fn compute_and_print_template_stats(
-    templates: &[(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)],
+    templates: &[(
+        IntermediatePrecomputeNode3Index,
+        IntermediatePrecomputeNode3Index,
+    )],
     god: &IntermediateTrie3GodWrapper,
     phase: &str,
 ) {
-    if !is_debug_level_enabled(2) { return; }
+    if !is_debug_level_enabled(2) {
+        return;
+    }
 
     let mut total_nodes_sum = 0; // Sum of nodes in each template if treated separately
     let mut union_nodes: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
@@ -664,26 +655,39 @@ fn compute_and_print_template_stats(
     println!("\n--- Global Template Stats ({}) ---", phase);
     println!("  Total templates: {}", templates.len());
     println!("  Sum of nodes (if unshared): {}", total_nodes_sum);
-    println!("  Unique nodes across all templates: {}", unique_nodes_count);
+    println!(
+        "  Unique nodes across all templates: {}",
+        unique_nodes_count
+    );
     println!("  Total edges across all templates: {}", total_edges);
-    println!("  Nodes shared by >= 2 templates: {} ({:.1}%)", shared_nodes_count, shared_pct);
-    println!("  Sharing factor (sum_nodes / unique_nodes): {:.2}x", sharing_factor);
+    println!(
+        "  Nodes shared by >= 2 templates: {} ({:.1}%)",
+        shared_nodes_count, shared_pct
+    );
+    println!(
+        "  Sharing factor (sum_nodes / unique_nodes): {:.2}x",
+        sharing_factor
+    );
     println!("--------------------------------------------");
 }
 
-// Run a global optimization across all per-terminal templates.
-// Pins all (start,end) nodes to keep external references valid.
+/// Runs a global optimization across all per-terminal templates.
+/// Pins all (start,end) nodes to keep external references valid.
 pub fn optimize_intermediate_trie3_templates_global(
-    templates: &[(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)],
+    templates: &[(
+        IntermediatePrecomputeNode3Index,
+        IntermediatePrecomputeNode3Index,
+    )],
     god: &IntermediateTrie3GodWrapper,
 ) {
-    // return;
-    if templates.is_empty() { return; }
+    if templates.is_empty() {
+        return;
+    }
 
     compute_and_print_template_stats(templates, god, "Before Optimization");
 
     let start_nodes: Vec<_> = templates.iter().map(|(s, _)| *s).collect();
-    let mut pinned: std::collections::HashSet<IntermediatePrecomputeNode3Index> = std::collections::HashSet::new();
+    let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
     for (s, e) in templates {
         pinned.insert(*s);
         pinned.insert(*e);
@@ -709,7 +713,9 @@ pub fn optimize_intermediate_trie3_templates_global(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constraint::{IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, StateIDBV};
+    use crate::constraint::{
+        IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, StateIDBV,
+    };
     use crate::datastructures::trie::Trie2Index;
     use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -728,18 +734,28 @@ mod tests {
             nodes.insert(i, Trie2Index::from(god.insert(Trie::new(content))));
         }
 
-        let mut bv0 = StateIDBV::zeros(); bv0.insert(0);
-        let mut bv1 = StateIDBV::zeros(); bv1.insert(1);
-        let mut bv2 = StateIDBV::zeros(); bv2.insert(2);
-        let mut bv3 = StateIDBV::zeros(); bv3.insert(3);
-        let mut bv4 = StateIDBV::zeros(); bv4.insert(4);
-        let mut bv5 = StateIDBV::zeros(); bv5.insert(5);
-        let mut bv6 = StateIDBV::zeros(); bv6.insert(6);
+        let mut bv0 = StateIDBV::zeros();
+        bv0.insert(0);
+        let mut bv1 = StateIDBV::zeros();
+        bv1.insert(1);
+        let mut bv2 = StateIDBV::zeros();
+        bv2.insert(2);
+        let mut bv3 = StateIDBV::zeros();
+        bv3.insert(3);
+        let mut bv4 = StateIDBV::zeros();
+        bv4.insert(4);
+        let mut bv5 = StateIDBV::zeros();
+        bv5.insert(5);
+        let mut bv6 = StateIDBV::zeros();
+        bv6.insert(6);
         let bv_max = StateIDBV::max_ones();
 
         // Helper to add edges
         let mut add_edge = |src: usize, ek: IntermediateTrie3EdgeKey, dst: usize| {
-            nodes[&src].write(&god).unwrap().force_insert_to_node(ek, (), nodes[&dst]);
+            nodes[&src]
+                .write(&god)
+                .unwrap()
+                .force_insert_to_node(ek, (), nodes[&dst]);
         };
 
         // Reconstruct graph from log
@@ -769,12 +785,29 @@ mod tests {
         let end_node = nodes[&42];
         let roots = &[start_node];
 
-        let paths_before: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&god, roots, |idx, _n| idx == end_node).into_iter().map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect())).collect();
+        let paths_before: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(
+            &god,
+            roots,
+            |idx, _n| idx == end_node,
+        )
+        .into_iter()
+        .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+        .collect();
+
         let mut pinned = HashSet::new();
         pinned.insert(start_node);
         pinned.insert(end_node);
         structural_merge_nodes_in_subgraph(roots, &pinned, &god);
-        let paths_after: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(&god, roots, |idx, _n| idx == end_node).into_iter().map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect())).collect();
+
+        let paths_after: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths(
+            &god,
+            roots,
+            |idx, _n| idx == end_node,
+        )
+        .into_iter()
+        .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
+        .collect();
+
         assert_eq!(paths_before, paths_after);
     }
 }
