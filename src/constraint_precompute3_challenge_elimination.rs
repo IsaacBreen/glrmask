@@ -967,6 +967,14 @@ fn run_trie_based_elimination(
             BTreeMap<LLMTokenBV, IntermediatePrecomputeNode3Index>,
         > = BTreeMap::new();
 
+        // For cyclic blocked exits, compress many push fanouts into a single push to a "gate" node,
+        // then from the gate emit NoOps to each blocked node. This drastically reduces the number
+        // of new Push edges without changing path semantics.
+        let mut per_src_cyclic_gate_cache: BTreeMap<
+            IntermediatePrecomputeNode3Index,
+            BTreeMap<(LLMTokenBV, StateIDBV, usize), IntermediatePrecomputeNode3Index>,
+        > = BTreeMap::new();
+
         // Cache exits per (dst, push_bv) to avoid repeated BFS work in this round.
         let mut exit_cache: BTreeMap<(usize, StateIDBV), Vec<Exit>> = BTreeMap::new();
 
@@ -1041,7 +1049,7 @@ fn run_trie_based_elimination(
             // - Always rewire Cancel/Degrade.
             // - Partition BlockedPush into acyclic vs cyclic, but rewire BOTH kinds to ensure
             //   no Pop edges remain reachable from any Push (even through cycles).
-            let cache = per_src_agg_cache
+            let llm_agg_cache = per_src_agg_cache
                 .entry(src)
                 .or_insert_with(BTreeMap::new);
 
@@ -1070,12 +1078,12 @@ fn run_trie_based_elimination(
 
             for (llm, cancel_dst) in cancel_set {
                 crate::debug!(5, "[challenge_elim]    - Applying Cancel exit to {} via LLM {:?}", cancel_dst, llm);
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                let agg = get_or_create_aggregator_node(src, &llm, god, llm_agg_cache);
                 god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
             }
             for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
                 crate::debug!(5, "[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                let agg = get_or_create_aggregator_node(src, &llm, god, llm_agg_cache);
                 god.insert_edge_simple(
                     agg,
                     degrade_dst,
@@ -1084,13 +1092,19 @@ fn run_trie_based_elimination(
                 );
             }
 
-            // Rewire ALL BlockedPush exits (acyclic and cyclic alike).
+            // Rewire BlockedPush exits:
+            // - Acyclic: keep as before (direct Push to each exit).
+            // - Cyclic: compress many exits into a single Push to a "gate" node,
+            //           with NoOp edges from the gate to each exit.
+            //
+            // This avoids exploding the number of Push edges in cycles while preserving
+            // exact path semantics (gate -> NoOp -> exit normalizes to the original rewiring).
             for (llm, exit_push_bv, exit_dst) in blocked_acyclic_set {
                 crate::debug!(5,
                     "[challenge_elim]      - Rewiring BlockedPush (acyclic) to {}, push_bv: {:?}, llm: {:?}",
                     exit_dst, exit_push_bv, llm
                 );
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
+                let agg = get_or_create_aggregator_node(src, &llm, god, llm_agg_cache);
                 god.insert_edge_simple(
                     agg,
                     exit_dst,
@@ -1098,18 +1112,58 @@ fn run_trie_based_elimination(
                     (),
                 );
             }
-            for (llm, exit_push_bv, exit_dst) in blocked_cyclic_set {
-                crate::debug!(5,
-                    "[challenge_elim]      - Rewiring BlockedPush (cyclic) to {}, push_bv: {:?}, llm: {:?}",
-                    exit_dst, exit_push_bv, llm
-                );
-                let agg = get_or_create_aggregator_node(src, &llm, god, cache);
-                god.insert_edge_simple(
-                    agg,
-                    exit_dst,
-                    IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
-                    (),
-                );
+            if !blocked_cyclic_set.is_empty() {
+                // Group cyclic blocked exits by (llm, push_bv) to create exactly one Push per group.
+                use std::collections::BTreeMap as BBTreeMap;
+                let mut grouped: BBTreeMap<(LLMTokenBV, StateIDBV), Vec<IntermediatePrecomputeNode3Index>> = BBTreeMap::new();
+                for (llm, exit_push_bv, exit_dst) in blocked_cyclic_set {
+                    grouped.entry((llm.clone(), exit_push_bv.clone()))
+                        .or_insert_with(Vec::new)
+                        .push(exit_dst);
+                }
+                for ((llm, exit_push_bv), exits) in grouped {
+                    crate::debug!(5,
+                        "[challenge_elim]      - Rewiring BlockedPush (cyclic, grouped) for llm: {:?}, push_bv: {:?} with {} exits",
+                        llm, exit_push_bv, exits.len()
+                    );
+                    let agg = get_or_create_aggregator_node(src, &llm, god, llm_agg_cache);
+
+                    // Get or create a gate node per (src, llm, push_bv, original-dst).
+                    // original-dst is the 'dst' variable from the push edge we are processing.
+                    let gate_cache = per_src_cyclic_gate_cache
+                        .entry(src)
+                        .or_insert_with(BTreeMap::new);
+                    let gate_key = (llm.clone(), exit_push_bv.clone(), dst.as_usize());
+                    let gate = match gate_cache.get(&gate_key) {
+                        Some(idx) => *idx,
+                        None => {
+                            let g: IntermediatePrecomputeNode3Index = god
+                                .insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))
+                                .into();
+                            gate_cache.insert(gate_key.clone(), g);
+                            g
+                        }
+                    };
+
+                    // Ensure the Push from aggregator to the gate exists (single Push per group).
+                    god.insert_edge_simple(
+                        agg,
+                        gate,
+                        IntermediateTrie3EdgeKey::Push(exit_push_bv.clone()),
+                        (),
+                    );
+
+                    // From the gate, add NoOp fanout to each blocked cyclic exit.
+                    // normalize_path will remove these NoOps; this is purely structural.
+                    for exit_dst in exits {
+                        god.insert_edge_simple(
+                            gate,
+                            exit_dst,
+                            IntermediateTrie3EdgeKey::NoOp,
+                            (),
+                        );
+                    }
+                }
             }
             // Remove the original push edge; rewriting is complete.
             crate::debug!(5,
