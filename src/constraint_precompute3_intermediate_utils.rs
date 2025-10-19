@@ -80,11 +80,21 @@ pub fn optimize_intermediate_trie3_template(
         // println!("Trie after merging: {}", Trie::pretty_print(&god, roots));
         println!("Normalized paths before:");
         for (i, path) in normalized_paths1.iter().enumerate() {
-            println!("  Path {}: {:?}", i + 1, path);
+            print!("  Path {}: [", i + 1);
+            for (i, ek) in path.iter().enumerate() {
+                print!("{}", ek);
+                if i < path.len() - 1 { print!(", "); }
+            }
+            println!("]");
         }
         println!("Normalized paths after:");
         for (i, path) in normalized_paths2.iter().enumerate() {
-            println!("  Path {}: {:?}", i + 1, path);
+            print!("  Path {}: [", i + 1);
+            for (i, ek) in path.iter().enumerate() {
+                print!("{}", ek);
+                if i < path.len() - 1 { print!(", "); }
+            }
+            println!("]");
         }
         assert_eq!(normalized_paths1, normalized_paths2);
         changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
