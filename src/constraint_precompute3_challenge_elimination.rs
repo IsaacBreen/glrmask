@@ -336,16 +336,9 @@ pub fn eliminate_pushes_and_pops(
                     }
 
                     let new_key_opt = match op_key {
-                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
-                            let new_s = s & s_prime;
-                            (!new_s.is_empty()).then_some(Intermediate2Trie3EdgeKey::Push(new_s))
-                        }
-                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
-                            (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp)
-                        }
-                        Intermediate2Trie3EdgeKey::Pop(n, s_prime) => {
-                            Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone()))
-                        }
+                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
+                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
+                        Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
                         Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
                         Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
                     };
