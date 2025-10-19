@@ -66,6 +66,9 @@ pub fn optimize_intermediate_trie3_template(
         println!("Iteration {}", i);
         println!("Has cycle? {}", Trie::has_cycle(&god, roots.clone()));
         // println!("Trie before merging: {}", Trie::pretty_print(&god, roots));
+        if !Trie::has_cycle(&god, roots.clone()) {
+            continue;
+        }
         changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
         let normalized_paths2: BTreeSet<_> = IntermediatePrecomputeNode3::get_all_paths_with_cycles(
             &god,
