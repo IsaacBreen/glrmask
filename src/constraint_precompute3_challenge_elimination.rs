@@ -230,14 +230,36 @@ pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
+    println!("Starting push/pop elimination...");
+    let initial_nodes =
+        IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
+            .len();
+    println!("Initial graph node count: {}", initial_nodes);
+
     // 1. Convert to Intermediate2 format, which moves token constraints to edge values.
     let (roots2, god2) = convert_to_intermediate2(roots, god);
+    let intermediate_nodes = Intermediate2PrecomputeNode3::all_nodes(
+        &god2,
+        &roots2.values().cloned().collect::<Vec<_>>(),
+    )
+    .len();
+    println!(
+        "Intermediate graph node count: {}",
+        intermediate_nodes
+    );
 
+    let mut loop_count = 0;
     // 2. Main loop: find and process nodes until no more candidates exist.
     loop {
+        loop_count += 1;
         let all_nodes = Intermediate2PrecomputeNode3::all_nodes(
             &god2,
             &roots2.values().cloned().collect::<Vec<_>>(),
+        );
+        println!(
+            "\nLoop {}: starting with {} nodes.",
+            loop_count,
+            all_nodes.len()
         );
 
         // To efficiently find incoming edges, we build a reverse adjacency list.
@@ -293,6 +315,10 @@ pub fn eliminate_pushes_and_pops(
         }
 
         if let Some(b_idx) = node_to_process {
+            println!(
+                "  Found standard candidate node to process: {}",
+                b_idx
+            );
             // Gather information about B's incoming pushes and all outgoing edges.
             let incoming_pushes: Vec<_> = reverse_adj
                 .get(&b_idx)
@@ -382,6 +408,7 @@ pub fn eliminate_pushes_and_pops(
             }
 
             if let Some(b_idx) = split_candidate {
+                println!("  No standard candidate. Found split candidate: {}", b_idx);
                 // Create the new "non-push" clone node
                 let b_value = b_idx.read(&god2).unwrap().value.clone();
                 let b_np_idx = Intermediate2PrecomputeNode3Index::new(
@@ -421,6 +448,7 @@ pub fn eliminate_pushes_and_pops(
                 continue;
             } else {
                 // No more nodes to process and no viable split candidate: stop.
+                println!("  No more candidates to process or split. Exiting loop.");
                 break;
             }
         }
@@ -428,6 +456,17 @@ pub fn eliminate_pushes_and_pops(
 
     // 3. Convert back to the original Trie format.
     let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
+    println!(
+        "Finished elimination loop. Final intermediate graph has {} nodes.",
+        IntermediatePrecomputeNode3::all_nodes(
+            &new_god1,
+            &new_roots1_map
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        )
+        .len()
+    );
 
     // 4. The function signature requires modifying `god` in place.
     // We clear the original `god` and deep-copy the new graph into it.
@@ -446,6 +485,11 @@ pub fn eliminate_pushes_and_pops(
     for (sid, final_root_idx) in sids_in_order.iter().zip(final_roots_vec.iter()) {
         roots.insert(*sid, *final_root_idx);
     }
+    println!(
+        "Final graph node count: {}",
+        IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
+            .len()
+    );
 }
 
 // --- Assertion and Test Helpers (Unchanged) ---
