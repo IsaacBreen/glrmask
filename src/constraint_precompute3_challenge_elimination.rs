@@ -251,7 +251,7 @@ fn splice_edge(
                 Some(Intermediate2Trie3EdgeKey::NoOp)
             }
         }
-        Intermediate2Trie3EdgeKey::Pop(n, states) if *n >= 2 => {
+        Intermediate2Trie3EdgeKey::Pop(n @ 2.., states) => {
             Some(Intermediate2Trie3EdgeKey::Pop(*n - 1, states.clone()))
         }
         // A Push followed by another Push is not a valid splice target in this algorithm.
@@ -308,14 +308,12 @@ pub fn eliminate_pushes_and_pops(
             let mut incoming_pushes = Vec::new();
             for &node_a in &all_nodes {
                 if let Some(guard_a) = node_a.read(&god2) {
-                    if let Some(dest_map) = guard_a.children().get(&Intermediate2Trie3EdgeKey::Push(StateIDBV::new())) {
-                         for (key, dest_map) in guard_a.children() {
-                             if let Intermediate2Trie3EdgeKey::Push(states) = key {
-                                 if let Some(bv) = dest_map.get(&node_b) {
-                                     incoming_pushes.push((node_a, states.clone(), bv.clone()));
-                                 }
-                             }
-                         }
+                    for (key, dest_map) in guard_a.children() {
+                        if let Intermediate2Trie3EdgeKey::Push(states) = key {
+                            if let Some(bv) = dest_map.get(&node_b) {
+                                incoming_pushes.push((node_a, states.clone(), bv.clone()));
+                            }
+                        }
                     }
                 }
             }
@@ -373,7 +371,6 @@ pub fn eliminate_pushes_and_pops(
 
     Trie::gc(god, &roots.values().cloned().collect::<Vec<_>>());
 }
-
 
 // --- Assertion and Test Helpers (Unchanged) ---
 
