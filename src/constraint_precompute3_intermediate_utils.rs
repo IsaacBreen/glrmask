@@ -65,7 +65,13 @@ pub fn optimize_intermediate_trie3_template(
             .collect();
         println!("Iteration {}", i);
         println!("Has cycle? {}", Trie::has_cycle(&god, roots.clone()));
-        // println!("Trie before merging: {}", Trie::pretty_print(&god, roots));
+        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+            .display_edge_keys_only()
+            .omit_nodes()
+            .omit_depth()
+            ;
+        println!("Trie before merging:");
+        println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
         if !Trie::has_cycle(&god, roots.clone()) {
             continue;
         }
@@ -80,7 +86,8 @@ pub fn optimize_intermediate_trie3_template(
             .into_iter()
             .map(|(_r, p)| normalize_path(p.into_iter().map(|(ek, _, _)| ek).collect()))
             .collect();
-        // println!("Trie after merging: {}", Trie::pretty_print(&god, roots));
+        println!("Trie after merging:");
+        println!("{}", Trie::pretty_print_with_options(&god, &roots.iter().cloned().collect::<Vec<_>>(), &options));
         if i == 0 {
             println!("Normalized paths before:");
             for (i, path) in normalized_paths1.iter().enumerate() {
