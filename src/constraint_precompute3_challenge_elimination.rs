@@ -2262,4 +2262,212 @@ mod tests {
 
         run_test(&god, &[root]);
     }
+
+    #[test]
+    fn test_context_join_kdebt_mismatch_minimal() {
+        // Construct a minimal DAG where:
+        //   root -> Push(A) -> s
+        //   s -> NoOp -> j
+        //   s -> Pop(2, [ALL]) -> j
+        //   j -> Pop(1, A) -> end
+        //
+        // Ground truth (simplify_path):
+        // - Path L: Push(A), NoOp, Pop(1, A) => Cancel => []
+        // - Path R: Push(A), Pop(2, ALL), Pop(1, A)
+        //     Innermost pair is Push(A) with first Pop(2, ALL) -> k>1 => remove Push(A), Pop(2)->Pop(1).
+        //     Remainder: Pop(1, ALL), Pop(1, A). No push remains; this path stays as two Pops.
+        //
+        // Final set of normalized paths should be:
+        //   { [], [Pop(1, ALL), Pop(1, A)] }
+        //
+        // The trie-based elimination, if it treats the join myopically, will mis-handle
+        // the “Pop(2)” branch by conflating it with the canceling branch at the join and
+        // lose the Pop(1, ALL) in the rewiring. This test will then fail.
+
+        use crate::datastructures::trie::Trie2Index;
+
+        let god = IntermediateTrie3GodWrapper::new();
+
+        // Nodes
+        let root: IntermediatePrecomputeNode3Index =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let s: IntermediatePrecomputeNode3Index =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let j: IntermediatePrecomputeNode3Index =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end: IntermediatePrecomputeNode3Index =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        // Bitsets
+        let mut bv_a = StateIDBV::zeros();
+        bv_a.insert(1);
+        let bv_all = StateIDBV::max_ones();
+
+        // Edges per the description
+        root.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_a.clone()), (), s);
+
+        // Branch 1: NoOp -> j
+        s.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), j);
+
+        // Branch 2: Pop(2, [ALL]) -> j
+        s.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(2, bv_all.clone()), (), j);
+
+        // Join node: Pop(1, A) -> end
+        j.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
+
+        // Run the harness (this compares trie-based vs. path-based ground truth).
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_merge_induced_join_mismatch() {
+        use crate::constraint_precompute3_intermediate_utils::structural_merge_nodes_in_subgraph;
+        use crate::datastructures::trie::Trie2Index;
+        use std::collections::BTreeSet as BBTreeSet;
+        use std::collections::HashSet as HHashSet;
+
+        let god = IntermediateTrie3GodWrapper::new();
+
+        // Nodes
+        let root =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let split =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let pre_join_left =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let pre_join_right =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let join =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        // Bitsets
+        let mut bv_a = StateIDBV::zeros();
+        bv_a.insert(1);
+        let bv_all = StateIDBV::max_ones();
+
+        // Shape:
+        // root --Push(A)--> split
+        // split --Pop(2, ALL)--> pre_join_left --NoOp--> join --Pop(1, A)--> end
+        // split --NoOp--> pre_join_right -----> join       (direct)
+        root.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_a.clone()), (), split);
+
+        split.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(2, bv_all.clone()), (), pre_join_left);
+        pre_join_left.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), join);
+
+        split.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), pre_join_right);
+        pre_join_right.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), join);
+
+        join.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
+
+        // Force a structural merge that coalesces pre_join_left and pre_join_right,
+        // eliminating the distinguishing node and producing the "FAILED" join shape.
+        let mut pinned = HHashSet::new(); // don't pin anything so the merge can happen
+        let roots_vec = vec![root];
+        structural_merge_nodes_in_subgraph(&roots_vec, &pinned, &god);
+
+        // Run the harness that compares trie-based vs. path-based elimination.
+        // The discrepancy induced by the merge should surface here.
+        run_test(&god, &[root]);
+    }
+
+    #[test]
+    fn test_exit_cache_llm_aliasing_mismatch() {
+        use crate::datastructures::trie::Trie2Index;
+
+        let god = IntermediateTrie3GodWrapper::new();
+
+        // Nodes
+        let root =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let push_dst =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let branch_x =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let branch_y =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let end_x =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+        let end_y =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::leaf())));
+
+        // Bitsets
+        let mut bv_a = StateIDBV::zeros();
+        bv_a.insert(1);
+        let mut llm_x = LLMTokenBV::zeros();
+        llm_x.insert(100);
+        let mut llm_y = LLMTokenBV::zeros();
+        llm_y.insert(200);
+
+        // We make two parallel subgraphs under the SAME push destination:
+        // push_dst --CheckLLM(X)--> branch_x --Pop(1, A)--> end_x
+        // push_dst --CheckLLM(Y)--> branch_y --Pop(1, A)--> end_y
+        //
+        // Then we create TWO identical Push(A) edges from root to the SAME push_dst,
+        // but we arrange that they are processed in one round (so exit_cache is used).
+        // The exit_cache key is (dst, push_bv), so the second push reuses the first
+        // push's exits (including the first LLM mask), and rewiring stamps both paths
+        // with X instead of {X, Y}. Path-based still returns {X, Y}.
+
+        // push subgraph under shared dst
+        push_dst.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_x.clone()), (), branch_x);
+        branch_x.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end_x);
+
+        push_dst.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_y.clone()), (), branch_y);
+        branch_y.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end_y);
+
+        // Two identical Push(A) edges to the SAME dst. In this trie, multiple identical edges
+        // collapse to one, so we differentiate them by a benign NoOp hop per edge.
+        let left_src =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+        let right_src =
+            Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
+
+        root.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), left_src);
+        root.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::NoOp, (), right_src);
+
+        left_src.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_a.clone()), (), push_dst);
+        right_src.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_a.clone()), (), push_dst);
+
+        // Now compare trie-based vs. path-based outputs. If exit_cache aliasing happens,
+        // trie-based will produce only one CheckLLM (X) branch, not both {X, Y}.
+        run_test(&god, &[root]);
+    }
 }
