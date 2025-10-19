@@ -449,8 +449,6 @@ pub fn eliminate_pushes_and_pops(
 
     // 5. If no mismatch, run the trie-based version on the actual input `god` to modify it.
     run_trie_based_elimination(roots, god);
-
-    assert_no_push_then_pop(god, roots);
 }
 
 /// Compute the final set of normalized paths from a graph, for comparison.
@@ -1150,6 +1148,8 @@ fn run_trie_based_elimination(
 
     // Optional: recompute depths for diagnostics or downstream heuristics.
     Trie::recompute_all_max_depths(god, &root_indices);
+
+    assert_no_push_then_pop(god, roots);
 }
 
 #[cfg(test)]
