@@ -9,7 +9,7 @@ use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::Trie;
 use crate::r#macro::is_debug_level_enabled;
 
-const MAX_PATH_LEN: usize = 100; // Increased for complex test cases
+const MAX_PATH_LEN: usize = 20; // Increased for complex test cases
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
