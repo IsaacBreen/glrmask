@@ -1284,7 +1284,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             timeit!("GLRParserState::handle_action::apply_filter", {
                 let mut constrained = state.clone();
                 if let Some(god) = constrained.trie2_god.as_ref() { // TODO: rename
-                    let key = IntermediateTrie3EdgeKey::Pop(0, bv.clone());
+                    let key = IntermediateTrie3EdgeKey::CheckState(bv.clone());
                     deep_add_precompute_trie_edges(
                         &mut constrained.stack,
                         god,
@@ -1731,7 +1731,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for (k, acc) in below {
             // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
             let all_states = StateIDBV::max_ones();
-            let key = IntermediateTrie3EdgeKey::Pop(k, all_states);
+            let key = IntermediateTrie3EdgeKey::Pop(k);
 
             if !acc.stored_trie_nodes().is_empty() {
                 any_sources = true;
@@ -1923,7 +1923,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 );
                                 (new_dest, PruneAndTransformRecursiveMemo::default())
                             });
-                            let key = IntermediateTrie3EdgeKey::Pop(0, bv.clone());
+                            let key = IntermediateTrie3EdgeKey::CheckState(bv.clone());
                             crate::debug!(5, "Applying state filter {:?}.", bv);
                             deep_add_precompute_trie_edges(
                                 &mut parent_after_filter, god, &key,

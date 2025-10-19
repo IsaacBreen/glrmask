@@ -112,8 +112,9 @@ pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, Precompute
 // New types for intermediate trie 3
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IntermediateTrie3EdgeKey {
-    Pop(usize, StateIDBV),
     Push(StateIDBV),
+    Pop(usize),
+    CheckState(StateIDBV),
     CheckLLM(LLMTokenBV),
     NoOp,
 }
@@ -154,8 +155,9 @@ impl Display for IntermediateTrie3EdgeKey {
         }
 
         match self {
-            IntermediateTrie3EdgeKey::Pop(n, bv) => write!(f, "Pop({}, {})", n, format_bv(bv)),
             IntermediateTrie3EdgeKey::Push(bv) => write!(f, "Push({})", format_bv(bv)),
+            IntermediateTrie3EdgeKey::Pop(n) => write!(f, "Pop({})", n),
+            IntermediateTrie3EdgeKey::CheckState(bv) => write!(f, "CheckState({})", format_bv(bv)),
             IntermediateTrie3EdgeKey::CheckLLM(bv) => write!(f, "CheckLLM({})", format_bv(bv)),
             IntermediateTrie3EdgeKey::NoOp => write!(f, "NoOp"),
         }

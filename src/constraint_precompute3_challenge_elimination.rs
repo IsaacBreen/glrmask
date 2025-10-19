@@ -95,7 +95,7 @@ fn simplify_path(
         for i in 0..ops.len() {
             if matches!(ops[i], IntermediateTrie3EdgeKey::Push(_)) {
                 push_idx = Some(i);
-            } else if let IntermediateTrie3EdgeKey::Pop(_, _) = ops[i] {
+            } else if let IntermediateTrie3EdgeKey::Pop(_) = ops[i] {
                 if push_idx.is_some() {
                     pop_idx = Some(i);
                     break;
@@ -627,7 +627,6 @@ enum Exit {
     DegradePop {
         llm: LLMTokenBV,
         new_n: usize,
-        pop_bv: StateIDBV,
         dst: IntermediatePrecomputeNode3Index,
     },
     // Elimination is blocked by a nested Push, or by reaching a leaf with no Pop(n>=1).
@@ -637,6 +636,12 @@ enum Exit {
         push_bv: StateIDBV,
         dst: IntermediatePrecomputeNode3Index,
         on_cycle: bool,
+    },
+    // A state check that was not consumed by a Pop.
+    BlockedCheckState {
+        llm: LLMTokenBV,
+        check_bv: StateIDBV,
+        dst: IntermediatePrecomputeNode3Index,
     },
 }
 
@@ -790,38 +795,43 @@ fn compute_push_elim_exits(
                         });
                         // Do not traverse past a nested push for this elimination.
                     }
-                    IntermediateTrie3EdgeKey::Pop(n, pop_bv) => {
+                    IntermediateTrie3EdgeKey::CheckState(check_bv) => {
+                        if state.push_bv.is_disjoint(check_bv) {
+                            if steps < 100 {
+                                crate::debug!(5, "[challenge_elim]         - Pruning CheckState branch due to disjoint BVs.");
+                            }
+                            continue;
+                        }
+                        let mut next_push = state.push_bv.clone();
+                        next_push &= check_bv.clone();
+                        for (dst_idx, _ev) in dsts.iter() {
+                            if steps < 100 {
+                                crate::debug!(5, "[challenge_elim]         - Enqueueing CheckState -> {} with restricted push_bv", dst_idx);
+                            }
+                            q.push_back(BFSState {
+                                node: *dst_idx,
+                                push_bv: next_push.clone(),
+                                llm_bv: state.llm_bv.clone(),
+                            });
+                        }
+                    }
+                    IntermediateTrie3EdgeKey::Pop(n) => {
                         let n_val = *n;
                         for (dst_idx, _ev) in dsts.iter() {
                             match n_val {
                                 0 => {
-                                    // Fold into push: A := A ∩ B; prune branch if disjoint.
-                                    if state.push_bv.is_disjoint(pop_bv) {
-                                        if steps < 100 {
-                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(0) branch due to disjoint BVs.");
-                                        }
-                                        // Invalid on this branch
-                                        continue;
-                                    }
-                                    let mut next_push = state.push_bv.clone();
-                                    next_push &= pop_bv.clone();
-                                    if steps < 100 {
-                                        crate::debug!(5, "[challenge_elim]         - Enqueueing Pop(0) -> {} with restricted push_bv", dst_idx);
-                                    }
+                                    // A Pop(0) is a no-op in terms of stack depth, but it implies a state check.
+                                    // Since the check is now a separate `CheckState` op, a bare `Pop(0)`
+                                    // should not be encountered during push elimination. If it is, it means
+                                    // a check against ALL states, which is a no-op for the push_bv.
                                     q.push_back(BFSState {
                                         node: *dst_idx,
-                                        push_bv: next_push,
+                                        push_bv: state.push_bv.clone(),
                                         llm_bv: state.llm_bv.clone(),
                                     });
                                 }
                                 1 => {
-                                    // Cancel if intersect; else branch invalid
-                                    if state.push_bv.is_disjoint(pop_bv) {
-                                        if steps < 100 {
-                                            crate::debug!(5, "[challenge_elim]         - Pruning Pop(1) branch due to disjoint BVs.");
-                                        }
-                                        continue;
-                                    }
+                                    // Cancel. The check was already folded into state.push_bv by a CheckState op.
                                     if steps < 100 {
                                         crate::debug!(5, "[challenge_elim]       - Found Pop(1). Creating Cancel exit to {}.", dst_idx);
                                     }
@@ -829,20 +839,17 @@ fn compute_push_elim_exits(
                                         llm: state.llm_bv.clone(),
                                         dst: *dst_idx,
                                     });
-                                    // Do not explore past a Pop(1) for this elimination.
                                 }
                                 _ => {
-                                    // Remove Push and decrement Pop.
+                                    // Decrement pop. The state check was already folded.
                                     if steps < 100 {
                                         crate::debug!(5, "[challenge_elim]       - Found Pop(>1). Creating DegradePop exit to {}.", dst_idx);
                                     }
                                     exits.push(Exit::DegradePop {
                                         llm: state.llm_bv.clone(),
                                         new_n: n_val - 1,
-                                        pop_bv: pop_bv.clone(),
                                         dst: *dst_idx,
                                     });
-                                    // Do not explore past a Pop(n>1) for this elimination.
                                 }
                             }
                         }
@@ -1094,8 +1101,8 @@ fn run_trie_based_elimination(
                     Exit::Cancel { llm, dst } => {
                         cancel_set.insert((llm.clone(), *dst));
                     }
-                    Exit::DegradePop { llm, new_n, pop_bv, dst } => {
-                        degrade_set.insert((llm.clone(), *new_n, pop_bv.clone(), *dst));
+                    Exit::DegradePop { llm, new_n, dst } => {
+                        degrade_set.insert((llm.clone(), *new_n, *dst));
                     }
                     Exit::BlockedPush { llm, push_bv: exit_push_bv, dst, on_cycle } => {
                         if *on_cycle {
@@ -1124,13 +1131,13 @@ fn run_trie_based_elimination(
                 let agg = get_or_create_aggregator_node(src, &llm, god, llm_agg_cache);
                 god.insert_edge_simple(agg, cancel_dst, IntermediateTrie3EdgeKey::NoOp, ());
             }
-            for (llm, new_n, pop_bv, degrade_dst) in degrade_set {
+            for (llm, new_n, degrade_dst) in degrade_set {
                 crate::debug!(5, "[challenge_elim]    - Applying DegradePop exit to {} via LLM {:?}", degrade_dst, llm);
                 let agg = get_or_create_aggregator_node(src, &llm, god, llm_agg_cache);
                 god.insert_edge_simple(
                     agg,
                     degrade_dst,
-                    IntermediateTrie3EdgeKey::Pop(new_n, pop_bv),
+                    IntermediateTrie3EdgeKey::Pop(new_n),
                     (),
                 );
             }
@@ -1339,9 +1346,13 @@ mod tests {
         root.write(&god)
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv.clone()), (), v1);
+        let v2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v1.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv), (), v2);
+        v2.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1364,9 +1375,13 @@ mod tests {
         root.write(&god)
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv1), (), v1);
+        let v2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v1.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv2), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv2), (), v2);
+        v2.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1389,7 +1404,7 @@ mod tests {
             .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv.clone()), (), v1);
         v1.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1414,7 +1429,7 @@ mod tests {
             .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv1), (), v1);
         v1.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(0, bv2), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv2), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1437,9 +1452,13 @@ mod tests {
         root.write(&god)
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv1), (), v1);
+        let v2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v1.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(3, bv2), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv2), (), v2);
+        v2.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(3), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1467,9 +1486,13 @@ mod tests {
         v1.write(&god)
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv2.clone()), (), v2);
+        let v3 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v2.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv2), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv2), (), v3);
+        v3.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1499,12 +1522,20 @@ mod tests {
         v1.write(&god)
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv2.clone()), (), v2);
+        let v2_5 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v2.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv2), (), v3);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv2), (), v2_5);
+        v2_5.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), v3);
+        let v3_5 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v3.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv1), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv1), (), v3_5);
+        v3_5.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1532,9 +1563,13 @@ mod tests {
         v1.write(&god)
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_bv), (), v2);
+        let v3 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v2.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv1), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv1), (), v3);
+        v3.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1569,12 +1604,20 @@ mod tests {
         v1.write(&god)
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::CheckLLM(llm_y), (), v3);
+        let v2_5 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v2.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv_a.clone()), (), v2_5);
+        v2_5.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), end);
+        let v3_5 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v3.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv_a.clone()), (), v3_5);
+        v3_5.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1600,9 +1643,13 @@ mod tests {
         root.write(&god)
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_a.clone()), (), v1);
+        let v2 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v1.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), root);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv_a.clone()), (), v2);
+        v2.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), root);
 
         run_test(&god, &[root]);
     }
@@ -1641,9 +1688,13 @@ mod tests {
         let mut bv = StateIDBV::zeros();
         bv.insert(1);
 
+        let v1 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         root.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv), (), v1);
+        v1.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), end);
 
         run_test(&god, &[root]);
     }
@@ -1710,23 +1761,40 @@ mod tests {
         v3x.write(&god)
             .unwrap()
             .force_insert_to_node(IntermediateTrie3EdgeKey::Push(bv_c.clone()), (), v4x);
+        let v4x_5 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v4x.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_c.clone()), (), v5x);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv_c.clone()), (), v4x_5);
+        v4x_5.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), v5x);
+        let v5x_5 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v5x.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_b.clone()), (), merge);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv_b.clone()), (), v5x_5);
+        v5x_5.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), merge);
 
         // Path Y (blocking and invalidation)
+        let v3y_5 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         v3y.write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), merge);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv_a.clone()), (), v3y_5);
+        v3y_5.write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), merge);
 
         // Common suffix
+        let merge_5 = Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal())));
         merge
             .write(&god)
             .unwrap()
-            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1, bv_a.clone()), (), end);
+            .force_insert_to_node(IntermediateTrie3EdgeKey::CheckState(bv_a.clone()), (), merge_5);
+        merge_5
+            .write(&god)
+            .unwrap()
+            .force_insert_to_node(IntermediateTrie3EdgeKey::Pop(1), (), end);
 
         // The expected outcome is that Path Y is completely eliminated.
         // Path X simplifies: Push(C)/Pop(C) cancel, then Push(B)/Pop(B) cancel.
