@@ -832,7 +832,7 @@ pub fn optimize_intermediate_trie3_templates_global(
     for _ in 0..6 {
         let mut changed = false;
         // First eliminate NoOp epsilon transitions globally, to expose more sharing opportunities.
-        changed |= eliminate_noop_epsilon_in_subgraph(&start_nodes, god);
+        // changed |= eliminate_noop_epsilon_in_subgraph(&start_nodes, god);
         changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
         changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
         for (s, e) in templates {
