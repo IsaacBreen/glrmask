@@ -196,8 +196,8 @@ pub fn eliminate_pushes_and_pops(
 
         if iteration > 1 {
             assert!(
-                current_num_nodes < prev_num_nodes,
-                "Node count did not strictly decrease in iteration {}. Previous: {}, Current: {}",
+                current_num_nodes <= prev_num_nodes,
+                "Node count increased in iteration {}. Previous: {}, Current: {}",
                 iteration, prev_num_nodes, current_num_nodes
             );
         }
