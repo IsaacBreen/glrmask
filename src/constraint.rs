@@ -1773,7 +1773,9 @@ impl GrammarConstraint {
 
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
         let template_roots: Vec<_> = out.values().map(|(start, _end)| start.clone()).collect();
+        // let template_roots: Vec<_> = template_roots[0..=1].to_vec();
         let template_roots: Vec<_> = template_roots[2..=2].to_vec();
+        // let template_roots: Vec<_> = vec![];
         let options = crate::datastructures::trie::PrettyPrintOptions::default()
             .display_edge_keys_only()
             .omit_depth();
@@ -1907,10 +1909,10 @@ impl GrammarConstraint {
         intermediate_precomputed3: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
         intermediate_trie3_god: &IntermediateTrie3GodWrapper,
     ) {
-        eliminate_pushes_and_pops(
-            intermediate_precomputed3,
-            intermediate_trie3_god,
-        );
+        // eliminate_pushes_and_pops(
+        //     intermediate_precomputed3,
+        //     intermediate_trie3_god,
+        // );
         // After elimination, assert that no pop operations are reachable from any push operations.
         // This is a key invariant that the elimination process should establish.
         crate::constraint_precompute3_challenge_elimination::assert_no_pops_reachable_from_pushes(
@@ -2185,13 +2187,13 @@ impl GrammarConstraint {
             &intermediate_trie3_god,
         );
 
-        // println!("Final intermediate trie3:");
-        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-        //     .display_edge_keys_only()
-        //     .omit_nodes()
-        //     .omit_depth()
-        //     ;
-        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+        println!("Final intermediate trie3:");
+        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+            .display_edge_keys_only()
+            .omit_nodes()
+            .omit_depth()
+            ;
+        println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
 
         // --- Convert intermediate trie to final Trie3 format ---
         crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");
@@ -2211,7 +2213,7 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+        // optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
         (precomputed3, trie3_god)
     }
 
