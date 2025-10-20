@@ -7,6 +7,8 @@ use crate::{
     datastructures::trie::Trie,
 };
 use std::collections::{BTreeMap, HashMap, HashSet, BTreeSet};
+use ordered_hash_map::OrderedHashMap;
+
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
@@ -248,7 +250,7 @@ fn merge_and_rewire_nodes(
                     for (dst, ev) in dsts.iter() {
                         // Remap destination to its canonical representative
                         let canon_dst = *node_map.get(dst).unwrap_or(dst);
-                        let dest_map_for_key = merged_children.entry(ek.clone()).or_default();
+                        let dest_map_for_key: &mut OrderedHashMap<_, _> = merged_children.entry(ek.clone()).or_default();
                         // The event value is just (), so we can just insert.
                         dest_map_for_key.insert(canon_dst, *ev);
                     }

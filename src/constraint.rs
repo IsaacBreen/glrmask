@@ -2152,7 +2152,6 @@ impl GrammarConstraint {
         let node_map = optimize_intermediate_trie3(
             &intermediate_roots,
             &intermediate_trie3_god,
-            |_, node| node.value.end,
         );
 
         // Update the roots in the map after optimization
