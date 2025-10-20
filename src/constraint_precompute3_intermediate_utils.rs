@@ -35,27 +35,6 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
     other_ops
 }
 
-pub fn optimize_intermediate_trie3_template(
-    start_node: &IntermediatePrecomputeNode3Index,
-    end_node: &IntermediatePrecomputeNode3Index,
-    god: &IntermediateTrie3GodWrapper,
-) {
-    let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-    pinned.insert(*start_node);
-    pinned.insert(*end_node);
-
-    for _ in 0..3 {
-        let mut changed = false;
-        changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
-        changed |= compress_noop_only_nodes(&[*start_node], &pinned, god);
-        changed |= structural_merge_nodes_in_subgraph(&[*start_node], &pinned, god);
-        changed |= prune_unproductive_nodes(&[*start_node], end_node, god);
-        if !changed {
-            break;
-        }
-    }
-}
-
 pub fn optimize_intermediate_trie3(
     roots: &[IntermediatePrecomputeNode3Index],
     end_node: &IntermediatePrecomputeNode3Index,
