@@ -75,11 +75,17 @@ impl StringTrie {
     fn insert(&mut self, s: &[u8], index: usize) {
         let mut current_node_id = 0;
         for &byte in s {
-            let current_node = &mut self.nodes[current_node_id];
-            current_node_id = *current_node.children.entry(byte).or_insert_with(|| {
+            // Check if the child exists
+            let next_id = if let Some(&child_id) = self.nodes[current_node_id].children.get(&byte) {
+                child_id
+            } else {
+                // If not, create a new node and get its ID
                 self.nodes.push(TrieNode::default());
-                self.nodes.len() - 1
-            });
+                let new_node_id = self.nodes.len() - 1;
+                self.nodes[current_node_id].children.insert(byte, new_node_id);
+                new_node_id
+            };
+            current_node_id = next_id;
         }
         self.nodes[current_node_id].string_indices.push(index);
     }
@@ -220,7 +226,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
         classes
     }
 
-    fn find_node_for_prefix(&self, start_node_id: usize, prefix: &[u8]) -> (usize, &[u8]) {
+    fn find_node_for_prefix<'b>(&self, start_node_id: usize, prefix: &'b [u8]) -> (usize, &'b [u8]) {
         let mut current_node_id = start_node_id;
         for (i, &byte) in prefix.iter().enumerate() {
             if let Some(&child_id) = self.trie.nodes[current_node_id].children.get(&byte) {
