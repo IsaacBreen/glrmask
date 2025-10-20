@@ -1776,10 +1776,12 @@ impl GrammarConstraint {
         let node_map = optimize_intermediate_trie3(
             &template_roots,
             trie3_god,
+            |_, node| node.value.end,
         );
+
         // Update the start nodes in the template map
         let mut new_out = BTreeMap::new();
-        for (tid, (start, end)) in out.into_iter() {
+        for (tid, (start, end)) in out {
             let new_start = node_map.get(&start).unwrap_or(&start).clone();
             let new_end = node_map.get(&end).unwrap_or(&end).clone();
             new_out.insert(tid, (new_start, new_end));
@@ -2152,6 +2154,7 @@ impl GrammarConstraint {
         let node_map = optimize_intermediate_trie3(
             &intermediate_roots,
             &intermediate_trie3_god,
+            |_, node| node.value.end,
         );
 
         // Update the roots in the map after optimization
