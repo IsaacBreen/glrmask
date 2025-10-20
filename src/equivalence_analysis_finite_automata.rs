@@ -1,7 +1,10 @@
-use crate::finite_automata::{GroupID, Regex};
+use crate::finite_automata::{GroupID, Match, Regex};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+
+// For debugging: verify equivalence classes using a brute-force method.
+const VERIFY_EQUIVALENCE_CLASSES: bool = false;
 
 // A canonical representation of a signature. It can be hashed and compared.
 // It's derived from the graph of tokenization possibilities.
@@ -145,6 +148,10 @@ impl<'a> EquivalenceAnalyzer<'a> {
             equivalence_classes.entry(signature_vector).or_default().push(i);
         }
 
+        if VERIFY_EQUIVALENCE_CLASSES {
+            verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
+        }
+
         equivalence_classes
     }
 }
@@ -161,4 +168,47 @@ pub fn find_equivalence_classes(
 ) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
     let mut analyzer = EquivalenceAnalyzer::new(regex, strings, initial_states);
     analyzer.find_equivalence_classes()
+}
+
+/// Brute-force verification of equivalence classes.
+/// This is slow and should only be used for debugging.
+fn verify_equivalence_classes(
+    regex: &Regex,
+    strings: &[Vec<u8>],
+    initial_states: &[usize],
+    computed_classes: &BTreeMap<Vec<SignatureId>, Vec<usize>>,
+) {
+    println!("Verifying equivalence classes (this may be slow)...");
+
+    let mut brute_force_classes: BTreeMap<Vec<Vec<Match>>, Vec<usize>> = BTreeMap::new();
+    for (i, s) in strings.iter().enumerate() {
+        let mut signature_vector = Vec::with_capacity(initial_states.len());
+        for &initial_state in initial_states {
+            let mut rs = regex.init_to_state(initial_state);
+            let matches = rs.greedy_find_all(s, true);
+            signature_vector.push(matches);
+        }
+        brute_force_classes.entry(signature_vector).or_default().push(i);
+    }
+
+    let mut computed_partitions: Vec<BTreeSet<usize>> = computed_classes
+        .values()
+        .map(|v| v.iter().cloned().collect())
+        .collect();
+    computed_partitions.sort();
+
+    let mut brute_force_partitions: Vec<BTreeSet<usize>> = brute_force_classes
+        .values()
+        .map(|v| v.iter().cloned().collect())
+        .collect();
+    brute_force_partitions.sort();
+
+    if computed_partitions == brute_force_partitions {
+        println!("Equivalence class verification successful!");
+    } else {
+        eprintln!("Equivalence class verification FAILED!");
+        eprintln!("Computed partitions ({}): {:?}", computed_partitions.len(), computed_partitions);
+        eprintln!("Brute-force partitions ({}): {:?}", brute_force_partitions.len(), brute_force_partitions);
+        panic!("Equivalence class verification failed.");
+    }
 }

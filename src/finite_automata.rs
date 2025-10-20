@@ -182,7 +182,7 @@ impl JSONConvertible for Regex {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Match {
     pub group_id: GroupID,
     pub position: usize,
