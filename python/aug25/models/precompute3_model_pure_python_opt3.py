@@ -914,11 +914,13 @@ class Model(GraphProvider):
         return result
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
-        print("get_mask")
         stats = Stats.get()
         stats.start('get_mask')
         stats.counts['get_mask.traversal.max_depth'] = 0
         stats.inc('get_mask.initial_tokenizer_states', len(self.state))
+
+        last_progress_time = time.time()
+        progress_interval_sec = 10.0 # Print progress every 10 seconds
 
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         work_heap = []
@@ -955,15 +957,16 @@ class Model(GraphProvider):
             return PyAcc({}, all_ones.difference(disallowed))
 
         init_cache = {}
-        for sid, gss in self.state.items():
+        num_states = len(self.state)
+        for i, (sid, gss) in enumerate(self.state.items()):
+            if not self.suppress_stats_report:
+                print(f"[get_mask] Seeding progress: processing state {i+1}/{num_states} (sid={sid})")
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
             enqueue(r, gss_init, 0)
         stats.stop('get_mask.seeding')
 
         stats.start('get_mask.main_loop')
-        last_progress_time = time.time()
-        progress_interval_sec = 10.0 # Print progress every 10 seconds
         remaining_mask = all_ones
         while work_heap:
             if not self.suppress_stats_report and time.time() - last_progress_time > progress_interval_sec:
