@@ -150,7 +150,8 @@ pub fn optimize_intermediate_trie3(
         if let Some(&existing_optimized_idx) = signature_map.get(&signature) {
             node_map.insert(original_idx, existing_optimized_idx);
         } else {
-            let new_optimized_idx = optimized_god.insert(original_node.value.clone()).into();
+            let new_trie_node = Trie::new(original_node.value.clone());
+            let new_optimized_idx: IntermediatePrecomputeNode3Index = optimized_god.insert(new_trie_node).into();
 
             optimized_god
                 .with_mut(new_optimized_idx.as_index(), |new_node| {
