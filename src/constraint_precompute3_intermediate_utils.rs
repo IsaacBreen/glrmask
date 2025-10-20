@@ -486,8 +486,7 @@ pub fn optimize_intermediate_trie3(
         }
     }
     if passes > 0 {
-        println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC.");
-        Trie::gc(god, roots);
+        println!("[optimize_intermediate_trie3] NoOp chains contracted.");
     }
     has_true_cycle_intermediate_trie3(god, roots);
 
