@@ -98,7 +98,7 @@ pub fn optimize_intermediate_trie3(
     // TODO: Implement optimization logic here.
     // This logic should modify `god` in place and build `node_map`.
 
-    let node_map = Default::default(); // Currently a no-op, returns empty map.
+    let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = Default::default(); // Currently a no-op, returns empty map.
 
     // Check equivalence after optimization (currently no-op)
     for original_root in &original_roots {
