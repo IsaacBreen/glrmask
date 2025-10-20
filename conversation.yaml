@@ -6760,21 +6760,11 @@ local_system:
               }
 
               let leaf_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
-              let all_llm_tokens = HybridBitset::ones(internal_max_llm_token + 1);
               let end_nodes = tokenizer.iter_states()
-                  .map(|tsid| {
-                      let end_node_for_tsid = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
-                      let accessible_terminals = tokenizer.tokens_accessible_from_state(tsid);
-                      for terminal_id in accessible_terminals {
-                          let mut guard = end_node_for_tsid.write(&trie1_god).unwrap();
-                          let dest_map = guard.children_mut().entry(Some(terminal_id)).or_default();
-                          dest_map.insert(leaf_node.clone(), all_llm_tokens.clone());
-                      }
-                      (tsid, end_node_for_tsid)
-                  })
+                  .map(|tsid| (tsid, leaf_node.clone()))
                   .collect();
 
-              crate::debug!(2, "Created trie1 end nodes for {} tokenizer states", tokenizer.iter_states().count());
+              crate::debug!(2, "Created trie1 leaf node for {} tokenizer states", tokenizer.iter_states().count());
 
               Self {
                   tokenizer,
@@ -13481,5 +13471,888 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Correct arguments passed to Self::precompute1
       in new_with_config_and_precompute0_cache"'
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      [DEBUG] 2] src/glr/table.rs:1413: Validating initial grammar
+      [DEBUG] 2] src/glr/table.rs:1419: Removing productions with undefined non-terminals
+      [DEBUG] 2] src/glr/table.rs:1455: Stage 1
+      [DEBUG] 2] src/glr/table.rs:1458: Stage 2
+      [DEBUG] 2] src/glr/table.rs:1461: Stage 3
+      [DEBUG] 2] src/glr/table.rs:1464: Stage 4
+      [DEBUG] 2] src/glr/table.rs:1467: Stage 5
+      [DEBUG] 2] src/glr/table.rs:1470: Stage 6
+      [DEBUG] 2] src/glr/table.rs:1473: Stage 7
+      [DEBUG] 2] src/glr/table.rs:1476: Stage 8
+      [DEBUG] 2] src/glr/table.rs:1480: Stage 9: Precomputing substring gotos
+      [DEBUG] 2] src/glr/table.rs:1483: Stage 10: Precomputing reduce goto map
+      [DEBUG] 2] src/glr/table.rs:1486: Finalizing table
+
+      --- Combined States Statistics ---
+      Total combined states: 1
+      Sole Shift actions: Total: 2, Min/Max per state: 2/2, Avg per state: 2.00
+        Distribution (count -> #states): 2: 1
+      Sole Reduce actions: Total: 2, Min/Max per state: 2/2, Avg per state: 2.00
+        Distribution (count -> #states): 2: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 1
+      Goto actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 1
+      ------------------------------------
+      Number of combined states: 1
+      [DEBUG] 2] src/glr/table.rs:1495: Done generating GLR parser
+      Parser: Parse Table:
+        Start State: 0
+        State 0:
+          Items:
+            - [S -> • A EOF]
+          Actions (full):
+            - On A: Shift 1
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - S -> accept
+        State 1:
+          Items:
+            - [S -> A • EOF]
+          Actions (full):
+            - On EOF: Shift 2
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 2:
+          Items:
+            - [S -> A EOF •]
+          Actions (full):
+            - On A: Reduce S (len 2) via rules [0]
+            - On EOF: Reduce S (len 2) via rules [0]
+          Default Action:
+            - Default Reduce S (len 2) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 3 (Combined):
+          Items: (State ID not found in item set map)
+          Items: (Combined state)
+          Actions (combined):
+          - On A: Shift 1 [states: HybridBitset { inner: 0..=0 }]
+          - On A: Reduce S (len 2) via rules [0] [states: HybridBitset { inner: 2..=2 }]
+          - On EOF: Shift 2 [states: HybridBitset { inner: 1..=1 }]
+          - On EOF: Reduce S (len 2) via rules [0] [states: HybridBitset { inner: 2..=2 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (combined):
+            (No goto actions)
+        State 18446744073709551615 (Hallucinated):
+          Items: (Hallucinated state)
+          Actions (hallucinated):
+          - On A: Shift 1 [states: HybridBitset { inner: 0..=0 }]
+          - On A: Reduce S (len 2) via rules [0] [states: HybridBitset { inner: 2..=2 }]
+          - On EOF: Shift 2 [states: HybridBitset { inner: 1..=1 }]
+          - On EOF: Reduce S (len 2) via rules [0] [states: HybridBitset { inner: 2..=2 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (hallucinated):
+            - S -> accept [states: HybridBitset { inner: 0..=0 }]
+
+      Terminal Map (name to terminal ID):
+        A -> 0
+        EOF -> 1
+
+      Non-Terminal Map:
+        S -> 0
+
+      [DEBUG] 2] src/equivalence_analysis_finite_automata.rs:82: Starting LLM token equivalence analysis for 3 unique suffixes...
+      [DEBUG] 2] src/constraint.rs:839: LLM Token Equivalence Analysis:
+      [DEBUG] 2] src/constraint.rs:840:   - Original LLM tokens: 2
+      [DEBUG] 2] src/constraint.rs:841:   - Equivalence classes: 2
+      [DEBUG] 2] src/constraint.rs:843:   - Reduction factor: 1.00x
+      [DEBUG] 2] src/constraint.rs:860:   - Class size distribution (top 10 largest):
+          - size 1: 2 classes
+      [DEBUG] 2] src/constraint.rs:936: Building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:200: Merging nodes
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:208: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:210: Done computing reachable IDs
+      [DEBUG] 2] src/constraint.rs:938: Done building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/constraint.rs:944: Computing possible_matches for all 3 tokenizer states
+      [DEBUG] 2] src/constraint.rs:954: Finished computing possible_matches
+      [DEBUG] 2] src/constraint.rs:958: Building state_map_by_llm and terminal_map_by_llm
+      [DEBUG] 2] src/constraint.rs:960: Built state_map_by_llm with 2 entries
+      [DEBUG] 2] src/constraint.rs:969: Computing terminal follow sets
+      [DEBUG] 2] src/constraint.rs:989: Computed terminal_follow_map_ids with 1 entries.
+      [DEBUG] 2] src/constraint.rs:2461: Building vocab prefix tree
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:200: Merging nodes
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:208: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:210: Done computing reachable IDs
+      [DEBUG] 2] src/constraint.rs:2463: Done building vocab prefix tree
+      [DEBUG] 2] src/constraint.rs:2473: Created trie1 roots for 3 tokenizer states
+      [DEBUG] 2] src/constraint.rs:2475: Counting vocab nodes for progress bar...
+      [DEBUG] 2] src/constraint.rs:2477: Counted 3 vocab nodes
+      [DEBUG] 2] src/constraint.rs:2504: Created trie1 end nodes for 3 tokenizer states
+      [DEBUG] 2] src/constraint.rs:2585: Starting precompute DFS
+      [DEBUG] 2] src/constraint.rs:2591: Finished precompute DFS
+      [DEBUG] 2] src/constraint.rs:2593: Precomputation complete
+      [DEBUG] 2] src/constraint_extra.rs:1039: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1150: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 5 unique nodes, of which
+          - 3 are roots
+          - 2 are non-roots, of which
+              - 1 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 5
+        Total Edges: 4
+          Edges with None Key: 0
+          Edges with Some Key: 4
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    1.00
+        Average edge occupancy for None-key edges:    0.00
+        Total ranges in all HybridBitsets: 4
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:462: Starting Trie1 size optimization...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:464: Initial Trie1 stats:
+      [DEBUG] 2] src/constraint_extra.rs:1039: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1150: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 5 unique nodes, of which
+          - 3 are roots
+          - 2 are non-roots, of which
+              - 1 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 5
+        Total Edges: 4
+          Edges with None Key: 0
+          Edges with Some Key: 4
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    1.00
+        Average edge occupancy for None-key edges:    0.00
+        Total ranges in all HybridBitsets: 4
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:542: Simplifying None edges to former end nodes in Trie1...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:611: Done simplifying None edges to former end nodes in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1491: Flattening None edges in Trie1 via epsilon-closure (keyed-only rewrite)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1611: Done flattening None edges in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1300: Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1355: Trie1 end-reachability: total=5, productive=3, prunable=2
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1391: Finished end-reachability pruning in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1300: Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1355: Trie1 end-reachability: total=4, productive=3, prunable=1
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1391: Finished end-reachability pruning in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:954: Merging equivalent LLM tokens in Trie1...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1038: Trie1: merged LLM tokens. Before: 2, After: 2. (0 merged)
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1205: Done computing frequencies.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1289: Trie1 reordering complete. Ranges reduced from 7 to 7. New max internal token ID: 1
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:711: Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1300: Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1355: Trie1 end-reachability: total=4, productive=3, prunable=1
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:1391: Finished end-reachability pruning in Trie1.
+      [DEBUG] 2] src/constraint_precompute1_utils.rs:530: Final Trie1 stats:
+      [DEBUG] 2] src/constraint_extra.rs:1039: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1150: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 4 unique nodes, of which
+          - 2 are roots
+          - 2 are non-roots, of which
+              - 1 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 4
+        Total Edges: 4
+          Edges with None Key: 0
+          Edges with Some Key: 4
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    1.00
+        Average edge occupancy for None-key edges:    0.00
+        Total ranges in all HybridBitsets: 4
+      [DEBUG] 2] src/constraint.rs:1780: Precomputing Trie 3 (template-driven)...
+      [optimize_intermediate_trie3] Pruning nodes that cannot reach an end node...
+      [optimize_intermediate_trie3] End-reachability: total=16, productive=10, prunable=6
+      [optimize_intermediate_trie3] Finished end-reachability pruning.
+      [optimize_intermediate_trie3] Contracting NoOp chains...
+      [optimize_intermediate_trie3] NoOp chain contraction pass 1 complete.
+      [optimize_intermediate_trie3] NoOp chains contracted. Running GC.
+      [optimize_intermediate_trie3] Normalizing CheckLLM edges...
+      [optimize_intermediate_trie3] Contracting CheckLLM chains...
+      [optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...
+      [optimize_intermediate_trie3] Reachable nodes: 6, edges: 4
+      [optimize_intermediate_trie3] Initial classes: 2
+      [optimize_intermediate_trie3] WL iteration 1: classes=5, changed=5
+      [optimize_intermediate_trie3] WL iteration 2: classes=5, changed=0
+      [optimize_intermediate_trie3] Refinement complete: iterations=2, classes=5, nodes=6
+      [optimize_intermediate_trie3] Canonicalization: classes=5, merges=1
+      [optimize_intermediate_trie3] Rewiring done: merges=1, edges_rewired=1
+      [optimize_intermediate_trie3] Running final GC.
+
+      --- Intermediate Trie3 Template Statistics ---
+      Terminal Name             ID         Nodes      Edges
+      ------------------------- ----- ---------- ----------
+      'A'                       0              3          2
+      'EOF'                     1              3          2
+      --------------------------------------------
+
+      Union Across All Templates:
+        Unique nodes: 5
+        Total edges: 4
+        Nodes shared by >= 2 templates: 1 (20.0%)
+      --------------------------------------------
+
+      [DEBUG] 2] src/constraint.rs:2008: Optimizing intermediate trie3...
+      [optimize_intermediate_trie3] Pruning nodes that cannot reach an end node...
+      [optimize_intermediate_trie3] End-reachability: total=23, productive=22, prunable=1
+      [optimize_intermediate_trie3] Finished end-reachability pruning.
+      [optimize_intermediate_trie3] Contracting NoOp chains...
+      [optimize_intermediate_trie3] NoOp chain contraction pass 1 complete.
+      [optimize_intermediate_trie3] NoOp chains contracted. Running GC.
+      [optimize_intermediate_trie3] Normalizing CheckLLM edges...
+      [optimize_intermediate_trie3] Contracting CheckLLM chains...
+      [optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...
+      [optimize_intermediate_trie3] Reachable nodes: 17, edges: 18
+      [optimize_intermediate_trie3] Initial classes: 4
+      [optimize_intermediate_trie3] WL iteration 1: classes=10, changed=10
+      [optimize_intermediate_trie3] WL iteration 2: classes=12, changed=4
+      [optimize_intermediate_trie3] WL iteration 3: classes=14, changed=6
+      [optimize_intermediate_trie3] WL iteration 4: classes=15, changed=11
+      [optimize_intermediate_trie3] WL iteration 5: classes=15, changed=0
+      [optimize_intermediate_trie3] Refinement complete: iterations=5, classes=15, nodes=17
+      [optimize_intermediate_trie3] Canonicalization: classes=15, merges=2
+      [optimize_intermediate_trie3] Rewiring done: merges=2, edges_rewired=2
+      [optimize_intermediate_trie3] Running final GC.
+      [DEBUG] 2] src/constraint.rs:2025: Processing and rebuilding trie3 paths...
+      Starting push/pop elimination...
+      Initial graph node count: 15
+      Intermediate graph node count: 16
+
+      Loop 1: starting with 16 nodes.
+        Found 3 standard candidate nodes to process.
+
+      Loop 2: starting with 13 nodes.
+        Found 1 standard candidate nodes to process.
+
+      Loop 3: starting with 12 nodes.
+        Found 2 standard candidate nodes to process.
+
+      Loop 4: starting with 9 nodes.
+        No more candidates to process or split. Exiting loop.
+      Finished elimination loop. Final intermediate graph has 11 nodes.
+      Final graph node count: 11
+      [DEBUG] 2] src/constraint.rs:2040: Converting intermediate trie3 to final Trie3 format...
+      [DEBUG] 2] src/constraint.rs:2055: Finished precomputing Trie 3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:204: Optimizing Trie 3 size...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:206: Initial stats:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 11 unique nodes, of which
+          - 3 are roots
+          - 8 are non-roots, of which
+              - 6 are internal (non-root, non-leaf)
+              - 2 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 11
+        Total Edges: 8
+        Nodes with End Marker: 1
+        Average edge fanout:    1.14
+        Total ranges in all HybridBitsets: 8
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:240: Running optimization pass 1: Pruning dead paths...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1262: Pruning dead paths from precomputed trie 3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1356: Finished pruning dead paths from trie 3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:240: Pass 1 ('Pruning dead paths') finished in 10.241375ms
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:240: Stats after pass 1:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 9 unique nodes, of which
+          - 3 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 9
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:246: Running optimization pass 2: Pruning nodes that do not reach end...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1044: Pruning Trie3 nodes that cannot reach any end node (reverse reachability)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1098: Trie3 end-reachability: total=9, productive=7, prunable=2
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1126: Finished end-reachability pruning in Trie3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:246: Pass 2 ('Pruning nodes that do not reach end') finished in 125.416µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:246: Stats after pass 2:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 9 unique nodes, of which
+          - 3 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 9
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:252: Running optimization pass 3: Merging equivalent LLM tokens...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:685: Merging equivalent LLM tokens in Trie3...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:764: Trie3: merged LLM tokens. Before: 2, After: 2. (0 merged)
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:252: Pass 3 ('Merging equivalent LLM tokens') finished in 50.375µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:252: Stats after pass 3:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 9 unique nodes, of which
+          - 3 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 9
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:258: Running optimization pass 4: Reordering LLM tokens for range minimization...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:869: Reordering LLM tokens in Trie3 for range minimization...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:911: Done computing frequencies.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:984: Trie3 reordering complete. Ranges reduced from 13 to 12. New max internal token ID: 1
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:258: Pass 4 ('Reordering LLM tokens for range minimization') finished in 118.417µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:258: Stats after pass 4:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 9 unique nodes, of which
+          - 3 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 9
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:267: Running optimization pass 5: Constraining bitvectors...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1222: Constraining bitvectors in Trie 3...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1258: Finished constraining bitvectors.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:267: Pass 5 ('Constraining bitvectors') finished in 10.243916ms
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:267: Stats after pass 5:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 9 unique nodes, of which
+          - 3 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 9
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:283: Running optimization pass 6: Factoring common destinations...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1135: Factoring out common destinations in Trie3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1213: Finished factoring common destinations in Trie3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:283: Pass 6 ('Factoring common destinations') finished in 87.5µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:283: Stats after pass 6:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 9 unique nodes, of which
+          - 3 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 9
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:296: Running optimization pass 7: Pruning dead paths (post-compress)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1262: Pruning dead paths from precomputed trie 3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1356: Finished pruning dead paths from trie 3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:296: Pass 7 ('Pruning dead paths (post-compress)') finished in 140.833µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:296: Stats after pass 7:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 9 unique nodes, of which
+          - 3 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 9
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:301: Running optimization pass 8: Garbage collection (pre-merge)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:301: Pass 8 ('Garbage collection (pre-merge)') finished in 17.75µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:301: Stats after pass 8:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 9 unique nodes, of which
+          - 3 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 9
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:307: Running optimization pass 9: Merging nodes (structural)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1497: Merging structurally equivalent subtrees in precomputed trie 3 (max_iters=40).
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:307: Pass 9 ('Merging nodes (structural)') finished in 452.209µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:307: Stats after pass 9:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 8 unique nodes, of which
+          - 2 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 8
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:320: Running optimization pass 10: Merging nodes...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1368: Merging identical subtrees in precomputed trie 3 (max_iters=40).
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:320: Pass 10 ('Merging nodes') finished in 206.791µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:320: Stats after pass 10:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 8 unique nodes, of which
+          - 2 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 8
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:329: Running optimization pass 11: Pruning nodes that do not reach end (post-merge)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1044: Pruning Trie3 nodes that cannot reach any end node (reverse reachability)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1098: Trie3 end-reachability: total=8, productive=7, prunable=1
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1126: Finished end-reachability pruning in Trie3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:329: Pass 11 ('Pruning nodes that do not reach end (post-merge)') finished in 109.041µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:329: Stats after pass 11:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 8 unique nodes, of which
+          - 2 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 8
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:341: Running optimization pass 12: Merging nodes (post-compress)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1368: Merging identical subtrees in precomputed trie 3 (max_iters=40).
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:341: Pass 12 ('Merging nodes (post-compress)') finished in 174.958µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:341: Stats after pass 12:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 8 unique nodes, of which
+          - 2 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 8
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:349: Running optimization pass 13: Pruning dead paths (final)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1262: Pruning dead paths from precomputed trie 3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:1356: Finished pruning dead paths from trie 3.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:349: Pass 13 ('Pruning dead paths (final)') finished in 110.667µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:349: Stats after pass 13:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 8 unique nodes, of which
+          - 2 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 8
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:355: Running optimization pass 14: Garbage collection (final)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:355: Pass 14 ('Garbage collection (final)') finished in 30.375µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:355: Stats after pass 14:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 8 unique nodes, of which
+          - 2 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 8
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:361: Running optimization pass 15: Merging equivalent LLM tokens (final pass)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:685: Merging equivalent LLM tokens in Trie3...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:764: Trie3: merged LLM tokens. Before: 2, After: 2. (0 merged)
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:361: Pass 15 ('Merging equivalent LLM tokens (final pass)') finished in 47.042µs
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:361: Stats after pass 15:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 8 unique nodes, of which
+          - 2 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 8
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:366: Running optimization pass 16: Reordering LLM tokens (final pass)...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:869: Reordering LLM tokens in Trie3 for range minimization...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:911: Done computing frequencies.
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:984: Trie3 reordering complete. Ranges reduced from 13 to 12. New max internal token ID: 1
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:366: Pass 16 ('Reordering LLM tokens (final pass)') finished in 4.344208ms
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:366: Stats after pass 16:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 8 unique nodes, of which
+          - 2 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 8
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:372: Recomputing max depths...
+      [DEBUG] 2] src/constraint_precompute3_utils.rs:378: Finished optimizing Trie 3 size.
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 8 unique nodes, of which
+          - 2 are roots
+          - 6 are non-roots, of which
+              - 5 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 8
+        Total Edges: 6
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 6
+      ---------------------------------
+      Dumping Precomputed Trie 0 Structure (showing original LLM Token IDs):
+      ===================================
+
+      ===================================
+      Dump Complete.
+      Dumping Precomputed Trie 1 Structure (showing original LLM Token IDs):
+      ===================================
+
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(0) (MaxDepth: 0) [Live: [0..=1] (e.g., ["$", "a"])]
+      ├── Edge 'A': [1] (e.g., ["a"]) -> Node Trie2Index(4) (MaxDepth: 1) [Live: [0..=1] (e.g., ["$", "a"])]
+      │  ├── Edge 'A': [0..=1] (e.g., ["$", "a"]) -> Node Trie2Index(3) (MaxDepth: 2) [END] [Live: [0..=1] (e.g., ["$", "a"])]
+      │  └── Edge 'EOF': [0..=1] (e.g., ["$", "a"]) -> Node Trie2Index(3) (MaxDepth: 2) [END] [Live: [0..=1] (e.g., ["$", "a"])]
+      └── Edge 'EOF': [0] (e.g., ["$"]) -> Ref to Node Trie2Index(4) (MaxDepth: 1) [Live: [0..=1] (e.g., ["$", "a"])]
+
+      --- Tokenizer State ID: 1 ---
+      Root Node Trie2Index(1) (MaxDepth: 0) [Live: []]
+
+      --- Tokenizer State ID: 2 ---
+      Root Node Trie2Index(1) (MaxDepth: 0) [Live: []]
+        (Root already visited)
+
+      ===================================
+      Dump Complete.
+      Dumping Precomputed Trie 3 Structure (showing original LLM Token IDs):
+      ===================================
+
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(0) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0] (e.g., ["a"])): states [0..=2] -> Node Trie2Index(3) (MaxDepth: 1)
+         └── Edge (pop: 0, tokens: [0] (e.g., ["a"])): states [0] -> Node Trie2Index(5) (MaxDepth: 2)
+            └── Edge (pop: 0, tokens: [0] (e.g., ["a"])): states [0..=2] -> Node Trie2Index(7) (MaxDepth: 3)
+               └── Edge (pop: 0, tokens: [0] (e.g., ["a"])): states [0..=2] -> Node Trie2Index(8) (MaxDepth: 4)
+                  └── Edge (pop: 0, tokens: [0..=1] (e.g., ["a", "$"])): states [0..=2] -> Node Trie2Index(9) (MaxDepth: 5)
+                     └── Edge (pop: 0, tokens: [0..=1] (e.g., ["a", "$"])): states [0..=2] -> Node Trie2Index(10) (MaxDepth: 6) [END]
+
+      --- Tokenizer State ID: 1 ---
+      Root Node Trie2Index(1) (MaxDepth: 0)
+
+      --- Tokenizer State ID: 2 ---
+      Root Node Trie2Index(1) (MaxDepth: 0)
+        (Root already visited)
+
+      ===================================
+      Dump Complete.
+      Initializing constraint state...
+
+
+      thread 'test_constraint_basic::test_trivial' (12424362) panicked at src/test_constraint_basic.rs:95:5:
+      assertion `left == right` failed
+        left: HybridBitset { inner:  }
+       right: HybridBitset { inner: 1..=1 }
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::test_constraint_basic::test_trivial
+                   at ./src/test_constraint_basic.rs:95:5
+         5: sep1::test_constraint_basic::test_trivial::{{closure}}
+                   at ./src/test_constraint_basic.rs:40:18
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+
+
+      We're getting a mismatch now. Look carefully.
+    metadata:
+  - assistant: |-
+      It appears the previous refactoring introduced a subtle bug in the precomputation logic for `Trie1`. The way `end_nodes` were constructed was a holdover from the `Trie0` logic and created dead ends in the graph, causing `get_mask` to return an empty set incorrectly.
+
+      The fix is to simplify the concept of an "end node" in `Precomputer1`. Instead of having a complex intermediate node for each possible final tokenizer state, all paths that successfully parse a full LLM token should simply point to a single, shared "leaf" node which marks a valid path.
+
+      Here are the step-by-step instructions and the corresponding git diff to apply this fix.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `src/constraint.rs`**.
+
+      2.  **Navigate to the `Precomputer1::new` function**. This function starts around line 2440.
+
+      3.  **Modify the `end_nodes` initialization**. The current logic creates a complex intermediate node for each tokenizer state. We will replace this to make all `end_nodes` point directly to the single `leaf_node`.
+
+          -   **Find this block of code** (around line 2482):
+              ```rust
+              let all_llm_tokens = HybridBitset::ones(internal_max_llm_token + 1);
+              let end_nodes = tokenizer.iter_states()
+                  .map(|tsid| {
+                      let end_node_for_tsid = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
+                      let accessible_terminals = tokenizer.tokens_accessible_from_state(tsid);
+                      for terminal_id in accessible_terminals {
+                          let mut guard = end_node_for_tsid.write(&trie1_god).unwrap();
+                          let dest_map = guard.children_mut().entry(Some(terminal_id)).or_default();
+                          dest_map.insert(leaf_node.clone(), all_llm_tokens.clone());
+                      }
+                      (tsid, end_node_for_tsid)
+                  })
+                  .collect();
+
+              crate::debug!(2, "Created trie1 end nodes for {} tokenizer states", tokenizer.iter_states().count());
+              ```
+
+          -   **Replace it with this simplified version**:
+              ```rust
+              let end_nodes = tokenizer.iter_states()
+                  .map(|tsid| (tsid, leaf_node.clone()))
+                  .collect();
+
+              crate::debug!(2, "Created trie1 leaf node for {} tokenizer states", tokenizer.iter_states().count());
+              ```
+
+      This change ensures that any path corresponding to a full LLM token terminates at the leaf node, correctly marking it as a valid possibility for `get_mask` without creating unintended dead ends.
+
+      ### Git Diff
+
+      Here is the git patch to apply the change.
+
+      ```diff
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -2481,18 +2481,9 @@
+               }
+       
+               let leaf_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
+      -        let all_llm_tokens = HybridBitset::ones(internal_max_llm_token + 1);
+               let end_nodes = tokenizer.iter_states()
+      -            .map(|tsid| {
+      -                let end_node_for_tsid = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
+      -                let accessible_terminals = tokenizer.tokens_accessible_from_state(tsid);
+      -                for terminal_id in accessible_terminals {
+      -                    let mut guard = end_node_for_tsid.write(&trie1_god).unwrap();
+      -                    let dest_map = guard.children_mut().entry(Some(terminal_id)).or_default();
+      -                    dest_map.insert(leaf_node.clone(), all_llm_tokens.clone());
+      -                }
+      -                (tsid, end_node_for_tsid)
+      -            })
+      +            .map(|tsid| (tsid, leaf_node.clone()))
+                   .collect();
+       
+      -        crate::debug!(2, "Created trie1 end nodes for {} tokenizer states", tokenizer.iter_states().count());
+      +        crate::debug!(2, "Created trie1 leaf node for {} tokenizer states", tokenizer.iter_states().count());
+       
+               Self {
+                   tokenizer,
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Simplify Precomputer1 end node creation
+      to point directly to leaf node"'
     metadata:
 ...

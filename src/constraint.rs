@@ -2487,21 +2487,11 @@ impl<'r> Precomputer1<'r> {
         }
 
         let leaf_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
-        let all_llm_tokens = HybridBitset::ones(internal_max_llm_token + 1);
         let end_nodes = tokenizer.iter_states()
-            .map(|tsid| {
-                let end_node_for_tsid = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
-                let accessible_terminals = tokenizer.tokens_accessible_from_state(tsid);
-                for terminal_id in accessible_terminals {
-                    let mut guard = end_node_for_tsid.write(&trie1_god).unwrap();
-                    let dest_map = guard.children_mut().entry(Some(terminal_id)).or_default();
-                    dest_map.insert(leaf_node.clone(), all_llm_tokens.clone());
-                }
-                (tsid, end_node_for_tsid)
-            })
+            .map(|tsid| (tsid, leaf_node.clone()))
             .collect();
 
-        crate::debug!(2, "Created trie1 end nodes for {} tokenizer states", tokenizer.iter_states().count());
+        crate::debug!(2, "Created trie1 leaf node for {} tokenizer states", tokenizer.iter_states().count());
 
         Self {
             tokenizer,
