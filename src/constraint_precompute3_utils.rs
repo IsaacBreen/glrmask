@@ -195,7 +195,7 @@ pub fn optimize_trie3_size(
     mut max_llm_token_id: usize,
     stage_vocab: &mut StageVocab,
 ) {
-    // has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
+    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
 	if !config.enabled {
 		return;
@@ -371,123 +371,132 @@ pub fn optimize_trie3_size(
 	crate::debug!(2, "Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
-    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
+    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
 	crate::debug!(2, "Finished optimizing Trie 3 size.");
 }
 
-type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize, usize);
-
 fn has_true_cycle_trie3(
     arena: &Trie3GodWrapper,
     roots: &[PrecomputeNode3Index],
-    internal_max_llm_token: usize,
-    max_state_id: usize,
 ) {
-    // We check for each token and state individually. This is slow but thorough.
-    let total_checks = (internal_max_llm_token + 1) * (max_state_id + 1);
-    #[cfg(not(rustrover))]
-    let mut pbar = tqdm!(total = total_checks, desc = "Trie3 Cycle Check", disable = !PROGRESS_BAR_ENABLED, leave = true);
+    let all_nodes = Trie::all_nodes(arena, roots);
+    if all_nodes.is_empty() {
+        return;
+    }
 
-    for llm_token_id in 0..=internal_max_llm_token {
-        for state_id in 0..=max_state_id {
-            #[cfg(not(rustrover))]
-            pbar.update(1).unwrap();
+    const UNVISITED: u8 = 0;
+    const VISITING: u8 = 1;
+    const VISITED: u8 = 2;
 
-            let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
-            for &root in roots {
-                if visited.contains(&root) {
-                    continue;
-                }
-                if let Some((cycle_path, _, _)) = detect_true_cycle_recursive_trie3(
-                    root,
-                    None,
-                    llm_token_id,
-                    state_id,
-                    arena,
-                    &mut HashMap::new(),
-                    &mut visited,
-                    &mut Vec::new(),
-                ) {
-                    let mut report = format!(
-                        "LLM-compatible cycle with pop=0 detected in precompute3 trie for internal LLM token ID {} and state ID {}.\nCycle path:\n",
-                        llm_token_id, state_id
-                    );
-                    for i in 0..cycle_path.len() {
-                        let (node_idx, _) = cycle_path[i];
-                        let next_i = (i + 1) % cycle_path.len();
-                        let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
-                        let edge_str = edge_to_next_opt.as_ref().map_or_else(
-                            || " (root edge)".to_string(),
-                            |ek| format!("pop={}, llm_bv=[...]", ek.0),
-                        );
-                        report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
-                    }
-                    panic!("{}", report);
-                }
+    let mut states: HashMap<PrecomputeNode3Index, u8> = all_nodes
+        .iter()
+        .map(|&idx| (idx, UNVISITED))
+        .collect();
+
+    let mut path: Vec<PrecomputeNode3Index> = Vec::new();
+
+    for node_idx in all_nodes {
+        if states.get(&node_idx) == Some(&UNVISITED) {
+            if let Some(report) = detect_true_cycle_recursive_trie3_new(
+                node_idx,
+                arena,
+                &mut states,
+                &mut path,
+            ) {
+                panic!("{}", report);
             }
         }
     }
 }
 
-fn detect_true_cycle_recursive_trie3(
+fn detect_true_cycle_recursive_trie3_new(
     node_idx: PrecomputeNode3Index,
-    edge_key_opt: Option<(isize, LLMTokenBV)>,
-    llm_token_id: usize,
-    state_id: usize,
     arena: &Trie3GodWrapper,
-    recursion_stack: &mut HashMap<PrecomputeNode3Index, usize>,
-    visited: &mut HashSet<PrecomputeNode3Index>,
-    path: &mut Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>,
-) -> Option<CycleReport3> {
-    path.push((node_idx, edge_key_opt));
+    states: &mut HashMap<PrecomputeNode3Index, u8>,
+    path: &mut Vec<PrecomputeNode3Index>,
+) -> Option<String> {
+    const UNVISITED: u8 = 0;
+    const VISITING: u8 = 1;
+    const VISITED: u8 = 2;
 
-    if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
-        let cycle_path = path[path_start_idx..].to_vec();
-        path.pop();
-        return Some((cycle_path, llm_token_id, state_id));
-    }
-
-    if visited.contains(&node_idx) {
-        path.pop();
-        return None;
-    }
-
-    recursion_stack.insert(node_idx, path.len() - 1);
+    states.insert(node_idx, VISITING);
+    path.push(node_idx);
 
     let children_to_visit = if let Some(guard) = node_idx.read(arena) {
-        guard.children().clone()
+        guard.children().iter()
+            .filter(|((pop, _), _)| *pop == 0)
+            .map(|(_ek, dm)| dm.clone())
+            .collect::<Vec<_>>()
     } else {
-        recursion_stack.remove(&node_idx);
-        path.pop();
-        return None;
+        Vec::new()
     };
 
-    for (edge_key, dest_map) in children_to_visit.iter() {
-        let (pop, llm_bv) = edge_key;
-        if *pop == 0 && llm_bv.contains(llm_token_id) {
-            for (child_idx, sids_bv) in dest_map.iter() {
-                if sids_bv.contains(state_id) {
-                    if let Some(report) = detect_true_cycle_recursive_trie3(
+    for dest_map in children_to_visit {
+        for child_idx in dest_map.keys() {
+            match states.get(child_idx).copied().unwrap_or(UNVISITED) {
+                VISITING => {
+                    if let Some(cycle_start_index) = path.iter().position(|&p| p == *child_idx) {
+                        let cycle_nodes = &path[cycle_start_index..];
+
+                        let mut llm_intersection = LLMTokenBV::max_ones();
+                        let mut sids_intersection = StateIDBV::max_ones();
+
+                        for i in 0..cycle_nodes.len() {
+                            let u = cycle_nodes[i];
+                            let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
+
+                            let u_guard = u.read(arena).unwrap();
+                            let mut edge_llm_union = LLMTokenBV::zeros();
+                            let mut edge_sids_union = StateIDBV::zeros();
+
+                            for ((pop, llm_bv), dm) in u_guard.children() {
+                                if *pop == 0 {
+                                    if let Some(sids) = dm.get(&v) {
+                                        edge_llm_union |= llm_bv;
+                                        edge_sids_union |= sids;
+                                    }
+                                }
+                            }
+
+                            llm_intersection &= &edge_llm_union;
+                            sids_intersection &= &edge_sids_union;
+                        }
+
+                        if !llm_intersection.is_empty() && !sids_intersection.is_empty() {
+                            let first_violating_token = llm_intersection.iter().next().unwrap();
+                            let first_violating_state = sids_intersection.iter().next().unwrap();
+
+                            let mut report = format!(
+                                "LLM-compatible cycle with pop=0 detected in precompute3 trie. Example violation: internal LLM token ID {} and state ID {}.\nCycle path:\n",
+                                first_violating_token, first_violating_state
+                            );
+                            for i in 0..cycle_nodes.len() {
+                                let u = cycle_nodes[i];
+                                let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
+                                report.push_str(&format!("  {} --> {}\n", u, v));
+                            }
+                            return Some(report);
+                        }
+                    }
+                }
+                UNVISITED => {
+                    if let Some(report) = detect_true_cycle_recursive_trie3_new(
                         *child_idx,
-                        Some(edge_key.clone()),
-                        llm_token_id,
-                        state_id,
                         arena,
-                        recursion_stack,
-                        visited,
+                        states,
                         path,
                     ) {
                         return Some(report);
                     }
                 }
+                _ => {}
             }
         }
     }
 
-    recursion_stack.remove(&node_idx);
-    visited.insert(node_idx);
     path.pop();
+    states.insert(node_idx, VISITED);
     None
 }
 
