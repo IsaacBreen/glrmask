@@ -53,7 +53,16 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::constraint_precompute2_utils::optimize_trie2_size;
-pub use crate::constraint_precompute0_utils::Trie0Config;
+#[derive(Debug, Clone)]
+pub struct Trie0Config {
+    pub enabled: bool,
+}
+
+impl Trie0Config {
+    pub fn off() -> Self {
+        Self { enabled: false }
+    }
+}
 pub use crate::constraint_precompute1_utils::Trie1Config;
 pub use crate::constraint_precompute2_utils::Trie2Config;
 pub use crate::constraint_precompute3_utils::Trie3Config;
@@ -1074,6 +1083,7 @@ impl GrammarConstraint {
             &token_name_map,
             precompute_vocab.internal_max_llm_token,
             &terminal_follow_map,
+            parser.ignore_terminal_id,
             &config.trie1,
             &mut precompute_vocab,
         );
@@ -1341,6 +1351,7 @@ impl GrammarConstraint {
             &token_name_map,
             precompute_vocab.internal_max_llm_token,
             &terminal_follow_map,
+            parser.ignore_terminal_id,
             &config.trie1,
             &mut precompute_vocab,
         );
