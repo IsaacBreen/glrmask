@@ -49,13 +49,13 @@ where
     F: Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
 {
     // Only Pop and Push operations count towards path length for cycle detection.
-    let counts_toward_length: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool =
+    let is_path_edge: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool =
         |ek, _, _| {
             matches!(ek, IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_))
         };
 
     let get_normalized_paths = |god, roots| {
-        Trie::get_all_paths_with_cycles(god, roots, is_end, counts_toward_length, max_path_length)
+        Trie::get_all_paths_with_cycles(god, roots, is_end, is_path_edge, max_path_length)
             .into_iter()
             .map(|(_, path)| normalize_path(path.into_iter().map(|(ek, ..)| ek).collect()))
             .collect::<HashSet<_>>()
