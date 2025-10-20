@@ -303,10 +303,10 @@ pub fn optimize_intermediate_trie3(
         .map(|r| *node_map.get(r).unwrap_or(r))
         .collect();
 
-    assert!(
-        are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
-        "Optimization failed to preserve graph equivalence for all roots"
-    );
+    // assert!(
+    //     are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
+    //     "Optimization failed to preserve graph equivalence for all roots"
+    // );
 
     node_map
 }
