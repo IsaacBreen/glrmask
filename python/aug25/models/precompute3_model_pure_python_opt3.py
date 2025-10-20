@@ -906,6 +906,7 @@ class Model(GraphProvider):
         return result
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
+        print("get_mask")
         stats = Stats.get()
         stats.start('get_mask')
         stats.counts['get_mask.traversal.max_depth'] = 0
@@ -953,8 +954,16 @@ class Model(GraphProvider):
         stats.stop('get_mask.seeding')
 
         stats.start('get_mask.main_loop')
+        last_progress_time = time.time()
+        progress_interval_sec = 10.0 # Print progress every 10 seconds
         remaining_mask = all_ones
         while work_heap:
+            if not self.suppress_stats_report and time.time() - last_progress_time > progress_interval_sec:
+                last_progress_time = time.time()
+                print(f"[get_mask] Progress: {len(work_heap)} items in heap, "
+                      f"{stats.counts.get('get_mask.traversal.nodes_processed', 0)} nodes processed, "
+                      f"{stats.counts.get('get_mask.traversal.edges_traversed', 0)} edges traversed, "
+                      f"max_depth={stats.counts.get('get_mask.traversal.max_depth', 0)}")
             stats.inc('get_mask.traversal.depth_heap.pops')
             stats.inc('get_mask.traversal.nodes_processed')
             node, gss_node, start_edge, start_dest, pop_cache, depth = dequeue()
