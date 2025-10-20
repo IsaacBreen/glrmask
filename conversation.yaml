@@ -3,7 +3,6 @@ local_system:
     - /Users/isaacbreen/Projects2/obsidian/grammars25/public interface of trie.rs.md
     - /Users/isaacbreen/Projects2/obsidian/grammars25/public interface of constraint.rs.md
     - src/constraint_precompute3_utils.rs
-    - src/constraint_precompute3_intermediate_utils.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -1206,7 +1205,7 @@ local_system:
           mut max_llm_token_id: usize,
           stage_vocab: &mut StageVocab,
       ) {
-          has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+          // has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
 
       	if !config.enabled {
       		return;
@@ -1382,132 +1381,123 @@ local_system:
       	crate::debug!(2, "Recomputing max depths...");
           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
-          has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+          has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
 
       	crate::debug!(2, "Finished optimizing Trie 3 size.");
       }
 
+      type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize, usize);
+
       fn has_true_cycle_trie3(
           arena: &Trie3GodWrapper,
           roots: &[PrecomputeNode3Index],
+          internal_max_llm_token: usize,
+          max_state_id: usize,
       ) {
-          let all_nodes = Trie::all_nodes(arena, roots);
-          if all_nodes.is_empty() {
-              return;
-          }
+          // We check for each token and state individually. This is slow but thorough.
+          let total_checks = (internal_max_llm_token + 1) * (max_state_id + 1);
+          #[cfg(not(rustrover))]
+          let mut pbar = tqdm!(total = total_checks, desc = "Trie3 Cycle Check", disable = !PROGRESS_BAR_ENABLED, leave = true);
 
-          const UNVISITED: u8 = 0;
-          const VISITING: u8 = 1;
-          const VISITED: u8 = 2;
+          for llm_token_id in 0..=internal_max_llm_token {
+              for state_id in 0..=max_state_id {
+                  #[cfg(not(rustrover))]
+                  pbar.update(1).unwrap();
 
-          let mut states: HashMap<PrecomputeNode3Index, u8> = all_nodes
-              .iter()
-              .map(|&idx| (idx, UNVISITED))
-              .collect();
-
-          let mut path: Vec<PrecomputeNode3Index> = Vec::new();
-
-          for node_idx in all_nodes {
-              if states.get(&node_idx) == Some(&UNVISITED) {
-                  if let Some(report) = detect_true_cycle_recursive_trie3_new(
-                      node_idx,
-                      arena,
-                      &mut states,
-                      &mut path,
-                  ) {
-                      panic!("{}", report);
+                  let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
+                  for &root in roots {
+                      if visited.contains(&root) {
+                          continue;
+                      }
+                      if let Some((cycle_path, _, _)) = detect_true_cycle_recursive_trie3(
+                          root,
+                          None,
+                          llm_token_id,
+                          state_id,
+                          arena,
+                          &mut HashMap::new(),
+                          &mut visited,
+                          &mut Vec::new(),
+                      ) {
+                          let mut report = format!(
+                              "LLM-compatible cycle with pop=0 detected in precompute3 trie for internal LLM token ID {} and state ID {}.\nCycle path:\n",
+                              llm_token_id, state_id
+                          );
+                          for i in 0..cycle_path.len() {
+                              let (node_idx, _) = cycle_path[i];
+                              let next_i = (i + 1) % cycle_path.len();
+                              let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
+                              let edge_str = edge_to_next_opt.as_ref().map_or_else(
+                                  || " (root edge)".to_string(),
+                                  |ek| format!("pop={}, llm_bv=[...]", ek.0),
+                              );
+                              report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
+                          }
+                          panic!("{}", report);
+                      }
                   }
               }
           }
       }
 
-      fn detect_true_cycle_recursive_trie3_new(
+      fn detect_true_cycle_recursive_trie3(
           node_idx: PrecomputeNode3Index,
+          edge_key_opt: Option<(isize, LLMTokenBV)>,
+          llm_token_id: usize,
+          state_id: usize,
           arena: &Trie3GodWrapper,
-          states: &mut HashMap<PrecomputeNode3Index, u8>,
-          path: &mut Vec<PrecomputeNode3Index>,
-      ) -> Option<String> {
-          const UNVISITED: u8 = 0;
-          const VISITING: u8 = 1;
-          const VISITED: u8 = 2;
+          recursion_stack: &mut HashMap<PrecomputeNode3Index, usize>,
+          visited: &mut HashSet<PrecomputeNode3Index>,
+          path: &mut Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>,
+      ) -> Option<CycleReport3> {
+          path.push((node_idx, edge_key_opt));
 
-          states.insert(node_idx, VISITING);
-          path.push(node_idx);
+          if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
+              let cycle_path = path[path_start_idx..].to_vec();
+              path.pop();
+              return Some((cycle_path, llm_token_id, state_id));
+          }
+
+          if visited.contains(&node_idx) {
+              path.pop();
+              return None;
+          }
+
+          recursion_stack.insert(node_idx, path.len() - 1);
 
           let children_to_visit = if let Some(guard) = node_idx.read(arena) {
-              guard.children().iter()
-                  .filter(|((pop, _), _)| *pop == 0)
-                  .map(|(_ek, dm)| dm.clone())
-                  .collect::<Vec<_>>()
+              guard.children().clone()
           } else {
-              Vec::new()
+              recursion_stack.remove(&node_idx);
+              path.pop();
+              return None;
           };
 
-          for dest_map in children_to_visit {
-              for child_idx in dest_map.keys() {
-                  match states.get(child_idx).copied().unwrap_or(UNVISITED) {
-                      VISITING => {
-                          if let Some(cycle_start_index) = path.iter().position(|&p| p == *child_idx) {
-                              let cycle_nodes = &path[cycle_start_index..];
-
-                              let mut llm_intersection = LLMTokenBV::max_ones();
-                              let mut sids_intersection = StateIDBV::max_ones();
-
-                              for i in 0..cycle_nodes.len() {
-                                  let u = cycle_nodes[i];
-                                  let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
-
-                                  let u_guard = u.read(arena).unwrap();
-                                  let mut edge_llm_union = LLMTokenBV::zeros();
-                                  let mut edge_sids_union = StateIDBV::zeros();
-
-                                  for ((pop, llm_bv), dm) in u_guard.children() {
-                                      if *pop == 0 {
-                                          if let Some(sids) = dm.get(&v) {
-                                              edge_llm_union |= llm_bv;
-                                              edge_sids_union |= sids;
-                                          }
-                                      }
-                                  }
-
-                                  llm_intersection &= &edge_llm_union;
-                                  sids_intersection &= &edge_sids_union;
-                              }
-
-                              if !llm_intersection.is_empty() && !sids_intersection.is_empty() {
-                                  let first_violating_token = llm_intersection.iter().next().unwrap();
-                                  let first_violating_state = sids_intersection.iter().next().unwrap();
-
-                                  let mut report = format!(
-                                      "LLM-compatible cycle with pop=0 detected in precompute3 trie. Example violation: internal LLM token ID {} and state ID {}.\nCycle path:\n",
-                                      first_violating_token, first_violating_state
-                                  );
-                                  for i in 0..cycle_nodes.len() {
-                                      let u = cycle_nodes[i];
-                                      let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
-                                      report.push_str(&format!("  {} --> {}\n", u, v));
-                                  }
-                                  return Some(report);
-                              }
-                          }
-                      }
-                      UNVISITED => {
-                          if let Some(report) = detect_true_cycle_recursive_trie3_new(
+          for (edge_key, dest_map) in children_to_visit.iter() {
+              let (pop, llm_bv) = edge_key;
+              if *pop == 0 && llm_bv.contains(llm_token_id) {
+                  for (child_idx, sids_bv) in dest_map.iter() {
+                      if sids_bv.contains(state_id) {
+                          if let Some(report) = detect_true_cycle_recursive_trie3(
                               *child_idx,
+                              Some(edge_key.clone()),
+                              llm_token_id,
+                              state_id,
                               arena,
-                              states,
+                              recursion_stack,
+                              visited,
                               path,
                           ) {
                               return Some(report);
                           }
                       }
-                      _ => {}
                   }
               }
           }
 
+          recursion_stack.remove(&node_idx);
+          visited.insert(node_idx);
           path.pop();
-          states.insert(node_idx, VISITED);
           None
       }
 
@@ -3092,652 +3082,6 @@ local_system:
               crate::debug!(2, "compress_trie3_edges: changes applied; prune/merge/gc will follow in optimize_trie3_size");
           } else {
               crate::debug!(2, "compress_trie3_edges: no changes");
-          }
-      }
-    src/constraint_precompute3_intermediate_utils.rs: |
-      // src/constraint_precompute3_intermediate_utils.rs
-      use crate::{
-          constraint::{
-              IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
-              IntermediateTrie3GodWrapper, LLMTokenBV,
-          },
-          datastructures::trie::Trie,
-      };
-      use kdam::tqdm;
-      use ordered_hash_map::OrderedHashMap;
-      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-      use crate::{profiler::PROGRESS_BAR_ENABLED};
-
-      /// Normalizes a path for comparison purposes.
-      /// - Removes NoOp edges.
-      /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
-      pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
-          let mut combined_llm_bv = LLMTokenBV::max_ones();
-          let mut has_llm_check = false;
-
-          let mut other_ops: Vec<_> = path
-              .into_iter()
-              .filter_map(|ek| match ek {
-                  IntermediateTrie3EdgeKey::CheckLLM(bv) => {
-                      combined_llm_bv &= bv;
-                      has_llm_check = true;
-                      None
-                  }
-                  IntermediateTrie3EdgeKey::NoOp => None,
-                  IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::Pop(_, _) => Some(ek),
-              })
-              .collect();
-
-          if has_llm_check {
-              other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
-          }
-
-          other_ops
-      }
-
-      /// Compares two Intermediate Trie3 graphs for equivalence by comparing their sets of normalized paths.
-      /// This is a strong equivalence check, suitable for testing optimization passes.
-      pub fn are_intermediate_trie3_graphs_equal<F>(
-          roots_a: &[IntermediatePrecomputeNode3Index],
-          god_a: &IntermediateTrie3GodWrapper,
-          roots_b: &[IntermediatePrecomputeNode3Index],
-          god_b: &IntermediateTrie3GodWrapper,
-          is_end: &F,
-          max_path_length: usize,
-      ) -> bool
-      where
-          F: Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
-      {
-          // Only Pop and Push operations count towards path length for cycle detection.
-          let is_path_edge: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool =
-              |ek, _, _| {
-                  !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
-              };
-
-          let get_normalized_paths = |god, roots| {
-              Trie::get_all_paths_with_cycles(god, roots, is_end, is_path_edge, max_path_length)
-                  .into_iter()
-                  .map(|(_, path)| normalize_path(path.into_iter().map(|(ek, ..)| ek).collect()))
-                  .collect::<HashSet<_>>()
-          };
-
-          get_normalized_paths(god_a, roots_a) == get_normalized_paths(god_b, roots_b)
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      struct NodeSignature {
-          end: bool,
-          // For each edge key, store the sorted list of child colors.
-          edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)>,
-      }
-
-      fn build_node_signature(
-          idx: IntermediatePrecomputeNode3Index,
-          god: &IntermediateTrie3GodWrapper,
-          color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-      ) -> NodeSignature {
-          let guard = idx.read(god).expect("Invalid index during signature build");
-          let end = guard.value.end;
-
-          // Collect children grouped by edge key, mapped to their current colors.
-          let mut edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)> = Vec::new();
-          for (ek, dsts) in guard.children().iter() {
-              let mut cols: Vec<usize> = dsts
-                  .keys()
-                  .map(|d| *color_map.get(d).unwrap_or(&0usize))
-                  .collect();
-              cols.sort_unstable();
-              edges.push((ek.clone(), cols));
-          }
-          edges.sort(); // ensure deterministic order
-
-          NodeSignature { end, edges }
-      }
-
-      fn contract_noop_chains(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-      ) -> bool {
-          let mut changed_anything = false;
-          let all_nodes = Trie::all_nodes(god, roots);
-          if all_nodes.is_empty() {
-              return false;
-          }
-
-          // Phase 1: Identify all nodes that are part of a simple NoOp chain.
-          // A node is a candidate if it's not an end node and has a single outgoing NoOp edge
-          // to a single destination.
-          let mut bypass_target: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-              HashMap::new();
-          for idx in &all_nodes {
-              let guard = idx.read(god).expect("read");
-              if guard.value.end {
-                  continue;
-              }
-
-              if guard.children().len() == 1 {
-                  if let Some((key, dests)) = guard.children().iter().next() {
-                      if matches!(key, IntermediateTrie3EdgeKey::NoOp) && dests.len() == 1 {
-                          let dest_idx = *dests.keys().next().unwrap();
-                          bypass_target.insert(*idx, dest_idx);
-                      }
-                  }
-              }
-          }
-
-          if bypass_target.is_empty() {
-              return false;
-          }
-
-          // Phase 2: Resolve bypass chains. e.g., if A->B and B->C, update map to A->C.
-          // This makes rewiring direct to the end of the chain.
-          for node_idx in bypass_target.keys().copied().collect::<Vec<_>>() {
-              let mut target = bypass_target[&node_idx];
-              let mut visited = HashSet::from([node_idx]);
-              while let Some(next_target) = bypass_target.get(&target) {
-                  if !visited.insert(target) {
-                      // Cycle of NoOp nodes detected. This is a "true cycle" and should have been caught.
-                      // Break to prevent an infinite loop.
-                      break;
-                  }
-                  target = *next_target;
-              }
-              bypass_target.insert(node_idx, target);
-          }
-
-          // Phase 3: Rewire the graph.
-          // For each node, check if any of its children should be bypassed.
-          for idx in &all_nodes {
-              if bypass_target.contains_key(idx) {
-                  continue;
-              }
-
-              let mut write_guard = idx.write(god).expect("write");
-              let old_children = std::mem::take(write_guard.children_mut());
-              let mut local_change = false;
-
-              for (key, dests) in old_children {
-                  let mut new_dests = OrderedHashMap::new();
-                  for (dest_idx, ev) in dests {
-                      let final_dest = bypass_target.get(&dest_idx).copied().unwrap_or(dest_idx);
-                      if final_dest != dest_idx {
-                          local_change = true;
-                      }
-                      new_dests.insert(final_dest, ev);
-                  }
-                  if !new_dests.is_empty() {
-                      // It's possible for multiple old (key, dests) to now have the same key.
-                      // We must merge them correctly.
-                      let entry = write_guard.children_mut().entry(key).or_default();
-                      for (dest, ev) in new_dests {
-                          entry.insert(dest, ev);
-                      }
-                  }
-              }
-              if local_change {
-                  changed_anything = true;
-              }
-          }
-
-          changed_anything
-      }
-
-      fn wl_color_refine(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-      ) -> (BTreeMap<IntermediatePrecomputeNode3Index, usize>, usize, usize, usize) {
-          // Restrict to reachable nodes to keep work bounded.
-          let mut reachable = Trie::all_nodes(god, roots);
-          reachable.sort_unstable();
-          reachable.dedup();
-
-          // Compute an edge count for progress reporting.
-          let mut edge_count: usize = 0;
-          for idx in &reachable {
-              if let Some(g) = idx.read(god) {
-                  for (_ek, dsts) in g.children().iter() {
-                      edge_count += dsts.len();
-                  }
-              }
-          }
-          println!(
-              "[optimize_intermediate_trie3] Reachable nodes: {}, edges: {}",
-              reachable.len(),
-              edge_count
-          );
-
-          // Initial colors: based on 'end' flag and out-degree for faster convergence.
-          let mut colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
-          let mut initial_color_map: BTreeMap<(bool, usize), usize> = BTreeMap::new();
-          let mut next_initial_color = 0;
-          for idx in &reachable {
-              let g = idx.read(god).expect("read");
-              let end = g.value.end;
-              let out_degree = g.children().values().map(|dests| dests.len()).sum();
-              let key = (end, out_degree);
-              let color = *initial_color_map.entry(key).or_insert_with(|| {
-                  let c = next_initial_color;
-                  next_initial_color += 1;
-                  c
-              });
-              colors.insert(*idx, color);
-          }
-
-          println!("[optimize_intermediate_trie3] Initial classes: {}", next_initial_color);
-
-          // Iteratively refine until stable.
-          let mut iter = 0usize;
-          loop {
-              iter += 1;
-              let mut sigs: Vec<(IntermediatePrecomputeNode3Index, NodeSignature)> = Vec::with_capacity(reachable.len());
-              for idx in &reachable {
-                  let sig = build_node_signature(*idx, god, &colors);
-                  sigs.push((*idx, sig));
-              }
-
-              // Intern signatures to compact color IDs.
-              let mut intern: BTreeMap<NodeSignature, usize> = BTreeMap::new();
-              let mut next_color_id: usize = 0;
-              let mut new_colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
-
-              for (idx, sig) in sigs {
-                  let cid = if let Some(c) = intern.get(&sig) {
-                      *c
-                  } else {
-                      let c = next_color_id;
-                      intern.insert(sig, c);
-                      next_color_id += 1;
-                      c
-                  };
-                  new_colors.insert(idx, cid);
-              }
-
-              // Compare with old colors to check for stability.
-              let mut changed = 0usize;
-              for (idx, new_c) in &new_colors {
-                  if colors.get(idx).copied().unwrap_or(usize::MAX) != *new_c {
-                      changed += 1;
-                  }
-              }
-
-              println!(
-                  "[optimize_intermediate_trie3] WL iteration {}: classes={}, changed={}",
-                  iter,
-                  new_colors.values().copied().collect::<HashSet<_>>().len(),
-                  changed
-              );
-
-              colors = new_colors;
-              if changed == 0 {
-                  break;
-              }
-          }
-
-          // Count classes and returns stats.
-          let classes = colors.values().copied().collect::<HashSet<_>>().len();
-          (colors, iter, classes, reachable.len())
-      }
-
-      fn rewire_to_canonical(
-          colors: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-          node_map: &mut BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>,
-      ) -> (usize, usize) {
-          // Compute reachable again to scope work.
-          let mut reachable = Trie::all_nodes(god, roots);
-          reachable.sort_unstable();
-          reachable.dedup();
-
-          // Build canonical representative per color (pick minimum index).
-          let mut canon_by_color: HashMap<usize, IntermediatePrecomputeNode3Index> = HashMap::new();
-          for idx in &reachable {
-              let c = colors[idx];
-              match canon_by_color.get(&c) {
-                  Some(existing) => {
-                      if idx.as_usize() < existing.as_usize() {
-                          canon_by_color.insert(c, *idx);
-                      }
-                  }
-                  None => {
-                      canon_by_color.insert(c, *idx);
-                  }
-              }
-          }
-
-          // Build node->canonical map (only store changed ones into node_map)
-          let mut merges = 0usize;
-          for idx in &reachable {
-              let c = colors[idx];
-              let canon = *canon_by_color.get(&c).expect("canonical missing");
-              if *idx != canon {
-                  merges += 1;
-                  node_map.insert(*idx, canon);
-              }
-          }
-          println!(
-              "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
-              canon_by_color.len(),
-              merges
-          );
-
-          // Prepare rewiring plan: for each src and edge key, move edges to canonical destination.
-          let mut plan: BTreeMap<
-              IntermediatePrecomputeNode3Index,
-              BTreeMap<IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>>
-          > = BTreeMap::new();
-
-          for src in &reachable {
-              if let Some(r) = src.read(god) {
-                  for (ek, dsts) in r.children().iter() {
-                      for (dst, _ev) in dsts.iter() {
-                          let c = colors[dst];
-                          let canon_dst = *canon_by_color.get(&c).unwrap();
-                          if canon_dst != *dst {
-                              plan.entry(*src)
-                                  .or_default()
-                                  .entry(ek.clone())
-                                  .or_default()
-                                  .push((*dst, canon_dst));
-                          }
-                      }
-                  }
-              }
-          }
-
-          // Apply rewiring plan.
-          let mut edges_rewired = 0usize;
-          for (src, by_key) in plan {
-              if let Some(mut w) = src.write(god) {
-                  for (ek, mods) in by_key {
-                      if let Some(map) = w.get_mut(&ek) {
-                          for (old_dst, new_dst) in mods {
-                              if old_dst == new_dst {
-                                  continue;
-                              }
-                              if let Some(ev) = map.remove(&old_dst) {
-                                  // Insert the new edge. This correctly handles cases where multiple children
-                                  // are remapped to the same canonical destination.
-                                  map.insert(new_dst, ev);
-                                  edges_rewired += 1;
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
-          (merges, edges_rewired)
-      }
-
-      fn prune_unproductive_paths_intermediate_trie3(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-      ) {
-          println!("[optimize_intermediate_trie3] Pruning nodes that cannot reach an end node...");
-          if roots.is_empty() {
-              return;
-          }
-
-          let all_nodes = Trie::all_nodes(god, roots);
-          if all_nodes.is_empty() {
-              return;
-          }
-
-          // 1. Build reverse adjacency list: dest -> sources
-          let mut incoming: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
-          for src in &all_nodes {
-              let g = src.read(god).expect("read");
-              for (_ek, dm) in g.children() {
-                  for (dst, _ev) in dm {
-                      incoming.entry(*dst).or_default().push(*src);
-                  }
-              }
-          }
-
-          // 2. Initialize worklist with all end nodes
-          let mut productive: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-          let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
-          let mut end_nodes_count = 0usize;
-          for n in &all_nodes {
-              let r = n.read(god).expect("read");
-              if r.value.end {
-                  end_nodes_count += 1;
-                  if productive.insert(*n) {
-                      q.push_back(*n);
-                  }
-              }
-          }
-
-          if end_nodes_count == 0 {
-              println!("[optimize_intermediate_trie3] No end nodes found; skipping pruning.");
-              return;
-          }
-
-          // 3. Reverse BFS to find all productive nodes
-          while let Some(d) = q.pop_front() {
-              if let Some(srcs) = incoming.get(&d) {
-                  for s in srcs {
-                      if productive.insert(*s) {
-                          q.push_back(*s);
-                      }
-                  }
-              }
-          }
-
-          let total_nodes = all_nodes.len();
-          let productive_nodes = productive.len();
-          let prunable = total_nodes.saturating_sub(productive_nodes);
-          println!(
-              "[optimize_intermediate_trie3] End-reachability: total={}, productive={}, prunable={}",
-              total_nodes, productive_nodes, prunable
-          );
-          if prunable == 0 {
-              return;
-          }
-
-          // 4. Remove any edge to a non-productive destination
-          for n in &all_nodes {
-              let mut w = n.write(god).expect("write");
-              let old_children = std::mem::take(w.children_mut());
-              for (ek, dm) in old_children {
-                  let mut new_dm = ordered_hash_map::OrderedHashMap::new();
-                  for (dst, ev) in dm {
-                      if productive.contains(&dst) {
-                          new_dm.insert(dst, ev);
-                      }
-                  }
-                  if !new_dm.is_empty() {
-                      w.children_mut().insert(ek, new_dm);
-                  }
-              }
-          }
-
-          // 5. Recompute all max depths
-          Trie::recompute_all_max_depths(god, roots);
-
-          println!("[optimize_intermediate_trie3] Finished end-reachability pruning.");
-      }
-
-      fn gc_preserving_ends(
-          god: &IntermediateTrie3GodWrapper,
-          roots: &[IntermediatePrecomputeNode3Index],
-      ) {
-          let mut effective_roots = roots.to_vec();
-
-          // Arena::to_vec() is expensive, but it's the way to get all items.
-          // We need to preserve all end nodes, even if they become disconnected.
-          let all_entries = god.to_vec();
-          for (idx, trie) in all_entries {
-              if trie.value.end {
-                  effective_roots.push(IntermediatePrecomputeNode3Index::new(idx));
-              }
-          }
-          effective_roots.sort();
-          effective_roots.dedup();
-          Trie::gc(god, &effective_roots);
-      }
-
-      pub fn optimize_intermediate_trie3(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-          is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
-      ) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
-          let original_god = god.deep_clone();
-          let original_roots = roots.to_vec();
-
-          has_true_cycle_intermediate_trie3(god, roots);
-
-          prune_unproductive_paths_intermediate_trie3(roots, god);
-
-          println!("[optimize_intermediate_trie3] Contracting NoOp chains...");
-          let mut passes = 0;
-          while contract_noop_chains(roots, god) {
-              passes += 1;
-              println!("[optimize_intermediate_trie3] NoOp chain contraction pass {} complete.", passes);
-              if passes > 10 {
-                   println!("[optimize_intermediate_trie3] WARN: NoOp chain contraction took too many passes, breaking.");
-                   break;
-              }
-          }
-          if passes > 0 {
-              println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC.");
-              gc_preserving_ends(god, roots);
-          } else {
-              println!("[optimize_intermediate_trie3] NoOp chains contracted.");
-          }
-          has_true_cycle_intermediate_trie3(god, roots);
-
-          let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-              BTreeMap::default();
-
-          // Pass 1: color-refinement-based structural deduplication with progress reporting.
-          println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
-          let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
-          println!(
-              "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
-              iters, classes, total_nodes
-          );
-
-          let mut node_map = node_map; // make mutable for update
-          let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
-          println!(
-              "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
-              merges, edges_rewired
-          );
-
-          // Check equivalence after optimization (currently no-op)
-          let new_roots: Vec<_> = original_roots
-              .iter()
-              .map(|r| *node_map.get(r).unwrap_or(r))
-              .collect();
-
-          println!("[optimize_intermediate_trie3] Running final GC.");
-          gc_preserving_ends(god, &new_roots);
-
-          // assert!(
-          //     are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
-          //     "Optimization failed to preserve graph equivalence for all roots"
-          // );
-
-          has_true_cycle_intermediate_trie3(god, &new_roots);
-
-          node_map
-      }
-
-      type CycleReportIntermediate3 = Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>;
-
-      fn detect_true_cycle_recursive_intermediate_trie3(
-          node_idx: IntermediatePrecomputeNode3Index,
-          edge_key_opt: Option<IntermediateTrie3EdgeKey>,
-          god: &IntermediateTrie3GodWrapper,
-          recursion_stack: &mut HashMap<IntermediatePrecomputeNode3Index, usize>,
-          visited: &mut HashSet<IntermediatePrecomputeNode3Index>,
-          path: &mut Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>,
-      ) -> Option<CycleReportIntermediate3> {
-          path.push((node_idx, edge_key_opt));
-
-          if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
-              let cycle_path = path[path_start_idx..].to_vec();
-              path.pop();
-              return Some(cycle_path);
-          }
-
-          if visited.contains(&node_idx) {
-              path.pop();
-              return None;
-          }
-
-          recursion_stack.insert(node_idx, path.len() - 1);
-
-          let children_to_visit = if let Some(guard) = node_idx.read(god) {
-              guard.children().clone()
-          } else {
-              recursion_stack.remove(&node_idx);
-              path.pop();
-              return None;
-          };
-
-          for (edge_key, dest_map) in children_to_visit.iter() {
-              match edge_key {
-                  IntermediateTrie3EdgeKey::CheckLLM(_) | IntermediateTrie3EdgeKey::NoOp => {
-                      for (child_idx, _) in dest_map.iter() {
-                          if let Some(report) = detect_true_cycle_recursive_intermediate_trie3(
-                              *child_idx,
-                              Some(edge_key.clone()),
-                              god,
-                              recursion_stack,
-                              visited,
-                              path,
-                          ) {
-                              return Some(report);
-                          }
-                      }
-                  }
-                  IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_) => {
-                      // These edges break "true" cycles, so we don't traverse them.
-                  }
-              }
-          }
-
-          recursion_stack.remove(&node_idx);
-          visited.insert(node_idx);
-          path.pop();
-          None
-      }
-
-      pub fn has_true_cycle_intermediate_trie3(
-          god: &IntermediateTrie3GodWrapper,
-          roots: &[IntermediatePrecomputeNode3Index],
-      ) {
-          let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-          for &root in roots {
-              if !visited.contains(&root) {
-                  continue;
-              }
-              if let Some(cycle_path) = detect_true_cycle_recursive_intermediate_trie3(
-                  root,
-                  None,
-                  god,
-                  &mut HashMap::new(),
-                  &mut visited,
-                  &mut Vec::new(),
-              ) {
-                  let mut report = format!(
-                      "Stack-neutral cycle detected in intermediate precompute3 trie.\nCycle path:\n"
-                  );
-                  for i in 0..cycle_path.len() {
-                      let (node_idx, _) = &cycle_path[i];
-                      let next_i = (i + 1) % cycle_path.len();
-                      let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
-                      let edge_str = edge_to_next_opt.as_ref().map_or_else(
-                          || " (root edge)".to_string(),
-                          |ek| format!("{}", ek),
-                      );
-                      report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
-                  }
-                  panic!("{}", report);
-              }
           }
       }
   prev_file_contents:
@@ -4940,7 +4284,7 @@ local_system:
           mut max_llm_token_id: usize,
           stage_vocab: &mut StageVocab,
       ) {
-          has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+          has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
 
       	if !config.enabled {
       		return;
@@ -6826,648 +6170,6 @@ local_system:
               crate::debug!(2, "compress_trie3_edges: changes applied; prune/merge/gc will follow in optimize_trie3_size");
           } else {
               crate::debug!(2, "compress_trie3_edges: no changes");
-          }
-      }
-    src/constraint_precompute3_intermediate_utils.rs: |
-      // src/constraint_precompute3_intermediate_utils.rs
-      use crate::{
-          constraint::{
-              IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
-              IntermediateTrie3GodWrapper, LLMTokenBV,
-          },
-          datastructures::trie::Trie,
-      };
-      use kdam::tqdm;
-      use ordered_hash_map::OrderedHashMap;
-      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-      use crate::{profiler::PROGRESS_BAR_ENABLED};
-
-      /// Normalizes a path for comparison purposes.
-      /// - Removes NoOp edges.
-      /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
-      pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
-          let mut combined_llm_bv = LLMTokenBV::max_ones();
-          let mut has_llm_check = false;
-
-          let mut other_ops: Vec<_> = path
-              .into_iter()
-              .filter_map(|ek| match ek {
-                  IntermediateTrie3EdgeKey::CheckLLM(bv) => {
-                      combined_llm_bv &= bv;
-                      has_llm_check = true;
-                      None
-                  }
-                  IntermediateTrie3EdgeKey::NoOp => None,
-                  IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::Pop(_, _) => Some(ek),
-              })
-              .collect();
-
-          if has_llm_check {
-              other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
-          }
-
-          other_ops
-      }
-
-      /// Compares two Intermediate Trie3 graphs for equivalence by comparing their sets of normalized paths.
-      /// This is a strong equivalence check, suitable for testing optimization passes.
-      pub fn are_intermediate_trie3_graphs_equal<F>(
-          roots_a: &[IntermediatePrecomputeNode3Index],
-          god_a: &IntermediateTrie3GodWrapper,
-          roots_b: &[IntermediatePrecomputeNode3Index],
-          god_b: &IntermediateTrie3GodWrapper,
-          is_end: &F,
-          max_path_length: usize,
-      ) -> bool
-      where
-          F: Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
-      {
-          // Only Pop and Push operations count towards path length for cycle detection.
-          let is_path_edge: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool =
-              |ek, _, _| {
-                  !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
-              };
-
-          let get_normalized_paths = |god, roots| {
-              Trie::get_all_paths_with_cycles(god, roots, is_end, is_path_edge, max_path_length)
-                  .into_iter()
-                  .map(|(_, path)| normalize_path(path.into_iter().map(|(ek, ..)| ek).collect()))
-                  .collect::<HashSet<_>>()
-          };
-
-          get_normalized_paths(god_a, roots_a) == get_normalized_paths(god_b, roots_b)
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      enum StructuralEdgeKey {
-          Pop(usize),
-          Push,
-          CheckLLM,
-          NoOp,
-      }
-
-      impl From<&IntermediateTrie3EdgeKey> for StructuralEdgeKey {
-          fn from(ek: &IntermediateTrie3EdgeKey) -> Self {
-              match ek {
-                  IntermediateTrie3EdgeKey::Pop(p, _) => StructuralEdgeKey::Pop(*p),
-                  IntermediateTrie3EdgeKey::Push(_) => StructuralEdgeKey::Push,
-                  IntermediateTrie3EdgeKey::CheckLLM(_) => StructuralEdgeKey::CheckLLM,
-                  IntermediateTrie3EdgeKey::NoOp => StructuralEdgeKey::NoOp,
-              }
-          }
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      struct NodeSignature {
-          end: bool,
-          // For each structural edge key, store the sorted list of child colors.
-          edges: Vec<(StructuralEdgeKey, Vec<usize>)>,
-      }
-
-      fn build_node_signature(
-          idx: IntermediatePrecomputeNode3Index,
-          god: &IntermediateTrie3GodWrapper,
-          color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-      ) -> NodeSignature {
-          let guard = idx.read(god).expect("Invalid index during signature build");
-          let end = guard.value.end;
-
-          // Collect children grouped by structural edge key, mapped to their current colors.
-          let mut edges_map: BTreeMap<StructuralEdgeKey, Vec<usize>> = BTreeMap::new();
-          for (ek, dsts) in guard.children().iter() {
-              let structural_key = StructuralEdgeKey::from(ek);
-              let cols = edges_map.entry(structural_key).or_default();
-              for d in dsts.keys() {
-                  // Use 0 for nodes not yet in color_map (shouldn't happen with reachable set)
-                  cols.push(*color_map.get(d).unwrap_or(&0));
-              }
-          }
-
-          let mut edges: Vec<(StructuralEdgeKey, Vec<usize>)> = Vec::new();
-          for (key, mut cols) in edges_map {
-              cols.sort_unstable();
-              edges.push((key, cols));
-          }
-          // BTreeMap provides sorted keys, so `edges` is already sorted by key.
-
-          NodeSignature { end, edges }
-      }
-
-      fn contract_noop_chains(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-      ) -> bool {
-          let mut changed_anything = false;
-          let all_nodes = Trie::all_nodes(god, roots);
-          if all_nodes.is_empty() {
-              return false;
-          }
-
-          // Phase 1: Identify all nodes that are part of a simple NoOp chain.
-          // A node is a candidate if it's not an end node and has a single outgoing NoOp edge
-          // to a single destination.
-          let mut bypass_target: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-              HashMap::new();
-          for idx in &all_nodes {
-              let guard = idx.read(god).expect("read");
-              if guard.value.end {
-                  continue;
-              }
-
-              if guard.children().len() == 1 {
-                  if let Some((key, dests)) = guard.children().iter().next() {
-                      if matches!(key, IntermediateTrie3EdgeKey::NoOp) && dests.len() == 1 {
-                          let dest_idx = *dests.keys().next().unwrap();
-                          bypass_target.insert(*idx, dest_idx);
-                      }
-                  }
-              }
-          }
-
-          if bypass_target.is_empty() {
-              return false;
-          }
-
-          // Phase 2: Resolve bypass chains. e.g., if A->B and B->C, update map to A->C.
-          // This makes rewiring direct to the end of the chain.
-          for node_idx in bypass_target.keys().copied().collect::<Vec<_>>() {
-              let mut target = bypass_target[&node_idx];
-              let mut visited = HashSet::from([node_idx]);
-              while let Some(next_target) = bypass_target.get(&target) {
-                  if !visited.insert(target) {
-                      // Cycle of NoOp nodes detected. This is a "true cycle" and should have been caught.
-                      // Break to prevent an infinite loop.
-                      break;
-                  }
-                  target = *next_target;
-              }
-              bypass_target.insert(node_idx, target);
-          }
-
-          // Phase 3: Rewire the graph.
-          // For each node, check if any of its children should be bypassed.
-          for idx in &all_nodes {
-              if bypass_target.contains_key(idx) {
-                  continue;
-              }
-
-              let mut write_guard = idx.write(god).expect("write");
-              let old_children = std::mem::take(write_guard.children_mut());
-              let mut local_change = false;
-
-              for (key, dests) in old_children {
-                  let mut new_dests = OrderedHashMap::new();
-                  for (dest_idx, ev) in dests {
-                      let final_dest = bypass_target.get(&dest_idx).copied().unwrap_or(dest_idx);
-                      if final_dest != dest_idx {
-                          local_change = true;
-                      }
-                      new_dests.insert(final_dest, ev);
-                  }
-                  if !new_dests.is_empty() {
-                      // It's possible for multiple old (key, dests) to now have the same key.
-                      // We must merge them correctly.
-                      let entry = write_guard.children_mut().entry(key).or_default();
-                      for (dest, ev) in new_dests {
-                          entry.insert(dest, ev);
-                      }
-                  }
-              }
-              if local_change {
-                  changed_anything = true;
-              }
-          }
-
-          changed_anything
-      }
-
-      fn wl_color_refine(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-      ) -> (BTreeMap<IntermediatePrecomputeNode3Index, usize>, usize, usize, usize) {
-          // Restrict to reachable nodes to keep work bounded.
-          let mut reachable = Trie::all_nodes(god, roots);
-          reachable.sort_unstable();
-          reachable.dedup();
-
-          // Compute an edge count for progress reporting.
-          let mut edge_count: usize = 0;
-          for idx in &reachable {
-              if let Some(g) = idx.read(god) {
-                  for (_ek, dsts) in g.children().iter() {
-                      edge_count += dsts.len();
-                  }
-              }
-          }
-          println!(
-              "[optimize_intermediate_trie3] Reachable nodes: {}, edges: {}",
-              reachable.len(),
-              edge_count
-          );
-
-          // Initial colors: based on 'end' flag and out-degree for faster convergence.
-          let mut colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
-          let mut initial_color_map: BTreeMap<(bool, usize), usize> = BTreeMap::new();
-          let mut next_initial_color = 0;
-          for idx in &reachable {
-              let g = idx.read(god).expect("read");
-              let end = g.value.end;
-              let out_degree = g.children().values().map(|dests| dests.len()).sum();
-              let key = (end, out_degree);
-              let color = *initial_color_map.entry(key).or_insert_with(|| {
-                  let c = next_initial_color;
-                  next_initial_color += 1;
-                  c
-              });
-              colors.insert(*idx, color);
-          }
-
-          println!("[optimize_intermediate_trie3] Initial classes: {}", next_initial_color);
-
-          // Iteratively refine until stable.
-          let mut iter = 0usize;
-          loop {
-              iter += 1;
-              let mut sigs: Vec<(IntermediatePrecomputeNode3Index, NodeSignature)> = Vec::with_capacity(reachable.len());
-              for idx in &reachable {
-                  let sig = build_node_signature(*idx, god, &colors);
-                  sigs.push((*idx, sig));
-              }
-
-              // Intern signatures to compact color IDs.
-              let mut intern: BTreeMap<NodeSignature, usize> = BTreeMap::new();
-              let mut next_color_id: usize = 0;
-              let mut new_colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
-
-              for (idx, sig) in sigs {
-                  let cid = if let Some(c) = intern.get(&sig) {
-                      *c
-                  } else {
-                      let c = next_color_id;
-                      intern.insert(sig, c);
-                      next_color_id += 1;
-                      c
-                  };
-                  new_colors.insert(idx, cid);
-              }
-
-              // Compare with old colors to check for stability.
-              let mut changed = 0usize;
-              for (idx, new_c) in &new_colors {
-                  if colors.get(idx).copied().unwrap_or(usize::MAX) != *new_c {
-                      changed += 1;
-                  }
-              }
-
-              println!(
-                  "[optimize_intermediate_trie3] WL iteration {}: classes={}, changed={}",
-                  iter,
-                  new_colors.values().copied().collect::<HashSet<_>>().len(),
-                  changed
-              );
-
-              colors = new_colors;
-              if changed == 0 {
-                  break;
-              }
-          }
-
-          // Count classes and returns stats.
-          let classes = colors.values().copied().collect::<HashSet<_>>().len();
-          (colors, iter, classes, reachable.len())
-      }
-
-      fn rewire_to_canonical(
-          colors: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-          node_map: &mut BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>,
-      ) -> (usize, usize) {
-          let reachable = Trie::all_nodes(god, roots);
-
-          // 1. Find canonical representative for each color class.
-          let mut canon_by_color: HashMap<usize, IntermediatePrecomputeNode3Index> = HashMap::new();
-          for idx in &reachable {
-              let c = colors[idx];
-              // Pick smallest index as canonical representative.
-              canon_by_color.entry(c).and_modify(|e| *e = (*e).min(*idx)).or_insert(*idx);
-          }
-
-          // 2. Build the node_map from every node to its canonical representative.
-          for idx in &reachable {
-              let c = colors[idx];
-              let canon = canon_by_color[&c];
-              node_map.insert(*idx, canon);
-          }
-
-          // 3. For each canonical node, merge the children of all nodes in its class.
-          let mut merges = 0;
-          let mut edges_rewired = 0;
-          for (color, canon_idx) in &canon_by_color {
-              // Find all nodes in this class.
-              let nodes_in_class: Vec<_> = reachable.iter().filter(|idx| colors[idx] == *color).copied().collect();
-              if nodes_in_class.len() <= 1 {
-                  continue;
-              }
-              merges += nodes_in_class.len() - 1;
-
-              let mut merged_children = BTreeMap::new();
-              for node_idx in nodes_in_class {
-                  let guard = node_idx.read(god).unwrap();
-                  for (ek, dest_map) in guard.children() {
-                      for (dest, ev) in dest_map {
-                          let canon_dest = node_map[dest];
-                          // The edge value is (), so we can just insert.
-                          merged_children.entry(ek.clone()).or_default().insert(canon_dest, ev.clone());
-                      }
-                  }
-              }
-
-              // Update the canonical node.
-              let mut canon_guard = canon_idx.write(god).unwrap();
-              if *canon_guard.children() != merged_children {
-                  edges_rewired += 1; // This metric is not very precise anymore.
-              }
-              *canon_guard.children_mut() = merged_children;
-          }
-
-          println!(
-              "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
-              canon_by_color.len(),
-              merges
-          );
-
-          (merges, edges_rewired)
-      }
-
-      fn prune_unproductive_paths_intermediate_trie3(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-      ) {
-          println!("[optimize_intermediate_trie3] Pruning nodes that cannot reach an end node...");
-          if roots.is_empty() {
-              return;
-          }
-
-          let all_nodes = Trie::all_nodes(god, roots);
-          if all_nodes.is_empty() {
-              return;
-          }
-
-          // 1. Build reverse adjacency list: dest -> sources
-          let mut incoming: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
-          for src in &all_nodes {
-              let g = src.read(god).expect("read");
-              for (_ek, dm) in g.children() {
-                  for (dst, _ev) in dm {
-                      incoming.entry(*dst).or_default().push(*src);
-                  }
-              }
-          }
-
-          // 2. Initialize worklist with all end nodes
-          let mut productive: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-          let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
-          let mut end_nodes_count = 0usize;
-          for n in &all_nodes {
-              let r = n.read(god).expect("read");
-              if r.value.end {
-                  end_nodes_count += 1;
-                  if productive.insert(*n) {
-                      q.push_back(*n);
-                  }
-              }
-          }
-
-          if end_nodes_count == 0 {
-              println!("[optimize_intermediate_trie3] No end nodes found; skipping pruning.");
-              return;
-          }
-
-          // 3. Reverse BFS to find all productive nodes
-          while let Some(d) = q.pop_front() {
-              if let Some(srcs) = incoming.get(&d) {
-                  for s in srcs {
-                      if productive.insert(*s) {
-                          q.push_back(*s);
-                      }
-                  }
-              }
-          }
-
-          let total_nodes = all_nodes.len();
-          let productive_nodes = productive.len();
-          let prunable = total_nodes.saturating_sub(productive_nodes);
-          println!(
-              "[optimize_intermediate_trie3] End-reachability: total={}, productive={}, prunable={}",
-              total_nodes, productive_nodes, prunable
-          );
-          if prunable == 0 {
-              return;
-          }
-
-          // 4. Remove any edge to a non-productive destination
-          for n in &all_nodes {
-              let mut w = n.write(god).expect("write");
-              let old_children = std::mem::take(w.children_mut());
-              for (ek, dm) in old_children {
-                  let mut new_dm = ordered_hash_map::OrderedHashMap::new();
-                  for (dst, ev) in dm {
-                      if productive.contains(&dst) {
-                          new_dm.insert(dst, ev);
-                      }
-                  }
-                  if !new_dm.is_empty() {
-                      w.children_mut().insert(ek, new_dm);
-                  }
-              }
-          }
-
-          // 5. Recompute all max depths
-          Trie::recompute_all_max_depths(god, roots);
-
-          println!("[optimize_intermediate_trie3] Finished end-reachability pruning.");
-      }
-
-      fn gc_preserving_ends(
-          god: &IntermediateTrie3GodWrapper,
-          roots: &[IntermediatePrecomputeNode3Index],
-      ) {
-          let mut effective_roots = roots.to_vec();
-
-          // Arena::to_vec() is expensive, but it's the way to get all items.
-          // We need to preserve all end nodes, even if they become disconnected.
-          let all_entries = god.to_vec();
-          for (idx, trie) in all_entries {
-              if trie.value.end {
-                  effective_roots.push(IntermediatePrecomputeNode3Index::new(idx));
-              }
-          }
-          effective_roots.sort();
-          effective_roots.dedup();
-          Trie::gc(god, &effective_roots);
-      }
-
-      pub fn optimize_intermediate_trie3(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-          is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
-      ) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
-          let original_god = god.deep_clone();
-          let original_roots = roots.to_vec();
-
-          has_true_cycle_intermediate_trie3(god, roots);
-
-          prune_unproductive_paths_intermediate_trie3(roots, god);
-
-          println!("[optimize_intermediate_trie3] Contracting NoOp chains...");
-          let mut passes = 0;
-          while contract_noop_chains(roots, god) {
-              passes += 1;
-              println!("[optimize_intermediate_trie3] NoOp chain contraction pass {} complete.", passes);
-              if passes > 10 {
-                   println!("[optimize_intermediate_trie3] WARN: NoOp chain contraction took too many passes, breaking.");
-                   break;
-              }
-          }
-          if passes > 0 {
-              println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC.");
-              gc_preserving_ends(god, roots);
-          } else {
-              println!("[optimize_intermediate_trie3] NoOp chains contracted.");
-          }
-          has_true_cycle_intermediate_trie3(god, roots);
-
-          let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-              BTreeMap::default();
-
-          // Pass 1: color-refinement-based structural deduplication with progress reporting.
-          println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
-          let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
-          println!(
-              "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
-              iters, classes, total_nodes
-          );
-
-          let mut node_map = node_map; // make mutable for update
-          let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
-          println!(
-              "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
-              merges, edges_rewired
-          );
-
-          // Check equivalence after optimization (currently no-op)
-          let new_roots: Vec<_> = original_roots
-              .iter()
-              .map(|r| *node_map.get(r).unwrap_or(r))
-              .collect();
-
-          println!("[optimize_intermediate_trie3] Running final GC.");
-          gc_preserving_ends(god, &new_roots);
-
-          // assert!(
-          //     are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
-          //     "Optimization failed to preserve graph equivalence for all roots"
-          // );
-
-          has_true_cycle_intermediate_trie3(god, &new_roots);
-
-          node_map
-      }
-
-      type CycleReportIntermediate3 = Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>;
-
-      fn detect_true_cycle_recursive_intermediate_trie3(
-          node_idx: IntermediatePrecomputeNode3Index,
-          edge_key_opt: Option<IntermediateTrie3EdgeKey>,
-          god: &IntermediateTrie3GodWrapper,
-          recursion_stack: &mut HashMap<IntermediatePrecomputeNode3Index, usize>,
-          visited: &mut HashSet<IntermediatePrecomputeNode3Index>,
-          path: &mut Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>,
-      ) -> Option<CycleReportIntermediate3> {
-          path.push((node_idx, edge_key_opt));
-
-          if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
-              let cycle_path = path[path_start_idx..].to_vec();
-              path.pop();
-              return Some(cycle_path);
-          }
-
-          if visited.contains(&node_idx) {
-              path.pop();
-              return None;
-          }
-
-          recursion_stack.insert(node_idx, path.len() - 1);
-
-          let children_to_visit = if let Some(guard) = node_idx.read(god) {
-              guard.children().clone()
-          } else {
-              recursion_stack.remove(&node_idx);
-              path.pop();
-              return None;
-          };
-
-          for (edge_key, dest_map) in children_to_visit.iter() {
-              match edge_key {
-                  IntermediateTrie3EdgeKey::CheckLLM(_) | IntermediateTrie3EdgeKey::NoOp => {
-                      for (child_idx, _) in dest_map.iter() {
-                          if let Some(report) = detect_true_cycle_recursive_intermediate_trie3(
-                              *child_idx,
-                              Some(edge_key.clone()),
-                              god,
-                              recursion_stack,
-                              visited,
-                              path,
-                          ) {
-                              return Some(report);
-                          }
-                      }
-                  }
-                  IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_) => {
-                      // These edges break "true" cycles, so we don't traverse them.
-                  }
-              }
-          }
-
-          recursion_stack.remove(&node_idx);
-          visited.insert(node_idx);
-          path.pop();
-          None
-      }
-
-      pub fn has_true_cycle_intermediate_trie3(
-          god: &IntermediateTrie3GodWrapper,
-          roots: &[IntermediatePrecomputeNode3Index],
-      ) {
-          let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-          for &root in roots {
-              if !visited.contains(&root) {
-                  continue;
-              }
-              if let Some(cycle_path) = detect_true_cycle_recursive_intermediate_trie3(
-                  root,
-                  None,
-                  god,
-                  &mut HashMap::new(),
-                  &mut visited,
-                  &mut Vec::new(),
-              ) {
-                  let mut report = format!(
-                      "Stack-neutral cycle detected in intermediate precompute3 trie.\nCycle path:\n"
-                  );
-                  for i in 0..cycle_path.len() {
-                      let (node_idx, _) = &cycle_path[i];
-                      let next_i = (i + 1) % cycle_path.len();
-                      let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
-                      let edge_str = edge_to_next_opt.as_ref().map_or_else(
-                          || " (root edge)".to_string(),
-                          |ek| format!("{}", ek),
-                      );
-                      report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
-                  }
-                  panic!("{}", report);
-              }
           }
       }
   diffs_applied_this_send: true
@@ -8721,7 +7423,7 @@ messages:
           mut max_llm_token_id: usize,
           stage_vocab: &mut StageVocab,
       ) {
-          has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+          // has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
 
       	if !config.enabled {
       		return;
@@ -8897,132 +7599,123 @@ messages:
       	crate::debug!(2, "Recomputing max depths...");
           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
-          has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+          has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
 
       	crate::debug!(2, "Finished optimizing Trie 3 size.");
       }
 
+      type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize, usize);
+
       fn has_true_cycle_trie3(
           arena: &Trie3GodWrapper,
           roots: &[PrecomputeNode3Index],
+          internal_max_llm_token: usize,
+          max_state_id: usize,
       ) {
-          let all_nodes = Trie::all_nodes(arena, roots);
-          if all_nodes.is_empty() {
-              return;
-          }
+          // We check for each token and state individually. This is slow but thorough.
+          let total_checks = (internal_max_llm_token + 1) * (max_state_id + 1);
+          #[cfg(not(rustrover))]
+          let mut pbar = tqdm!(total = total_checks, desc = "Trie3 Cycle Check", disable = !PROGRESS_BAR_ENABLED, leave = true);
 
-          const UNVISITED: u8 = 0;
-          const VISITING: u8 = 1;
-          const VISITED: u8 = 2;
+          for llm_token_id in 0..=internal_max_llm_token {
+              for state_id in 0..=max_state_id {
+                  #[cfg(not(rustrover))]
+                  pbar.update(1).unwrap();
 
-          let mut states: HashMap<PrecomputeNode3Index, u8> = all_nodes
-              .iter()
-              .map(|&idx| (idx, UNVISITED))
-              .collect();
-
-          let mut path: Vec<PrecomputeNode3Index> = Vec::new();
-
-          for node_idx in all_nodes {
-              if states.get(&node_idx) == Some(&UNVISITED) {
-                  if let Some(report) = detect_true_cycle_recursive_trie3_new(
-                      node_idx,
-                      arena,
-                      &mut states,
-                      &mut path,
-                  ) {
-                      panic!("{}", report);
+                  let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
+                  for &root in roots {
+                      if visited.contains(&root) {
+                          continue;
+                      }
+                      if let Some((cycle_path, _, _)) = detect_true_cycle_recursive_trie3(
+                          root,
+                          None,
+                          llm_token_id,
+                          state_id,
+                          arena,
+                          &mut HashMap::new(),
+                          &mut visited,
+                          &mut Vec::new(),
+                      ) {
+                          let mut report = format!(
+                              "LLM-compatible cycle with pop=0 detected in precompute3 trie for internal LLM token ID {} and state ID {}.\nCycle path:\n",
+                              llm_token_id, state_id
+                          );
+                          for i in 0..cycle_path.len() {
+                              let (node_idx, _) = cycle_path[i];
+                              let next_i = (i + 1) % cycle_path.len();
+                              let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
+                              let edge_str = edge_to_next_opt.as_ref().map_or_else(
+                                  || " (root edge)".to_string(),
+                                  |ek| format!("pop={}, llm_bv=[...]", ek.0),
+                              );
+                              report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
+                          }
+                          panic!("{}", report);
+                      }
                   }
               }
           }
       }
 
-      fn detect_true_cycle_recursive_trie3_new(
+      fn detect_true_cycle_recursive_trie3(
           node_idx: PrecomputeNode3Index,
+          edge_key_opt: Option<(isize, LLMTokenBV)>,
+          llm_token_id: usize,
+          state_id: usize,
           arena: &Trie3GodWrapper,
-          states: &mut HashMap<PrecomputeNode3Index, u8>,
-          path: &mut Vec<PrecomputeNode3Index>,
-      ) -> Option<String> {
-          const UNVISITED: u8 = 0;
-          const VISITING: u8 = 1;
-          const VISITED: u8 = 2;
+          recursion_stack: &mut HashMap<PrecomputeNode3Index, usize>,
+          visited: &mut HashSet<PrecomputeNode3Index>,
+          path: &mut Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>,
+      ) -> Option<CycleReport3> {
+          path.push((node_idx, edge_key_opt));
 
-          states.insert(node_idx, VISITING);
-          path.push(node_idx);
+          if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
+              let cycle_path = path[path_start_idx..].to_vec();
+              path.pop();
+              return Some((cycle_path, llm_token_id, state_id));
+          }
+
+          if visited.contains(&node_idx) {
+              path.pop();
+              return None;
+          }
+
+          recursion_stack.insert(node_idx, path.len() - 1);
 
           let children_to_visit = if let Some(guard) = node_idx.read(arena) {
-              guard.children().iter()
-                  .filter(|((pop, _), _)| *pop == 0)
-                  .map(|(_ek, dm)| dm.clone())
-                  .collect::<Vec<_>>()
+              guard.children().clone()
           } else {
-              Vec::new()
+              recursion_stack.remove(&node_idx);
+              path.pop();
+              return None;
           };
 
-          for dest_map in children_to_visit {
-              for child_idx in dest_map.keys() {
-                  match states.get(child_idx).copied().unwrap_or(UNVISITED) {
-                      VISITING => {
-                          if let Some(cycle_start_index) = path.iter().position(|&p| p == *child_idx) {
-                              let cycle_nodes = &path[cycle_start_index..];
-
-                              let mut llm_intersection = LLMTokenBV::max_ones();
-                              let mut sids_intersection = StateIDBV::max_ones();
-
-                              for i in 0..cycle_nodes.len() {
-                                  let u = cycle_nodes[i];
-                                  let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
-
-                                  let u_guard = u.read(arena).unwrap();
-                                  let mut edge_llm_union = LLMTokenBV::zeros();
-                                  let mut edge_sids_union = StateIDBV::zeros();
-
-                                  for ((pop, llm_bv), dm) in u_guard.children() {
-                                      if *pop == 0 {
-                                          if let Some(sids) = dm.get(&v) {
-                                              edge_llm_union |= llm_bv;
-                                              edge_sids_union |= sids;
-                                          }
-                                      }
-                                  }
-
-                                  llm_intersection &= &edge_llm_union;
-                                  sids_intersection &= &edge_sids_union;
-                              }
-
-                              if !llm_intersection.is_empty() && !sids_intersection.is_empty() {
-                                  let first_violating_token = llm_intersection.iter().next().unwrap();
-                                  let first_violating_state = sids_intersection.iter().next().unwrap();
-
-                                  let mut report = format!(
-                                      "LLM-compatible cycle with pop=0 detected in precompute3 trie. Example violation: internal LLM token ID {} and state ID {}.\nCycle path:\n",
-                                      first_violating_token, first_violating_state
-                                  );
-                                  for i in 0..cycle_nodes.len() {
-                                      let u = cycle_nodes[i];
-                                      let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
-                                      report.push_str(&format!("  {} --> {}\n", u, v));
-                                  }
-                                  return Some(report);
-                              }
-                          }
-                      }
-                      UNVISITED => {
-                          if let Some(report) = detect_true_cycle_recursive_trie3_new(
+          for (edge_key, dest_map) in children_to_visit.iter() {
+              let (pop, llm_bv) = edge_key;
+              if *pop == 0 && llm_bv.contains(llm_token_id) {
+                  for (child_idx, sids_bv) in dest_map.iter() {
+                      if sids_bv.contains(state_id) {
+                          if let Some(report) = detect_true_cycle_recursive_trie3(
                               *child_idx,
+                              Some(edge_key.clone()),
+                              llm_token_id,
+                              state_id,
                               arena,
-                              states,
+                              recursion_stack,
+                              visited,
                               path,
                           ) {
                               return Some(report);
                           }
                       }
-                      _ => {}
                   }
               }
           }
 
+          recursion_stack.remove(&node_idx);
+          visited.insert(node_idx);
           path.pop();
-          states.insert(node_idx, VISITED);
           None
       }
 
@@ -10613,789 +9306,10 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_utils.rs
-  - user: |-
-      ```rust 'src/constraint_precompute3_intermediate_utils.rs'
-      // src/constraint_precompute3_intermediate_utils.rs
-      use crate::{
-          constraint::{
-              IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
-              IntermediateTrie3GodWrapper, LLMTokenBV,
-          },
-          datastructures::trie::Trie,
-      };
-      use kdam::tqdm;
-      use ordered_hash_map::OrderedHashMap;
-      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-      use crate::{profiler::PROGRESS_BAR_ENABLED};
-
-      /// Normalizes a path for comparison purposes.
-      /// - Removes NoOp edges.
-      /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
-      pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
-          let mut combined_llm_bv = LLMTokenBV::max_ones();
-          let mut has_llm_check = false;
-
-          let mut other_ops: Vec<_> = path
-              .into_iter()
-              .filter_map(|ek| match ek {
-                  IntermediateTrie3EdgeKey::CheckLLM(bv) => {
-                      combined_llm_bv &= bv;
-                      has_llm_check = true;
-                      None
-                  }
-                  IntermediateTrie3EdgeKey::NoOp => None,
-                  IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::Pop(_, _) => Some(ek),
-              })
-              .collect();
-
-          if has_llm_check {
-              other_ops.insert(0, IntermediateTrie3EdgeKey::CheckLLM(combined_llm_bv));
-          }
-
-          other_ops
-      }
-
-      /// Compares two Intermediate Trie3 graphs for equivalence by comparing their sets of normalized paths.
-      /// This is a strong equivalence check, suitable for testing optimization passes.
-      pub fn are_intermediate_trie3_graphs_equal<F>(
-          roots_a: &[IntermediatePrecomputeNode3Index],
-          god_a: &IntermediateTrie3GodWrapper,
-          roots_b: &[IntermediatePrecomputeNode3Index],
-          god_b: &IntermediateTrie3GodWrapper,
-          is_end: &F,
-          max_path_length: usize,
-      ) -> bool
-      where
-          F: Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
-      {
-          // Only Pop and Push operations count towards path length for cycle detection.
-          let is_path_edge: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool =
-              |ek, _, _| {
-                  !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
-              };
-
-          let get_normalized_paths = |god, roots| {
-              Trie::get_all_paths_with_cycles(god, roots, is_end, is_path_edge, max_path_length)
-                  .into_iter()
-                  .map(|(_, path)| normalize_path(path.into_iter().map(|(ek, ..)| ek).collect()))
-                  .collect::<HashSet<_>>()
-          };
-
-          get_normalized_paths(god_a, roots_a) == get_normalized_paths(god_b, roots_b)
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      struct NodeSignature {
-          end: bool,
-          // For each edge key, store the sorted list of child colors.
-          edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)>,
-      }
-
-      fn build_node_signature(
-          idx: IntermediatePrecomputeNode3Index,
-          god: &IntermediateTrie3GodWrapper,
-          color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-      ) -> NodeSignature {
-          let guard = idx.read(god).expect("Invalid index during signature build");
-          let end = guard.value.end;
-
-          // Collect children grouped by edge key, mapped to their current colors.
-          let mut edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)> = Vec::new();
-          for (ek, dsts) in guard.children().iter() {
-              let mut cols: Vec<usize> = dsts
-                  .keys()
-                  .map(|d| *color_map.get(d).unwrap_or(&0usize))
-                  .collect();
-              cols.sort_unstable();
-              edges.push((ek.clone(), cols));
-          }
-          edges.sort(); // ensure deterministic order
-
-          NodeSignature { end, edges }
-      }
-
-      fn contract_noop_chains(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-      ) -> bool {
-          let mut changed_anything = false;
-          let all_nodes = Trie::all_nodes(god, roots);
-          if all_nodes.is_empty() {
-              return false;
-          }
-
-          // Phase 1: Identify all nodes that are part of a simple NoOp chain.
-          // A node is a candidate if it's not an end node and has a single outgoing NoOp edge
-          // to a single destination.
-          let mut bypass_target: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-              HashMap::new();
-          for idx in &all_nodes {
-              let guard = idx.read(god).expect("read");
-              if guard.value.end {
-                  continue;
-              }
-
-              if guard.children().len() == 1 {
-                  if let Some((key, dests)) = guard.children().iter().next() {
-                      if matches!(key, IntermediateTrie3EdgeKey::NoOp) && dests.len() == 1 {
-                          let dest_idx = *dests.keys().next().unwrap();
-                          bypass_target.insert(*idx, dest_idx);
-                      }
-                  }
-              }
-          }
-
-          if bypass_target.is_empty() {
-              return false;
-          }
-
-          // Phase 2: Resolve bypass chains. e.g., if A->B and B->C, update map to A->C.
-          // This makes rewiring direct to the end of the chain.
-          for node_idx in bypass_target.keys().copied().collect::<Vec<_>>() {
-              let mut target = bypass_target[&node_idx];
-              let mut visited = HashSet::from([node_idx]);
-              while let Some(next_target) = bypass_target.get(&target) {
-                  if !visited.insert(target) {
-                      // Cycle of NoOp nodes detected. This is a "true cycle" and should have been caught.
-                      // Break to prevent an infinite loop.
-                      break;
-                  }
-                  target = *next_target;
-              }
-              bypass_target.insert(node_idx, target);
-          }
-
-          // Phase 3: Rewire the graph.
-          // For each node, check if any of its children should be bypassed.
-          for idx in &all_nodes {
-              if bypass_target.contains_key(idx) {
-                  continue;
-              }
-
-              let mut write_guard = idx.write(god).expect("write");
-              let old_children = std::mem::take(write_guard.children_mut());
-              let mut local_change = false;
-
-              for (key, dests) in old_children {
-                  let mut new_dests = OrderedHashMap::new();
-                  for (dest_idx, ev) in dests {
-                      let final_dest = bypass_target.get(&dest_idx).copied().unwrap_or(dest_idx);
-                      if final_dest != dest_idx {
-                          local_change = true;
-                      }
-                      new_dests.insert(final_dest, ev);
-                  }
-                  if !new_dests.is_empty() {
-                      // It's possible for multiple old (key, dests) to now have the same key.
-                      // We must merge them correctly.
-                      let entry = write_guard.children_mut().entry(key).or_default();
-                      for (dest, ev) in new_dests {
-                          entry.insert(dest, ev);
-                      }
-                  }
-              }
-              if local_change {
-                  changed_anything = true;
-              }
-          }
-
-          changed_anything
-      }
-
-      fn wl_color_refine(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-      ) -> (BTreeMap<IntermediatePrecomputeNode3Index, usize>, usize, usize, usize) {
-          // Restrict to reachable nodes to keep work bounded.
-          let mut reachable = Trie::all_nodes(god, roots);
-          reachable.sort_unstable();
-          reachable.dedup();
-
-          // Compute an edge count for progress reporting.
-          let mut edge_count: usize = 0;
-          for idx in &reachable {
-              if let Some(g) = idx.read(god) {
-                  for (_ek, dsts) in g.children().iter() {
-                      edge_count += dsts.len();
-                  }
-              }
-          }
-          println!(
-              "[optimize_intermediate_trie3] Reachable nodes: {}, edges: {}",
-              reachable.len(),
-              edge_count
-          );
-
-          // Initial colors: based on 'end' flag and out-degree for faster convergence.
-          let mut colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
-          let mut initial_color_map: BTreeMap<(bool, usize), usize> = BTreeMap::new();
-          let mut next_initial_color = 0;
-          for idx in &reachable {
-              let g = idx.read(god).expect("read");
-              let end = g.value.end;
-              let out_degree = g.children().values().map(|dests| dests.len()).sum();
-              let key = (end, out_degree);
-              let color = *initial_color_map.entry(key).or_insert_with(|| {
-                  let c = next_initial_color;
-                  next_initial_color += 1;
-                  c
-              });
-              colors.insert(*idx, color);
-          }
-
-          println!("[optimize_intermediate_trie3] Initial classes: {}", next_initial_color);
-
-          // Iteratively refine until stable.
-          let mut iter = 0usize;
-          loop {
-              iter += 1;
-              let mut sigs: Vec<(IntermediatePrecomputeNode3Index, NodeSignature)> = Vec::with_capacity(reachable.len());
-              for idx in &reachable {
-                  let sig = build_node_signature(*idx, god, &colors);
-                  sigs.push((*idx, sig));
-              }
-
-              // Intern signatures to compact color IDs.
-              let mut intern: BTreeMap<NodeSignature, usize> = BTreeMap::new();
-              let mut next_color_id: usize = 0;
-              let mut new_colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
-
-              for (idx, sig) in sigs {
-                  let cid = if let Some(c) = intern.get(&sig) {
-                      *c
-                  } else {
-                      let c = next_color_id;
-                      intern.insert(sig, c);
-                      next_color_id += 1;
-                      c
-                  };
-                  new_colors.insert(idx, cid);
-              }
-
-              // Compare with old colors to check for stability.
-              let mut changed = 0usize;
-              for (idx, new_c) in &new_colors {
-                  if colors.get(idx).copied().unwrap_or(usize::MAX) != *new_c {
-                      changed += 1;
-                  }
-              }
-
-              println!(
-                  "[optimize_intermediate_trie3] WL iteration {}: classes={}, changed={}",
-                  iter,
-                  new_colors.values().copied().collect::<HashSet<_>>().len(),
-                  changed
-              );
-
-              colors = new_colors;
-              if changed == 0 {
-                  break;
-              }
-          }
-
-          // Count classes and returns stats.
-          let classes = colors.values().copied().collect::<HashSet<_>>().len();
-          (colors, iter, classes, reachable.len())
-      }
-
-      fn rewire_to_canonical(
-          colors: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-          node_map: &mut BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>,
-      ) -> (usize, usize) {
-          // Compute reachable again to scope work.
-          let mut reachable = Trie::all_nodes(god, roots);
-          reachable.sort_unstable();
-          reachable.dedup();
-
-          // Build canonical representative per color (pick minimum index).
-          let mut canon_by_color: HashMap<usize, IntermediatePrecomputeNode3Index> = HashMap::new();
-          for idx in &reachable {
-              let c = colors[idx];
-              match canon_by_color.get(&c) {
-                  Some(existing) => {
-                      if idx.as_usize() < existing.as_usize() {
-                          canon_by_color.insert(c, *idx);
-                      }
-                  }
-                  None => {
-                      canon_by_color.insert(c, *idx);
-                  }
-              }
-          }
-
-          // Build node->canonical map (only store changed ones into node_map)
-          let mut merges = 0usize;
-          for idx in &reachable {
-              let c = colors[idx];
-              let canon = *canon_by_color.get(&c).expect("canonical missing");
-              if *idx != canon {
-                  merges += 1;
-                  node_map.insert(*idx, canon);
-              }
-          }
-          println!(
-              "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
-              canon_by_color.len(),
-              merges
-          );
-
-          // Prepare rewiring plan: for each src and edge key, move edges to canonical destination.
-          let mut plan: BTreeMap<
-              IntermediatePrecomputeNode3Index,
-              BTreeMap<IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>>
-          > = BTreeMap::new();
-
-          for src in &reachable {
-              if let Some(r) = src.read(god) {
-                  for (ek, dsts) in r.children().iter() {
-                      for (dst, _ev) in dsts.iter() {
-                          let c = colors[dst];
-                          let canon_dst = *canon_by_color.get(&c).unwrap();
-                          if canon_dst != *dst {
-                              plan.entry(*src)
-                                  .or_default()
-                                  .entry(ek.clone())
-                                  .or_default()
-                                  .push((*dst, canon_dst));
-                          }
-                      }
-                  }
-              }
-          }
-
-          // Apply rewiring plan.
-          let mut edges_rewired = 0usize;
-          for (src, by_key) in plan {
-              if let Some(mut w) = src.write(god) {
-                  for (ek, mods) in by_key {
-                      if let Some(map) = w.get_mut(&ek) {
-                          for (old_dst, new_dst) in mods {
-                              if old_dst == new_dst {
-                                  continue;
-                              }
-                              if let Some(ev) = map.remove(&old_dst) {
-                                  // Insert the new edge. This correctly handles cases where multiple children
-                                  // are remapped to the same canonical destination.
-                                  map.insert(new_dst, ev);
-                                  edges_rewired += 1;
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
-          (merges, edges_rewired)
-      }
-
-      fn prune_unproductive_paths_intermediate_trie3(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-      ) {
-          println!("[optimize_intermediate_trie3] Pruning nodes that cannot reach an end node...");
-          if roots.is_empty() {
-              return;
-          }
-
-          let all_nodes = Trie::all_nodes(god, roots);
-          if all_nodes.is_empty() {
-              return;
-          }
-
-          // 1. Build reverse adjacency list: dest -> sources
-          let mut incoming: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
-          for src in &all_nodes {
-              let g = src.read(god).expect("read");
-              for (_ek, dm) in g.children() {
-                  for (dst, _ev) in dm {
-                      incoming.entry(*dst).or_default().push(*src);
-                  }
-              }
-          }
-
-          // 2. Initialize worklist with all end nodes
-          let mut productive: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-          let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
-          let mut end_nodes_count = 0usize;
-          for n in &all_nodes {
-              let r = n.read(god).expect("read");
-              if r.value.end {
-                  end_nodes_count += 1;
-                  if productive.insert(*n) {
-                      q.push_back(*n);
-                  }
-              }
-          }
-
-          if end_nodes_count == 0 {
-              println!("[optimize_intermediate_trie3] No end nodes found; skipping pruning.");
-              return;
-          }
-
-          // 3. Reverse BFS to find all productive nodes
-          while let Some(d) = q.pop_front() {
-              if let Some(srcs) = incoming.get(&d) {
-                  for s in srcs {
-                      if productive.insert(*s) {
-                          q.push_back(*s);
-                      }
-                  }
-              }
-          }
-
-          let total_nodes = all_nodes.len();
-          let productive_nodes = productive.len();
-          let prunable = total_nodes.saturating_sub(productive_nodes);
-          println!(
-              "[optimize_intermediate_trie3] End-reachability: total={}, productive={}, prunable={}",
-              total_nodes, productive_nodes, prunable
-          );
-          if prunable == 0 {
-              return;
-          }
-
-          // 4. Remove any edge to a non-productive destination
-          for n in &all_nodes {
-              let mut w = n.write(god).expect("write");
-              let old_children = std::mem::take(w.children_mut());
-              for (ek, dm) in old_children {
-                  let mut new_dm = ordered_hash_map::OrderedHashMap::new();
-                  for (dst, ev) in dm {
-                      if productive.contains(&dst) {
-                          new_dm.insert(dst, ev);
-                      }
-                  }
-                  if !new_dm.is_empty() {
-                      w.children_mut().insert(ek, new_dm);
-                  }
-              }
-          }
-
-          // 5. Recompute all max depths
-          Trie::recompute_all_max_depths(god, roots);
-
-          println!("[optimize_intermediate_trie3] Finished end-reachability pruning.");
-      }
-
-      fn gc_preserving_ends(
-          god: &IntermediateTrie3GodWrapper,
-          roots: &[IntermediatePrecomputeNode3Index],
-      ) {
-          let mut effective_roots = roots.to_vec();
-
-          // Arena::to_vec() is expensive, but it's the way to get all items.
-          // We need to preserve all end nodes, even if they become disconnected.
-          let all_entries = god.to_vec();
-          for (idx, trie) in all_entries {
-              if trie.value.end {
-                  effective_roots.push(IntermediatePrecomputeNode3Index::new(idx));
-              }
-          }
-          effective_roots.sort();
-          effective_roots.dedup();
-          Trie::gc(god, &effective_roots);
-      }
-
-      pub fn optimize_intermediate_trie3(
-          roots: &[IntermediatePrecomputeNode3Index],
-          god: &IntermediateTrie3GodWrapper,
-          is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
-      ) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
-          let original_god = god.deep_clone();
-          let original_roots = roots.to_vec();
-
-          has_true_cycle_intermediate_trie3(god, roots);
-
-          prune_unproductive_paths_intermediate_trie3(roots, god);
-
-          println!("[optimize_intermediate_trie3] Contracting NoOp chains...");
-          let mut passes = 0;
-          while contract_noop_chains(roots, god) {
-              passes += 1;
-              println!("[optimize_intermediate_trie3] NoOp chain contraction pass {} complete.", passes);
-              if passes > 10 {
-                   println!("[optimize_intermediate_trie3] WARN: NoOp chain contraction took too many passes, breaking.");
-                   break;
-              }
-          }
-          if passes > 0 {
-              println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC.");
-              gc_preserving_ends(god, roots);
-          } else {
-              println!("[optimize_intermediate_trie3] NoOp chains contracted.");
-          }
-          has_true_cycle_intermediate_trie3(god, roots);
-
-          let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-              BTreeMap::default();
-
-          // Pass 1: color-refinement-based structural deduplication with progress reporting.
-          println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
-          let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
-          println!(
-              "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
-              iters, classes, total_nodes
-          );
-
-          let mut node_map = node_map; // make mutable for update
-          let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
-          println!(
-              "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
-              merges, edges_rewired
-          );
-
-          // Check equivalence after optimization (currently no-op)
-          let new_roots: Vec<_> = original_roots
-              .iter()
-              .map(|r| *node_map.get(r).unwrap_or(r))
-              .collect();
-
-          println!("[optimize_intermediate_trie3] Running final GC.");
-          gc_preserving_ends(god, &new_roots);
-
-          // assert!(
-          //     are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
-          //     "Optimization failed to preserve graph equivalence for all roots"
-          // );
-
-          has_true_cycle_intermediate_trie3(god, &new_roots);
-
-          node_map
-      }
-
-      type CycleReportIntermediate3 = Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>;
-
-      fn detect_true_cycle_recursive_intermediate_trie3(
-          node_idx: IntermediatePrecomputeNode3Index,
-          edge_key_opt: Option<IntermediateTrie3EdgeKey>,
-          god: &IntermediateTrie3GodWrapper,
-          recursion_stack: &mut HashMap<IntermediatePrecomputeNode3Index, usize>,
-          visited: &mut HashSet<IntermediatePrecomputeNode3Index>,
-          path: &mut Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>,
-      ) -> Option<CycleReportIntermediate3> {
-          path.push((node_idx, edge_key_opt));
-
-          if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
-              let cycle_path = path[path_start_idx..].to_vec();
-              path.pop();
-              return Some(cycle_path);
-          }
-
-          if visited.contains(&node_idx) {
-              path.pop();
-              return None;
-          }
-
-          recursion_stack.insert(node_idx, path.len() - 1);
-
-          let children_to_visit = if let Some(guard) = node_idx.read(god) {
-              guard.children().clone()
-          } else {
-              recursion_stack.remove(&node_idx);
-              path.pop();
-              return None;
-          };
-
-          for (edge_key, dest_map) in children_to_visit.iter() {
-              match edge_key {
-                  IntermediateTrie3EdgeKey::CheckLLM(_) | IntermediateTrie3EdgeKey::NoOp => {
-                      for (child_idx, _) in dest_map.iter() {
-                          if let Some(report) = detect_true_cycle_recursive_intermediate_trie3(
-                              *child_idx,
-                              Some(edge_key.clone()),
-                              god,
-                              recursion_stack,
-                              visited,
-                              path,
-                          ) {
-                              return Some(report);
-                          }
-                      }
-                  }
-                  IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_) => {
-                      // These edges break "true" cycles, so we don't traverse them.
-                  }
-              }
-          }
-
-          recursion_stack.remove(&node_idx);
-          visited.insert(node_idx);
-          path.pop();
-          None
-      }
-
-      pub fn has_true_cycle_intermediate_trie3(
-          god: &IntermediateTrie3GodWrapper,
-          roots: &[IntermediatePrecomputeNode3Index],
-      ) {
-          let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-          for &root in roots {
-              if !visited.contains(&root) {
-                  continue;
-              }
-              if let Some(cycle_path) = detect_true_cycle_recursive_intermediate_trie3(
-                  root,
-                  None,
-                  god,
-                  &mut HashMap::new(),
-                  &mut visited,
-                  &mut Vec::new(),
-              ) {
-                  let mut report = format!(
-                      "Stack-neutral cycle detected in intermediate precompute3 trie.\nCycle path:\n"
-                  );
-                  for i in 0..cycle_path.len() {
-                      let (node_idx, _) = &cycle_path[i];
-                      let next_i = (i + 1) % cycle_path.len();
-                      let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
-                      let edge_str = edge_to_next_opt.as_ref().map_or_else(
-                          || " (root edge)".to_string(),
-                          |ek| format!("{}", ek),
-                      );
-                      report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
-                  }
-                  panic!("{}", report);
-              }
-          }
-      }
-
-      ```
-    metadata:
-      filename: src/constraint_precompute3_intermediate_utils.rs
-  - user: |-
-      `````ad-attachment
-      collapse: closed
-
-      ```
-      [optimize_intermediate_trie3] Pruning nodes that cannot reach an end node...
-      [optimize_intermediate_trie3] End-reachability: total=368632, productive=220346, prunable=148286
-      [optimize_intermediate_trie3] Finished end-reachability pruning.
-      [optimize_intermediate_trie3] Contracting NoOp chains...
-      [optimize_intermediate_trie3] NoOp chain contraction pass 1 complete.
-      [optimize_intermediate_trie3] NoOp chains contracted. Running GC.
-      [optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...
-      [optimize_intermediate_trie3] Reachable nodes: 29761, edges: 215264
-      [optimize_intermediate_trie3] Initial classes: 72
-      [optimize_intermediate_trie3] WL iteration 1: classes=971, changed=28133
-      [optimize_intermediate_trie3] WL iteration 2: classes=2341, changed=29752
-      [optimize_intermediate_trie3] WL iteration 3: classes=3616, changed=26054
-      [optimize_intermediate_trie3] WL iteration 4: classes=5729, changed=28531
-      [optimize_intermediate_trie3] WL iteration 5: classes=6717, changed=28235
-      [optimize_intermediate_trie3] WL iteration 6: classes=8503, changed=28963
-      [optimize_intermediate_trie3] WL iteration 7: classes=8620, changed=28058
-      [optimize_intermediate_trie3] WL iteration 8: classes=8824, changed=28296
-      [optimize_intermediate_trie3] WL iteration 9: classes=8824, changed=0
-      [optimize_intermediate_trie3] Refinement complete: iterations=9, classes=8824, nodes=29761
-      [optimize_intermediate_trie3] Canonicalization: classes=8824, merges=20937
-      [optimize_intermediate_trie3] Rewiring done: merges=20937, edges_rewired=110184
-      [optimize_intermediate_trie3] Running final GC.
-
-      --- Intermediate Trie3 Template Statistics ---
-      Terminal Name             ID         Nodes      Edges
-      ------------------------- ----- ---------- ----------
-      'EOF'                     0            145        645
-      'IDENTIFIER'              1            213        786
-      'IGNORE'                  2              3          2
-      'NUMERIC_LITERAL'         3            181        725
-      'STRING_LITERAL'          4            181        725
-      'TEMPLATE_CHARS'          5             10         15
-      '';''                     6            130        414
-      ''{''                     7            201        769
-      ''}''                     8            237        870
-      ''var''                   9            143        640
-      ''let''                   10           143        640
-      ''const''                 11           143        640
-      '',''                     12           202        607
-      ''=''                     13            37        109
-      '':''                     14            95        316
-      ''[''                     15           206        800
-      '']''                     16           135        454
-      ''if''                    17           142        638
-      ''(''                     18           208        805
-      '')''                     19           173        610
-      ''else''                  20           140        599
-      ''while''                 21           144        653
-      ''do''                    22           142        638
-      ''for''                   23           142        638
-      ''in''                    24            62        180
-      ''of''                    25            10         21
-      ''switch''                26           142        638
-      ''case''                  27           162        686
-      ''default''               28           150        654
-      ''try''                   29           142        638
-      ''catch''                 30             7          8
-      ''finally''               31            12         17
-      ''function''              32           180        723
-      ''return''                33           142        638
-      ''break''                 34           142        638
-      ''continue''              35           142        638
-      ''class''                 36           142        638
-      ''extends''               37             3          2
-      ''+=''                    38            26         79
-      ''-=''                    39            26         79
-      ''*=''                    40            26         79
-      ''/=''                    41            26         79
-      ''%=''                    42            26         79
-      ''**=''                   43            26         79
-      ''=>''                    44             8         10
-      ''?''                     45            75        231
-      ''||''                    46            74        229
-      ''&&''                    47            67        202
-      ''==''                    48            59        175
-      ''!=''                    49            59        175
-      ''===''                   50            59        175
-      ''!==''                   51            59        175
-      ''<''                     52            52        152
-      ''>''                     53            52        152
-      ''<=''                    54            52        152
-      ''>=''                    55            52        152
-      ''instanceof''            56            52        152
-      ''+''                     57           184        646
-      ''-''                     58           184        646
-      ''*''                     59            38        112
-      ''/''                     60            38        112
-      ''%''                     61            38        112
-      ''**''                    62            30         90
-      ''delete''                63           179        721
-      ''typeof''                64           179        721
-      ''void''                  65           179        721
-      ''++''                    66           190        808
-      ''--''                    67           190        808
-      ''~''                     68           179        721
-      ''!''                     69           179        721
-      ''.''                     70            30         82
-      ''...''                   71             4          4
-      ''new''                   72           179        721
-      ''this''                  73           179        721
-      ''super''                 74           179        721
-      ''null''                  75           179        721
-      ''true''                  76           179        721
-      ''false''                 77           179        721
-      ''`''                     78           188        738
-      ''${''                    79            10         15
-      --------------------------------------------
-
-      Union Across All Templates:
-        Unique nodes: 8824
-        Total edges: 34567
-        Nodes shared by >= 2 templates: 1 (0.0%)
-      --------------------------------------------
-      ```
-
-      `````
-
-      We need to do a much, much better job of optimizing the intermediate trie.
-
-      Above are some typical stats for a trie passed in. These tries are computed separately, and hence share no nodes, but ought to have a lot of similarity between them. They'll be passed into `optimize_intermediate_trie3` together as one set of roots.
-      Note that `are_intermediate_trie3_graphs_equal` must pass no matter how arbitrarily high we set `max_path_length`.
-
-      We're still failling to share nodes properly. This is unexpected. It's absolutely crazy that there are so few shared nodes.
-
-      Tips, extra instructions, and common pitfalls:
-      - There are usually many cycles in the input graphs. These must be preserved.
-      - Be careful to ensure the optimizations are valid under the assertion. This is a common mistake.
+  - user: Make `has_true_cycle_trie3` faster. I note that for there to be a state/token
+      cycle, there needs to be a token cycle too. It's possible a token cycle is broken
+      by the state masks. But it might be more efficient to look for token cycles
+      first, then check whether it's resolved by state masks.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -11414,405 +9328,662 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Based on the information you've provided, the key issue appears to be that the node-merging logic in `optimize_intermediate_trie3` is too strict. It requires edges to be identical, including their specific `StateIDBV` and `LLMTokenBV` data, preventing structurally similar subgraphs from different grammar templates from being shared.
+      Of course. Here are the step-by-step instructions to make `has_true_cycle_trie3` faster, followed by the corresponding git diff.
 
-      To fix this, we will modify the optimization to perform a *structural* merge. This involves:
-      1.  Defining node equivalence based only on the graph's shape, ignoring the bit-vector data on edges.
-      2.  Updating the merging logic to combine the edges from all equivalent nodes into a single representative node.
+      ### Step-by-step Instructions
 
-      Here are the step-by-step instructions to apply these changes, followed by the corresponding git diff.
+      1.  **File:** `src/constraint_precompute3_utils.rs`
 
-      ### Step-by-Step Instructions
+      2.  **Update `optimize_trie3_size` Function:**
+          In this function, locate the two calls to `has_true_cycle_trie3`. They appear near the beginning and at the end of the function. Modify both calls to remove the last two arguments (`stage_vocab.internal_max_llm_token` and `max_state_id`), as the new implementation no longer requires them.
 
-      #### File: `src/constraint_precompute3_intermediate_utils.rs`
-
-      1.  **Add `StructuralEdgeKey` Enum:**
-          At the top of the file, before the `NodeSignature` struct, add a new enum to represent the structural type of an edge, along with a conversion from the original `IntermediateTrie3EdgeKey`.
-
-          ```rust
-          #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-          enum StructuralEdgeKey {
-              Pop(usize),
-              Push,
-              CheckLLM,
-              NoOp,
-          }
-
-          impl From<&IntermediateTrie3EdgeKey> for StructuralEdgeKey {
-              fn from(ek: &IntermediateTrie3EdgeKey) -> Self {
-                  match ek {
-                      IntermediateTrie3EdgeKey::Pop(p, _) => StructuralEdgeKey::Pop(*p),
-                      IntermediateTrie3EdgeKey::Push(_) => StructuralEdgeKey::Push,
-                      IntermediateTrie3EdgeKey::CheckLLM(_) => StructuralEdgeKey::CheckLLM,
-                      IntermediateTrie3EdgeKey::NoOp => StructuralEdgeKey::NoOp,
-                  }
-              }
-          }
-          ```
-
-      2.  **Update `NodeSignature` Struct:**
-          Modify the `NodeSignature` struct to use the new `StructuralEdgeKey`.
-
-          *   **From:**
+          *   **Before (near the top):**
               ```rust
-              struct NodeSignature {
-                  end: bool,
-                  // For each edge key, store the sorted list of child colors.
-                  edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)>,
-              }
+              // has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
               ```
-          *   **To:**
+          *   **After:**
               ```rust
-              struct NodeSignature {
-                  end: bool,
-                  // For each structural edge key, store the sorted list of child colors.
-                  edges: Vec<(StructuralEdgeKey, Vec<usize>)>,
-              }
+              has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+              ```
+              *(Note: The original line was commented out, so you can either update it and uncomment it or just replace it with the new active call.)*
+
+          *   **Before (at the bottom):**
+              ```rust
+              has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
+              ```
+          *   **After:**
+              ```rust
+              has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
               ```
 
-      3.  **Replace `build_node_signature` Function:**
-          Replace the entire `build_node_signature` function with a new version that groups edges by their structural key, allowing the equivalence check to ignore bit-vector data.
+      3.  **Replace Cycle Detection Logic:**
+          Delete the `CycleReport3` type alias, the entire `has_true_cycle_trie3` function, and its recursive helper `detect_true_cycle_recursive_trie3`. Replace them with the new, more efficient implementations provided below. The new approach uses a single Depth-First Search (DFS) to find structural cycles and only then analyzes the constraints on a found cycle, which is significantly faster than the previous method of iterating through every possible token and state.
 
-          *   **Replace this:**
+          *   **Delete this type alias:**
               ```rust
-              fn build_node_signature(
-                  idx: IntermediatePrecomputeNode3Index,
-                  god: &IntermediateTrie3GodWrapper,
-                  color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-              ) -> NodeSignature {
-                  let guard = idx.read(god).expect("Invalid index during signature build");
-                  let end = guard.value.end;
-              
-                  // Collect children grouped by edge key, mapped to their current colors.
-                  let mut edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)> = Vec::new();
-                  for (ek, dsts) in guard.children().iter() {
-                      let mut cols: Vec<usize> = dsts
-                          .keys()
-                          .map(|d| *color_map.get(d).unwrap_or(&0usize))
-                          .collect();
-                      cols.sort_unstable();
-                      edges.push((ek.clone(), cols));
-                  }
-                  edges.sort(); // ensure deterministic order
-              
-                  NodeSignature { end, edges }
-              }
+              type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize, usize);
               ```
-          *   **With this:**
+          *   **Delete these two functions:**
               ```rust
-              fn build_node_signature(
-                  idx: IntermediatePrecomputeNode3Index,
-                  god: &IntermediateTrie3GodWrapper,
-                  color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-              ) -> NodeSignature {
-                  let guard = idx.read(god).expect("Invalid index during signature build");
-                  let end = guard.value.end;
-              
-                  // Collect children grouped by structural edge key, mapped to their current colors.
-                  let mut edges_map: BTreeMap<StructuralEdgeKey, Vec<usize>> = BTreeMap::new();
-                  for (ek, dsts) in guard.children().iter() {
-                      let structural_key = StructuralEdgeKey::from(ek);
-                      let cols = edges_map.entry(structural_key).or_default();
-                      for d in dsts.keys() {
-                          // Use 0 for nodes not yet in color_map (shouldn't happen with reachable set)
-                          cols.push(*color_map.get(d).unwrap_or(&0));
-                      }
-                  }
-              
-                  let mut edges: Vec<(StructuralEdgeKey, Vec<usize>)> = Vec::new();
-                  for (key, mut cols) in edges_map {
-                      cols.sort_unstable();
-                      edges.push((key, cols));
-                  }
-                  // BTreeMap provides sorted keys, so `edges` is already sorted by key.
-              
-                  NodeSignature { end, edges }
-              }
+              fn has_true_cycle_trie3(...) { ... }
+              fn detect_true_cycle_recursive_trie3(...) { ... }
               ```
-
-      4.  **Replace `rewire_to_canonical` Function:**
-          Replace the entire `rewire_to_canonical` function. The new implementation correctly merges all edges from equivalent nodes into their canonical representative, which is essential for preserving the graph's complete logic after the structural merge.
-
-          *   **Replace the existing `rewire_to_canonical` function with this new version:**
+          *   **Add these new functions in their place:**
               ```rust
-              fn rewire_to_canonical(
-                  colors: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-                  roots: &[IntermediatePrecomputeNode3Index],
-                  god: &IntermediateTrie3GodWrapper,
-                  node_map: &mut BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>,
-              ) -> (usize, usize) {
-                  let reachable = Trie::all_nodes(god, roots);
-              
-                  // 1. Find canonical representative for each color class.
-                  let mut canon_by_color: HashMap<usize, IntermediatePrecomputeNode3Index> = HashMap::new();
-                  for idx in &reachable {
-                      let c = colors[idx];
-                      // Pick smallest index as canonical representative.
-                      canon_by_color.entry(c).and_modify(|e| *e = (*e).min(*idx)).or_insert(*idx);
+              fn has_true_cycle_trie3(
+                  arena: &Trie3GodWrapper,
+                  roots: &[PrecomputeNode3Index],
+              ) {
+                  let all_nodes = Trie::all_nodes(arena, roots);
+                  if all_nodes.is_empty() {
+                      return;
                   }
               
-                  // 2. Build the node_map from every node to its canonical representative.
-                  for idx in &reachable {
-                      let c = colors[idx];
-                      let canon = canon_by_color[&c];
-                      node_map.insert(*idx, canon);
-                  }
+                  const UNVISITED: u8 = 0;
+                  const VISITING: u8 = 1;
+                  const VISITED: u8 = 2;
               
-                  // 3. For each canonical node, merge the children of all nodes in its class.
-                  let mut merges = 0;
-                  let mut edges_rewired = 0;
-                  for (color, canon_idx) in &canon_by_color {
-                      // Find all nodes in this class.
-                      let nodes_in_class: Vec<_> = reachable.iter().filter(|idx| colors[idx] == *color).copied().collect();
-                      if nodes_in_class.len() <= 1 {
-                          continue;
-                      }
-                      merges += nodes_in_class.len() - 1;
+                  let mut states: HashMap<PrecomputeNode3Index, u8> = all_nodes
+                      .iter()
+                      .map(|&idx| (idx, UNVISITED))
+                      .collect();
               
-                      let mut merged_children = BTreeMap::new();
-                      for node_idx in nodes_in_class {
-                          let guard = node_idx.read(god).unwrap();
-                          for (ek, dest_map) in guard.children() {
-                              for (dest, ev) in dest_map {
-                                  let canon_dest = node_map[dest];
-                                  // The edge value is (), so we can just insert.
-                                  merged_children.entry(ek.clone()).or_default().insert(canon_dest, ev.clone());
-                              }
+                  let mut path: Vec<PrecomputeNode3Index> = Vec::new();
+              
+                  for node_idx in all_nodes {
+                      if states.get(&node_idx) == Some(&UNVISITED) {
+                          if let Some(report) = detect_true_cycle_recursive_trie3_new(
+                              node_idx,
+                              arena,
+                              &mut states,
+                              &mut path,
+                          ) {
+                              panic!("{}", report);
                           }
                       }
+                  }
+              }
               
-                      // Update the canonical node.
-                      let mut canon_guard = canon_idx.write(god).unwrap();
-                      if *canon_guard.children() != merged_children {
-                          edges_rewired += 1; // This metric is not very precise anymore.
+              fn detect_true_cycle_recursive_trie3_new(
+                  node_idx: PrecomputeNode3Index,
+                  arena: &Trie3GodWrapper,
+                  states: &mut HashMap<PrecomputeNode3Index, u8>,
+                  path: &mut Vec<PrecomputeNode3Index>,
+              ) -> Option<String> {
+                  const UNVISITED: u8 = 0;
+                  const VISITING: u8 = 1;
+                  const VISITED: u8 = 2;
+              
+                  states.insert(node_idx, VISITING);
+                  path.push(node_idx);
+              
+                  let children_to_visit = if let Some(guard) = node_idx.read(arena) {
+                      guard.children().iter()
+                          .filter(|((pop, _), _)| *pop == 0)
+                          .map(|(_ek, dm)| dm.clone())
+                          .collect::<Vec<_>>()
+                  } else {
+                      Vec::new()
+                  };
+              
+                  for dest_map in children_to_visit {
+                      for child_idx in dest_map.keys() {
+                          match states.get(child_idx).copied().unwrap_or(UNVISITED) {
+                              VISITING => {
+                                  if let Some(cycle_start_index) = path.iter().position(|&p| p == *child_idx) {
+                                      let cycle_nodes = &path[cycle_start_index..];
+              
+                                      let mut llm_intersection = LLMTokenBV::max_ones();
+                                      let mut sids_intersection = StateIDBV::max_ones();
+              
+                                      for i in 0..cycle_nodes.len() {
+                                          let u = cycle_nodes[i];
+                                          let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
+              
+                                          let u_guard = u.read(arena).unwrap();
+                                          let mut edge_llm_union = LLMTokenBV::zeros();
+                                          let mut edge_sids_union = StateIDBV::zeros();
+              
+                                          for ((pop, llm_bv), dm) in u_guard.children() {
+                                              if *pop == 0 {
+                                                  if let Some(sids) = dm.get(&v) {
+                                                      edge_llm_union |= llm_bv;
+                                                      edge_sids_union |= sids;
+                                                  }
+                                              }
+                                          }
+              
+                                          llm_intersection &= &edge_llm_union;
+                                          sids_intersection &= &edge_sids_union;
+                                      }
+              
+                                      if !llm_intersection.is_empty() && !sids_intersection.is_empty() {
+                                          let first_violating_token = llm_intersection.iter().next().unwrap();
+                                          let first_violating_state = sids_intersection.iter().next().unwrap();
+              
+                                          let mut report = format!(
+                                              "LLM-compatible cycle with pop=0 detected in precompute3 trie. Example violation: internal LLM token ID {} and state ID {}.\nCycle path:\n",
+                                              first_violating_token, first_violating_state
+                                          );
+                                          for i in 0..cycle_nodes.len() {
+                                              let u = cycle_nodes[i];
+                                              let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
+                                              report.push_str(&format!("  {} --> {}\n", u, v));
+                                          }
+                                          return Some(report);
+                                      }
+                                  }
+                              }
+                              UNVISITED => {
+                                  if let Some(report) = detect_true_cycle_recursive_trie3_new(
+                                      *child_idx,
+                                      arena,
+                                      states,
+                                      path,
+                                  ) {
+                                      return Some(report);
+                                  }
+                              }
+                              _ => {}
+                          }
                       }
-                      *canon_guard.children_mut() = merged_children;
                   }
               
-                  println!(
-                      "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
-                      canon_by_color.len(),
-                      merges
-                  );
-              
-                  (merges, edges_rewired)
+                  path.pop();
+                  states.insert(node_idx, VISITED);
+                  None
               }
               ```
 
-      ### Git Diffs
-
-      Here is the git patch that applies the changes described above.
+      ### Git Diff
 
       ```diff
-      diff --git a/src/constraint_precompute3_intermediate_utils.rs b/src/constraint_precompute3_intermediate_utils.rs
-      index 331114b..133234a 100644
-      --- a/src/constraint_precompute3_intermediate_utils.rs
-      +++ b/src/constraint_precompute3_intermediate_utils.rs
-      @@ -60,45 +60,61 @@
-           get_normalized_paths(god_a, roots_a) == get_normalized_paths(god_b, roots_b)
+      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 2411158..1111111 100644
+      --- a/src/constraint_precompute3_utils.rs
+      +++ b/src/constraint_precompute3_utils.rs
+      @@ -231,7 +231,7 @@
+           max_llm_token_id: usize,
+           stage_vocab: &mut StageVocab,
+       ) {
+      -    // has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
+      +    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+       
+       	if !config.enabled {
+       		return;
+      @@ -401,119 +401,121 @@
+       	crate::debug!(2, "Recomputing max depths...");
+           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+       
+      -    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
+      +    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+       
+       	crate::debug!(2, "Finished optimizing Trie 3 size.");
        }
        
-      +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      +enum StructuralEdgeKey {
-      +    Pop(usize),
-      +    Push,
-      +    CheckLLM,
-      +    NoOp,
-      +}
-      +
-      +impl From<&IntermediateTrie3EdgeKey> for StructuralEdgeKey {
-      +    fn from(ek: &IntermediateTrie3EdgeKey) -> Self {
-      +        match ek {
-      +            IntermediateTrie3EdgeKey::Pop(p, _) => StructuralEdgeKey::Pop(*p),
-      +            IntermediateTrie3EdgeKey::Push(_) => StructuralEdgeKey::Push,
-      +            IntermediateTrie3EdgeKey::CheckLLM(_) => StructuralEdgeKey::CheckLLM,
-      +            IntermediateTrie3EdgeKey::NoOp => StructuralEdgeKey::NoOp,
-      +        }
-      +    }
-      +}
-      +
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-       struct NodeSignature {
-           end: bool,
-      -    // For each edge key, store the sorted list of child colors.
-      -    edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)>,
-      +    // For each structural edge key, store the sorted list of child colors.
-      +    edges: Vec<(StructuralEdgeKey, Vec<usize>)>,
-       }
-       
-       fn build_node_signature(
-           idx: IntermediatePrecomputeNode3Index,
-           god: &IntermediateTrie3GodWrapper,
-           color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-       ) -> NodeSignature {
-           let guard = idx.read(god).expect("Invalid index during signature build");
-           let end = guard.value.end;
-       
-      -    // Collect children grouped by edge key, mapped to their current colors.
-      -    let mut edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)> = Vec::new();
-      +    // Collect children grouped by structural edge key, mapped to their current colors.
-      +    let mut edges_map: BTreeMap<StructuralEdgeKey, Vec<usize>> = BTreeMap::new();
-           for (ek, dsts) in guard.children().iter() {
-      -        let mut cols: Vec<usize> = dsts
-      -            .keys()
-      -            .map(|d| *color_map.get(d).unwrap_or(&0usize))
-      -            .collect();
-      -        cols.sort_unstable();
-      -        edges.push((ek.clone(), cols));
-      -    }
-      -    edges.sort(); // ensure deterministic order
-      +        let structural_key = StructuralEdgeKey::from(ek);
-      +        let cols = edges_map.entry(structural_key).or_default();
-      +        for d in dsts.keys() {
-      +            // Use 0 for nodes not yet in color_map (shouldn't happen with reachable set)
-      +            cols.push(*color_map.get(d).unwrap_or(&0));
-      +        }
-      +    }
-      +
-      +    let mut edges: Vec<(StructuralEdgeKey, Vec<usize>)> = Vec::new();
-      +    for (key, mut cols) in edges_map {
-      +        cols.sort_unstable();
-      +        edges.push((key, cols));
-      +    }
-      +    // BTreeMap provides sorted keys, so `edges` is already sorted by key.
-       
-           NodeSignature { end, edges }
-       }
-       
-       fn contract_noop_chains(
-           roots: &[IntermediatePrecomputeNode3Index],
-      @@ -248,87 +264,59 @@
-           roots: &[IntermediatePrecomputeNode3Index],
-           god: &IntermediateTrie3GodWrapper,
-           node_map: &mut BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>,
-       ) -> (usize, usize) {
-      -    // Compute reachable again to scope work.
-      -    let mut reachable = Trie::all_nodes(god, roots);
-      -    reachable.sort_unstable();
-      -    reachable.dedup();
+      -type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize, usize);
       -
-      -    // Build canonical representative per color (pick minimum index).
-      +    let reachable = Trie::all_nodes(god, roots);
-      +
-      +    // 1. Find canonical representative for each color class.
-           let mut canon_by_color: HashMap<usize, IntermediatePrecomputeNode3Index> = HashMap::new();
-           for idx in &reachable {
-               let c = colors[idx];
-      -        match canon_by_color.get(&c) {
-      -            Some(existing) => {
-      -                if idx.as_usize() < existing.as_usize() {
-      -                    canon_by_color.insert(c, *idx);
+       fn has_true_cycle_trie3(
+           arena: &Trie3GodWrapper,
+           roots: &[PrecomputeNode3Index],
+      -    internal_max_llm_token: usize,
+      -    max_state_id: usize,
+       ) {
+      -    // We check for each token and state individually. This is slow but thorough.
+      -    let total_checks = (internal_max_llm_token + 1) * (max_state_id + 1);
+      -    #[cfg(not(rustrover))]
+      -    let mut pbar = tqdm!(total = total_checks, desc = "Trie3 Cycle Check", disable = !PROGRESS_BAR_ENABLED, leave = true);
+      -
+      -    for llm_token_id in 0..=internal_max_llm_token {
+      -        for state_id in 0..=max_state_id {
+      -            #[cfg(not(rustrover))]
+      -            pbar.update(1).unwrap();
+      -
+      -            let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
+      -            for &root in roots {
+      -                if visited.contains(&root) {
+      -                    continue;
+      -                }
+      -                if let Some((cycle_path, _, _)) = detect_true_cycle_recursive_trie3(
+      -                    root,
+      -                    None,
+      -                    llm_token_id,
+      -                    state_id,
+      -                    arena,
+      -                    &mut HashMap::new(),
+      -                    &mut visited,
+      -                    &mut Vec::new(),
+      -                ) {
+      -                    let mut report = format!(
+      -                        "LLM-compatible cycle with pop=0 detected in precompute3 trie for internal LLM token ID {} and state ID {}.\nCycle path:\n",
+      -                        llm_token_id, state_id
+      -                    );
+      -                    for i in 0..cycle_path.len() {
+      -                        let (node_idx, _) = cycle_path[i];
+      -                        let next_i = (i + 1) % cycle_path.len();
+      -                        let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
+      -                        let edge_str = edge_to_next_opt.as_ref().map_or_else(
+      -                            || " (root edge)".to_string(),
+      -                            |ek| format!("pop={}, llm_bv=[...]", ek.0),
+      -                        );
+      -                        report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
+      -                    }
+      -                    panic!("{}", report);
       -                }
       -            }
-      -            None => {
-      -                canon_by_color.insert(c, *idx);
-      -            }
       -        }
       -    }
+      -}
       -
-      -    // Build node->canonical map (only store changed ones into node_map)
-      -    let mut merges = 0usize;
-      +        // Pick smallest index as canonical representative.
-      +        canon_by_color.entry(c).and_modify(|e| *e = (*e).min(*idx)).or_insert(*idx);
+      -fn detect_true_cycle_recursive_trie3(
+      +    let all_nodes = Trie::all_nodes(arena, roots);
+      +    if all_nodes.is_empty() {
+      +        return;
       +    }
       +
-      +    // 2. Build the node_map from every node to its canonical representative.
-           for idx in &reachable {
-               let c = colors[idx];
-      -        let canon = *canon_by_color.get(&c).expect("canonical missing");
-      -        if *idx != canon {
-      -            merges += 1;
-      -            node_map.insert(*idx, canon);
-      -        }
-      -    }
-      +        let canon = canon_by_color[&c];
-      +        node_map.insert(*idx, canon);
-      +    }
+      +    const UNVISITED: u8 = 0;
+      +    const VISITING: u8 = 1;
+      +    const VISITED: u8 = 2;
       +
-      +    // 3. For each canonical node, merge the children of all nodes in its class.
-      +    let mut merges = 0;
-      +    let mut edges_rewired = 0;
-      +    for (color, canon_idx) in &canon_by_color {
-      +        // Find all nodes in this class.
-      +        let nodes_in_class: Vec<_> = reachable.iter().filter(|idx| colors[idx] == *color).copied().collect();
-      +        if nodes_in_class.len() <= 1 {
-      +            continue;
-      +        }
-      +        merges += nodes_in_class.len() - 1;
+      +    let mut states: HashMap<PrecomputeNode3Index, u8> = all_nodes
+      +        .iter()
+      +        .map(|&idx| (idx, UNVISITED))
+      +        .collect();
       +
-      +        let mut merged_children = BTreeMap::new();
-      +        for node_idx in nodes_in_class {
-      +            let guard = node_idx.read(god).unwrap();
-      +            for (ek, dest_map) in guard.children() {
-      +                for (dest, ev) in dest_map {
-      +                    let canon_dest = node_map[dest];
-      +                    // The edge value is (), so we can just insert.
-      +                    merged_children.entry(ek.clone()).or_default().insert(canon_dest, ev.clone());
-      +                }
+      +    let mut path: Vec<PrecomputeNode3Index> = Vec::new();
+      +
+      +    for node_idx in all_nodes {
+      +        if states.get(&node_idx) == Some(&UNVISITED) {
+      +            if let Some(report) = detect_true_cycle_recursive_trie3_new(
+      +                node_idx,
+      +                arena,
+      +                &mut states,
+      +                &mut path,
+      +            ) {
+      +                panic!("{}", report);
       +            }
       +        }
+      +    }
+      +}
       +
-      +        // Update the canonical node.
-      +        let mut canon_guard = canon_idx.write(god).unwrap();
-      +        if *canon_guard.children() != merged_children {
-      +            edges_rewired += 1; // This metric is not very precise anymore.
+      +fn detect_true_cycle_recursive_trie3_new(
+           node_idx: PrecomputeNode3Index,
+      -    edge_key_opt: Option<(isize, LLMTokenBV)>,
+      -    llm_token_id: usize,
+      -    state_id: usize,
+           arena: &Trie3GodWrapper,
+      -    recursion_stack: &mut HashMap<PrecomputeNode3Index, usize>,
+      -    visited: &mut HashSet<PrecomputeNode3Index>,
+      -    path: &mut Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>,
+      -) -> Option<CycleReport3> {
+      -    path.push((node_idx, edge_key_opt));
+      -
+      -    if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
+      -        let cycle_path = path[path_start_idx..].to_vec();
+      -        path.pop();
+      -        return Some((cycle_path, llm_token_id, state_id));
+      -    }
+      -
+      -    if visited.contains(&node_idx) {
+      -        path.pop();
+      -        return None;
+      -    }
+      -
+      -    recursion_stack.insert(node_idx, path.len() - 1);
+      +    states: &mut HashMap<PrecomputeNode3Index, u8>,
+      +    path: &mut Vec<PrecomputeNode3Index>,
+      +) -> Option<String> {
+      +    const UNVISITED: u8 = 0;
+      +    const VISITING: u8 = 1;
+      +    const VISITED: u8 = 2;
+      +
+      +    states.insert(node_idx, VISITING);
+      +    path.push(node_idx);
+       
+           let children_to_visit = if let Some(guard) = node_idx.read(arena) {
+      -        guard.children().clone()
+      +        guard.children().iter()
+      +            .filter(|((pop, _), _)| *pop == 0)
+      +            .map(|(_ek, dm)| dm.clone())
+      +            .collect::<Vec<_>>()
+           } else {
+      -        recursion_stack.remove(&node_idx);
+      -        path.pop();
+      -        return None;
+      +        Vec::new()
+           };
+       
+      -    for (edge_key, dest_map) in children_to_visit.iter() {
+      -        let (pop, llm_bv) = edge_key;
+      -        if *pop == 0 && llm_bv.contains(llm_token_id) {
+      -            for (child_idx, sids_bv) in dest_map.iter() {
+      -                if sids_bv.contains(state_id) {
+      -                    if let Some(report) = detect_true_cycle_recursive_trie3(
+      +    for dest_map in children_to_visit {
+      +        for child_idx in dest_map.keys() {
+      +            match states.get(child_idx).copied().unwrap_or(UNVISITED) {
+      +                VISITING => {
+      +                    if let Some(cycle_start_index) = path.iter().position(|&p| p == *child_idx) {
+      +                        let cycle_nodes = &path[cycle_start_index..];
+      +
+      +                        let mut llm_intersection = LLMTokenBV::max_ones();
+      +                        let mut sids_intersection = StateIDBV::max_ones();
+      +
+      +                        for i in 0..cycle_nodes.len() {
+      +                            let u = cycle_nodes[i];
+      +                            let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
+      +
+      +                            let u_guard = u.read(arena).unwrap();
+      +                            let mut edge_llm_union = LLMTokenBV::zeros();
+      +                            let mut edge_sids_union = StateIDBV::zeros();
+      +
+      +                            for ((pop, llm_bv), dm) in u_guard.children() {
+      +                                if *pop == 0 {
+      +                                    if let Some(sids) = dm.get(&v) {
+      +                                        edge_llm_union |= llm_bv;
+      +                                        edge_sids_union |= sids;
+      +                                    }
+      +                                }
+      +                            }
+      +
+      +                            llm_intersection &= &edge_llm_union;
+      +                            sids_intersection &= &edge_sids_union;
+      +                        }
+      +
+      +                        if !llm_intersection.is_empty() && !sids_intersection.is_empty() {
+      +                            let first_violating_token = llm_intersection.iter().next().unwrap();
+      +                            let first_violating_state = sids_intersection.iter().next().unwrap();
+      +
+      +                            let mut report = format!(
+      +                                "LLM-compatible cycle with pop=0 detected in precompute3 trie. Example violation: internal LLM token ID {} and state ID {}.\nCycle path:\n",
+      +                                first_violating_token, first_violating_state
+      +                            );
+      +                            for i in 0..cycle_nodes.len() {
+      +                                let u = cycle_nodes[i];
+      +                                let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
+      +                                report.push_str(&format!("  {} --> {}\n", u, v));
+      +                            }
+      +                            return Some(report);
+      +                        }
+      +                    }
+      +                }
+      +                UNVISITED => {
+      +                    if let Some(report) = detect_true_cycle_recursive_trie3_new(
+                               *child_idx,
+      -                        Some(edge_key.clone()),
+      -                        llm_token_id,
+      -                        state_id,
+                               arena,
+      -                        recursion_stack,
+      -                        visited,
+      +                        states,
+                               path,
+                           ) {
+                               return Some(report);
+                           }
+                       }
+      -            }
+      -        }
+      -    }
+      -
+      -    recursion_stack.remove(&node_idx);
+      -    visited.insert(node_idx);
+      +                _ => {}
+      +            }
       +        }
-      +        *canon_guard.children_mut() = merged_children;
       +    }
       +
-           println!(
-               "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
-               canon_by_color.len(),
-               merges
-           );
+           path.pop();
+      +    states.insert(node_idx, VISITED);
+           None
+       }
        
-      -    // Prepare rewiring plan: for each src and edge key, move edges to canonical destination.
-      -    let mut plan: BTreeMap<
-      -        IntermediatePrecomputeNode3Index,
-      -        BTreeMap<IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>>
-      -    > = BTreeMap::new();
+
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 2411158..1111111 100644
+      --- a/src/constraint_precompute3_utils.rs
+      +++ b/src/constraint_precompute3_utils.rs
+      @@ -201,7 +201,7 @@
+           mut max_llm_token_id: usize,
+           stage_vocab: &mut StageVocab,
+       ) {
+      -    // has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
+      +    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
+       
+       	if !config.enabled {
+       		return;
+      @@ -401,119 +401,121 @@
+       	crate::debug!(2, "Recomputing max depths...");
+           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+       
+      -    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
+      +    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+       
+       	crate::debug!(2, "Finished optimizing Trie 3 size.");
+       }
+       
+      -type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize, usize);
       -
-      -    for src in &reachable {
-      -        if let Some(r) = src.read(god) {
-      -            for (ek, dsts) in r.children().iter() {
-      -                for (dst, _ev) in dsts.iter() {
-      -                    let c = colors[dst];
-      -                    let canon_dst = *canon_by_color.get(&c).unwrap();
-      -                    if canon_dst != *dst {
-      -                        plan.entry(*src)
-      -                            .or_default()
-      -                            .entry(ek.clone())
-      -                            .or_default()
-      -                            .push((*dst, canon_dst));
+       fn has_true_cycle_trie3(
+           arena: &Trie3GodWrapper,
+           roots: &[PrecomputeNode3Index],
+      -    internal_max_llm_token: usize,
+      -    max_state_id: usize,
+       ) {
+      -    // We check for each token and state individually. This is slow but thorough.
+      -    let total_checks = (internal_max_llm_token + 1) * (max_state_id + 1);
+      -    #[cfg(not(rustrover))]
+      -    let mut pbar = tqdm!(total = total_checks, desc = "Trie3 Cycle Check", disable = !PROGRESS_BAR_ENABLED, leave = true);
+      -
+      -    for llm_token_id in 0..=internal_max_llm_token {
+      -        for state_id in 0..=max_state_id {
+      -            #[cfg(not(rustrover))]
+      -            pbar.update(1).unwrap();
+      -
+      -            let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
+      -            for &root in roots {
+      -                if visited.contains(&root) {
+      -                    continue;
+      -                }
+      -                if let Some((cycle_path, _, _)) = detect_true_cycle_recursive_trie3(
+      -                    root,
+      -                    None,
+      -                    llm_token_id,
+      -                    state_id,
+      -                    arena,
+      -                    &mut HashMap::new(),
+      -                    &mut visited,
+      -                    &mut Vec::new(),
+      -                ) {
+      -                    let mut report = format!(
+      -                        "LLM-compatible cycle with pop=0 detected in precompute3 trie for internal LLM token ID {} and state ID {}.\nCycle path:\n",
+      -                        llm_token_id, state_id
+      -                    );
+      -                    for i in 0..cycle_path.len() {
+      -                        let (node_idx, _) = cycle_path[i];
+      -                        let next_i = (i + 1) % cycle_path.len();
+      -                        let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
+      -                        let edge_str = edge_to_next_opt.as_ref().map_or_else(
+      -                            || " (root edge)".to_string(),
+      -                            |ek| format!("pop={}, llm_bv=[...]", ek.0),
+      -                        );
+      -                        report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
       -                    }
+      -                    panic!("{}", report);
       -                }
       -            }
       -        }
       -    }
+      -}
       -
-      -    // Apply rewiring plan.
-      -    let mut edges_rewired = 0usize;
-      -    for (src, by_key) in plan {
-      -        if let Some(mut w) = src.write(god) {
-      -            for (ek, mods) in by_key {
-      -                if let Some(map) = w.get_mut(&ek) {
-      -                    for (old_dst, new_dst) in mods {
-      -                        if old_dst == new_dst {
-      -                            continue;
-      -                        }
-      -                        if let Some(ev) = map.remove(&old_dst) {
-      -                            // Insert the new edge. This correctly handles cases where multiple children
-      -                            // are remapped to the same canonical destination.
-      -                            map.insert(new_dst, ev);
-      -                            edges_rewired += 1;
-      -                        }
-      -                    }
-      -                }
+      -fn detect_true_cycle_recursive_trie3(
+      +    let all_nodes = Trie::all_nodes(arena, roots);
+      +    if all_nodes.is_empty() {
+      +        return;
+      +    }
+      +
+      +    const UNVISITED: u8 = 0;
+      +    const VISITING: u8 = 1;
+      +    const VISITED: u8 = 2;
+      +
+      +    let mut states: HashMap<PrecomputeNode3Index, u8> = all_nodes
+      +        .iter()
+      +        .map(|&idx| (idx, UNVISITED))
+      +        .collect();
+      +
+      +    let mut path: Vec<PrecomputeNode3Index> = Vec::new();
+      +
+      +    for node_idx in all_nodes {
+      +        if states.get(&node_idx) == Some(&UNVISITED) {
+      +            if let Some(report) = detect_true_cycle_recursive_trie3_new(
+      +                node_idx,
+      +                arena,
+      +                &mut states,
+      +                &mut path,
+      +            ) {
+      +                panic!("{}", report);
+      +            }
+      +        }
+      +    }
+      +}
+      +
+      +fn detect_true_cycle_recursive_trie3_new(
+           node_idx: PrecomputeNode3Index,
+      -    edge_key_opt: Option<(isize, LLMTokenBV)>,
+      -    llm_token_id: usize,
+      -    state_id: usize,
+           arena: &Trie3GodWrapper,
+      -    recursion_stack: &mut HashMap<PrecomputeNode3Index, usize>,
+      -    visited: &mut HashSet<PrecomputeNode3Index>,
+      -    path: &mut Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>,
+      -) -> Option<CycleReport3> {
+      -    path.push((node_idx, edge_key_opt));
+      -
+      -    if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
+      -        let cycle_path = path[path_start_idx..].to_vec();
+      -        path.pop();
+      -        return Some((cycle_path, llm_token_id, state_id));
+      -    }
+      -
+      -    if visited.contains(&node_idx) {
+      -        path.pop();
+      -        return None;
+      -    }
+      -
+      -    recursion_stack.insert(node_idx, path.len() - 1);
+      +    states: &mut HashMap<PrecomputeNode3Index, u8>,
+      +    path: &mut Vec<PrecomputeNode3Index>,
+      +) -> Option<String> {
+      +    const UNVISITED: u8 = 0;
+      +    const VISITING: u8 = 1;
+      +    const VISITED: u8 = 2;
+      +
+      +    states.insert(node_idx, VISITING);
+      +    path.push(node_idx);
+       
+           let children_to_visit = if let Some(guard) = node_idx.read(arena) {
+      -        guard.children().clone()
+      +        guard.children().iter()
+      +            .filter(|((pop, _), _)| *pop == 0)
+      +            .map(|(_ek, dm)| dm.clone())
+      +            .collect::<Vec<_>>()
+           } else {
+      -        recursion_stack.remove(&node_idx);
+      -        path.pop();
+      -        return None;
+      +        Vec::new()
+           };
+       
+      -    for (edge_key, dest_map) in children_to_visit.iter() {
+      -        let (pop, llm_bv) = edge_key;
+      -        if *pop == 0 && llm_bv.contains(llm_token_id) {
+      -            for (child_idx, sids_bv) in dest_map.iter() {
+      -                if sids_bv.contains(state_id) {
+      -                    if let Some(report) = detect_true_cycle_recursive_trie3(
+      +    for dest_map in children_to_visit {
+      +        for child_idx in dest_map.keys() {
+      +            match states.get(child_idx).copied().unwrap_or(UNVISITED) {
+      +                VISITING => {
+      +                    if let Some(cycle_start_index) = path.iter().position(|&p| p == *child_idx) {
+      +                        let cycle_nodes = &path[cycle_start_index..];
+      +
+      +                        let mut llm_intersection = LLMTokenBV::max_ones();
+      +                        let mut sids_intersection = StateIDBV::max_ones();
+      +
+      +                        for i in 0..cycle_nodes.len() {
+      +                            let u = cycle_nodes[i];
+      +                            let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
+      +
+      +                            let u_guard = u.read(arena).unwrap();
+      +                            let mut edge_llm_union = LLMTokenBV::zeros();
+      +                            let mut edge_sids_union = StateIDBV::zeros();
+      +
+      +                            for ((pop, llm_bv), dm) in u_guard.children() {
+      +                                if *pop == 0 {
+      +                                    if let Some(sids) = dm.get(&v) {
+      +                                        edge_llm_union |= llm_bv;
+      +                                        edge_sids_union |= sids;
+      +                                    }
+      +                                }
+      +                            }
+      +
+      +                            llm_intersection &= &edge_llm_union;
+      +                            sids_intersection &= &edge_sids_union;
+      +                        }
+      +
+      +                        if !llm_intersection.is_empty() && !sids_intersection.is_empty() {
+      +                            let first_violating_token = llm_intersection.iter().next().unwrap();
+      +                            let first_violating_state = sids_intersection.iter().next().unwrap();
+      +
+      +                            let mut report = format!(
+      +                                "LLM-compatible cycle with pop=0 detected in precompute3 trie. Example violation: internal LLM token ID {} and state ID {}.\nCycle path:\n",
+      +                                first_violating_token, first_violating_state
+      +                            );
+      +                            for i in 0..cycle_nodes.len() {
+      +                                let u = cycle_nodes[i];
+      +                                let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
+      +                                report.push_str(&format!("  {} --> {}\n", u, v));
+      +                            }
+      +                            return Some(report);
+      +                        }
+      +                    }
+      +                }
+      +                UNVISITED => {
+      +                    if let Some(report) = detect_true_cycle_recursive_trie3_new(
+                               *child_idx,
+      -                        Some(edge_key.clone()),
+      -                        llm_token_id,
+      -                        state_id,
+                               arena,
+      -                        recursion_stack,
+      -                        visited,
+      +                        states,
+                               path,
+                           ) {
+                               return Some(report);
+                           }
+                       }
       -            }
       -        }
       -    }
       -
-           (merges, edges_rewired)
+      -    recursion_stack.remove(&node_idx);
+      -    visited.insert(node_idx);
+      +                _ => {}
+      +            }
+      +        }
+      +    }
+      +
+           path.pop();
+      +    states.insert(node_idx, VISITED);
+           None
        }
        
 
@@ -11823,11 +9994,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint_precompute3_intermediate_utils.rs
-      Applying patch to 'src/constraint_precompute3_intermediate_utils.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_precompute3_intermediate_utils.rs.
+      Identified target file: src/constraint_precompute3_utils.rs
+      Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor intermediate Trie3 canonicalization
-      to use structural node signatures for merging"'
+  - user: 'Changes committed with message: "Refactor: Optimize has_true_cycle_trie3
+      by switching to DFS-based cycle detection and removing redundant arguments."'
     metadata:
 ...
