@@ -2145,7 +2145,8 @@ impl GrammarConstraint {
         optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
 
         // Update the roots in the map after optimization
-        for (tokenizer_state_id, new_root) in intermediate_precomputed3.keys().copied().zip(intermediate_roots.into_iter()) {
+        let tokenizer_state_ids: Vec<_> = intermediate_precomputed3.keys().copied().collect();
+        for (tokenizer_state_id, new_root) in tokenizer_state_ids.into_iter().zip(intermediate_roots.into_iter()) {
             intermediate_precomputed3.insert(tokenizer_state_id, new_root);
         }
 

@@ -2152,6 +2152,11 @@ local_system:
               let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
               optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
 
+              // Update the roots in the map after optimization
+              for (tokenizer_state_id, new_root) in intermediate_precomputed3.keys().copied().zip(intermediate_roots.into_iter()) {
+                  intermediate_precomputed3.insert(tokenizer_state_id, new_root);
+              }
+
 
               // --- New: Path extraction, elimination, and trie rebuilding ---
               crate::debug!(2, "Processing and rebuilding trie3 paths...");
@@ -6410,7 +6415,8 @@ local_system:
               optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
 
               // Update the roots in the map after optimization
-              for (tokenizer_state_id, new_root) in intermediate_precomputed3.keys().copied().zip(intermediate_roots.into_iter()) {
+              let tokenizer_state_ids: Vec<_> = intermediate_precomputed3.keys().copied().collect();
+              for (tokenizer_state_id, new_root) in tokenizer_state_ids.into_iter().zip(intermediate_roots.into_iter()) {
                   intermediate_precomputed3.insert(tokenizer_state_id, new_root);
               }
 
@@ -8497,7 +8503,7 @@ local_system:
           roots: &mut Vec<IntermediatePrecomputeNode3Index>,
           god: &IntermediateTrie3GodWrapper,
       ) {
-          // Optimization logic will go here (e.g., merging identical subgraphs)
+          todo!()
       }
 
       /// Runs a global optimization across all per-terminal templates.
@@ -10712,6 +10718,11 @@ messages:
               let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
               optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
 
+              // Update the roots in the map after optimization
+              for (tokenizer_state_id, new_root) in intermediate_precomputed3.keys().copied().zip(intermediate_roots.into_iter()) {
+                  intermediate_precomputed3.insert(tokenizer_state_id, new_root);
+              }
+
 
               // --- New: Path extraction, elimination, and trie rebuilding ---
               crate::debug!(2, "Processing and rebuilding trie3 paths...");
@@ -12829,9 +12840,18 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_intermediate_utils.rs
-  - user: |2
-              let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-              optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
+  - user: |+
+      error[E0502]: cannot borrow `intermediate_precomputed3` as mutable because it is also borrowed as immutable
+          --> src/constraint.rs:2149:13
+           |
+      2148 |         for (tokenizer_state_id, new_root) in intermediate_precomputed3.keys().copied().zip(intermediate_roots.into_iter()) {
+           |                                               -----------------------------------------------------------------------------
+           |                                               |
+           |                                               immutable borrow occurs here
+           |                                               immutable borrow later used here
+      2149 |             intermediate_precomputed3.insert(tokenizer_state_id, new_root);
+           |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+
     metadata:
   - user: After this, make sure that if the roots changed this is saved properly.
     metadata:
@@ -12852,23 +12872,16 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The issue is that the `intermediate_precomputed3` map needs to be updated with the new root indices if the `optimize_intermediate_trie3` function performs node merging and updates the `intermediate_roots` vector in place. Additionally, the placeholder `todo!()` in `optimize_intermediate_trie3` needs to be removed to prevent a panic.
+      The error is due to attempting to iterate over the keys of `intermediate_precomputed3` (an immutable borrow) and simultaneously calling `insert` on it (a mutable borrow) inside the loop. To fix this, we must collect the keys first, which releases the immutable borrow, before starting the loop that performs the mutable operation.
 
-      Here are the step-by-step instructions and the corresponding git diffs.
+      Here are the step-by-step instructions and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **In `src/constraint.rs`**:
-          In the `GrammarConstraint::precompute3` function, immediately after the call to `optimize_intermediate_trie3`, insert a loop to update the `intermediate_precomputed3` map with the potentially new root indices from `intermediate_roots`.
+      In `src/constraint.rs`, modify the section where the roots of `intermediate_precomputed3` are updated after optimization (around line 2148) to collect the keys before iteration.
 
-          Locate the following lines (around line 1360):
-          ```rust
-                  // --- New: Optimize intermediate trie before path processing ---
-                  crate::debug!(2, "Optimizing intermediate trie3...");
-                  let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-                  optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
-          ```
-          Insert the following code block right after `optimize_intermediate_trie3`:
+      1.  **In `src/constraint.rs`**, locate the following lines (around line 2148):
+
           ```rust
                   // Update the roots in the map after optimization
                   for (tokenizer_state_id, new_root) in intermediate_precomputed3.keys().copied().zip(intermediate_roots.into_iter()) {
@@ -12876,78 +12889,44 @@ messages:
                   }
           ```
 
-      2.  **In `src/constraint_precompute3_intermediate_utils.rs`**:
-          In the `optimize_intermediate_trie3` function, replace the `todo!()` macro with an empty function body to allow compilation.
+      2.  **Replace** those lines with the following code:
 
-          Locate the following lines (around line 39):
           ```rust
-          pub fn optimize_intermediate_trie3(
-              roots: &mut Vec<IntermediatePrecomputeNode3Index>,
-              god: &IntermediateTrie3GodWrapper,
-          ) {
-              todo!()
-          }
-          ```
-          Replace them with:
-          ```rust
-          pub fn optimize_intermediate_trie3(
-              roots: &mut Vec<IntermediatePrecomputeNode3Index>,
-              god: &IntermediateTrie3GodWrapper,
-          ) {
-              // Optimization logic will go here (e.g., merging identical subgraphs)
-          }
+                  // Update the roots in the map after optimization
+                  let tokenizer_state_ids: Vec<_> = intermediate_precomputed3.keys().copied().collect();
+                  for (tokenizer_state_id, new_root) in tokenizer_state_ids.into_iter().zip(intermediate_roots.into_iter()) {
+                      intermediate_precomputed3.insert(tokenizer_state_id, new_root);
+                  }
           ```
 
-      ### Git Diffs
+      ### Git Diff
 
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1360,6 +1360,11 @@
-               let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
+      @@ -2148,8 +2148,9 @@
                optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
        
-      +        // Update the roots in the map after optimization
-      +        for (tokenizer_state_id, new_root) in intermediate_precomputed3.keys().copied().zip(intermediate_roots.into_iter()) {
-      +            intermediate_precomputed3.insert(tokenizer_state_id, new_root);
-      +        }
-      +
+               // Update the roots in the map after optimization
+      -        for (tokenizer_state_id, new_root) in intermediate_precomputed3.keys().copied().zip(intermediate_roots.into_iter()) {
+      +        let tokenizer_state_ids: Vec<_> = intermediate_precomputed3.keys().copied().collect();
+      +        for (tokenizer_state_id, new_root) in tokenizer_state_ids.into_iter().zip(intermediate_roots.into_iter()) {
+                   intermediate_precomputed3.insert(tokenizer_state_id, new_root);
+               }
        
-               // --- New: Path extraction, elimination, and trie rebuilding ---
-               crate::debug!(2, "Processing and rebuilding trie3 paths...");
-      ```
-
-      ```diff
-      diff --git a/src/constraint_precompute3_intermediate_utils.rs b/src/constraint_precompute3_intermediate_utils.rs
-      --- a/src/constraint_precompute3_intermediate_utils.rs
-      +++ b/src/constraint_precompute3_intermediate_utils.rs
-      @@ -39,7 +39,7 @@
-           roots: &mut Vec<IntermediatePrecomputeNode3Index>,
-           god: &IntermediateTrie3GodWrapper,
-       ) {
-      -    todo!()
-      +    // Optimization logic will go here (e.g., merging identical subgraphs)
-       }
-       
-       /// Runs a global optimization across all per-terminal templates.
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/constraint_precompute3_intermediate_utils.rs
-      Applying patch to 'src/constraint_precompute3_intermediate_utils.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_precompute3_intermediate_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Update intermediate trie3 roots after
-      optimization and stub out optimization function"'
+  - user: 'Changes committed with message: "Fix E0502 borrow error when updating intermediate_precomputed3
+      roots after optimization"'
     metadata:
 ...
