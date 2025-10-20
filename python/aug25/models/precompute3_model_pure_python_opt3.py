@@ -595,10 +595,18 @@ class Model(GraphProvider):
             py_table[state_id] = py_row
         parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
-        # Misc data (some still requires FFI for loading)
-        constraint = ffi.GrammarConstraint.from_json_string(s)
-        pmc_ffi = constraint.possible_matches()
-        possible_matches_cache = {int(t): {int(i): RangeSet.from_ranges(b.to_ranges()) for i, b in inner.items()} for t, inner in pmc_ffi.items()}
+        # Misc data
+        pmc_json = data['possible_matches']
+        possible_matches_cache = {}
+        for tsid_json, term_map_json in pmc_json:
+            tsid = int(tsid_json)
+            term_map = {}
+            for term_id_json, bv_json in term_map_json:
+                term_id = int(term_id_json)
+                bv = RangeSet.from_ranges(bs_from_json(dumps(bv_json)).to_ranges())
+                term_map[term_id] = bv
+            possible_matches_cache[tsid] = term_map
+
         vocab = data['precompute3_vocab']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
@@ -613,7 +621,7 @@ class Model(GraphProvider):
             id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
             internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
-            ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
+            ignore_terminal_id=parser_data.get('ignore_terminal_id'),
             state={tokenizer.initial_state_id(): initial_gss},
         )
         model._compute_edge_accelerators()
