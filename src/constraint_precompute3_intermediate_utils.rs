@@ -92,6 +92,22 @@ pub fn optimize_intermediate_trie3(
     is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
     // The return type is correct for a node mapping (old node -> new node)
 ) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
-    // TODO
-    Default::default()
+    let original_god = god.deep_clone();
+    let original_roots = roots.to_vec();
+
+    // TODO: Implement optimization logic here.
+    // This logic should modify `god` in place and build `node_map`.
+
+    let node_map = Default::default(); // Currently a no-op, returns empty map.
+
+    // Check equivalence after optimization (currently no-op)
+    for original_root in &original_roots {
+        let new_root = node_map.get(original_root).unwrap_or(original_root);
+        assert!(
+            are_intermediate_trie3_graphs_equal(*original_root, &original_god, *new_root, god, &is_end, 100),
+            "Optimization failed to preserve graph equivalence for root {}", original_root
+        );
+    }
+
+    node_map
 }
