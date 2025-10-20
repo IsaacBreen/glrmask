@@ -7,7 +7,7 @@ use crate::{
     datastructures::trie::Trie,
 };
 use kdam::{tqdm, BarExt};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 /// Normalizes a path for comparison purposes.
@@ -273,6 +273,96 @@ fn rewire_to_canonical(
     (merges, edges_rewired)
 }
 
+fn prune_unproductive_paths_intermediate_trie3(
+    roots: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) {
+    println!("[optimize_intermediate_trie3] Pruning nodes that cannot reach an end node...");
+    if roots.is_empty() {
+        return;
+    }
+
+    let all_nodes = Trie::all_nodes(god, roots);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    // 1. Build reverse adjacency list: dest -> sources
+    let mut incoming: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
+    for src in &all_nodes {
+        let g = src.read(god).expect("read");
+        for (_ek, dm) in g.children() {
+            for (dst, _ev) in dm {
+                incoming.entry(*dst).or_default().push(*src);
+            }
+        }
+    }
+
+    // 2. Initialize worklist with all end nodes
+    let mut productive: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+    let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
+    let mut end_nodes_count = 0usize;
+    for n in &all_nodes {
+        let r = n.read(god).expect("read");
+        if r.value.end {
+            end_nodes_count += 1;
+            if productive.insert(*n) {
+                q.push_back(*n);
+            }
+        }
+    }
+
+    if end_nodes_count == 0 {
+        println!("[optimize_intermediate_trie3] No end nodes found; skipping pruning.");
+        return;
+    }
+
+    // 3. Reverse BFS to find all productive nodes
+    while let Some(d) = q.pop_front() {
+        if let Some(srcs) = incoming.get(&d) {
+            for s in srcs {
+                if productive.insert(*s) {
+                    q.push_back(*s);
+                }
+            }
+        }
+    }
+
+    let total_nodes = all_nodes.len();
+    let productive_nodes = productive.len();
+    let prunable = total_nodes.saturating_sub(productive_nodes);
+    println!(
+        "[optimize_intermediate_trie3] End-reachability: total={}, productive={}, prunable={}",
+        total_nodes, productive_nodes, prunable
+    );
+    if prunable == 0 {
+        return;
+    }
+
+    // 4. Remove any edge to a non-productive destination
+    for n in &all_nodes {
+        let mut w = n.write(god).expect("write");
+        let old_children = std::mem::take(w.children_mut());
+        for (ek, dm) in old_children {
+            let mut new_dm = ordered_hash_map::OrderedHashMap::new();
+            for (dst, ev) in dm {
+                if productive.contains(&dst) {
+                    new_dm.insert(dst, ev);
+                }
+            }
+            if !new_dm.is_empty() {
+                w.children_mut().insert(ek, new_dm);
+            }
+        }
+    }
+
+    // 5. GC everything now unreachable from roots
+    Trie::gc(god, roots);
+    Trie::recompute_all_max_depths(god, roots);
+
+    println!("[optimize_intermediate_trie3] Finished end-reachability pruning.");
+}
+
 pub fn optimize_intermediate_trie3(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
@@ -281,6 +371,9 @@ pub fn optimize_intermediate_trie3(
     let original_god = god.deep_clone();
     let original_roots = roots.to_vec();
 
+    has_true_cycle_intermediate_trie3(god, roots);
+
+    prune_unproductive_paths_intermediate_trie3(roots, god);
     has_true_cycle_intermediate_trie3(god, roots);
 
     let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
