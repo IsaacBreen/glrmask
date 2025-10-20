@@ -49,15 +49,3 @@ pub fn optimize_intermediate_trie3_templates_global(
 ) {
     // TODO
 }
-
-fn compute_and_print_template_stats(
-    templates: &[(
-        IntermediatePrecomputeNode3Index,
-        IntermediatePrecomputeNode3Index,
-    )],
-    god: &IntermediateTrie3GodWrapper,
-    phase: &str,
-) {
-    todo!()
-}
-
