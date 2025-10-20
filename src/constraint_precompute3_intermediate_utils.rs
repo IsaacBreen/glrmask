@@ -88,7 +88,7 @@ pub fn optimize_intermediate_trie3(
     let mut nodes_by_depth: BTreeMap<usize, Vec<_>> = BTreeMap::new();
     for node_idx in &all_nodes {
         // It's safe to unwrap as all_nodes are guaranteed to be in the arena.
-        god.with(*node_idx, |node| {
+        god.with(node_idx.as_index(), |node| {
             nodes_by_depth.entry(node.max_depth).or_default().push(*node_idx);
         })
         .unwrap();
@@ -112,7 +112,7 @@ pub fn optimize_intermediate_trie3(
         eprintln!("> Processing depth {}: {} nodes...", depth, nodes.len());
         for &original_idx in nodes {
             // To avoid holding a lock while building the signature, we clone the node's data.
-            let original_node_clone = god.get(original_idx).unwrap();
+            let original_node_clone = god.get(original_idx.as_index()).unwrap();
 
             // Build the signature for the current node.
             // Children's indices are replaced with their already-computed optimized indices from node_map.
