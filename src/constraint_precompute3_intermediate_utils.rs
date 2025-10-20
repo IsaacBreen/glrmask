@@ -183,7 +183,8 @@ pub fn optimize_intermediate_trie3(
             let mut keys: Vec<_> = nd.edges.keys().cloned().collect();
             keys.sort();
             let sig = InitialSignature { end: nd.end, keys };
-            let cid = *interner.entry(sig).or_insert_with(|| interner.len());
+            let next_id = interner.len();
+            let cid = *interner.entry(sig).or_insert(next_id);
             class_ids[pos] = cid;
         }
     }
@@ -217,7 +218,8 @@ pub fn optimize_intermediate_trie3(
                 end: nd.end,
                 edges: edges_sig,
             };
-            let cid = *interner.entry(sig).or_insert_with(|| interner.len());
+            let next_id = interner.len();
+            let cid = *interner.entry(sig).or_insert(next_id);
             new_class_ids[pos] = cid;
             if new_class_ids[pos] != class_ids[pos] {
                 changed += 1;
