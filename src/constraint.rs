@@ -2493,7 +2493,7 @@ impl<'r> Precomputer1<'r> {
             if tsid == tokenizer.initial_state_id() {
                 end_nodes.insert(tsid, leaf_node.clone());
             } else {
-                let end_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
+                let end_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
                 let accessible_terminals = tokenizer.tokens_accessible_from_state(tsid);
                 for terminal_id in accessible_terminals {
                     trie1_god.insert_edge_simple(end_node, leaf_node.clone(), Some(terminal_id), all_tokens.clone());
@@ -2592,8 +2592,12 @@ impl<'r> Precomputer1<'r> {
         for (sid, root) in &self.roots {
             crate::debug!(6, "  {}: {}", sid.0, root);
         }
+        for end_node in self.end_nodes.values() {
+            end_node.write(&self.trie1_god).expect("Failed to write end node").value.end = true;
+        }
         self.dfs(&self.vocab.root, assoc);
         for end_node in self.end_nodes.values() {
+            if *end_node == self.leaf_node { continue; }
             end_node.write(&self.trie1_god).expect("Failed to write end node").value.end = false;
         }
         crate::debug!(2, "Finished precompute DFS");
