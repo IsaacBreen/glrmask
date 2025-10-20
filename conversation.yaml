@@ -2761,7 +2761,7 @@ local_system:
       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
       // For debugging: verify equivalence classes using a brute-force method.
-      const VERIFY_EQUIVALENCE_CLASSES: bool = true;
+      const VERIFY_EQUIVALENCE_CLASSES: bool = false;
 
       // A canonical representation of a signature. It can be hashed and compared.
       // It's derived from the graph of tokenization possibilities.
@@ -2827,13 +2827,13 @@ local_system:
               // 1. Collect all unique suffixes from the input strings.
               //    We need all suffixes because a remainder after a match is a suffix of the string being processed.
               let mut suffixes = HashSet::new();
-              suffixes.insert(Vec::new()); // Base case for recursion
+              suffixes.insert(&[] as &[u8]); // Base case for recursion
               for s in self.strings {
                   for i in 0..=s.len() {
-                      suffixes.insert(s[i..].to_vec());
+                      suffixes.insert(&s[i..]);
                   }
               }
-              let mut sorted_suffixes: Vec<Vec<u8>> = suffixes.into_iter().collect();
+              let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
               sorted_suffixes.sort_by_key(|p| p.len());
 
               crate::debug!(2, "Starting LLM token equivalence analysis for {} unique suffixes...", sorted_suffixes.len());
@@ -2856,9 +2856,9 @@ local_system:
 
               // 3. Compute signatures for all prefixes, from shortest to longest.
               let mut signature_interner = SignatureInterner::new();
-              let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
+              let mut memo: HashMap<&[u8], BTreeMap<usize, SignatureId>> = HashMap::new();
 
-              for suffix in &sorted_suffixes {
+              for &suffix in &sorted_suffixes {
                   pb.inc(1);
                   let mut state_sigs = BTreeMap::new();
                   for &dfa_state in &relevant_states {
@@ -2888,7 +2888,7 @@ local_system:
                       };
                       state_sigs.insert(dfa_state, signature_interner.intern(sig));
                   }
-                  memo.insert(suffix.clone(), state_sigs);
+                  memo.insert(suffix, state_sigs);
               }
               pb.finish();
 
@@ -2896,7 +2896,7 @@ local_system:
               let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
               for (i, s) in self.strings.iter().enumerate() {
                   let mut signature_vector = Vec::with_capacity(self.initial_states.len());
-                  if let Some(string_sigs) = memo.get(s) {
+                  if let Some(string_sigs) = memo.get(s.as_slice()) {
                       for &initial_state in self.initial_states {
                           let sig_id = string_sigs.get(&initial_state)
                               .expect("BUG: Signature for initial state not found");
@@ -2982,7 +2982,18 @@ local_system:
               BTreeMap::new();
           let mut memo: HashMap<(Vec<u8>, usize), VerificationSignature> = HashMap::new();
 
+          let pb = ProgressBar::new(strings.len() as u64);
+          pb.set_style(
+              ProgressStyle::default_bar()
+                  .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Verification)")
+                  .expect("progress-bar"),
+          );
+          if !PROGRESS_BAR_ENABLED {
+              pb.set_draw_target(ProgressDrawTarget::hidden());
+          }
+
           for (i, s) in strings.iter().enumerate() {
+              pb.inc(1);
               let mut signature_vector = Vec::with_capacity(initial_states.len());
               for &initial_state in initial_states {
                   let signature = build_verification_signature(regex, s, initial_state, &mut memo);
@@ -2990,6 +3001,7 @@ local_system:
               }
               brute_force_classes.entry(signature_vector).or_default().push(i);
           }
+          pb.finish();
 
           // Convert both computed and brute-force classes into partitions (sets of sets of indices) for comparison.
           let computed_partitions: BTreeSet<BTreeSet<usize>> = computed_classes
@@ -5943,52 +5955,62 @@ local_system:
           computed_classes: &BTreeMap<Vec<SignatureId>, Vec<usize>>,
       ) {
           println!("Verifying equivalence classes (this may be slow)...");
-
+       
           // A canonical representation of the tokenization graph for verification.
           #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-          struct VerificationSignature {
-              matches: BTreeSet<(GroupID, usize, VerificationSignature)>,
+          struct InternedVerificationSignature {
+              matches: BTreeSet<(GroupID, usize, InternedVerificationSignatureId)>,
               final_state: Option<usize>,
           }
+          type InternedVerificationSignatureId = usize;
 
-          fn build_verification_signature(
-              regex: &Regex,
-              text: &[u8],
-              initial_state: usize,
-              memo: &mut HashMap<(Vec<u8>, usize), VerificationSignature>,
-          ) -> VerificationSignature {
-              let key = (text.to_vec(), initial_state);
-              if let Some(result) = memo.get(&key) {
-                  return result.clone();
-              }
-
-              let result = regex.execute_from_state2(text, initial_state);
-
-              let mut sig_matches = BTreeSet::new();
-              for m in result.matches {
-                  if m.position == 0 {
-                      continue;
-                  }
-                  let remainder = &text[m.position..];
-                  let remainder_sig =
-                      build_verification_signature(regex, remainder, regex.dfa.start_state, memo);
-                  sig_matches.insert((m.group_id, m.position, remainder_sig));
-              }
-
-              let signature = VerificationSignature {
-                  matches: sig_matches,
-                  final_state: result.end_state,
-              };
-
-              memo.insert(key, signature.clone());
-              signature
+          struct VerificationSignatureInterner {
+              signatures: Vec<InternedVerificationSignature>,
+              map: HashMap<InternedVerificationSignature, InternedVerificationSignatureId>,
           }
 
-          let mut brute_force_classes: BTreeMap<Vec<VerificationSignature>, Vec<usize>> =
-              BTreeMap::new();
-          let mut memo: HashMap<(Vec<u8>, usize), VerificationSignature> = HashMap::new();
+          impl VerificationSignatureInterner {
+              fn new() -> Self {
+                  VerificationSignatureInterner {
+                      signatures: Vec::new(),
+                      map: HashMap::new(),
+                  }
+              }
 
-          let pb = ProgressBar::new(strings.len() as u64);
+              fn intern(&mut self, sig: InternedVerificationSignature) -> InternedVerificationSignatureId {
+                  if let Some(&id) = self.map.get(&sig) {
+                      return id;
+                  }
+                  let id = self.signatures.len();
+                  self.signatures.push(sig.clone());
+                  self.map.insert(sig, id);
+                  id
+              }
+          }
+
+          // 1. Collect all unique suffixes.
+          let mut suffixes = HashSet::new();
+          suffixes.insert(&[] as &[u8]);
+          for s in strings {
+              for i in 0..=s.len() {
+                  suffixes.insert(&s[i..]);
+              }
+          }
+          let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
+          sorted_suffixes.sort_by_key(|s| s.len());
+
+          // 2. Identify all relevant DFA states.
+          let relevant_states: BTreeSet<usize> = initial_states
+              .iter()
+              .cloned()
+              .chain(std::iter::once(regex.dfa.start_state))
+              .collect();
+
+          // 3. Compute signatures for all suffixes, from shortest to longest.
+          let mut interner = VerificationSignatureInterner::new();
+          let mut memo: HashMap<&[u8], BTreeMap<usize, InternedVerificationSignatureId>> = HashMap::new();
+
+          let pb = ProgressBar::new(sorted_suffixes.len() as u64);
           pb.set_style(
               ProgressStyle::default_bar()
                   .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Verification)")
@@ -5998,18 +6020,52 @@ local_system:
               pb.set_draw_target(ProgressDrawTarget::hidden());
           }
 
-          for (i, s) in strings.iter().enumerate() {
+          for &suffix in &sorted_suffixes {
               pb.inc(1);
-              let mut signature_vector = Vec::with_capacity(initial_states.len());
-              for &initial_state in initial_states {
-                  let signature = build_verification_signature(regex, s, initial_state, &mut memo);
-                  signature_vector.push(signature);
+              let mut state_sigs = BTreeMap::new();
+              for &dfa_state in &relevant_states {
+                  let result = regex.execute_from_state2(suffix, dfa_state);
+
+                  let mut matches = BTreeSet::new();
+                  for m in result.matches {
+                      if m.position == 0 {
+                          continue;
+                      }
+                      let remainder = &suffix[m.position..];
+                      let remainder_sigs = memo
+                          .get(remainder)
+                          .expect("BUG: remainder signature should be pre-computed");
+                      let remainder_sig_id = *remainder_sigs
+                          .get(&regex.dfa.start_state)
+                          .expect("BUG: remainder signature for start_state should exist");
+                      matches.insert((m.group_id, m.position, remainder_sig_id));
+                  }
+
+                  let sig = InternedVerificationSignature {
+                      matches,
+                      final_state: result.end_state,
+                  };
+                  let sig_id = interner.intern(sig);
+                  state_sigs.insert(dfa_state, sig_id);
               }
-              brute_force_classes.entry(signature_vector).or_default().push(i);
+              memo.insert(suffix, state_sigs);
           }
           pb.finish();
 
-          // Convert both computed and brute-force classes into partitions (sets of sets of indices) for comparison.
+          // 4. Classify original strings based on their signature vectors.
+          let mut brute_force_classes: BTreeMap<Vec<InternedVerificationSignatureId>, Vec<usize>> = BTreeMap::new();
+          for (i, s) in strings.iter().enumerate() {
+              let mut signature_vector = Vec::with_capacity(initial_states.len());
+              if let Some(string_sigs) = memo.get(s.as_slice()) {
+                  for &initial_state in initial_states {
+                      let sig_id = *string_sigs.get(&initial_state).unwrap();
+                      signature_vector.push(sig_id);
+                  }
+              }
+              brute_force_classes.entry(signature_vector).or_default().push(i);
+          }
+
+          // 5. Compare partitions.
           let computed_partitions: BTreeSet<BTreeSet<usize>> = computed_classes
               .values()
               .map(|class| class.iter().cloned().collect())
@@ -8836,7 +8892,7 @@ messages:
       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
       // For debugging: verify equivalence classes using a brute-force method.
-      const VERIFY_EQUIVALENCE_CLASSES: bool = true;
+      const VERIFY_EQUIVALENCE_CLASSES: bool = false;
 
       // A canonical representation of a signature. It can be hashed and compared.
       // It's derived from the graph of tokenization possibilities.
@@ -8902,13 +8958,13 @@ messages:
               // 1. Collect all unique suffixes from the input strings.
               //    We need all suffixes because a remainder after a match is a suffix of the string being processed.
               let mut suffixes = HashSet::new();
-              suffixes.insert(Vec::new()); // Base case for recursion
+              suffixes.insert(&[] as &[u8]); // Base case for recursion
               for s in self.strings {
                   for i in 0..=s.len() {
-                      suffixes.insert(s[i..].to_vec());
+                      suffixes.insert(&s[i..]);
                   }
               }
-              let mut sorted_suffixes: Vec<Vec<u8>> = suffixes.into_iter().collect();
+              let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
               sorted_suffixes.sort_by_key(|p| p.len());
 
               crate::debug!(2, "Starting LLM token equivalence analysis for {} unique suffixes...", sorted_suffixes.len());
@@ -8931,9 +8987,9 @@ messages:
 
               // 3. Compute signatures for all prefixes, from shortest to longest.
               let mut signature_interner = SignatureInterner::new();
-              let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
+              let mut memo: HashMap<&[u8], BTreeMap<usize, SignatureId>> = HashMap::new();
 
-              for suffix in &sorted_suffixes {
+              for &suffix in &sorted_suffixes {
                   pb.inc(1);
                   let mut state_sigs = BTreeMap::new();
                   for &dfa_state in &relevant_states {
@@ -8963,7 +9019,7 @@ messages:
                       };
                       state_sigs.insert(dfa_state, signature_interner.intern(sig));
                   }
-                  memo.insert(suffix.clone(), state_sigs);
+                  memo.insert(suffix, state_sigs);
               }
               pb.finish();
 
@@ -8971,7 +9027,7 @@ messages:
               let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
               for (i, s) in self.strings.iter().enumerate() {
                   let mut signature_vector = Vec::with_capacity(self.initial_states.len());
-                  if let Some(string_sigs) = memo.get(s) {
+                  if let Some(string_sigs) = memo.get(s.as_slice()) {
                       for &initial_state in self.initial_states {
                           let sig_id = string_sigs.get(&initial_state)
                               .expect("BUG: Signature for initial state not found");
@@ -9057,7 +9113,18 @@ messages:
               BTreeMap::new();
           let mut memo: HashMap<(Vec<u8>, usize), VerificationSignature> = HashMap::new();
 
+          let pb = ProgressBar::new(strings.len() as u64);
+          pb.set_style(
+              ProgressStyle::default_bar()
+                  .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Verification)")
+                  .expect("progress-bar"),
+          );
+          if !PROGRESS_BAR_ENABLED {
+              pb.set_draw_target(ProgressDrawTarget::hidden());
+          }
+
           for (i, s) in strings.iter().enumerate() {
+              pb.inc(1);
               let mut signature_vector = Vec::with_capacity(initial_states.len());
               for &initial_state in initial_states {
                   let signature = build_verification_signature(regex, s, initial_state, &mut memo);
@@ -9065,6 +9132,7 @@ messages:
               }
               brute_force_classes.entry(signature_vector).or_default().push(i);
           }
+          pb.finish();
 
           // Convert both computed and brute-force classes into partitions (sets of sets of indices) for comparison.
           let computed_partitions: BTreeSet<BTreeSet<usize>> = computed_classes
@@ -9090,11 +9158,8 @@ messages:
       ```
     metadata:
       filename: src/equivalence_analysis_finite_automata.rs
-  - user: ⠈ [00:00:21] 
-      [██████████████████████████████████████████████████████████████████████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
-      69316/112842 (61%, 14s) (Equivalence Analysis)
-    metadata:
-  - user: This is far too slow. It needs to be sub 100 ms.
+  - user: verify_equivalence_classes is currently far too slow. Like, I know it won't
+      be fast. But it shouldn't be that slow either.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9113,153 +9178,332 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The performance issue you're seeing in `EquivalenceAnalyzer` is significant, and it's primarily caused by two things: a very slow brute-force verification step that's currently enabled, and inefficient handling of string data that leads to excessive memory allocations.
+      Of course. The performance issue in `verify_equivalence_classes` is due to its recursive nature combined with an inefficient memoization strategy that involves cloning byte vectors for keys.
 
-      Here are the step-by-step instructions to optimize the code, followed by the git diffs to apply them.
+      I'll guide you through replacing it with a more performant, iterative approach that processes string suffixes from shortest to longest, similar to the main `find_equivalence_classes` algorithm. This avoids deep recursion and expensive key cloning.
 
       ### Step-by-step Instructions
 
-      These changes should be applied to the file `src/equivalence_analysis_finite_automata.rs`.
+      1.  **Open the file `src/equivalence_analysis_finite_automata.rs`**.
 
-      1.  **Disable Brute-Force Verification**
+      2.  **Navigate to the `verify_equivalence_classes` function.**
 
-          The constant `VERIFY_EQUIVALENCE_CLASSES` is set to `true`, enabling a very slow, recursive verification process intended only for debugging. Disabling this will provide a major speed boost.
+      3.  **Replace the entire body of the `verify_equivalence_classes` function.** Delete the existing implementation (from the line `println!...` to the final closing brace `}`) and replace it with the following code block. This new implementation is iterative and significantly more efficient.
 
-          -   In `src/equivalence_analysis_finite_automata.rs`, find this line:
-              ```rust
-              const VERIFY_EQUIVALENCE_CLASSES: bool = true;
-              ```
-          -   And change it to `false`:
-              ```rust
-              const VERIFY_EQUIVALENCE_CLASSES: bool = false;
-              ```
+      ```rust
+          println!("Verifying equivalence classes (this may be slow)...");
 
-      2.  **Optimize Suffix Handling with Slices**
+          // A canonical representation of the tokenization graph for verification.
+          #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+          struct InternedVerificationSignature {
+              matches: BTreeSet<(GroupID, usize, InternedVerificationSignatureId)>,
+              final_state: Option<usize>,
+          }
+          type InternedVerificationSignatureId = usize;
 
-          We will modify the `find_equivalence_classes` method to use string slices (`&[u8]`) instead of owned vectors (`Vec<u8>`). This avoids countless memory allocations and copies, which is a major source of the slowdown.
+          struct VerificationSignatureInterner {
+              signatures: Vec<InternedVerificationSignature>,
+              map: HashMap<InternedVerificationSignature, InternedVerificationSignatureId>,
+          }
 
-          -   **Update Suffix Collection**: Change the logic to collect and store slices instead of creating new vectors.
-              -   In the `find_equivalence_classes` function, replace this block:
-                  ```rust
-                  let mut suffixes = HashSet::new();
-                  suffixes.insert(Vec::new()); // Base case for recursion
-                  for s in self.strings {
-                      for i in 0..=s.len() {
-                          suffixes.insert(s[i..].to_vec());
-                      }
+          impl VerificationSignatureInterner {
+              fn new() -> Self {
+                  VerificationSignatureInterner {
+                      signatures: Vec::new(),
+                      map: HashMap::new(),
                   }
-                  let mut sorted_suffixes: Vec<Vec<u8>> = suffixes.into_iter().collect();
-                  ```
-              -   With this slice-based version:
-                  ```rust
-                  let mut suffixes = HashSet::new();
-                  suffixes.insert(&[] as &[u8]); // Base case for recursion
-                  for s in self.strings {
-                      for i in 0..=s.len() {
-                          suffixes.insert(&s[i..]);
-                      }
+              }
+
+              fn intern(&mut self, sig: InternedVerificationSignature) -> InternedVerificationSignatureId {
+                  if let Some(&id) = self.map.get(&sig) {
+                      return id;
                   }
-                  let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
-                  ```
-          -   **Update Memoization Table Key**: The `HashMap` key should be changed from `Vec<u8>` to `&[u8]`.
-              -   Find this line:
-                  ```rust
-                  let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
-                  ```
-              -   And replace it with:
-                  ```rust
-                  let mut memo: HashMap<&[u8], BTreeMap<usize, SignatureId>> = HashMap::new();
-                  ```
-          -   **Update the Main Processing Loop**: Modify the loop to iterate over slices directly and avoid cloning vectors when inserting into the memoization table.
-              -   Change the loop signature from:
-                  ```rust
-                  for suffix in &sorted_suffixes {
-                  ```
-              -   To destructure the slice, like this:
-                  ```rust
-                  for &suffix in &sorted_suffixes {
-                  ```
-              -   Then, at the end of that loop block, find and change the `memo.insert` call:
-                  -   From: `memo.insert(suffix.clone(), state_sigs);`
-                  -   To: `memo.insert(suffix, state_sigs);`
-          -   **Update Final String Classification**: In the final loop that classifies the original strings, you need to use `as_slice()` to look up the string in the updated `memo` table.
-              -   Find this line:
-                  ```rust
-                  if let Some(string_sigs) = memo.get(s) {
-                  ```
-              -   And change it to:
-                  ```rust
-                  if let Some(string_sigs) = memo.get(s.as_slice()) {
-                  ```
+                  let id = self.signatures.len();
+                  self.signatures.push(sig.clone());
+                  self.map.insert(sig, id);
+                  id
+              }
+          }
 
-      These changes will dramatically reduce the overhead of the analysis and should bring the execution time well within your target.
+          // 1. Collect all unique suffixes.
+          let mut suffixes = HashSet::new();
+          suffixes.insert(&[] as &[u8]);
+          for s in strings {
+              for i in 0..=s.len() {
+                  suffixes.insert(&s[i..]);
+              }
+          }
+          let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
+          sorted_suffixes.sort_by_key(|s| s.len());
 
-      ### Git Diffs
+          // 2. Identify all relevant DFA states.
+          let relevant_states: BTreeSet<usize> = initial_states
+              .iter()
+              .cloned()
+              .chain(std::iter::once(regex.dfa.start_state))
+              .collect();
 
-      Here are the git diffs to apply the changes described above.
+          // 3. Compute signatures for all suffixes, from shortest to longest.
+          let mut interner = VerificationSignatureInterner::new();
+          let mut memo: HashMap<&[u8], BTreeMap<usize, InternedVerificationSignatureId>> = HashMap::new();
+
+          let pb = ProgressBar::new(sorted_suffixes.len() as u64);
+          pb.set_style(
+              ProgressStyle::default_bar()
+                  .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Verification)")
+                  .expect("progress-bar"),
+          );
+          if !PROGRESS_BAR_ENABLED {
+              pb.set_draw_target(ProgressDrawTarget::hidden());
+          }
+
+          for &suffix in &sorted_suffixes {
+              pb.inc(1);
+              let mut state_sigs = BTreeMap::new();
+              for &dfa_state in &relevant_states {
+                  let result = regex.execute_from_state2(suffix, dfa_state);
+
+                  let mut matches = BTreeSet::new();
+                  for m in result.matches {
+                      if m.position == 0 {
+                          continue;
+                      }
+                      let remainder = &suffix[m.position..];
+                      let remainder_sigs = memo
+                          .get(remainder)
+                          .expect("BUG: remainder signature should be pre-computed");
+                      let remainder_sig_id = *remainder_sigs
+                          .get(&regex.dfa.start_state)
+                          .expect("BUG: remainder signature for start_state should exist");
+                      matches.insert((m.group_id, m.position, remainder_sig_id));
+                  }
+
+                  let sig = InternedVerificationSignature {
+                      matches,
+                      final_state: result.end_state,
+                  };
+                  let sig_id = interner.intern(sig);
+                  state_sigs.insert(dfa_state, sig_id);
+              }
+              memo.insert(suffix, state_sigs);
+          }
+          pb.finish();
+
+          // 4. Classify original strings based on their signature vectors.
+          let mut brute_force_classes: BTreeMap<Vec<InternedVerificationSignatureId>, Vec<usize>> = BTreeMap::new();
+          for (i, s) in strings.iter().enumerate() {
+              let mut signature_vector = Vec::with_capacity(initial_states.len());
+              if let Some(string_sigs) = memo.get(s.as_slice()) {
+                  for &initial_state in initial_states {
+                      let sig_id = *string_sigs.get(&initial_state).unwrap();
+                      signature_vector.push(sig_id);
+                  }
+              }
+              brute_force_classes.entry(signature_vector).or_default().push(i);
+          }
+
+          // 5. Compare partitions.
+          let computed_partitions: BTreeSet<BTreeSet<usize>> = computed_classes
+              .values()
+              .map(|class| class.iter().cloned().collect())
+              .collect();
+
+          let brute_force_partitions: BTreeSet<BTreeSet<usize>> = brute_force_classes
+              .values()
+              .map(|class| class.iter().cloned().collect())
+              .collect();
+
+          if computed_partitions == brute_force_partitions {
+              println!("Equivalence class verification successful!");
+          } else {
+              eprintln!("Equivalence class verification FAILED!");
+              eprintln!("Computed partitions ({}): {:?}", computed_partitions.len(), computed_partitions);
+              eprintln!("Brute-force partitions ({}): {:?}", brute_force_partitions.len(), brute_force_partitions);
+              panic!("Equivalence class verification failed.");
+          }
+      ```
+
+      ### Git Diff
+
+      Here is the git diff for the change.
 
       ```diff
       diff --git a/src/equivalence_analysis_finite_automata.rs b/src/equivalence_analysis_finite_automata.rs
-      index e9a4645..36c738e 100644
+      index 2611111..1199111 100644
       --- a/src/equivalence_analysis_finite_automata.rs
       +++ b/src/equivalence_analysis_finite_automata.rs
-      @@ -4,7 +4,7 @@
-       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+      @@ -161,91 +161,121 @@
+           computed_classes: &BTreeMap<Vec<SignatureId>, Vec<usize>>,
+       ) {
+           println!("Verifying equivalence classes (this may be slow)...");
+      -
+      + 
+           // A canonical representation of the tokenization graph for verification.
+           #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      -    struct VerificationSignature {
+      -        matches: BTreeSet<(GroupID, usize, VerificationSignature)>,
+      +    struct InternedVerificationSignature {
+      +        matches: BTreeSet<(GroupID, usize, InternedVerificationSignatureId)>,
+               final_state: Option<usize>,
+           }
+      -
+      -    fn build_verification_signature(
+      -        regex: &Regex,
+      -        text: &[u8],
+      -        initial_state: usize,
+      -        memo: &mut HashMap<(Vec<u8>, usize), VerificationSignature>,
+      -    ) -> VerificationSignature {
+      -        let key = (text.to_vec(), initial_state);
+      -        if let Some(result) = memo.get(&key) {
+      -            return result.clone();
+      -        }
+      -
+      -        let result = regex.execute_from_state2(text, initial_state);
+      -
+      -        let mut sig_matches = BTreeSet::new();
+      -        for m in result.matches {
+      -            if m.position == 0 {
+      -                continue;
+      -            }
+      -            let remainder = &text[m.position..];
+      -            let remainder_sig =
+      -                build_verification_signature(regex, remainder, regex.dfa.start_state, memo);
+      -            sig_matches.insert((m.group_id, m.position, remainder_sig));
+      -        }
+      -
+      -        let signature = VerificationSignature {
+      -            matches: sig_matches,
+      -            final_state: result.end_state,
+      -        };
+      -
+      -        memo.insert(key, signature.clone());
+      -        signature
+      -    }
+      -
+      -    let mut brute_force_classes: BTreeMap<Vec<VerificationSignature>, Vec<usize>> =
+      -        BTreeMap::new();
+      -    let mut memo: HashMap<(Vec<u8>, usize), VerificationSignature> = HashMap::new();
+      -
+      -    let pb = ProgressBar::new(strings.len() as u64);
+      +    type InternedVerificationSignatureId = usize;
+      +
+      +    struct VerificationSignatureInterner {
+      +        signatures: Vec<InternedVerificationSignature>,
+      +        map: HashMap<InternedVerificationSignature, InternedVerificationSignatureId>,
+      +    }
+      +
+      +    impl VerificationSignatureInterner {
+      +        fn new() -> Self {
+      +            VerificationSignatureInterner {
+      +                signatures: Vec::new(),
+      +                map: HashMap::new(),
+      +            }
+      +        }
+      +
+      +        fn intern(&mut self, sig: InternedVerificationSignature) -> InternedVerificationSignatureId {
+      +            if let Some(&id) = self.map.get(&sig) {
+      +                return id;
+      +            }
+      +            let id = self.signatures.len();
+      +            self.signatures.push(sig.clone());
+      +            self.map.insert(sig, id);
+      +            id
+      +        }
+      +    }
+      +
+      +    // 1. Collect all unique suffixes.
+      +    let mut suffixes = HashSet::new();
+      +    suffixes.insert(&[] as &[u8]);
+      +    for s in strings {
+      +        for i in 0..=s.len() {
+      +            suffixes.insert(&s[i..]);
+      +        }
+      +    }
+      +    let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
+      +    sorted_suffixes.sort_by_key(|s| s.len());
+      +
+      +    // 2. Identify all relevant DFA states.
+      +    let relevant_states: BTreeSet<usize> = initial_states
+      +        .iter()
+      +        .cloned()
+      +        .chain(std::iter::once(regex.dfa.start_state))
+      +        .collect();
+      +
+      +    // 3. Compute signatures for all suffixes, from shortest to longest.
+      +    let mut interner = VerificationSignatureInterner::new();
+      +    let mut memo: HashMap<&[u8], BTreeMap<usize, InternedVerificationSignatureId>> = HashMap::new();
+      +
+      +    let pb = ProgressBar::new(sorted_suffixes.len() as u64);
+           pb.set_style(
+               ProgressStyle::default_bar()
+                   .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Verification)")
+                   .expect("progress-bar"),
+           );
+           if !PROGRESS_BAR_ENABLED {
+               pb.set_draw_target(ProgressDrawTarget::hidden());
+           }
        
-       // For debugging: verify equivalence classes using a brute-force method.
-      -const VERIFY_EQUIVALENCE_CLASSES: bool = true;
-      +const VERIFY_EQUIVALENCE_CLASSES: bool = false;
+      -    for (i, s) in strings.iter().enumerate() {
+      +    for &suffix in &sorted_suffixes {
+               pb.inc(1);
+      -        let mut signature_vector = Vec::with_capacity(initial_states.len());
+      -        for &initial_state in initial_states {
+      -            let signature = build_verification_signature(regex, s, initial_state, &mut memo);
+      -            signature_vector.push(signature);
+      -        }
+      -        brute_force_classes.entry(signature_vector).or_default().push(i);
+      +        let mut state_sigs = BTreeMap::new();
+      +        for &dfa_state in &relevant_states {
+      +            let result = regex.execute_from_state2(suffix, dfa_state);
+      +
+      +            let mut matches = BTreeSet::new();
+      +            for m in result.matches {
+      +                if m.position == 0 {
+      +                    continue;
+      +                }
+      +                let remainder = &suffix[m.position..];
+      +                let remainder_sigs = memo
+      +                    .get(remainder)
+      +                    .expect("BUG: remainder signature should be pre-computed");
+      +                let remainder_sig_id = *remainder_sigs
+      +                    .get(&regex.dfa.start_state)
+      +                    .expect("BUG: remainder signature for start_state should exist");
+      +                matches.insert((m.group_id, m.position, remainder_sig_id));
+      +            }
+      +
+      +            let sig = InternedVerificationSignature {
+      +                matches,
+      +                final_state: result.end_state,
+      +            };
+      +            let sig_id = interner.intern(sig);
+      +            state_sigs.insert(dfa_state, sig_id);
+      +        }
+      +        memo.insert(suffix, state_sigs);
+           }
+           pb.finish();
        
-       // A canonical representation of a signature. It can be hashed and compared.
-       // It's derived from the graph of tokenization possibilities.
-      @@ -58,16 +58,16 @@
-           pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
-               // 1. Collect all unique suffixes from the input strings.
-               //    We need all suffixes because a remainder after a match is a suffix of the string being processed.
-               let mut suffixes = HashSet::new();
-      -        suffixes.insert(Vec::new()); // Base case for recursion
-      +        suffixes.insert(&[] as &[u8]); // Base case for recursion
-               for s in self.strings {
-                   for i in 0..=s.len() {
-      -                suffixes.insert(s[i..].to_vec());
-      +                suffixes.insert(&s[i..]);
-                   }
-               }
-      -        let mut sorted_suffixes: Vec<Vec<u8>> = suffixes.into_iter().collect();
-      +        let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
-               sorted_suffixes.sort_by_key(|p| p.len());
+      -    // Convert both computed and brute-force classes into partitions (sets of sets of indices) for comparison.
+      +    // 4. Classify original strings based on their signature vectors.
+      +    let mut brute_force_classes: BTreeMap<Vec<InternedVerificationSignatureId>, Vec<usize>> = BTreeMap::new();
+      +    for (i, s) in strings.iter().enumerate() {
+      +        let mut signature_vector = Vec::with_capacity(initial_states.len());
+      +        if let Some(string_sigs) = memo.get(s.as_slice()) {
+      +            for &initial_state in initial_states {
+      +                let sig_id = *string_sigs.get(&initial_state).unwrap();
+      +                signature_vector.push(sig_id);
+      +            }
+      +        }
+      +        brute_force_classes.entry(signature_vector).or_default().push(i);
+      +    }
+      +
+      +    // 5. Compare partitions.
+           let computed_partitions: BTreeSet<BTreeSet<usize>> = computed_classes
+               .values()
+               .map(|class| class.iter().cloned().collect())
+               .collect();
        
-               crate::debug!(2, "Starting LLM token equivalence analysis for {} unique suffixes...", sorted_suffixes.len());
-      @@ -87,9 +87,9 @@
-       
-               // 3. Compute signatures for all prefixes, from shortest to longest.
-               let mut signature_interner = SignatureInterner::new();
-      -        let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
-      +        let mut memo: HashMap<&[u8], BTreeMap<usize, SignatureId>> = HashMap::new();
-       
-      -        for suffix in &sorted_suffixes {
-      +        for &suffix in &sorted_suffixes {
-                   pb.inc(1);
-                   let mut state_sigs = BTreeMap::new();
-                   for &dfa_state in &relevant_states {
-      @@ -118,14 +118,14 @@
-                       };
-                       state_sigs.insert(dfa_state, signature_interner.intern(sig));
-                   }
-      -            memo.insert(suffix.clone(), state_sigs);
-      +            memo.insert(suffix, state_sigs);
-               }
-               pb.finish();
-       
-               // 4. Classify original strings based on their signature vectors.
-               let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
-               for (i, s) in self.strings.iter().enumerate() {
-                   let mut signature_vector = Vec::with_capacity(self.initial_states.len());
-      -            if let Some(string_sigs) = memo.get(s) {
-      +            if let Some(string_sigs) = memo.get(s.as_slice()) {
-                       for &initial_state in self.initial_states {
-                           let sig_id = string_sigs.get(&initial_state)
-                               .expect("BUG: Signature for initial state not found");
+           let brute_force_partitions: BTreeSet<BTreeSet<usize>> = brute_force_classes
+               .values()
 
       ```
     metadata:
@@ -9272,7 +9516,7 @@ messages:
       Applying patch to 'src/equivalence_analysis_finite_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/equivalence_analysis_finite_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Performance: Disable slow equivalence
-      class verification and optimize suffix handling with slices"'
+  - user: 'Changes committed with message: "Refactor: Optimize verify_equivalence_classes
+      with iterative suffix processing"'
     metadata:
 ...
