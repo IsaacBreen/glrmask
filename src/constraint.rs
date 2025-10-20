@@ -2746,9 +2746,6 @@ impl<'r> Precomputer1<'r> {
                             );
                             let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
                             let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                            if &actual_dst == src_node_wrapper {
-                                println!("End nodes: {:?}", self.end_nodes);
-                            }
                             assert_ne!(&actual_dst, src_node_wrapper);
                         }
                         let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
