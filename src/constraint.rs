@@ -1770,27 +1770,6 @@ impl GrammarConstraint {
         }
 
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
-        {
-            let term_ids: Vec<TerminalID> = out.keys().copied().collect();
-            let templates_vec: Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)> =
-                out.values().cloned().collect();
-
-            let pinned_nodes: HashSet<_> = templates_vec.iter().flat_map(|(s, e)| vec![s.clone(), e.clone()]).collect();
-            let pinned_nodes_vec: Vec<_> = pinned_nodes.iter().cloned().collect();
-
-            let node_map = optimize_intermediate_trie3(
-                &pinned_nodes_vec,
-                trie3_god,
-                |idx, _| pinned_nodes.contains(&idx),
-            );
-
-            for tid in term_ids {
-                let (old_s, old_e) = out.get(&tid).unwrap();
-                let new_s = node_map.get(old_s).unwrap_or(old_s).clone();
-                let new_e = node_map.get(old_e).unwrap_or(old_e).clone();
-                out.insert(tid, (new_s, new_e));
-            }
-        }
 
         out
     }
