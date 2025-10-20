@@ -4,7 +4,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 // For debugging: verify equivalence classes using a brute-force method.
-const VERIFY_EQUIVALENCE_CLASSES: bool = true;
+const VERIFY_EQUIVALENCE_CLASSES: bool = false;
 
 // A canonical representation of a signature. It can be hashed and compared.
 // It's derived from the graph of tokenization possibilities.
@@ -70,13 +70,13 @@ impl<'a> EquivalenceAnalyzer<'a> {
         // 1. Collect all unique suffixes from the input strings.
         //    We need all suffixes because a remainder after a match is a suffix of the string being processed.
         let mut suffixes = HashSet::new();
-        suffixes.insert(Vec::new()); // Base case for recursion
+        suffixes.insert(&[] as &[u8]); // Base case for recursion
         for s in self.strings {
             for i in 0..=s.len() {
-                suffixes.insert(s[i..].to_vec());
+                suffixes.insert(&s[i..]);
             }
         }
-        let mut sorted_suffixes: Vec<Vec<u8>> = suffixes.into_iter().collect();
+        let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
         sorted_suffixes.sort_by_key(|p| p.len());
 
         crate::debug!(2, "Starting LLM token equivalence analysis for {} unique suffixes...", sorted_suffixes.len());
@@ -99,9 +99,9 @@ impl<'a> EquivalenceAnalyzer<'a> {
 
         // 3. Compute signatures for all prefixes, from shortest to longest.
         let mut signature_interner = SignatureInterner::new();
-        let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
+        let mut memo: HashMap<&[u8], BTreeMap<usize, SignatureId>> = HashMap::new();
 
-        for suffix in &sorted_suffixes {
+        for &suffix in &sorted_suffixes {
             pb.inc(1);
             let mut state_sigs = BTreeMap::new();
             for &dfa_state in &relevant_states {
@@ -131,7 +131,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
                 };
                 state_sigs.insert(dfa_state, signature_interner.intern(sig));
             }
-            memo.insert(suffix.clone(), state_sigs);
+            memo.insert(suffix, state_sigs);
         }
         pb.finish();
 
@@ -139,7 +139,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
         let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
         for (i, s) in self.strings.iter().enumerate() {
             let mut signature_vector = Vec::with_capacity(self.initial_states.len());
-            if let Some(string_sigs) = memo.get(s) {
+            if let Some(string_sigs) = memo.get(s.as_slice()) {
                 for &initial_state in self.initial_states {
                     let sig_id = string_sigs.get(&initial_state)
                         .expect("BUG: Signature for initial state not found");
