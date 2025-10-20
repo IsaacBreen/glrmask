@@ -65,6 +65,7 @@ use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_a
 use std::iter::FromIterator;
 use crate::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
 use crate::constraint_precompute3_intermediate_utils::optimize_intermediate_trie3;
+use crate::equivalence_analysis_finite_automata;
 
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;
@@ -860,19 +861,67 @@ impl GrammarConstraint {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
-        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map);
+        
+        // --- Equivalence Analysis ---
+        crate::debug!(2, "Starting LLM token equivalence analysis...");
+        let llm_token_strings: Vec<_> = llm_token_map.keys().cloned().collect();
+        let llm_token_ids: Vec<_> = llm_token_map.values().cloned().collect();
+        let tokenizer_states: Vec<_> = tokenizer.iter_states().map(|s| s.0).collect();
 
+        let equivalence_classes = equivalence_analysis_finite_automata::find_equivalence_classes(
+            &tokenizer,
+            &llm_token_strings,
+            &tokenizer_states,
+        );
+        crate::debug!(2, "Found {} equivalence classes for {} LLM tokens.", equivalence_classes.len(), llm_token_map.len());
 
-		let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
-		// Build reverse mapping for global vocab
+        let mut representative_llm_token_map = BiBTreeMap::new();
+        let mut original_to_representative_map: BTreeMap<LLMTokenID, LLMTokenID> = BTreeMap::new();
+        let mut representative_to_class_map: BTreeMap<LLMTokenID, Vec<LLMTokenID>> = BTreeMap::new();
+
+        for (_sig_vec, class_indices) in equivalence_classes {
+            if class_indices.is_empty() { continue; }
+
+            // Find shortest token as representative.
+            let representative_index = *class_indices.iter().min_by_key(|&&i| llm_token_strings[i].len()).unwrap();
+            
+            let representative_bytes = &llm_token_strings[representative_index];
+            let representative_id = llm_token_ids[representative_index];
+            
+            representative_llm_token_map.insert(representative_bytes.clone(), representative_id);
+            
+            let mut class_ids = Vec::new();
+            for &idx in &class_indices {
+                let original_id = llm_token_ids[idx];
+                original_to_representative_map.insert(original_id, representative_id);
+                class_ids.push(original_id);
+            }
+            representative_to_class_map.insert(representative_id, class_ids);
+        }
+        // --- End Equivalence Analysis ---
+
+        let representative_original_to_internal_map = Self::setup_llm_token_mappings(&representative_llm_token_map);
+
+        let mut original_to_internal_map = BTreeMap::new();
+        for (original_id, _bytes) in llm_token_map.iter_by_right() {
+            let representative_id = original_to_representative_map.get(original_id).unwrap();
+            let internal_id = representative_original_to_internal_map.get(&representative_id.0).unwrap();
+            original_to_internal_map.insert(original_id.0, *internal_id);
+        }
+
+		let internal_max_llm_token = representative_original_to_internal_map.values().copied().max().unwrap_or(0);
+		
 		let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-		for (orig, int_id) in &original_to_internal_map {
-			internal_to_original_map.entry(*int_id).or_default().insert(*orig);
+		for (rep_orig_id, internal_id) in &representative_original_to_internal_map {
+            let representative_llm_id = LLMTokenID(*rep_orig_id);
+			let class_ids = representative_to_class_map.get(&representative_llm_id).unwrap();
+            let bv: LLMTokenBV = class_ids.iter().map(|id| id.0).collect();
+			internal_to_original_map.insert(*internal_id, bv);
 		}
 
         let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
-        for (bytes, original_id) in llm_token_map.iter() {
-            if let Some(internal_id_val) = original_to_internal_map.get(&original_id.0) {
+        for (bytes, original_id) in representative_llm_token_map.iter() {
+            if let Some(internal_id_val) = representative_original_to_internal_map.get(&original_id.0) {
                 internal_llm_token_map_for_precompute.insert(bytes.clone(), LLMTokenID(*internal_id_val));
             }
         }
