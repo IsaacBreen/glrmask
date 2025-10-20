@@ -889,19 +889,19 @@ where
     /// * `roots`: The starting nodes for path traversal.
     /// * `is_end`: A predicate that returns true if a node is a valid end point for a path.
     ///             A path is only returned if its final node satisfies this predicate.
-    /// * `counts_toward_length`: A predicate that decides whether an edge is included in the returned path
-    ///             and counts toward `max_path_length`. Edges for which this returns `false` are still
-    ///             traversed, but are not part of the output path.
-    ///             Cycle prevention uses an "active stamp" per node keyed by the counted-edge length
-    ///             (i.e., current path length). We only forbid re-entering the same node at the same
-    ///             counted length, which blocks infinite loops made solely of uncounted edges while
-    ///             allowing revisits after progress on counted edges.
+    /// * `is_path_edge`: A predicate that decides whether an edge should be included in a returned path.
+    ///             Edges for which this returns `false` are still traversed to find further path segments,
+    ///             but they are not included in the output path vector, nor do they count towards `max_path_length`.
+    ///             This allows for modeling "transient" or "zero-cost" edges.
+    ///             Cycle prevention uses an "active stamp" per node keyed by the path edge count.
+    ///             This blocks infinite loops made solely of non-path edges while allowing revisits
+    ///             after making progress on path edges.
     /// * `max_path_length`: The maximum length of a path (number of edges) to explore.
     pub fn get_all_paths_with_cycles<F, G>(
         arena: &Arena<Self>,
         roots: &[Trie2Index],
         is_end: F,
-        counts_toward_length: G,
+        is_path_edge: G,
         max_path_length: usize,
     ) -> Vec<(T, Vec<(EK, EV, T)>)>
     where
@@ -921,7 +921,7 @@ where
                     &mut vec![],
                     &mut all_paths,
                     &is_end,
-                    &counts_toward_length,
+                    &is_path_edge,
                     &root_value,
                     max_path_length,
                 );
@@ -936,7 +936,7 @@ where
         current_path: &mut Vec<(EK, EV, T)>,
         all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
         is_end: &F,
-        counts_toward_length: &G,
+        is_path_edge: &G,
         root_value: &T,
         max_path_length: usize,
     ) where
@@ -1037,8 +1037,8 @@ where
             let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
             frame.idx += 1;
             // Determine whether this edge increases the counted length.
-            let counts = counts_toward_length(&ek, &ev, child_idx);
-            let next_stamp = path.len() + if counts { 1 } else { 0 };
+            let include_edge = is_path_edge(&ek, &ev, child_idx);
+            let next_stamp = path.len() + if include_edge { 1 } else { 0 };
 
             // Prevent infinite loops formed solely by uncounted edges:
             // do not re-enter the same node at the same counted length.
@@ -1047,7 +1047,7 @@ where
             }
             if let Some(child_guard) = child_idx.read(arena) {
                 let child_value = child_guard.value.clone();
-                if counts {
+                if include_edge {
                     // Add this edge to the current path before exploring the child.
                     path.push((ek, ev, child_value));
                 }
@@ -1058,7 +1058,7 @@ where
                     edges: child_edges,
                     idx: 0,
                     started: false,
-                    has_incoming_edge: counts,
+                    has_incoming_edge: include_edge,
                     stamp: next_stamp,
                 });
                 active.entry(child_idx).or_default().push(next_stamp);
@@ -2799,7 +2799,7 @@ mod tests {
             &arena,
             &[root],
             |idx, _| idx == n8_idx,
-            |_, _, _| true,
+            |_, _, _| true, // is_path_edge
             max_len,
         );
 
@@ -2853,7 +2853,7 @@ mod tests {
             &arena,
             &[root],
             |idx, _| idx == target,
-            |ek, _, _| ek == "counted",
+            |ek, _, _| ek == "counted", // is_path_edge
             5, // max_path_length
         );
 
@@ -2910,7 +2910,7 @@ mod tests {
             &arena,
             &[root],
             |idx, _| idx == target,
-            |ek, _, _| ek != "cycle_uncounted", // only "to_a", "cycle_counted", "to_target" are counted
+            |ek, _, _| ek != "cycle_uncounted", // is_path_edge: only "to_a", "cycle_counted", "to_target" are path edges
             5, // max_path_length
         );
 
