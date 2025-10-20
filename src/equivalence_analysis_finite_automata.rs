@@ -4,7 +4,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 // For debugging: verify equivalence classes using a brute-force method.
-const VERIFY_EQUIVALENCE_CLASSES: bool = false;
+const VERIFY_EQUIVALENCE_CLASSES: bool = true;
 
 // A canonical representation of a signature. It can be hashed and compared.
 // It's derived from the graph of tokenization possibilities.
