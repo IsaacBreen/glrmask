@@ -302,7 +302,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
     /// Create a new destination node in the arena and insert an edge to it.
     /// Returns the index of the newly created node.
-    pub fn force_insert_to_new_node(
+    fn force_insert_to_new_node(
         &mut self,
         arena: &Arena<Trie<EK, EV, T>>,
         edge_key: EK,
@@ -318,7 +318,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     }
 
     /// Insert an edge to an existing destination node index.
-    pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: Trie2Index) {
+    fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: Trie2Index) {
         self.children.entry(edge_key).or_default().insert(dst, edge_value);
     }
 
