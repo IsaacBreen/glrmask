@@ -388,8 +388,15 @@ fn has_true_cycle_trie3(
     max_state_id: usize,
 ) {
     // We check for each token and state individually. This is slow but thorough.
+    let total_checks = (internal_max_llm_token + 1) * (max_state_id + 1);
+    #[cfg(not(rustrover))]
+    let mut pbar = tqdm!(total = total_checks, desc = "Trie3 Cycle Check", disable = !PROGRESS_BAR_ENABLED, leave = true);
+
     for llm_token_id in 0..=internal_max_llm_token {
         for state_id in 0..=max_state_id {
+            #[cfg(not(rustrover))]
+            pbar.update(1).unwrap();
+
             let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
             for &root in roots {
                 if visited.contains(&root) {

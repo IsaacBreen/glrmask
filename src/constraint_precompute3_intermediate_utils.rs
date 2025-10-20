@@ -6,7 +6,9 @@ use crate::{
     },
     datastructures::trie::Trie,
 };
+use kdam::tqdm;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::profiler::PROGRESS_BAR_ENABLED;
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -380,8 +382,14 @@ pub fn has_true_cycle_intermediate_trie3(
     god: &IntermediateTrie3GodWrapper,
     roots: &[IntermediatePrecomputeNode3Index],
 ) {
+    #[cfg(not(rustrover))]
+    let mut pbar = tqdm!(total = roots.len(), desc = "Intermediate Trie3 Cycle Check", disable = !PROGRESS_BAR_ENABLED, leave = true);
+
     let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
     for &root in roots {
+        #[cfg(not(rustrover))]
+        pbar.update(1).unwrap();
+
         if visited.contains(&root) {
             continue;
         }
