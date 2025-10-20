@@ -1774,12 +1774,21 @@ impl GrammarConstraint {
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
         let template_roots: Vec<_> = out.values().map(|(start, _end)| start.clone()).collect();
         let template_roots: Vec<_> = template_roots[2..=2].to_vec();
+        let options = crate::datastructures::trie::PrettyPrintOptions::default()
+            .display_edge_keys_only()
+            .omit_depth();
+        println!("Before optimizing intermediate trie3 template:");
+        println!("{}", Trie::pretty_print_with_options(trie3_god, &template_roots, &options));
         let node_map = optimize_intermediate_trie3(
             &template_roots,
             trie3_god,
             |_, node| node.value.end,
         );
         // let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>  = BTreeMap::new();
+
+        let new_template_roots: Vec<_> = template_roots.iter().map(|idx| node_map.get(idx).unwrap_or(idx).clone()).collect();
+        println!("After optimizing intermediate trie3 template:");
+        println!("{}", Trie::pretty_print_with_options(trie3_god, &new_template_roots, &options));
 
         // Update the start nodes in the template map
         let mut new_out = BTreeMap::new();
