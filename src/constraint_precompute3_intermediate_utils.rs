@@ -1,8 +1,9 @@
 // src/constraint_precompute3_intermediate_utils.rs
 use crate::constraint::{
-    IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
+    IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
     IntermediateTrie3GodWrapper, LLMTokenBV,
 };
+use std::collections::BTreeMap;
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -32,20 +33,21 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
 }
 
 pub fn optimize_intermediate_trie3(
-    roots: &mut Vec<IntermediatePrecomputeNode3Index>,
+    roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
-) {
+    is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
+) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
     // TODO
+    Default::default()
 }
 
 /// Runs a global optimization across all per-terminal templates.
 /// Pins all (start,end) nodes to keep external references valid.
 pub fn optimize_intermediate_trie3_templates_global(
-    templates: &mut Vec<(
-        IntermediatePrecomputeNode3Index,
-        IntermediatePrecomputeNode3Index,
-    )>,
+    roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
-) {
+    is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
+) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
     // TODO
+    Default::default()
 }

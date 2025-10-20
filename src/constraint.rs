@@ -1772,14 +1772,23 @@ impl GrammarConstraint {
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
         {
             let term_ids: Vec<TerminalID> = out.keys().copied().collect();
-            let mut templates_vec: Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)> =
+            let templates_vec: Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)> =
                 out.values().cloned().collect();
-            optimize_intermediate_trie3_templates_global(
-                &mut templates_vec,
+
+            let pinned_nodes: HashSet<_> = templates_vec.iter().flat_map(|(s, e)| vec![s.clone(), e.clone()]).collect();
+            let pinned_nodes_vec: Vec<_> = pinned_nodes.iter().cloned().collect();
+
+            let node_map = optimize_intermediate_trie3_templates_global(
+                &pinned_nodes_vec,
                 trie3_god,
+                |idx, _| pinned_nodes.contains(&idx),
             );
-            for (tid, (new_s, new_e)) in term_ids.iter().zip(templates_vec.iter()) {
-                out.insert(*tid, (*new_s, *new_e));
+
+            for tid in term_ids {
+                let (old_s, old_e) = out.get(&tid).unwrap();
+                let new_s = node_map.get(old_s).unwrap_or(old_s).clone();
+                let new_e = node_map.get(old_e).unwrap_or(old_e).clone();
+                out.insert(tid, (new_s, new_e));
             }
         }
 
@@ -2141,13 +2150,18 @@ impl GrammarConstraint {
 
         // --- New: Optimize intermediate trie before path processing ---
         crate::debug!(2, "Optimizing intermediate trie3...");
-        let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
+        let intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
+        let root_map = optimize_intermediate_trie3(
+            &intermediate_roots,
+            &intermediate_trie3_god,
+            |_, node| node.value.end,
+        );
 
         // Update the roots in the map after optimization
-        let tokenizer_state_ids: Vec<_> = intermediate_precomputed3.keys().copied().collect();
-        for (tokenizer_state_id, new_root) in tokenizer_state_ids.into_iter().zip(intermediate_roots.into_iter()) {
-            intermediate_precomputed3.insert(tokenizer_state_id, new_root);
+        for root in intermediate_precomputed3.values_mut() {
+            if let Some(new_root) = root_map.get(root) {
+                *root = new_root.clone();
+            }
         }
 
 
