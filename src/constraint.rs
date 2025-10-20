@@ -2435,7 +2435,6 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     pub(crate) ignore_terminal_id: Option<TerminalID>,
     pub(crate) token_name_map:   &'r BiBTreeMap<Terminal, usize>,
-    pub(crate) end_nodes:        BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     pub(crate) leaf_node:        PrecomputeNode1Index,
     pub(crate) trie1_god:        Trie1GodWrapper,
 }
@@ -2487,22 +2486,7 @@ impl<'r> Precomputer1<'r> {
         }
 
         let leaf_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
-        let mut end_nodes = BTreeMap::new();
-        let all_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
-        for tsid in tokenizer.iter_states() {
-            if tsid == tokenizer.initial_state_id() {
-                end_nodes.insert(tsid, leaf_node.clone());
-            } else {
-                let end_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
-                let accessible_terminals = tokenizer.tokens_accessible_from_state(tsid);
-                for terminal_id in accessible_terminals {
-                    trie1_god.insert_edge_simple(end_node, leaf_node.clone(), Some(terminal_id), all_tokens.clone());
-                }
-                end_nodes.insert(tsid, end_node);
-            }
-        }
-
-        crate::debug!(2, "Created trie1 leaf node for {} tokenizer states", tokenizer.iter_states().count());
+        crate::debug!(2, "Created trie1 leaf node");
 
         Self {
             tokenizer,
@@ -2518,14 +2502,9 @@ impl<'r> Precomputer1<'r> {
             terminal_follow_map,
             ignore_terminal_id,
             token_name_map,
-            end_nodes,
             leaf_node,
             trie1_god,
         }
-    }
-
-    fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode1Index {
-        self.end_nodes[&final_sid].clone()
     }
 
     fn get_leaf_node(&self) -> PrecomputeNode1Index {
@@ -2592,14 +2571,7 @@ impl<'r> Precomputer1<'r> {
         for (sid, root) in &self.roots {
             crate::debug!(6, "  {}: {}", sid.0, root);
         }
-        for end_node in self.end_nodes.values() {
-            end_node.write(&self.trie1_god).expect("Failed to write end node").value.end = true;
-        }
         self.dfs(&self.vocab.root, assoc);
-        for end_node in self.end_nodes.values() {
-            if *end_node == self.leaf_node { continue; }
-            end_node.write(&self.trie1_god).expect("Failed to write end node").value.end = false;
-        }
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish();
         crate::debug!(2, "Precomputation complete");
@@ -2730,23 +2702,30 @@ impl<'r> Precomputer1<'r> {
                     }
 
                     if let Some(end_state_val) = exec_result.end_state {
+                        let final_tokenizer_state = TokenizerStateID(end_state_val);
+                        let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
                         for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
                             let llm_token_id = child_vocab_node.token_id();
                             let mut edge_bv = HybridBitset::zeros();
                             edge_bv.insert(llm_token_id);
-                            let edge_key = None;
-                            let mut inserter = EdgeInserter::new(
-                                &self.trie1_god,
-                                src_node_wrapper.as_arc().clone(),
-                                edge_key,
-                                &edge_bv & src_contextual_tokens,
-                                |e, n| *e |= n,
-                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                |ev, t| *ev &= &t.live_tokens,
-                            );
-                            let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
-                            let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                            assert_ne!(&actual_dst, src_node_wrapper);
+                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
+                            if edge_bv_for_inserter.is_empty() { continue; }
+
+                            for terminal_id in &accessible_terminals {
+                                let edge_key = Some(terminal_id);
+                                let mut inserter = EdgeInserter::new(
+                                    &self.trie1_god,
+                                    src_node_wrapper.as_arc().clone(),
+                                    edge_key.copied(),
+                                    edge_bv_for_inserter.clone(),
+                                    |e, n| *e |= n,
+                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                    |ev, t| *ev &= &t.live_tokens,
+                                );
+                                let end_idx = self.get_leaf_node();
+                                let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                assert_ne!(&actual_dst, src_node_wrapper);
+                            }
                         }
                         let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
                         for (node, tokens) in precompute_nodes_with_tokens {
