@@ -200,6 +200,8 @@ pub fn optimize_trie3_size(
     mut max_llm_token_id: usize,
     stage_vocab: &mut StageVocab,
 ) {
+    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
+
 	if !config.enabled {
 		return;
 	}
