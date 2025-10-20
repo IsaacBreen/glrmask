@@ -279,6 +279,8 @@ pub fn optimize_intermediate_trie3(
     let original_god = god.deep_clone();
     let original_roots = roots.to_vec();
 
+    has_true_cycle_intermediate_trie3(god, roots);
+
     let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
         BTreeMap::default();
 
@@ -308,6 +310,103 @@ pub fn optimize_intermediate_trie3(
     //     "Optimization failed to preserve graph equivalence for all roots"
     // );
 
+    has_true_cycle_intermediate_trie3(god, &new_roots);
+
     node_map
 }
 
+type CycleReportIntermediate3 = Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>;
+
+fn detect_true_cycle_recursive_intermediate_trie3(
+    node_idx: IntermediatePrecomputeNode3Index,
+    edge_key_opt: Option<IntermediateTrie3EdgeKey>,
+    god: &IntermediateTrie3GodWrapper,
+    recursion_stack: &mut HashMap<IntermediatePrecomputeNode3Index, usize>,
+    visited: &mut HashSet<IntermediatePrecomputeNode3Index>,
+    path: &mut Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>,
+) -> Option<CycleReportIntermediate3> {
+    path.push((node_idx, edge_key_opt));
+
+    if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
+        let cycle_path = path[path_start_idx..].to_vec();
+        path.pop();
+        return Some(cycle_path);
+    }
+
+    if visited.contains(&node_idx) {
+        path.pop();
+        return None;
+    }
+
+    recursion_stack.insert(node_idx, path.len() - 1);
+
+    let children_to_visit = if let Some(guard) = node_idx.read(god) {
+        guard.children().clone()
+    } else {
+        recursion_stack.remove(&node_idx);
+        path.pop();
+        return None;
+    };
+
+    for (edge_key, dest_map) in children_to_visit.iter() {
+        match edge_key {
+            IntermediateTrie3EdgeKey::CheckLLM(_) | IntermediateTrie3EdgeKey::NoOp => {
+                for (child_idx, _) in dest_map.iter() {
+                    if let Some(report) = detect_true_cycle_recursive_intermediate_trie3(
+                        *child_idx,
+                        Some(edge_key.clone()),
+                        god,
+                        recursion_stack,
+                        visited,
+                        path,
+                    ) {
+                        return Some(report);
+                    }
+                }
+            }
+            IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_) => {
+                // These edges break "true" cycles, so we don't traverse them.
+            }
+        }
+    }
+
+    recursion_stack.remove(&node_idx);
+    visited.insert(node_idx);
+    path.pop();
+    None
+}
+
+pub fn has_true_cycle_intermediate_trie3(
+    god: &IntermediateTrie3GodWrapper,
+    roots: &[IntermediatePrecomputeNode3Index],
+) {
+    let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+    for &root in roots {
+        if visited.contains(&root) {
+            continue;
+        }
+        if let Some(cycle_path) = detect_true_cycle_recursive_intermediate_trie3(
+            root,
+            None,
+            god,
+            &mut HashMap::new(),
+            &mut visited,
+            &mut Vec::new(),
+        ) {
+            let mut report = format!(
+                "Stack-neutral cycle detected in intermediate precompute3 trie.\nCycle path:\n"
+            );
+            for i in 0..cycle_path.len() {
+                let (node_idx, _) = &cycle_path[i];
+                let next_i = (i + 1) % cycle_path.len();
+                let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
+                let edge_str = edge_to_next_opt.as_ref().map_or_else(
+                    || " (root edge)".to_string(),
+                    |ek| format!("{}", ek),
+                );
+                report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
+            }
+            panic!("{}", report);
+        }
+    }
+}
