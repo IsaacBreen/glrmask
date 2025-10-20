@@ -15,7 +15,6 @@ use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::tokenizer::TokenizerStateID;
 
 use crate::profiler::PROGRESS_BAR_ENABLED;
-use crate::types::TerminalID;
 
 pub fn clone_trie3_graph(
     root: &Trie2Index,
@@ -27,9 +26,10 @@ pub fn clone_trie3_graph(
     let mut map: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = HashMap::new();
     let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
 
+    let root_ptr = *root;
     let root_value = { root.read(trie3_god).expect("poison").value.clone() };
     let new_root = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(root_value)));
-    map.insert(*root, new_root.clone());
+    map.insert(root_ptr, new_root.clone());
     q.push_back(root.clone());
 
     while let Some(old_arc) = q.pop_front() {
@@ -54,11 +54,13 @@ pub fn clone_trie3_graph(
 
         for (_ek, entries) in &children_snapshot {
             for (node_ptr, _ev) in entries {
-                if !map.contains_key(node_ptr) {
-                    let child_value = { node_ptr.read(trie3_god).expect("poison").value.clone() };
+                let child_arc_old = node_ptr.as_arc().clone();
+                let child_ptr_old = child_arc_old;
+                if !map.contains_key(&child_ptr_old) {
+                    let child_value = { child_arc_old.read(trie3_god).expect("poison").value.clone() };
                     let child_arc_new = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(child_value)));
-                    map.insert(*node_ptr, child_arc_new);
-                    q.push_back(*node_ptr);
+                    map.insert(child_ptr_old, child_arc_new);
+                    q.push_back(child_arc_old);
                 }
             }
         }
@@ -68,8 +70,10 @@ pub fn clone_trie3_graph(
             for (ek, entries) in children_snapshot {
                 let dest_map = new_g.children_mut().entry(ek).or_default();
                 for (old_node_ptr, ev) in entries {
-                    let child_idx_new = map.get(&old_node_ptr).expect("must exist").clone();
-                    let new_key = child_idx_new;
+                    let child_arc_old = old_node_ptr.as_arc().clone();
+                    let child_ptr_old = child_arc_old;
+                    let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
+                    let new_key = child_arc_new;
                     dest_map.insert(new_key, ev);
                 }
             }
@@ -78,138 +82,6 @@ pub fn clone_trie3_graph(
 
     Trie::recompute_all_max_depths(trie3_god, &[new_root.clone()]);
     (new_root, map)
-}
-
-pub fn optimize_intermediate_trie3(
-    roots: &mut BTreeMap<TerminalID, IntermediatePrecomputeNode3Index>,
-    trie3_god: &IntermediateTrie3GodWrapper,
-) {
-    crate::debug!(2, "[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
-    merge_nodes_intermediate_trie3(roots, trie3_god);
-    
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    Trie::gc(trie3_god, &roots_vec);
-    Trie::recompute_all_max_depths(trie3_god, &roots_vec);
-}
-
-fn merge_nodes_intermediate_trie3(
-    roots: &mut BTreeMap<TerminalID, IntermediatePrecomputeNode3Index>,
-    trie3_god: &IntermediateTrie3GodWrapper,
-) {
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-    if all_nodes.is_empty() { return; }
-
-    let n = all_nodes.len();
-    crate::debug!(2, "[optimize_intermediate_trie3] Reachable nodes: {}", n);
-
-    let mut dense_of: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::with_capacity(n);
-    let mut old_of: Vec<IntermediatePrecomputeNode3Index> = Vec::with_capacity(n);
-    for (i, node_idx) in all_nodes.iter().enumerate() {
-        dense_of.insert(*node_idx, i);
-        old_of.push(*node_idx);
-    }
-
-    let mut ends: Vec<bool> = vec![false; n];
-    type RawEdge = (IntermediateTrie3EdgeKey, usize); // key, dense_dest
-    let mut raw_edges: Vec<Vec<RawEdge>> = vec![Vec::new(); n];
-
-    for (u_dense, u_idx) in old_of.iter().enumerate() {
-        let guard = u_idx.read(trie3_god).unwrap();
-        ends[u_dense] = guard.value.end;
-        for (ek, dest_map) in guard.children() {
-            for (v_idx, _) in dest_map {
-                if let Some(&v_dense) = dense_of.get(v_idx) {
-                    raw_edges[u_dense].push((ek.clone(), v_dense));
-                }
-            }
-        }
-    }
-
-    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
-    let max_iters = 50; // Generous limit
-
-    for it in 0..max_iters {
-        type AggregatedEdge = (IntermediateTrie3EdgeKey, usize); // key, dest_class
-        type Signature = (bool, Vec<AggregatedEdge>);
-
-        let mut sig_to_id: HashMap<Signature, usize> = HashMap::new();
-        let mut new_class = vec![0; n];
-        let mut next_id = 0;
-        let mut changes = 0;
-
-        for u in 0..n {
-            let mut agg_edges: Vec<AggregatedEdge> = Vec::with_capacity(raw_edges[u].len());
-            for (key, v_dense) in &raw_edges[u] {
-                let dest_class = prev_class[*v_dense];
-                agg_edges.push((key.clone(), dest_class));
-            }
-            agg_edges.sort_unstable(); // For canonical signature
-
-            let sig: Signature = (ends[u], agg_edges);
-
-            let cid = *sig_to_id.entry(sig).or_insert_with(|| {
-                let id = next_id;
-                next_id += 1;
-                id
-            });
-
-            new_class[u] = cid;
-            if new_class[u] != prev_class[u] {
-                changes += 1;
-            }
-        }
-
-        crate::debug!(2, "[optimize_intermediate_trie3] WL iteration {}: classes={}, changed={}", it + 1, next_id, changes);
-        prev_class = new_class;
-        if changes == 0 {
-            crate::debug!(2, "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}", it + 1, next_id, n);
-            break;
-        }
-    }
-
-    let final_partition = prev_class;
-    let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
-
-    let mut representatives: Vec<Option<IntermediatePrecomputeNode3Index>> = vec![None; num_classes];
-    for (u_dense, &class_id) in final_partition.iter().enumerate() {
-        if representatives[class_id].is_none() {
-            representatives[class_id] = Some(old_of[u_dense]);
-        }
-    }
-
-    let mut node_to_rep: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = HashMap::with_capacity(n);
-    for (u_dense, &class_id) in final_partition.iter().enumerate() {
-        node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
-    }
-    
-    let merges = n.saturating_sub(num_classes);
-    crate::debug!(2, "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}", num_classes, merges);
-
-    let mut edges_rewired = 0;
-    for class_id in 0..num_classes {
-        if let Some(rep_idx) = representatives[class_id] {
-            let mut guard = rep_idx.write(trie3_god).unwrap();
-            let old_children = std::mem::take(guard.children_mut());
-            
-            for (key, dest_map) in old_children {
-                let mut new_dest_map = OrderedHashMap::new();
-                for (old_dest, val) in dest_map {
-                    let new_dest = *node_to_rep.get(&old_dest).unwrap();
-                    new_dest_map.insert(new_dest, val);
-                    if new_dest != old_dest {
-                        edges_rewired += 1;
-                    }
-                }
-                guard.children_mut().insert(key, new_dest_map);
-            }
-        }
-    }
-    crate::debug!(2, "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}", merges, edges_rewired);
-
-    for root_idx in roots.values_mut() {
-        *root_idx = *node_to_rep.get(root_idx).unwrap();
-    }
 }
 
 #[derive(Debug, Clone)]
