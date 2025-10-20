@@ -8,6 +8,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
+use crate::constraint::IntermediatePrecomputedNodeContents3;
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -308,9 +309,9 @@ pub fn optimize_intermediate_trie3(
         let value = if classes[cid].end {
             // Preserve "end" status
             // Prefer leaf() for end nodes; otherwise internal()
-            IntermediatePrecomputeNode3::value_type::leaf()
+            IntermediatePrecomputedNodeContents3::leaf()
         } else {
-            IntermediatePrecomputeNode3::value_type::internal()
+            IntermediatePrecomputedNodeContents3::internal()
         };
         // The above uses associated constructors on the value; since IntermediatePrecomputeNode3 is a Trie<T>,
         // we access the value constructors directly.
@@ -321,14 +322,14 @@ pub fn optimize_intermediate_trie3(
             crate::constraint::IntermediatePrecomputedNodeContents3::internal()
         };
         let new_idx = god.insert(Trie::new(value));
-        class_to_new_index[cid] = new_idx;
+        class_to_new_index[cid] = IntermediatePrecomputeNode3Index::new(new_idx);
     }
 
     // Now connect edges between class nodes
     for cid in 0..num_classes {
         let src_idx = class_to_new_index[cid];
         let edges = &classes[cid].edges;
-        god.with_mut(src_idx, |node| {
+        god.with_mut(src_idx.as_index(), |node| {
             for (ek, child_classes) in edges {
                 for &cc in child_classes {
                     let dst_idx = class_to_new_index[cc];
