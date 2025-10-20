@@ -101,13 +101,14 @@ pub fn optimize_intermediate_trie3(
     let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = Default::default(); // Currently a no-op, returns empty map.
 
     // Check equivalence after optimization (currently no-op)
-    for original_root in &original_roots {
-        let new_root = node_map.get(original_root).unwrap_or(original_root);
-        assert!(
-            are_intermediate_trie3_graphs_equal(&[*original_root], &original_god, &[*new_root], god, &is_end, 100),
-            "Optimization failed to preserve graph equivalence for root {}", original_root
-        );
-    }
+    let new_roots: Vec<_> = original_roots.iter()
+        .map(|r| node_map.get(r).unwrap_or(r).clone())
+        .collect();
+
+    assert!(
+        are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 100),
+        "Optimization failed to preserve graph equivalence for all roots"
+    );
 
     node_map
 }
