@@ -2604,10 +2604,13 @@ impl<'r> Precomputer1<'r> {
                     for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
                         let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
                         for (node, tokens) in nodes_with_tokens {
-                            entry
-                                .entry(node)
-                                .or_insert_with(LLMTokenBV::zeros)
-                                .bitor_assign(&tokens);
+                            let continuing_tokens = &tokens & &child_vocab_node.reachable_token_ids();
+                            if !continuing_tokens.is_empty() {
+                                entry
+                                    .entry(node)
+                                    .or_insert_with(LLMTokenBV::zeros)
+                                    .bitor_assign(&continuing_tokens);
+                            }
                         }
                     }
                     continue;
@@ -2731,10 +2734,13 @@ impl<'r> Precomputer1<'r> {
                         }
                         let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
                         for (node, tokens) in precompute_nodes_with_tokens {
-                            entry
-                                .entry(node.clone())
-                                .or_insert_with(LLMTokenBV::zeros)
-                                .bitor_assign(&tokens);
+                            let continuing_tokens = &tokens & &child_vocab_node.reachable_token_ids();
+                            if !continuing_tokens.is_empty() {
+                                entry
+                                    .entry(node.clone())
+                                    .or_insert_with(LLMTokenBV::zeros)
+                                    .bitor_assign(&continuing_tokens);
+                            }
                         }
                     }
                 }
