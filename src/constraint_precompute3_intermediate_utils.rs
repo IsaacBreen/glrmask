@@ -37,7 +37,6 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
 
 pub fn optimize_intermediate_trie3(
     roots: &[IntermediatePrecomputeNode3Index],
-    end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
 ) {
     if is_debug_level_enabled(2) {
@@ -46,16 +45,94 @@ pub fn optimize_intermediate_trie3(
         crate::constraint_extra::print_intermediate_stats3(&stats, god);
     }
     for _ in 0..2 {
-        let changed = prune_unproductive_nodes(roots, end_node, god);
+        let changed = prune_unproductive_nodes(roots, god);
         if !changed {
             break;
         }
     }
 }
 
-/// Prunes nodes in a graph that cannot reach the specified `end_node`.
+/// Prunes nodes in a graph that cannot reach any node where `value.end == true`.
 /// Returns true if any edges were pruned.
 fn prune_unproductive_nodes(
+    start_nodes: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) -> bool {
+    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
+    if all_nodes_vec.is_empty() {
+        return false;
+    }
+    let all_nodes_in_subgraph: HashSet<_> = all_nodes_vec.into_iter().collect();
+
+    // Build reverse adjacency map for the subgraph
+    let mut incoming: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> =
+        HashMap::new();
+    for src in &all_nodes_in_subgraph {
+        if let Some(g) = src.read(god) {
+            for (_ek, dm) in g.children() {
+                for (dst, _) in dm {
+                    // Only consider edges within the subgraph
+                    if all_nodes_in_subgraph.contains(dst) {
+                        incoming.entry(*dst).or_default().push(*src);
+                    }
+                }
+            }
+        }
+    }
+
+    // Reverse BFS from all end_nodes to find all productive nodes
+    let mut productive: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+    let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
+
+    for node in &all_nodes_in_subgraph {
+        if let Some(g) = node.read(god) {
+            if g.value.end {
+                if productive.insert(*node) {
+                    q.push_back(*node);
+                }
+            }
+        }
+    }
+
+    while let Some(d) = q.pop_front() {
+        if let Some(srcs) = incoming.get(&d) {
+            for s in srcs {
+                if productive.insert(*s) {
+                    q.push_back(*s);
+                }
+            }
+        }
+    }
+
+    if all_nodes_in_subgraph.len() == productive.len() {
+        return false;
+    }
+
+    let mut changed = false;
+    // Remove any edge pointing to a non-productive destination
+    for n in &all_nodes_in_subgraph {
+        if !productive.contains(n) {
+            continue; // This node will be GC'd anyway, no need to edit its edges.
+        }
+        if let Some(mut w) = n.write(god) {
+            let original_edge_count: usize = w.children().values().map(|dm| dm.len()).sum();
+            w.children_mut().retain(|_ek, dm| {
+                dm.retain(|dst, _| productive.contains(dst));
+                !dm.is_empty()
+            });
+            let new_edge_count: usize = w.children().values().map(|dm| dm.len()).sum();
+            if new_edge_count < original_edge_count {
+                changed = true;
+            }
+        }
+    }
+
+    changed
+}
+
+/// Prunes nodes in a graph that cannot reach the specified `end_node`.
+/// Returns true if any edges were pruned.
+fn prune_unproductive_nodes_to_target(
     start_nodes: &[IntermediatePrecomputeNode3Index],
     end_node: &IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
@@ -130,11 +207,17 @@ fn prune_unproductive_nodes(
 /// Compresses nodes whose outgoing edges are all NoOp by bypassing them.
 /// Pinned nodes are never removed (e.g., template start/end).
 fn compress_noop_only_nodes(
-    start_nodes: &[IntermediatePrecomputeNode3Index],
-    pinned: &HashSet<IntermediatePrecomputeNode3Index>,
+    templates: &[(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)],
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
-    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
+    let start_nodes: Vec<_> = templates.iter().map(|(s, _)| *s).collect();
+    let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+    for (s, e) in templates {
+        pinned.insert(*s);
+        pinned.insert(*e);
+    }
+
+    let all_nodes_vec = Trie::all_nodes(god, &start_nodes);
     if all_nodes_vec.is_empty() {
         return false;
     }
@@ -362,11 +445,17 @@ struct NodeSignature {
 /// Merges structurally equivalent nodes within the reachable subgraph, except pinned nodes.
 /// Works across multiple roots if provided.
 pub(crate) fn structural_merge_nodes_in_subgraph(
-    start_nodes: &[IntermediatePrecomputeNode3Index],
-    pinned: &HashSet<IntermediatePrecomputeNode3Index>,
+    templates: &mut Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>,
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
-    let all_nodes_vec = Trie::all_nodes(god, start_nodes);
+    let start_nodes: Vec<_> = templates.iter().map(|(s, _)| *s).collect();
+    let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+    for (s, e) in templates.iter() {
+        pinned.insert(*s);
+        pinned.insert(*e);
+    }
+
+    let all_nodes_vec = Trie::all_nodes(god, &start_nodes);
     if all_nodes_vec.is_empty() {
         return false;
     }
@@ -715,6 +804,19 @@ pub(crate) fn structural_merge_nodes_in_subgraph(
         }
     }
 
+    // Update templates with their representatives
+    let mut changed_templates = false;
+    for (s, e) in templates.iter_mut() {
+        let new_s = rep.get(s).copied().unwrap_or(*s);
+        let new_e = rep.get(e).copied().unwrap_or(*e);
+        if new_s != *s || new_e != *e {
+            changed_templates = true;
+            *s = new_s;
+            *e = new_e;
+        }
+    }
+    any_changed |= changed_templates;
+
     any_changed
 }
 
@@ -787,10 +889,10 @@ fn compute_and_print_template_stats(
 /// Runs a global optimization across all per-terminal templates.
 /// Pins all (start,end) nodes to keep external references valid.
 pub fn optimize_intermediate_trie3_templates_global(
-    templates: &[(
+    templates: &mut Vec<(
         IntermediatePrecomputeNode3Index,
         IntermediatePrecomputeNode3Index,
-    )],
+    )>,
     god: &IntermediateTrie3GodWrapper,
 ) {
     if templates.is_empty() {
@@ -799,23 +901,14 @@ pub fn optimize_intermediate_trie3_templates_global(
 
     compute_and_print_template_stats(templates, god, "Before Optimization");
 
-    let start_nodes: Vec<_> = templates.iter().map(|(s, _)| *s).collect();
-    let mut pinned: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-    for (s, e) in templates {
-        pinned.insert(*s);
-        pinned.insert(*e);
-    }
-
     // A few global passes: compress NoOp chains and merge identical subgraphs across all templates,
     // then prune per template to drop detritus.
     for _ in 0..6 {
         let mut changed = false;
-        // First eliminate NoOp epsilon transitions globally, to expose more sharing opportunities.
-        // changed |= eliminate_noop_epsilon_in_subgraph(&start_nodes, god);
-        changed |= compress_noop_only_nodes(&start_nodes, &pinned, god);
-        changed |= structural_merge_nodes_in_subgraph(&start_nodes, &pinned, god);
-        for (s, e) in templates {
-            changed |= prune_unproductive_nodes(&[*s], e, god);
+        changed |= compress_noop_only_nodes(templates, god);
+        changed |= structural_merge_nodes_in_subgraph(templates, god);
+        for (s, e) in templates.iter() {
+            changed |= prune_unproductive_nodes_to_target(&[*s], e, god);
         }
         if !changed {
             break;

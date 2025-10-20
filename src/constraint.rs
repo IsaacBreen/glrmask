@@ -1771,12 +1771,16 @@ impl GrammarConstraint {
 
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
         {
-            let templates_vec: Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)> =
+            let term_ids: Vec<TerminalID> = out.keys().copied().collect();
+            let mut templates_vec: Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)> =
                 out.values().cloned().collect();
             optimize_intermediate_trie3_templates_global(
-                &templates_vec,
+                &mut templates_vec,
                 trie3_god,
             );
+            for (tid, (new_s, new_e)) in term_ids.iter().zip(templates_vec.iter()) {
+                out.insert(*tid, (*new_s, *new_e));
+            }
         }
 
         out
@@ -2138,7 +2142,7 @@ impl GrammarConstraint {
         // --- New: Optimize intermediate trie before path processing ---
         crate::debug!(2, "Optimizing intermediate trie3...");
         let intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        optimize_intermediate_trie3(&intermediate_roots, &trie3_end, &intermediate_trie3_god);
+        optimize_intermediate_trie3(&intermediate_roots, &intermediate_trie3_god);
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
