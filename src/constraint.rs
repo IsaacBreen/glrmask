@@ -1766,6 +1766,8 @@ impl GrammarConstraint {
 
         for tid in term_ids {
             let (start, end) = Self::build_trie3_template_for_terminal(parser, trie3_god, tid, internal_max_llm_token);
+            // Temporarily mark the end node as 'end' for optimization purposes
+            end.write(trie3_god).unwrap().value.end = true;
             out.insert(tid, (start, end));
         }
 
@@ -1781,7 +1783,15 @@ impl GrammarConstraint {
         let mut new_out = BTreeMap::new();
         for (tid, (start, end)) in out {
             let new_start = node_map.get(&start).unwrap_or(&start).clone();
-            new_out.insert(tid, (new_start, end));
+            let new_end = node_map.get(&end).unwrap_or(&end).clone();
+            new_out.insert(tid, (new_start, new_end));
+        }
+
+        // Revert the 'end' flag on the template end nodes.
+        // The optimization process relies on the 'end' flag being set for the template end node,
+        // but the final trie3 construction needs it to be false (as it's an internal node).
+        for (_tid, (_start, end)) in new_out.iter() {
+            end.write(trie3_god).unwrap().value.end = false;
         }
 
         new_out
