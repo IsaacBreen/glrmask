@@ -225,7 +225,18 @@ fn verify_equivalence_classes(
         BTreeMap::new();
     let mut memo: HashMap<(Vec<u8>, usize), VerificationSignature> = HashMap::new();
 
+    let pb = ProgressBar::new(strings.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Verification)")
+            .expect("progress-bar"),
+    );
+    if !PROGRESS_BAR_ENABLED {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
+
     for (i, s) in strings.iter().enumerate() {
+        pb.inc(1);
         let mut signature_vector = Vec::with_capacity(initial_states.len());
         for &initial_state in initial_states {
             let signature = build_verification_signature(regex, s, initial_state, &mut memo);
@@ -233,6 +244,7 @@ fn verify_equivalence_classes(
         }
         brute_force_classes.entry(signature_vector).or_default().push(i);
     }
+    pb.finish();
 
     // Convert both computed and brute-force classes into partitions (sets of sets of indices) for comparison.
     let computed_partitions: BTreeSet<BTreeSet<usize>> = computed_classes
