@@ -179,27 +179,8 @@ fn verify_equivalence_classes(
     println!("Verifying equivalence classes (this may be slow)...");
 
     let mut brute_force_classes: BTreeMap<Vec<Vec<Match>>, Vec<usize>> = BTreeMap::new();
-    for (i, s) in strings.iter().enumerate() {
-        let mut signature_vector = Vec::with_capacity(initial_states.len());
-        for &initial_state in initial_states {
-            let mut rs = regex.init_to_state(initial_state);
-            let matches = rs.greedy_find_all(s, true);
-            signature_vector.push(matches);
-        }
-        brute_force_classes.entry(signature_vector).or_default().push(i);
-    }
 
-    let mut computed_partitions: Vec<BTreeSet<usize>> = computed_classes
-        .values()
-        .map(|v| v.iter().cloned().collect())
-        .collect();
-    computed_partitions.sort();
-
-    let mut brute_force_partitions: Vec<BTreeSet<usize>> = brute_force_classes
-        .values()
-        .map(|v| v.iter().cloned().collect())
-        .collect();
-    brute_force_partitions.sort();
+    todo!();
 
     if computed_partitions == brute_force_partitions {
         println!("Equivalence class verification successful!");
