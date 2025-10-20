@@ -2141,8 +2141,8 @@ impl GrammarConstraint {
 
         // --- New: Optimize intermediate trie before path processing ---
         crate::debug!(2, "Optimizing intermediate trie3...");
-        let intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        optimize_intermediate_trie3(&intermediate_roots, &intermediate_trie3_god);
+        let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
+        optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");

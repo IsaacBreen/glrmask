@@ -32,7 +32,7 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
 }
 
 pub fn optimize_intermediate_trie3(
-    roots: &[IntermediatePrecomputeNode3Index],
+    roots: &mut Vec<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
     todo!()
