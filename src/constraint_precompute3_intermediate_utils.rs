@@ -6,7 +6,7 @@ use crate::{
     },
     datastructures::trie::Trie,
 };
-use kdam::tqdm;
+use kdam::{tqdm, BarExt};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 

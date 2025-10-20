@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 use range_set_blaze::RangeSetBlaze;
 use indicatif::{ProgressBar, ProgressStyle};
-use kdam::tqdm;
+use kdam::{tqdm, BarExt};
 use ordered_hash_map::OrderedHashMap;
 use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, PrecomputeNode3Index, PrecomputedNodeContents, StageVocab, StateIDBV, Trie3GodWrapper};
 use crate::constraint_extra::{calculate_final_stats3, print_precompute_stats3, PrecomputeStats};
