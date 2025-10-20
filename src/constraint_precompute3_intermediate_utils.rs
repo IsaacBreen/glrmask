@@ -40,14 +40,3 @@ pub fn optimize_intermediate_trie3(
     // TODO
     Default::default()
 }
-
-/// Runs a global optimization across all per-terminal templates.
-/// Pins all (start,end) nodes to keep external references valid.
-pub fn optimize_intermediate_trie3_templates_global(
-    roots: &[IntermediatePrecomputeNode3Index],
-    god: &IntermediateTrie3GodWrapper,
-    is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
-) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
-    // TODO
-    Default::default()
-}

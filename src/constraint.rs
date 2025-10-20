@@ -64,7 +64,7 @@ use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use std::iter::FromIterator;
 use crate::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
-use crate::constraint_precompute3_intermediate_utils::{optimize_intermediate_trie3, optimize_intermediate_trie3_templates_global};
+use crate::constraint_precompute3_intermediate_utils::optimize_intermediate_trie3;
 
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;
@@ -1778,7 +1778,7 @@ impl GrammarConstraint {
             let pinned_nodes: HashSet<_> = templates_vec.iter().flat_map(|(s, e)| vec![s.clone(), e.clone()]).collect();
             let pinned_nodes_vec: Vec<_> = pinned_nodes.iter().cloned().collect();
 
-            let node_map = optimize_intermediate_trie3_templates_global(
+            let node_map = optimize_intermediate_trie3(
                 &pinned_nodes_vec,
                 trie3_god,
                 |idx, _| pinned_nodes.contains(&idx),
