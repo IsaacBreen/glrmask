@@ -1,5 +1,7 @@
 use crate::finite_automata::{GroupID, Regex};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use crate::profiler::PROGRESS_BAR_ENABLED;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 // A canonical representation of a signature. It can be hashed and compared.
 // It's derived from the graph of tokenization possibilities.
@@ -77,6 +79,17 @@ impl<'a> EquivalenceAnalyzer<'a> {
         let mut sorted_substrings: Vec<Vec<u8>> = substrings.into_iter().collect();
         sorted_substrings.sort_by_key(|p| p.len());
 
+        crate::debug!(2, "Starting LLM token equivalence analysis for {} unique substrings...", sorted_substrings.len());
+        let pb = ProgressBar::new(sorted_substrings.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Equivalence Analysis)")
+                .expect("progress-bar"),
+        );
+        if !PROGRESS_BAR_ENABLED {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
+        }
+
         // 2. Identify all DFA states for which we need to compute signatures.
         let relevant_states: BTreeSet<usize> = self.initial_states
             .iter()
@@ -89,6 +102,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
         let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
 
         for substring in &sorted_substrings {
+            pb.inc(1);
             let mut state_sigs = BTreeMap::new();
             for &dfa_state in &relevant_states {
                 let mut rs = self.regex.init_to_state(dfa_state);
@@ -115,6 +129,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
             }
             memo.insert(substring.clone(), state_sigs);
         }
+        pb.finish();
 
         // 4. Classify original strings based on their signature vectors.
         let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
