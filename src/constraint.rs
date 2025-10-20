@@ -2490,12 +2490,16 @@ impl<'r> Precomputer1<'r> {
         let mut end_nodes = BTreeMap::new();
         let all_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
         for tsid in tokenizer.iter_states() {
-            let end_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
-            let accessible_terminals = tokenizer.tokens_accessible_from_state(tsid);
-            for terminal_id in accessible_terminals {
-                trie1_god.insert_edge_simple(end_node, leaf_node.clone(), Some(terminal_id), all_tokens.clone());
+            if tsid == tokenizer.initial_state_id() {
+                end_nodes.insert(tsid, leaf_node.clone());
+            } else {
+                let end_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
+                let accessible_terminals = tokenizer.tokens_accessible_from_state(tsid);
+                for terminal_id in accessible_terminals {
+                    trie1_god.insert_edge_simple(end_node, leaf_node.clone(), Some(terminal_id), all_tokens.clone());
+                }
+                end_nodes.insert(tsid, end_node);
             }
-        end_nodes.insert(tsid, end_node);
         }
 
         crate::debug!(2, "Created trie1 leaf node for {} tokenizer states", tokenizer.iter_states().count());
@@ -2522,6 +2526,10 @@ impl<'r> Precomputer1<'r> {
 
     fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode1Index {
         self.end_nodes[&final_sid].clone()
+    }
+
+    fn get_leaf_node(&self) -> PrecomputeNode1Index {
+        self.leaf_node.clone()
     }
 
     fn finish(
@@ -2649,10 +2657,7 @@ impl<'r> Precomputer1<'r> {
                                     |node_value, edge_value| node_value.live_tokens |= edge_value,
                                     |ev, t| *ev &= &t.live_tokens,
                                 );
-                                let end_idx = {
-                                    let s0 = self.tokenizer.initial_state_id();
-                                    self.get_end_node(s0)
-                                };
+                                let end_idx = self.get_leaf_node();
                                 let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                                 assert_ne!(&actual_dst, src_node_wrapper);
                             }
