@@ -379,6 +379,118 @@ pub fn optimize_trie3_size(
 	crate::debug!(2, "Finished optimizing Trie 3 size.");
 }
 
+type CycleReportIntermediate3 = (Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>, usize, usize);
+
+pub fn has_true_cycle_intermediate_trie3(
+    arena: &IntermediateTrie3GodWrapper,
+    roots: &[IntermediatePrecomputeNode3Index],
+    internal_max_llm_token: usize,
+    max_state_id: usize,
+) {
+    // We check for each token and state individually. This is slow but thorough.
+    for llm_token_id in 0..=internal_max_llm_token {
+        for state_id in 0..=max_state_id {
+            let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+            for &root in roots {
+                if visited.contains(&root) {
+                    continue;
+                }
+                if let Some((cycle_path, _, _)) = detect_true_cycle_recursive_intermediate_trie3(
+                    root,
+                    None,
+                    llm_token_id,
+                    state_id,
+                    arena,
+                    &mut HashMap::new(),
+                    &mut visited,
+                    &mut Vec::new(),
+                ) {
+                    let mut report = format!(
+                        "LLM-compatible cycle with non-negative stack change detected in intermediate precompute3 trie for internal LLM token ID {} and state ID {}.\nCycle path:\n",
+                        llm_token_id, state_id
+                    );
+                    for i in 0..cycle_path.len() {
+                        let (node_idx, _) = cycle_path[i];
+                        let next_i = (i + 1) % cycle_path.len();
+                        let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
+                        let edge_str = edge_to_next_opt.as_ref().map_or_else(
+                            || " (root edge)".to_string(),
+                            |ek| format!("{}", ek),
+                        );
+                        report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
+                    }
+                    panic!("{}", report);
+                }
+            }
+        }
+    }
+}
+
+fn detect_true_cycle_recursive_intermediate_trie3(
+    node_idx: IntermediatePrecomputeNode3Index,
+    edge_key_opt: Option<IntermediateTrie3EdgeKey>,
+    llm_token_id: usize,
+    state_id: usize,
+    arena: &IntermediateTrie3GodWrapper,
+    recursion_stack: &mut HashMap<IntermediatePrecomputeNode3Index, usize>,
+    visited: &mut HashSet<IntermediatePrecomputeNode3Index>,
+    path: &mut Vec<(IntermediatePrecomputeNode3Index, Option<IntermediateTrie3EdgeKey>)>,
+) -> Option<CycleReportIntermediate3> {
+    path.push((node_idx, edge_key_opt));
+
+    if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
+        let cycle_path = path[path_start_idx..].to_vec();
+        path.pop();
+        return Some((cycle_path, llm_token_id, state_id));
+    }
+
+    if visited.contains(&node_idx) {
+        path.pop();
+        return None;
+    }
+
+    recursion_stack.insert(node_idx, path.len() - 1);
+
+    let children_to_visit = if let Some(guard) = node_idx.read(arena) {
+        guard.children().clone()
+    } else {
+        recursion_stack.remove(&node_idx);
+        path.pop();
+        return None;
+    };
+
+    for (edge_key, dest_map) in children_to_visit.iter() {
+        let traversable = match edge_key {
+            IntermediateTrie3EdgeKey::Pop(n, bv) => *n == 0 && bv.contains(state_id),
+            IntermediateTrie3EdgeKey::Push(bv) => bv.contains(state_id),
+            IntermediateTrie3EdgeKey::CheckLLM(bv) => bv.contains(llm_token_id),
+            IntermediateTrie3EdgeKey::NoOp => true,
+        };
+
+        if traversable {
+            for (child_idx, _edge_val) in dest_map.iter() {
+                if let Some(report) = detect_true_cycle_recursive_intermediate_trie3(
+                    *child_idx,
+                    Some(edge_key.clone()),
+                    llm_token_id,
+                    state_id,
+                    arena,
+                    recursion_stack,
+                    visited,
+                    path,
+                ) {
+                    return Some(report);
+                }
+            }
+        }
+    }
+
+    recursion_stack.remove(&node_idx);
+    visited.insert(node_idx);
+    path.pop();
+    None
+}
+
 type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize, usize);
 
 fn has_true_cycle_trie3(
