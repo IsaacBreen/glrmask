@@ -1773,7 +1773,7 @@ impl GrammarConstraint {
 
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
         let template_roots: Vec<_> = out.values().map(|(start, _end)| start.clone()).collect();
-        let template_roots: Vec<_> = template_roots[0..=1].to_vec();
+        let template_roots: Vec<_> = template_roots[2..=2].to_vec();
         let node_map = optimize_intermediate_trie3(
             &template_roots,
             trie3_god,
