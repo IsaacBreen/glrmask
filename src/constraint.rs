@@ -2355,6 +2355,14 @@ impl GrammarConstraint {
         GrammarConstraintState { parent: self, state }
     }
 
+    pub fn state_with_nodes(&self, nodes: Vec<(usize, Arc<GSSNode>)>) -> GrammarConstraintState<'_> {
+        let mut state = BTreeMap::new();
+        for (i, node) in nodes.into_iter() {
+            state.insert(TokenizerStateID(i), self.parser.init_glr_parser(Some(self.llm_vocab.clone())));
+        }
+        GrammarConstraintState { parent: self, state }
+    }
+
     #[inline]
     pub(crate) fn original_id_to_internal_stage0(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
         self.precompute0_vocab.original_to_internal.get(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
