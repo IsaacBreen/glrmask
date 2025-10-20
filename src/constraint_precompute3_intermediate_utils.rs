@@ -276,7 +276,6 @@ pub fn optimize_intermediate_trie3(
     god: &IntermediateTrie3GodWrapper,
     is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
 ) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
-    return BTreeMap::new();
     let original_god = god.deep_clone();
     let original_roots = roots.to_vec();
 
