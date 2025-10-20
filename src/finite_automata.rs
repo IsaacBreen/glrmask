@@ -1210,21 +1210,11 @@ impl RegexState<'_> {
     ///
     /// If there is no match, returns None.
     pub fn get_greedy_match(&self) -> Option<Match> {
-        if self.matches.len() == 0 {
-            return None;
-        }
-        let mut matches = self.matches.iter();
-        let (mut longest_match_group_id, mut longest_match_position) = matches.next().unwrap();
-        for (group_id, position) in matches {
-            if position > longest_match_position {
-                longest_match_group_id = group_id;
-                longest_match_position = position;
-            }
-        }
-        Some(Match {
-            group_id: *longest_match_group_id,
-            position: *longest_match_position,
-        })
+        self.matches
+            .iter()
+            .filter(|(_, &pos)| pos > 0) // Tokenizers must consume input to avoid infinite loops.
+            .max_by(|(&g1, &p1), (&g2, &p2)| p1.cmp(&p2).then_with(|| g2.cmp(&g1))) // Longest match (p1 vs p2), then smallest group_id (g2 vs g1).
+            .map(|(&group_id, &position)| Match { group_id, position })
     }
 
     pub fn final_state_report(&self) -> FinalStateReport {

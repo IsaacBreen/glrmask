@@ -63,17 +63,19 @@ impl<'a> EquivalenceAnalyzer<'a> {
     }
 
     pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
-        // 1. Collect all unique prefixes from the input strings.
-        //    This exploits shared work for common prefixes.
-        let mut prefixes = HashSet::new();
-        prefixes.insert(Vec::new()); // Base case for recursion
+        // 1. Collect all unique substrings from the input strings.
+        //    We need all substrings because a remainder after a match can be any substring.
+        let mut substrings = HashSet::new();
+        substrings.insert(Vec::new()); // Base case for recursion
         for s in self.strings {
-            for i in 0..=s.len() {
-                prefixes.insert(s[0..i].to_vec());
+            for i in 0..s.len() {
+                for j in i..=s.len() {
+                    substrings.insert(s[i..j].to_vec());
+                }
             }
         }
-        let mut sorted_prefixes: Vec<Vec<u8>> = prefixes.into_iter().collect();
-        sorted_prefixes.sort_by_key(|p| p.len());
+        let mut sorted_substrings: Vec<Vec<u8>> = substrings.into_iter().collect();
+        sorted_substrings.sort_by_key(|p| p.len());
 
         // 2. Identify all DFA states for which we need to compute signatures.
         let relevant_states: BTreeSet<usize> = self.initial_states
@@ -86,14 +88,14 @@ impl<'a> EquivalenceAnalyzer<'a> {
         let mut signature_interner = SignatureInterner::new();
         let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
 
-        for prefix in &sorted_prefixes {
+        for substring in &sorted_substrings {
             let mut state_sigs = BTreeMap::new();
             for &dfa_state in &relevant_states {
                 let mut rs = self.regex.init_to_state(dfa_state);
-                rs.execute(prefix);
+                rs.execute(substring);
 
                 let sig = if let Some(m) = rs.get_greedy_match() {
-                    let remainder = &prefix[m.position..];
+                    let remainder = &substring[m.position..];
                     let remainder_sigs = memo.get(remainder)
                         .expect("BUG: remainder signature should be pre-computed");
                     let remainder_sig_id = remainder_sigs.get(&self.regex.dfa.start_state)
@@ -111,7 +113,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
                 };
                 state_sigs.insert(dfa_state, signature_interner.intern(sig));
             }
-            memo.insert(prefix.clone(), state_sigs);
+            memo.insert(substring.clone(), state_sigs);
         }
 
         // 4. Classify original strings based on their signature vectors.
