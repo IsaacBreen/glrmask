@@ -35,7 +35,7 @@ pub fn optimize_intermediate_trie3(
     roots: &mut Vec<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    todo!()
+    // TODO
 }
 
 /// Runs a global optimization across all per-terminal templates.
@@ -47,7 +47,7 @@ pub fn optimize_intermediate_trie3_templates_global(
     )>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    todo!()
+    // TODO
 }
 
 fn compute_and_print_template_stats(
