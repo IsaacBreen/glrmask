@@ -68,22 +68,20 @@ impl<'a> EquivalenceAnalyzer<'a> {
     }
 
     pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
-        // 1. Collect all unique substrings from the input strings.
-        //    We need all substrings because a remainder after a match can be any substring.
-        let mut substrings = HashSet::new();
-        substrings.insert(Vec::new()); // Base case for recursion
+        // 1. Collect all unique suffixes from the input strings.
+        //    We need all suffixes because a remainder after a match is a suffix of the string being processed.
+        let mut suffixes = HashSet::new();
+        suffixes.insert(Vec::new()); // Base case for recursion
         for s in self.strings {
-            for i in 0..s.len() {
-                for j in i..=s.len() {
-                    substrings.insert(s[i..j].to_vec());
-                }
+            for i in 0..=s.len() {
+                suffixes.insert(s[i..].to_vec());
             }
         }
-        let mut sorted_substrings: Vec<Vec<u8>> = substrings.into_iter().collect();
-        sorted_substrings.sort_by_key(|p| p.len());
+        let mut sorted_suffixes: Vec<Vec<u8>> = suffixes.into_iter().collect();
+        sorted_suffixes.sort_by_key(|p| p.len());
 
-        crate::debug!(2, "Starting LLM token equivalence analysis for {} unique substrings...", sorted_substrings.len());
-        let pb = ProgressBar::new(sorted_substrings.len() as u64);
+        crate::debug!(2, "Starting LLM token equivalence analysis for {} unique suffixes...", sorted_suffixes.len());
+        let pb = ProgressBar::new(sorted_suffixes.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Equivalence Analysis)")
@@ -104,15 +102,15 @@ impl<'a> EquivalenceAnalyzer<'a> {
         let mut signature_interner = SignatureInterner::new();
         let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
 
-        for substring in &sorted_substrings {
+        for suffix in &sorted_suffixes {
             pb.inc(1);
             let mut state_sigs = BTreeMap::new();
             for &dfa_state in &relevant_states {
                 let mut rs = self.regex.init_to_state(dfa_state);
-                rs.execute(substring);
+                rs.execute(suffix);
 
                 let sig = if let Some(m) = rs.get_greedy_match() {
-                    let remainder = &substring[m.position..];
+                    let remainder = &suffix[m.position..];
                     let remainder_sigs = memo.get(remainder)
                         .expect("BUG: remainder signature should be pre-computed");
                     let remainder_sig_id = remainder_sigs.get(&self.regex.dfa.start_state)
@@ -130,7 +128,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
                 };
                 state_sigs.insert(dfa_state, signature_interner.intern(sig));
             }
-            memo.insert(substring.clone(), state_sigs);
+            memo.insert(suffix.clone(), state_sigs);
         }
         pb.finish();
 

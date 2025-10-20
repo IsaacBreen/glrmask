@@ -190,7 +190,7 @@ local_system:
       }
 
 
-      #[derive(Debug, Clone, PartialEq, Eq)]
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
       pub struct Match {
           pub group_id: GroupID,
           pub position: usize,
@@ -2605,10 +2605,13 @@ local_system:
           }
       }
     src/equivalence_analysis_finite_automata.rs: |
-      use crate::finite_automata::{GroupID, Regex};
+      use crate::finite_automata::{GroupID, Match, Regex};
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
       use crate::profiler::PROGRESS_BAR_ENABLED;
       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+
+      // For debugging: verify equivalence classes using a brute-force method.
+      const VERIFY_EQUIVALENCE_CLASSES: bool = true;
 
       // A canonical representation of a signature. It can be hashed and compared.
       // It's derived from the graph of tokenization possibilities.
@@ -2752,6 +2755,10 @@ local_system:
                   equivalence_classes.entry(signature_vector).or_default().push(i);
               }
 
+              if VERIFY_EQUIVALENCE_CLASSES {
+                  verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
+              }
+
               equivalence_classes
           }
       }
@@ -2768,6 +2775,49 @@ local_system:
       ) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
           let mut analyzer = EquivalenceAnalyzer::new(regex, strings, initial_states);
           analyzer.find_equivalence_classes()
+      }
+
+      /// Brute-force verification of equivalence classes.
+      /// This is slow and should only be used for debugging.
+      fn verify_equivalence_classes(
+          regex: &Regex,
+          strings: &[Vec<u8>],
+          initial_states: &[usize],
+          computed_classes: &BTreeMap<Vec<SignatureId>, Vec<usize>>,
+      ) {
+          println!("Verifying equivalence classes (this may be slow)...");
+
+          let mut brute_force_classes: BTreeMap<Vec<Vec<Match>>, Vec<usize>> = BTreeMap::new();
+          for (i, s) in strings.iter().enumerate() {
+              let mut signature_vector = Vec::with_capacity(initial_states.len());
+              for &initial_state in initial_states {
+                  let mut rs = regex.init_to_state(initial_state);
+                  let matches = rs.greedy_find_all(s, true);
+                  signature_vector.push(matches);
+              }
+              brute_force_classes.entry(signature_vector).or_default().push(i);
+          }
+
+          let mut computed_partitions: Vec<BTreeSet<usize>> = computed_classes
+              .values()
+              .map(|v| v.iter().cloned().collect())
+              .collect();
+          computed_partitions.sort();
+
+          let mut brute_force_partitions: Vec<BTreeSet<usize>> = brute_force_classes
+              .values()
+              .map(|v| v.iter().cloned().collect())
+              .collect();
+          brute_force_partitions.sort();
+
+          if computed_partitions == brute_force_partitions {
+              println!("Equivalence class verification successful!");
+          } else {
+              eprintln!("Equivalence class verification FAILED!");
+              eprintln!("Computed partitions ({}): {:?}", computed_partitions.len(), computed_partitions);
+              eprintln!("Brute-force partitions ({}): {:?}", brute_force_partitions.len(), brute_force_partitions);
+              panic!("Equivalence class verification failed.");
+          }
       }
   prev_file_contents:
     src/finite_automata.rs: |
@@ -5376,7 +5426,7 @@ local_system:
       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
       // For debugging: verify equivalence classes using a brute-force method.
-      const VERIFY_EQUIVALENCE_CLASSES: bool = false;
+      const VERIFY_EQUIVALENCE_CLASSES: bool = true;
 
       // A canonical representation of a signature. It can be hashed and compared.
       // It's derived from the graph of tokenization possibilities.
@@ -5440,22 +5490,20 @@ local_system:
           }
 
           pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
-              // 1. Collect all unique substrings from the input strings.
-              //    We need all substrings because a remainder after a match can be any substring.
-              let mut substrings = HashSet::new();
-              substrings.insert(Vec::new()); // Base case for recursion
+              // 1. Collect all unique suffixes from the input strings.
+              //    We need all suffixes because a remainder after a match is a suffix of the string being processed.
+              let mut suffixes = HashSet::new();
+              suffixes.insert(Vec::new()); // Base case for recursion
               for s in self.strings {
-                  for i in 0..s.len() {
-                      for j in i..=s.len() {
-                          substrings.insert(s[i..j].to_vec());
-                      }
+                  for i in 0..=s.len() {
+                      suffixes.insert(s[i..].to_vec());
                   }
               }
-              let mut sorted_substrings: Vec<Vec<u8>> = substrings.into_iter().collect();
-              sorted_substrings.sort_by_key(|p| p.len());
+              let mut sorted_suffixes: Vec<Vec<u8>> = suffixes.into_iter().collect();
+              sorted_suffixes.sort_by_key(|p| p.len());
 
-              crate::debug!(2, "Starting LLM token equivalence analysis for {} unique substrings...", sorted_substrings.len());
-              let pb = ProgressBar::new(sorted_substrings.len() as u64);
+              crate::debug!(2, "Starting LLM token equivalence analysis for {} unique suffixes...", sorted_suffixes.len());
+              let pb = ProgressBar::new(sorted_suffixes.len() as u64);
               pb.set_style(
                   ProgressStyle::default_bar()
                       .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Equivalence Analysis)")
@@ -5476,15 +5524,15 @@ local_system:
               let mut signature_interner = SignatureInterner::new();
               let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
 
-              for substring in &sorted_substrings {
+              for suffix in &sorted_suffixes {
                   pb.inc(1);
                   let mut state_sigs = BTreeMap::new();
                   for &dfa_state in &relevant_states {
                       let mut rs = self.regex.init_to_state(dfa_state);
-                      rs.execute(substring);
+                      rs.execute(suffix);
 
                       let sig = if let Some(m) = rs.get_greedy_match() {
-                          let remainder = &substring[m.position..];
+                          let remainder = &suffix[m.position..];
                           let remainder_sigs = memo.get(remainder)
                               .expect("BUG: remainder signature should be pre-computed");
                           let remainder_sig_id = remainder_sigs.get(&self.regex.dfa.start_state)
@@ -5502,7 +5550,7 @@ local_system:
                       };
                       state_sigs.insert(dfa_state, signature_interner.intern(sig));
                   }
-                  memo.insert(substring.clone(), state_sigs);
+                  memo.insert(suffix.clone(), state_sigs);
               }
               pb.finish();
 
@@ -5811,7 +5859,7 @@ messages:
       }
 
 
-      #[derive(Debug, Clone, PartialEq, Eq)]
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
       pub struct Match {
           pub group_id: GroupID,
           pub position: usize,
@@ -8231,10 +8279,13 @@ messages:
       filename: src/finite_automata.rs
   - user: |-
       ```rust 'src/equivalence_analysis_finite_automata.rs'
-      use crate::finite_automata::{GroupID, Regex};
+      use crate::finite_automata::{GroupID, Match, Regex};
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
       use crate::profiler::PROGRESS_BAR_ENABLED;
       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+
+      // For debugging: verify equivalence classes using a brute-force method.
+      const VERIFY_EQUIVALENCE_CLASSES: bool = true;
 
       // A canonical representation of a signature. It can be hashed and compared.
       // It's derived from the graph of tokenization possibilities.
@@ -8378,6 +8429,10 @@ messages:
                   equivalence_classes.entry(signature_vector).or_default().push(i);
               }
 
+              if VERIFY_EQUIVALENCE_CLASSES {
+                  verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
+              }
+
               equivalence_classes
           }
       }
@@ -8396,55 +8451,56 @@ messages:
           analyzer.find_equivalence_classes()
       }
 
+      /// Brute-force verification of equivalence classes.
+      /// This is slow and should only be used for debugging.
+      fn verify_equivalence_classes(
+          regex: &Regex,
+          strings: &[Vec<u8>],
+          initial_states: &[usize],
+          computed_classes: &BTreeMap<Vec<SignatureId>, Vec<usize>>,
+      ) {
+          println!("Verifying equivalence classes (this may be slow)...");
+
+          let mut brute_force_classes: BTreeMap<Vec<Vec<Match>>, Vec<usize>> = BTreeMap::new();
+          for (i, s) in strings.iter().enumerate() {
+              let mut signature_vector = Vec::with_capacity(initial_states.len());
+              for &initial_state in initial_states {
+                  let mut rs = regex.init_to_state(initial_state);
+                  let matches = rs.greedy_find_all(s, true);
+                  signature_vector.push(matches);
+              }
+              brute_force_classes.entry(signature_vector).or_default().push(i);
+          }
+
+          let mut computed_partitions: Vec<BTreeSet<usize>> = computed_classes
+              .values()
+              .map(|v| v.iter().cloned().collect())
+              .collect();
+          computed_partitions.sort();
+
+          let mut brute_force_partitions: Vec<BTreeSet<usize>> = brute_force_classes
+              .values()
+              .map(|v| v.iter().cloned().collect())
+              .collect();
+          brute_force_partitions.sort();
+
+          if computed_partitions == brute_force_partitions {
+              println!("Equivalence class verification successful!");
+          } else {
+              eprintln!("Equivalence class verification FAILED!");
+              eprintln!("Computed partitions ({}): {:?}", computed_partitions.len(), computed_partitions);
+              eprintln!("Brute-force partitions ({}): {:?}", brute_force_partitions.len(), brute_force_partitions);
+              panic!("Equivalence class verification failed.");
+          }
+      }
+
       ```
     metadata:
       filename: src/equivalence_analysis_finite_automata.rs
-  - user: |-
-      Now, let's try speed up the first stage, ie precompute0.
-      Would be SO much faster if we could merge equivalent LLM tokens ahead of time.
-
-      Let's say I have a set of strings `Vec<Vec<u8>>`. I want to know which of these are *equivalent* under the DFA/regex, in some special sense.
-      What I mean is this:
-      - Suppose we have two strings `Vec<u8>`.
-      - Imagine a graph where nodes are tokenizer states (there can be more than one node per tokenizer state) and edges are optional group IDs.
-      - Create one root and one end node for each tokenizer state.
-      - Create a queue as a `BTreeMap` position -> tokenizer state ID -> node. Initialize it with the tokenizer states and their roots at position 0.
-      - Process the queue by popping a position/state/node
-          - Execute the regex from the tokenizer state at the position.
-          - If there's an end state, make a `None` edge to the end node for the end tokenizer state.
-          - For each match position/group
-              - Add an edge with that group ID. As the dest, check the queue first. Otherwise, make a new node. The next state will be the initial state.
-      - If the graphs created are the same, the strings are equivalent.
-      This isn't how I'm suggesting you implement this. It's just to give you an idea of what equivalence means.
-      There's going to be approximately one hundred thousand strings and one thousand tokenizer states. This needs to execute in under 100 ms.
-
-
-      Let's proceed in steps.
-
-      ...
-
-      First, write an outline with function bodies left as `todo!()`.
-
-      ...
-
-      Now add placeholder implementations that assign each string its own equivalence class. Do NOT modify src/equivalence_analysis_finite_automata.rs in this step. Only src/constraint.rs
-
-      ...
-
-      Now implement this properly and in full. Ensure it's efficient.
-
-      ...
-
-      Ok the above has been done.
-      Now it'd be good to see how well it did. Some stats. In constraint.rs I guess.
-
-      ...
-
-      Add a progress bar to `src/equivalence_analysis_finite_automata.rs`. Note the way pbars are used in the rest of the code, cfg etc.
-
-      ...
-
-      Add a debug constant. If it's set, verify the equivalence classes using a more brute-force (but more obviously correct) method.
+  - user: '  [00:01:11] [███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████]
+      233646/233646 (100%, 0s) (Equivalence Analysis)'
+    metadata:
+  - user: This is way too slow.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8463,240 +8519,128 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to add a debug constant and a verification method for the equivalence classes.
+      Of course. The performance issue you're seeing is due to the equivalence analysis algorithm processing every unique *substring* of the input strings, which can be a very large number. We can optimize this by realizing that we only need to analyze the unique *suffixes* of the input strings, as any remainder from a token match will be a suffix of the string being processed. This change will drastically reduce the number of items to analyze and significantly speed up the process.
+
+      Here are the step-by-step instructions to apply this optimization, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      #### 1. Modify `src/finite_automata.rs`
+      1.  **Open the file:** `src/equivalence_analysis_finite_automata.rs`.
 
-      To enable comparison of tokenization results, we need to make the `Match` struct orderable.
+      2.  **Navigate to the function:** `find_equivalence_classes` within the `impl<'a> EquivalenceAnalyzer<'a>` block.
 
-      -   Open the file `src/finite_automata.rs`.
-      -   Find the definition of the `Match` struct.
-      -   Add `PartialOrd` and `Ord` to the `#[derive(...)]` attribute.
+      3.  **Replace the substring collection logic with suffix collection:**
+          *   Locate the block of code under the comment `// 1. Collect all unique substrings from the input strings.`.
+          *   Change this comment to `// 1. Collect all unique suffixes from the input strings.` and update the explanatory comment below it.
+          *   Replace the nested loops that generate all substrings with a single loop that generates all suffixes for each input string.
+          *   Rename the `substrings` variable to `suffixes` and `sorted_substrings` to `sorted_suffixes` for clarity.
 
-      ```rust
-      // src/finite_automata.rs
+      4.  **Update the main processing loop:**
+          *   In the `for` loop that iterates over the collected strings, change the loop variable from `substring` to `suffix`.
+          *   Update all uses of the loop variable within the loop body (`rs.execute`, `remainder` calculation, and `memo.insert`) to use `suffix`.
 
-      // Change this:
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct Match {
-          pub group_id: GroupID,
-          pub position: usize,
-      }
+      5.  **Update the progress bar and logging:**
+          *   Change the debug message to report on "unique suffixes".
+          *   Initialize the `ProgressBar` with the length of `sorted_suffixes`.
 
-      // To this:
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      pub struct Match {
-          pub group_id: GroupID,
-          pub position: usize,
-      }
-      ```
-
-      #### 2. Modify `src/equivalence_analysis_finite_automata.rs`
-
-      Here, we will add the debug constant, the verification function, and the call to trigger it.
-
-      1.  **Add Imports and a Debug Constant:**
-          -   Open `src/equivalence_analysis_finite_automata.rs`.
-          -   At the top of the file, modify the first `use` statement to import `Match`.
-          -   Below the `use` statements, add a `const` boolean to control whether verification runs.
-
-          ```rust
-          // src/equivalence_analysis_finite_automata.rs
-
-          // Change this line:
-          use crate::finite_automata::{GroupID, Regex};
-          // To this:
-          use crate::finite_automata::{GroupID, Match, Regex};
-
-          // And add this constant below the use statements:
-          // For debugging: verify equivalence classes using a brute-force method.
-          const VERIFY_EQUIVALENCE_CLASSES: bool = false;
-          ```
-
-      2.  **Add the Verification Function:**
-          -   At the very end of `src/equivalence_analysis_finite_automata.rs`, add the following function. It implements a brute-force method of tokenizing every string from every initial state and comparing the resulting partitions with the ones generated by the optimized algorithm.
-
-          ```rust
-          // src/equivalence_analysis_finite_automata.rs
-
-          /// Brute-force verification of equivalence classes.
-          /// This is slow and should only be used for debugging.
-          fn verify_equivalence_classes(
-              regex: &Regex,
-              strings: &[Vec<u8>],
-              initial_states: &[usize],
-              computed_classes: &BTreeMap<Vec<SignatureId>, Vec<usize>>,
-          ) {
-              println!("Verifying equivalence classes (this may be slow)...");
-          
-              let mut brute_force_classes: BTreeMap<Vec<Vec<Match>>, Vec<usize>> = BTreeMap::new();
-              for (i, s) in strings.iter().enumerate() {
-                  let mut signature_vector = Vec::with_capacity(initial_states.len());
-                  for &initial_state in initial_states {
-                      let mut rs = regex.init_to_state(initial_state);
-                      let matches = rs.greedy_find_all(s, true);
-                      signature_vector.push(matches);
-                  }
-                  brute_force_classes.entry(signature_vector).or_default().push(i);
-              }
-          
-              let mut computed_partitions: Vec<BTreeSet<usize>> = computed_classes
-                  .values()
-                  .map(|v| v.iter().cloned().collect())
-                  .collect();
-              computed_partitions.sort();
-          
-              let mut brute_force_partitions: Vec<BTreeSet<usize>> = brute_force_classes
-                  .values()
-                  .map(|v| v.iter().cloned().collect())
-                  .collect();
-              brute_force_partitions.sort();
-          
-              if computed_partitions == brute_force_partitions {
-                  println!("Equivalence class verification successful!");
-              } else {
-                  eprintln!("Equivalence class verification FAILED!");
-                  eprintln!("Computed partitions ({}): {:?}", computed_partitions.len(), computed_partitions);
-                  eprintln!("Brute-force partitions ({}): {:?}", brute_force_partitions.len(), brute_force_partitions);
-                  panic!("Equivalence class verification failed.");
-              }
-          }
-          ```
-
-      3.  **Call the Verification Function:**
-          -   In the `find_equivalence_classes` method of `EquivalenceAnalyzer`, insert the call to `verify_equivalence_classes` just before the final `return` statement.
-
-          ```rust
-          // src/equivalence_analysis_finite_automata.rs
-
-          // Inside impl<'a> EquivalenceAnalyzer<'a> { fn find_equivalence_classes(...) { ... } }
-          // ...
-                  equivalence_classes.entry(signature_vector).or_default().push(i);
-              }
-
-              if VERIFY_EQUIVALENCE_CLASSES {
-                  verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
-              }
-
-              equivalence_classes
-          }
-          ```
+      These changes are all confined to the `find_equivalence_classes` function.
 
       ### Git Diffs
 
-      Here are the git diffs corresponding to the changes described above.
+      Here is the git diff to apply the changes.
 
       ```diff
       diff --git a/src/equivalence_analysis_finite_automata.rs b/src/equivalence_analysis_finite_automata.rs
-      index 6211111..1199999 100644
       --- a/src/equivalence_analysis_finite_automata.rs
       +++ b/src/equivalence_analysis_finite_automata.rs
-      @@ -1,7 +1,10 @@
-      -use crate::finite_automata::{GroupID, Regex};
-      +use crate::finite_automata::{GroupID, Match, Regex};
-       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-       use crate::profiler::PROGRESS_BAR_ENABLED;
-       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-      +
-      +// For debugging: verify equivalence classes using a brute-force method.
-      +const VERIFY_EQUIVALENCE_CLASSES: bool = false;
+      @@ -95,27 +95,25 @@
+       }
        
-       // A canonical representation of a signature. It can be hashed and compared.
-       // It's derived from the graph of tokenization possibilities.
-      @@ -141,6 +144,11 @@
-                   equivalence_classes.entry(signature_vector).or_default().push(i);
+       impl<'a> EquivalenceAnalyzer<'a> {
+           pub fn new(regex: &'a Regex, strings: &'a [Vec<u8>], initial_states: &'a [usize]) -> Self {
+               EquivalenceAnalyzer {
+                   regex,
+                   strings,
+                   initial_states,
                }
-       
-      +        if VERIFY_EQUIVALENCE_CLASSES {
-      +            verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
-      +        }
-      +
-               equivalence_classes
            }
-       }
-      @@ -158,3 +166,46 @@
-           let mut analyzer = EquivalenceAnalyzer::new(regex, strings, initial_states);
-           analyzer.find_equivalence_classes()
-       }
-      +
-      +/// Brute-force verification of equivalence classes.
-      +/// This is slow and should only be used for debugging.
-      +fn verify_equivalence_classes(
-      +    regex: &Regex,
-      +    strings: &[Vec<u8>],
-      +    initial_states: &[usize],
-      +    computed_classes: &BTreeMap<Vec<SignatureId>, Vec<usize>>,
-      +) {
-      +    println!("Verifying equivalence classes (this may be slow)...");
-      +
-      +    let mut brute_force_classes: BTreeMap<Vec<Vec<Match>>, Vec<usize>> = BTreeMap::new();
-      +    for (i, s) in strings.iter().enumerate() {
-      +        let mut signature_vector = Vec::with_capacity(initial_states.len());
-      +        for &initial_state in initial_states {
-      +            let mut rs = regex.init_to_state(initial_state);
-      +            let matches = rs.greedy_find_all(s, true);
-      +            signature_vector.push(matches);
-      +        }
-      +        brute_force_classes.entry(signature_vector).or_default().push(i);
-      +    }
-      +
-      +    let mut computed_partitions: Vec<BTreeSet<usize>> = computed_classes
-      +        .values()
-      +        .map(|v| v.iter().cloned().collect())
-      +        .collect();
-      +    computed_partitions.sort();
-      +
-      +    let mut brute_force_partitions: Vec<BTreeSet<usize>> = brute_force_classes
-      +        .values()
-      +        .map(|v| v.iter().cloned().collect())
-      +        .collect();
-      +    brute_force_partitions.sort();
-      +
-      +    if computed_partitions == brute_force_partitions {
-      +        println!("Equivalence class verification successful!");
-      +    } else {
-      +        eprintln!("Equivalence class verification FAILED!");
-      +        eprintln!("Computed partitions ({}): {:?}", computed_partitions.len(), computed_partitions);
-      +        eprintln!("Brute-force partitions ({}): {:?}", brute_force_partitions.len(), brute_force_partitions);
-      +        panic!("Equivalence class verification failed.");
-      +    }
-      +}
-
-      ```
-      ```diff
-      diff --git a/src/finite_automata.rs b/src/finite_automata.rs
-      index 1111111..2222222 100644
-      --- a/src/finite_automata.rs
-      +++ b/src/finite_automata.rs
-      @@ -193,7 +193,7 @@
-       }
        
+           pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
+      -        // 1. Collect all unique substrings from the input strings.
+      -        //    We need all substrings because a remainder after a match can be any substring.
+      -        let mut substrings = HashSet::new();
+      -        substrings.insert(Vec::new()); // Base case for recursion
+      +        // 1. Collect all unique suffixes from the input strings.
+      +        //    We need all suffixes because a remainder after a match is a suffix of the string being processed.
+      +        let mut suffixes = HashSet::new();
+      +        suffixes.insert(Vec::new()); // Base case for recursion
+               for s in self.strings {
+      -            for i in 0..s.len() {
+      -                for j in i..=s.len() {
+      -                    substrings.insert(s[i..j].to_vec());
+      -                }
+      +            for i in 0..=s.len() {
+      +                suffixes.insert(s[i..].to_vec());
+                   }
+               }
+      -        let mut sorted_substrings: Vec<Vec<u8>> = substrings.into_iter().collect();
+      -        sorted_substrings.sort_by_key(|p| p.len());
+      +        let mut sorted_suffixes: Vec<Vec<u8>> = suffixes.into_iter().collect();
+      +        sorted_suffixes.sort_by_key(|p| p.len());
        
-      -#[derive(Debug, Clone, PartialEq, Eq)]
-      +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-       pub struct Match {
-           pub group_id: GroupID,
-           pub position: usize,
+      -        crate::debug!(2, "Starting LLM token equivalence analysis for {} unique substrings...", sorted_substrings.len());
+      -        let pb = ProgressBar::new(sorted_substrings.len() as u64);
+      +        crate::debug!(2, "Starting LLM token equivalence analysis for {} unique suffixes...", sorted_suffixes.len());
+      +        let pb = ProgressBar::new(sorted_suffixes.len() as u64);
+               pb.set_style(
+                   ProgressStyle::default_bar()
+                       .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Equivalence Analysis)")
+      @@ -134,20 +132,20 @@
+               let mut signature_interner = SignatureInterner::new();
+               let mut memo: HashMap<Vec<u8>, BTreeMap<usize, SignatureId>> = HashMap::new();
+       
+      -        for substring in &sorted_substrings {
+      +        for suffix in &sorted_suffixes {
+                   pb.inc(1);
+                   let mut state_sigs = BTreeMap::new();
+                   for &dfa_state in &relevant_states {
+                       let mut rs = self.regex.init_to_state(dfa_state);
+      -                rs.execute(substring);
+      +                rs.execute(suffix);
+       
+                       let sig = if let Some(m) = rs.get_greedy_match() {
+      -                    let remainder = &substring[m.position..];
+      +                    let remainder = &suffix[m.position..];
+                           let remainder_sigs = memo.get(remainder)
+                               .expect("BUG: remainder signature should be pre-computed");
+                           let remainder_sig_id = remainder_sigs.get(&self.regex.dfa.start_state)
+                               .expect("BUG: remainder signature for start_state should exist");
+       
+                           CanonicalSignature {
+                               match_and_remainder: Some((m.group_id, m.position, *remainder_sig_id)),
+                               final_state_if_no_match: None,
+      @@ -160,7 +158,7 @@
+                       };
+                       state_sigs.insert(dfa_state, signature_interner.intern(sig));
+                   }
+      -            memo.insert(substring.clone(), state_sigs);
+      +            memo.insert(suffix.clone(), state_sigs);
+               }
+               pb.finish();
+       
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/equivalence_analysis_finite_automata.rs
       Applying patch to 'src/equivalence_analysis_finite_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/equivalence_analysis_finite_automata.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/finite_automata.rs
-      Applying patch to 'src/finite_automata.rs' using custom patcher...
-      Successfully applied patch and wrote to src/finite_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Add optional brute-force verification
-      for equivalence classes and make Match orderable"'
+  - user: 'Changes committed with message: "Optimize equivalence analysis by processing
+      only unique suffixes instead of all substrings"'
     metadata:
 ...
