@@ -2265,8 +2265,7 @@ impl GrammarConstraint {
                         IntermediateTrie3EdgeKey::NoOp => ((0, tokens_all.clone()), states_all.clone()),
                     };
 
-                    let mut new_guard = new_idx.write(&trie3_god).unwrap();
-                    new_guard.force_insert_to_node(final_key, final_value, new_child_idx);
+                    trie3_god.insert_edge_simple(new_idx, new_child_idx, final_key, final_value);
                 }
             }
         }
