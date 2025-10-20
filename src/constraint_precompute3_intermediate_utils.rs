@@ -47,7 +47,7 @@ pub fn are_intermediate_trie3_graphs_equal<F>(
 where
     F: Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
 {
-    let counts_toward_length = |ek: &IntermediateTrie3EdgeKey, _, _| {
+    let counts_toward_length: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool = |ek, _, _| {
         // Only Pop and Push operations count towards path length for cycle detection.
         // CheckLLM and NoOp are considered "free" moves.
         matches!(ek, IntermediateTrie3EdgeKey::Pop(_, _)) || matches!(ek, IntermediateTrie3EdgeKey::Push(_))
