@@ -1826,8 +1826,6 @@ impl GrammarConstraint {
         // Flatten the active GSS into explicit stacks. Each is (Vec<ParseStateEdgeContent>, Acc).
         let stacks = s.active_state.stack.inner.to_stacks();
         let end = Self::reduce_gss_stacks_to_trie3_from_start(trie3_god, &stacks, internal_max_llm_token);
-        // Optimize the template subgraph
-        println!("Optimizing intermediate trie3 template for terminal '{}'", parser.terminal_map.get_by_right(&tid).unwrap());
         (start, end)
     }
 
