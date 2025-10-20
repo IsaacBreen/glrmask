@@ -236,7 +236,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
         if node_id == 0 {
             return Vec::new();
         }
-        let mut path = Vec::new();
+        let mut path: Vec<u8> = Vec::new();
         let mut q = VecDeque::from([(0, Vec::new())]);
         let mut visited = BTreeSet::from([0]);
         while let Some((curr_id, curr_path)) = q.pop_front() {

@@ -864,8 +864,8 @@ impl GrammarConstraint {
         
         // --- Equivalence Analysis ---
         crate::debug!(2, "Starting LLM token equivalence analysis...");
-        let llm_token_strings: Vec<_> = llm_token_map.keys().cloned().collect();
-        let llm_token_ids: Vec<_> = llm_token_map.values().cloned().collect();
+        let llm_token_strings: Vec<_> = llm_token_map.left_values().cloned().collect();
+        let llm_token_ids: Vec<_> = llm_token_map.right_values().cloned().collect();
         let tokenizer_states: Vec<_> = tokenizer.iter_states().map(|s| s.0).collect();
 
         let equivalence_classes = equivalence_analysis_finite_automata::find_equivalence_classes(
@@ -903,7 +903,7 @@ impl GrammarConstraint {
         let representative_original_to_internal_map = Self::setup_llm_token_mappings(&representative_llm_token_map);
 
         let mut original_to_internal_map = BTreeMap::new();
-        for (original_id, _bytes) in llm_token_map.iter_by_right() {
+        for (_bytes, original_id) in llm_token_map.iter() {
             let representative_id = original_to_representative_map.get(original_id).unwrap();
             let internal_id = representative_original_to_internal_map.get(&representative_id.0).unwrap();
             original_to_internal_map.insert(original_id.0, *internal_id);
