@@ -2144,6 +2144,12 @@ impl GrammarConstraint {
         let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
         optimize_intermediate_trie3(&mut intermediate_roots, &intermediate_trie3_god);
 
+        // Update the roots in the map after optimization
+        for (tokenizer_state_id, new_root) in intermediate_precomputed3.keys().copied().zip(intermediate_roots.into_iter()) {
+            intermediate_precomputed3.insert(tokenizer_state_id, new_root);
+        }
+
+
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
         Self::_process_and_rebuild_trie3_paths(
