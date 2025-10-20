@@ -41,11 +41,11 @@ pub fn are_intermediate_trie3_graphs_equal<F>(
     god_a: &IntermediateTrie3GodWrapper,
     root_b: IntermediatePrecomputeNode3Index,
     god_b: &IntermediateTrie3GodWrapper,
-    is_end: F,
+    is_end: &F,
     max_path_length: usize,
 ) -> bool
 where
-    F: Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool + Clone,
+    F: Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
 {
     let counts_toward_length = |ek: &IntermediateTrie3EdgeKey, _, _| {
         // Only Pop and Push operations count towards path length for cycle detection.
@@ -58,7 +58,7 @@ where
         god_a,
         &[root_a],
         is_end,
-        counts_toward_length,
+        &counts_toward_length,
         max_path_length,
     );
 
@@ -67,7 +67,7 @@ where
         god_b,
         &[root_b],
         is_end,
-        counts_toward_length,
+        &counts_toward_length,
         max_path_length,
     );
 

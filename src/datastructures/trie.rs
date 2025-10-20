@@ -900,8 +900,8 @@ where
     pub fn get_all_paths_with_cycles<F, G>(
         arena: &Arena<Self>,
         roots: &[Trie2Index],
-        is_end: F,
-        counts_toward_length: G,
+        is_end: &F,
+        counts_toward_length: &G,
         max_path_length: usize,
     ) -> Vec<(T, Vec<(EK, EV, T)>)>
     where
@@ -920,8 +920,8 @@ where
                     root,
                     &mut vec![],
                     &mut all_paths,
-                    &is_end,
-                    &counts_toward_length,
+                    is_end,
+                    counts_toward_length,
                     &root_value,
                     max_path_length,
                 );
