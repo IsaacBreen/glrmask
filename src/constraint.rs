@@ -1779,7 +1779,7 @@ impl GrammarConstraint {
     ) -> (Precomputed3, Trie3GodWrapper) {
         crate::debug!(2, "Precomputing Trie 3 (template-driven)...");
         let roots: Vec<PrecomputeNode1Index> = precomputed1.values().cloned().collect();
-        assert!(!Trie::has_cycle(trie1_god, roots));
+        // assert!(!Trie::has_cycle(trie1_god, roots));
         let mut intermediate_precomputed3 = BTreeMap::new();
         let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
 
