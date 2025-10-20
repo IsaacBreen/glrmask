@@ -8,6 +8,7 @@ use crate::{
 };
 use kdam::tqdm;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::datastructures::ordered_hash_map::Retain;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 /// Normalizes a path for comparison purposes.
@@ -64,6 +65,118 @@ where
     };
 
     get_normalized_paths(god_a, roots_a) == get_normalized_paths(god_b, roots_b)
+}
+
+pub fn prune_nodes_not_reaching_end_intermediate_trie3(
+    roots: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) {
+    println!("[optimize_intermediate_trie3] Pruning nodes not reaching end...");
+    let all_nodes = Trie::all_nodes(god, roots);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    // 1. Build reverse adjacency map
+    let mut incoming: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
+    for src in &all_nodes {
+        let g = src.read(god).expect("read");
+        for (_ek, dm) in g.children() {
+            for dst in dm.keys() {
+                incoming.entry(*dst).or_default().push(*src);
+            }
+        }
+    }
+
+    // 2. Find all 'end' nodes and initialize worklist
+    let mut productive: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+    let mut q: std::collections::VecDeque<IntermediatePrecomputeNode3Index> = std::collections::VecDeque::new();
+    for n in &all_nodes {
+        if n.read(god).expect("read").value.end {
+            if productive.insert(*n) {
+                q.push_back(*n);
+            }
+        }
+    }
+
+    if productive.is_empty() {
+        println!("[optimize_intermediate_trie3] No end nodes found, skipping prune.");
+        return;
+    }
+
+    // 3. Reverse BFS from end nodes to find all productive nodes
+    while let Some(d) = q.pop_front() {
+        if let Some(srcs) = incoming.get(&d) {
+            for s in srcs {
+                if productive.insert(*s) {
+                    q.push_back(*s);
+                }
+            }
+        }
+    }
+
+    // 4. Remove edges pointing to non-productive nodes
+    for n in &all_nodes {
+        let mut w = n.write(god).expect("write");
+        w.children_mut().retain(|_ek, dm| {
+            dm.retain(|dst, _ev| productive.contains(dst));
+            !dm.is_empty()
+        });
+    }
+
+    // 5. GC unreachable nodes
+    Trie::gc(god, roots);
+}
+
+fn contract_noop_chains(
+    god: &IntermediateTrie3GodWrapper,
+    all_nodes: &[IntermediatePrecomputeNode3Index],
+) -> bool {
+    let mut bypass_map: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> = HashMap::new();
+    for node_idx in all_nodes {
+        let guard = node_idx.read(god).expect("read");
+        if !guard.value.end && guard.children().len() == 1 {
+            if let Some((ek, dst_map)) = guard.children().iter().next() {
+                if matches!(ek, IntermediateTrie3EdgeKey::NoOp) && dst_map.len() == 1 {
+                    let dest_idx = *dst_map.keys().next().unwrap();
+                    if *node_idx != dest_idx {
+                        // Avoid self-loops
+                        bypass_map.insert(*node_idx, dest_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    if bypass_map.is_empty() {
+        return false;
+    }
+
+    let mut changed = false;
+    for node_idx in all_nodes {
+        let mut w_guard = node_idx.write(god).expect("write");
+        let mut modifications = Vec::new();
+
+        for (ek, dst_map) in w_guard.children() {
+            for dest in dst_map.keys() {
+                if let Some(new_dest) = bypass_map.get(dest) {
+                    modifications.push((ek.clone(), *dest, *new_dest));
+                }
+            }
+        }
+
+        if !modifications.is_empty() {
+            changed = true;
+            for (ek, old_dest, new_dest) in modifications {
+                if let Some(map) = w_guard.children_mut().get_mut(&ek) {
+                    if let Some(ev) = map.remove(&old_dest) {
+                        map.insert(new_dest, ev);
+                    }
+                }
+            }
+        }
+    }
+    changed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -282,6 +395,27 @@ pub fn optimize_intermediate_trie3(
     let original_roots = roots.to_vec();
 
     has_true_cycle_intermediate_trie3(god, roots);
+
+    // Preprocessing passes to simplify the graph before structural comparison
+    prune_nodes_not_reaching_end_intermediate_trie3(roots, god);
+
+    println!("[optimize_intermediate_trie3] Contracting NoOp chains...");
+    const MAX_PASSES: usize = 10;
+    for i in 0..MAX_PASSES {
+        let all_nodes = Trie::all_nodes(god, roots);
+        if all_nodes.is_empty() { break; }
+        if !contract_noop_chains(god, &all_nodes) {
+            println!(
+                "[optimize_intermediate_trie3] NoOp chain contraction reached fixed point after {} passes.",
+                i + 1
+            );
+            break;
+        }
+        if i == MAX_PASSES - 1 {
+            println!("[optimize_intermediate_trie3] NoOp chain contraction reached max passes.");
+        }
+    }
+    Trie::gc(god, roots); // Clean up bypassed nodes.
 
     let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
         BTreeMap::default();
