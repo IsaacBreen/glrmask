@@ -10,6 +10,7 @@ use kdam::tqdm;
 use ordered_hash_map::OrderedHashMap;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use crate::{profiler::PROGRESS_BAR_ENABLED};
+use std::cmp::Ordering;
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -54,7 +55,7 @@ where
     // Only Pop and Push operations count towards path length for cycle detection.
     let is_path_edge: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool =
         |ek, _, _| {
-            !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
+            matches!(ek, IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::CheckLLM(_))
         };
 
     let get_normalized_paths = |god, roots| {
@@ -95,6 +96,215 @@ fn build_node_signature(
     edges.sort(); // ensure deterministic order
 
     NodeSignature { end, edges }
+}
+
+/// Compute in-degree for all nodes reachable from roots.
+fn compute_in_degrees(
+    roots: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) -> HashMap<IntermediatePrecomputeNode3Index, usize> {
+    let nodes = Trie::all_nodes(god, roots);
+    let mut indeg: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
+    for n in &nodes {
+        indeg.entry(*n).or_insert(0);
+    }
+    for n in &nodes {
+        if let Some(r) = n.read(god) {
+            for (_ek, dm) in r.children() {
+                for (dst, _ev) in dm {
+                    *indeg.entry(*dst).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    indeg
+}
+
+/// Normalize CheckLLM edges on a single node:
+/// 1) Aggregate the union of bitvectors per destination (merges duplicate/subsumed edges).
+/// 2) Regroup by the aggregated bitvector so that a single CheckLLM(BV) key maps to a set of destinations.
+///    This yields a canonical representation independent of original partitioning.
+fn normalize_checkllm_edges_on_node(
+    idx: IntermediatePrecomputeNode3Index,
+    god: &IntermediateTrie3GodWrapper,
+) -> bool {
+    let mut changed = false;
+    let mut w = if let Some(w) = idx.write(god) { w } else { return false };
+
+    // Take children out to rebuild.
+    let old_children = std::mem::take(w.children_mut());
+
+    // Gather old stats for "did we change?"
+    let mut old_ck_keys = 0usize;
+    let mut old_ck_edges = 0usize;
+    for (ek, dm) in old_children.iter() {
+        if matches!(ek, IntermediateTrie3EdgeKey::CheckLLM(_)) {
+            old_ck_keys += 1;
+            old_ck_edges += dm.len();
+        }
+    }
+
+    // Step 1: union BV per destination across all CheckLLM entries.
+    let mut union_per_dest: BTreeMap<IntermediatePrecomputeNode3Index, LLMTokenBV> = BTreeMap::new();
+    let mut other_edges: BTreeMap<IntermediateTrie3EdgeKey, OrderedHashMap<IntermediatePrecomputeNode3Index, ()>> = BTreeMap::new();
+    for (ek, dm) in old_children.into_iter() {
+        match ek {
+            IntermediateTrie3EdgeKey::CheckLLM(bv) => {
+                for (dst, _ev) in dm.into_iter() {
+                    union_per_dest
+                        .entry(dst)
+                        .and_modify(|acc| *acc |= bv.clone())
+                        .or_insert(bv.clone());
+                }
+            }
+            _ => {
+                other_edges.insert(ek, dm);
+            }
+        }
+    }
+
+    // Step 2: group destinations by their aggregated bitvector.
+    let mut grouped: BTreeMap<LLMTokenBV, Vec<IntermediatePrecomputeNode3Index>> = BTreeMap::new();
+    for (dst, bv) in union_per_dest.into_iter() {
+        grouped.entry(bv).or_default().push(dst);
+    }
+    let mut new_ck_keys = 0usize;
+    let mut new_ck_edges = 0usize;
+
+    // Rebuild children.
+    for (ek, dm) in other_edges.into_iter() {
+        w.children_mut().insert(ek, dm);
+    }
+    for (bv, mut dests) in grouped.into_iter() {
+        dests.sort_unstable();
+        let ek = IntermediateTrie3EdgeKey::CheckLLM(bv);
+        let mut dm: OrderedHashMap<IntermediatePrecomputeNode3Index, ()> = OrderedHashMap::new();
+        for d in dests {
+            dm.insert(d, ());
+            new_ck_edges += 1;
+        }
+        w.children_mut().insert(ek, dm);
+        new_ck_keys += 1;
+    }
+
+    if old_ck_keys != new_ck_keys || old_ck_edges != new_ck_edges {
+        changed = true;
+    }
+    changed
+}
+
+/// Apply CheckLLM normalization to all reachable nodes. Returns true if any change occurred.
+fn normalize_checkllm_edges_for_all(
+    roots: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) -> bool {
+    let nodes = Trie::all_nodes(god, roots);
+    let mut changed_any = false;
+    for n in nodes {
+        if normalize_checkllm_edges_on_node(n, god) {
+            changed_any = true;
+        }
+    }
+    changed_any
+}
+
+#[derive(Debug, Clone)]
+struct CheckLLMChainTask {
+    src: IntermediatePrecomputeNode3Index,
+    src_ek: IntermediateTrie3EdgeKey, // CheckLLM(bv1)
+    mid: IntermediatePrecomputeNode3Index,
+    new_bv: LLMTokenBV,               // bv1 & bv2
+    dst: IntermediatePrecomputeNode3Index,
+}
+
+/// Contract simple linear chains of consecutive CheckLLM checks:
+///   src --[CheckLLM(bv1)]--> mid --[CheckLLM(bv2)]--> dst
+/// with constraints:
+///   - mid has in-degree == 1,
+///   - mid is not an end node,
+///   - each step has a single destination (no branching along this chain).
+/// Then replace the first edge with CheckLLM(bv1 & bv2) directly to dst.
+fn contract_checkllm_chains(
+    roots: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) -> bool {
+    let reachable = Trie::all_nodes(god, roots);
+    if reachable.is_empty() {
+        return false;
+    }
+    let mut indeg = compute_in_degrees(roots, god);
+    let mut tasks: Vec<CheckLLMChainTask> = Vec::new();
+
+    for src in &reachable {
+        let Some(rsrc) = src.read(god) else { continue };
+        for (ek1, dm1) in rsrc.children().iter() {
+            let bv1 = if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek1 {
+                bv.clone()
+            } else {
+                continue;
+            };
+            if dm1.len() != 1 {
+                continue;
+            }
+            let (&mid, _) = dm1.iter().next().unwrap();
+            if indeg.get(&mid).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let Some(rmid) = mid.read(god) else { continue };
+            if rmid.value.end {
+                continue; // cannot bypass acceptance point
+            }
+            if rmid.children().len() != 1 {
+                continue;
+            }
+            let (ek2, dm2) = rmid.children().iter().next().unwrap();
+            let bv2 = if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek2 {
+                bv.clone()
+            } else {
+                continue;
+            };
+            if dm2.len() != 1 {
+                continue;
+            }
+            let (&dst, _) = dm2.iter().next().unwrap();
+            let mut new_bv = bv1.clone();
+            new_bv &= bv2.clone();
+            tasks.push(CheckLLMChainTask {
+                src: *src,
+                src_ek: ek1.clone(),
+                mid,
+                new_bv,
+                dst,
+            });
+        }
+    }
+
+    if tasks.is_empty() {
+        return false;
+    }
+
+    // Apply rewiring tasks.
+    let mut changed = false;
+    for t in tasks {
+        if let Some(mut wsrc) = t.src.write(god) {
+            if let Some(dm) = wsrc.get_mut(&t.src_ek) {
+                if dm.remove(&t.mid).is_some() {
+                    changed = true;
+                }
+                if dm.is_empty() {
+                    wsrc.children_mut().remove(&t.src_ek);
+                }
+            }
+            let new_ek = IntermediateTrie3EdgeKey::CheckLLM(t.new_bv);
+            wsrc.children_mut().entry(new_ek).or_default().insert(t.dst, ());
+        }
+        // Update in-degree snapshot for subsequent rewires in the same pass.
+        if let Some(v) = indeg.get_mut(&t.mid) {
+            *v = v.saturating_sub(1);
+        }
+        *indeg.entry(t.dst).or_insert(0) += 1;
+    }
+    changed
 }
 
 fn contract_noop_chains(
@@ -493,6 +703,7 @@ pub fn optimize_intermediate_trie3(
 
     prune_unproductive_paths_intermediate_trie3(roots, god);
 
+    // Pass A: aggressively remove simple NoOp chains (epsilon-like edges).
     println!("[optimize_intermediate_trie3] Contracting NoOp chains...");
     let mut passes = 0;
     while contract_noop_chains(roots, god) {
@@ -511,6 +722,25 @@ pub fn optimize_intermediate_trie3(
     }
     has_true_cycle_intermediate_trie3(god, roots);
 
+    // Pass B: normalize CheckLLM partitions, then contract linear CheckLLM chains.
+    println!("[optimize_intermediate_trie3] Normalizing CheckLLM edges...");
+    let mut changed_any = normalize_checkllm_edges_for_all(roots, god);
+    println!("[optimize_intermediate_trie3] Contracting CheckLLM chains...");
+    let mut chain_passes = 0usize;
+    while contract_checkllm_chains(roots, god) {
+        chain_passes += 1;
+        changed_any = true;
+        if chain_passes > 10 {
+            println!("[optimize_intermediate_trie3] WARN: CheckLLM chain contraction took too many passes, breaking.");
+            break;
+        }
+    }
+    if changed_any {
+        println!("[optimize_intermediate_trie3] CheckLLM normalization/chain contraction made changes. Running GC.");
+        gc_preserving_ends(god, roots);
+    }
+    has_true_cycle_intermediate_trie3(god, roots);
+
     let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
         BTreeMap::default();
 
@@ -522,6 +752,11 @@ pub fn optimize_intermediate_trie3(
         iters, classes, total_nodes
     );
 
+    // Normalize again before canonical rewiring to maximize equality exposure.
+    if normalize_checkllm_edges_for_all(roots, god) {
+        println!("[optimize_intermediate_trie3] Normalization revealed new opportunities pre-canonicalization.");
+    }
+
     let mut node_map = node_map; // make mutable for update
     let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
     println!(
@@ -529,6 +764,24 @@ pub fn optimize_intermediate_trie3(
         merges, edges_rewired
     );
 
+    // Quick polish pass: normalization + WL + canonicalization can sometimes collapse further.
+    let mut polish_changed = false;
+    if normalize_checkllm_edges_for_all(roots, god) {
+        polish_changed = true;
+    }
+    if polish_changed {
+        println!("[optimize_intermediate_trie3] Polishing: rerunning WL refinement after normalization...");
+        let (colors2, iters2, classes2, total_nodes2) = wl_color_refine(roots, god);
+        println!(
+            "[optimize_intermediate_trie3] Polish refinement complete: iterations={}, classes={}, nodes={}",
+            iters2, classes2, total_nodes2
+        );
+        let (merges2, edges_rewired2) = rewire_to_canonical(&colors2, roots, god, &mut node_map);
+        println!(
+            "[optimize_intermediate_trie3] Polish rewiring done: merges={}, edges_rewired={}",
+            merges2, edges_rewired2
+        );
+    }
     // Check equivalence after optimization (currently no-op)
     let new_roots: Vec<_> = original_roots
         .iter()
@@ -615,7 +868,7 @@ pub fn has_true_cycle_intermediate_trie3(
 ) {
     let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
     for &root in roots {
-        if !visited.contains(&root) {
+        if visited.contains(&root) {
             continue;
         }
         if let Some(cycle_path) = detect_true_cycle_recursive_intermediate_trie3(
