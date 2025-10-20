@@ -68,10 +68,29 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum StructuralEdgeKey {
+    Pop(usize),
+    Push,
+    CheckLLM,
+    NoOp,
+}
+
+impl From<&IntermediateTrie3EdgeKey> for StructuralEdgeKey {
+    fn from(ek: &IntermediateTrie3EdgeKey) -> Self {
+        match ek {
+            IntermediateTrie3EdgeKey::Pop(p, _) => StructuralEdgeKey::Pop(*p),
+            IntermediateTrie3EdgeKey::Push(_) => StructuralEdgeKey::Push,
+            IntermediateTrie3EdgeKey::CheckLLM(_) => StructuralEdgeKey::CheckLLM,
+            IntermediateTrie3EdgeKey::NoOp => StructuralEdgeKey::NoOp,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct NodeSignature {
     end: bool,
-    // For each edge key, store the sorted list of child colors.
-    edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)>,
+    // For each structural edge key, store the sorted list of child colors.
+    edges: Vec<(StructuralEdgeKey, Vec<usize>)>,
 }
 
 fn build_node_signature(
@@ -82,17 +101,23 @@ fn build_node_signature(
     let guard = idx.read(god).expect("Invalid index during signature build");
     let end = guard.value.end;
 
-    // Collect children grouped by edge key, mapped to their current colors.
-    let mut edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)> = Vec::new();
+    // Collect children grouped by structural edge key, mapped to their current colors.
+    let mut edges_map: BTreeMap<StructuralEdgeKey, Vec<usize>> = BTreeMap::new();
     for (ek, dsts) in guard.children().iter() {
-        let mut cols: Vec<usize> = dsts
-            .keys()
-            .map(|d| *color_map.get(d).unwrap_or(&0usize))
-            .collect();
-        cols.sort_unstable();
-        edges.push((ek.clone(), cols));
+        let structural_key = StructuralEdgeKey::from(ek);
+        let cols = edges_map.entry(structural_key).or_default();
+        for d in dsts.keys() {
+            // Use 0 for nodes not yet in color_map (shouldn't happen with reachable set)
+            cols.push(*color_map.get(d).unwrap_or(&0));
+        }
     }
-    edges.sort(); // ensure deterministic order
+
+    let mut edges: Vec<(StructuralEdgeKey, Vec<usize>)> = Vec::new();
+    for (key, mut cols) in edges_map {
+        cols.sort_unstable();
+        edges.push((key, cols));
+    }
+    // BTreeMap provides sorted keys, so `edges` is already sorted by key.
 
     NodeSignature { end, edges }
 }
@@ -287,88 +312,59 @@ fn rewire_to_canonical(
     god: &IntermediateTrie3GodWrapper,
     node_map: &mut BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>,
 ) -> (usize, usize) {
-    // Compute reachable again to scope work.
-    let mut reachable = Trie::all_nodes(god, roots);
-    reachable.sort_unstable();
-    reachable.dedup();
+    let reachable = Trie::all_nodes(god, roots);
 
-    // Build canonical representative per color (pick minimum index).
+    // 1. Find canonical representative for each color class.
     let mut canon_by_color: HashMap<usize, IntermediatePrecomputeNode3Index> = HashMap::new();
     for idx in &reachable {
         let c = colors[idx];
-        match canon_by_color.get(&c) {
-            Some(existing) => {
-                if idx.as_usize() < existing.as_usize() {
-                    canon_by_color.insert(c, *idx);
-                }
-            }
-            None => {
-                canon_by_color.insert(c, *idx);
-            }
-        }
+        // Pick smallest index as canonical representative.
+        canon_by_color.entry(c).and_modify(|e| *e = (*e).min(*idx)).or_insert(*idx);
     }
 
-    // Build node->canonical map (only store changed ones into node_map)
-    let mut merges = 0usize;
+    // 2. Build the node_map from every node to its canonical representative.
     for idx in &reachable {
         let c = colors[idx];
-        let canon = *canon_by_color.get(&c).expect("canonical missing");
-        if *idx != canon {
-            merges += 1;
-            node_map.insert(*idx, canon);
-        }
+        let canon = canon_by_color[&c];
+        node_map.insert(*idx, canon);
     }
+
+    // 3. For each canonical node, merge the children of all nodes in its class.
+    let mut merges = 0;
+    let mut edges_rewired = 0;
+    for (color, canon_idx) in &canon_by_color {
+        // Find all nodes in this class.
+        let nodes_in_class: Vec<_> = reachable.iter().filter(|idx| colors[idx] == *color).copied().collect();
+        if nodes_in_class.len() <= 1 {
+            continue;
+        }
+        merges += nodes_in_class.len() - 1;
+
+        let mut merged_children: BTreeMap<IntermediateTrie3EdgeKey, OrderedHashMap<IntermediatePrecomputeNode3Index, ()>> = BTreeMap::new();
+        for node_idx in nodes_in_class {
+            let guard = node_idx.read(god).unwrap();
+            for (ek, dest_map) in guard.children() {
+                for (dest, ev) in dest_map {
+                    let canon_dest = node_map[dest];
+                    // The edge value is (), so we can just insert.
+                    merged_children.entry(ek.clone()).or_default().insert(canon_dest, ev.clone());
+                }
+            }
+        }
+
+        // Update the canonical node.
+        let mut canon_guard = canon_idx.write(god).unwrap();
+        if *canon_guard.children() != merged_children {
+            edges_rewired += 1; // This metric is not very precise anymore.
+        }
+        *canon_guard.children_mut() = merged_children;
+    }
+
     println!(
         "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
         canon_by_color.len(),
         merges
     );
-
-    // Prepare rewiring plan: for each src and edge key, move edges to canonical destination.
-    let mut plan: BTreeMap<
-        IntermediatePrecomputeNode3Index,
-        BTreeMap<IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>>
-    > = BTreeMap::new();
-
-    for src in &reachable {
-        if let Some(r) = src.read(god) {
-            for (ek, dsts) in r.children().iter() {
-                for (dst, _ev) in dsts.iter() {
-                    let c = colors[dst];
-                    let canon_dst = *canon_by_color.get(&c).unwrap();
-                    if canon_dst != *dst {
-                        plan.entry(*src)
-                            .or_default()
-                            .entry(ek.clone())
-                            .or_default()
-                            .push((*dst, canon_dst));
-                    }
-                }
-            }
-        }
-    }
-
-    // Apply rewiring plan.
-    let mut edges_rewired = 0usize;
-    for (src, by_key) in plan {
-        if let Some(mut w) = src.write(god) {
-            for (ek, mods) in by_key {
-                if let Some(map) = w.get_mut(&ek) {
-                    for (old_dst, new_dst) in mods {
-                        if old_dst == new_dst {
-                            continue;
-                        }
-                        if let Some(ev) = map.remove(&old_dst) {
-                            // Insert the new edge. This correctly handles cases where multiple children
-                            // are remapped to the same canonical destination.
-                            map.insert(new_dst, ev);
-                            edges_rewired += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     (merges, edges_rewired)
 }
