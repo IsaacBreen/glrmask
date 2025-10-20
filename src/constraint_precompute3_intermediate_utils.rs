@@ -35,7 +35,7 @@ pub fn optimize_intermediate_trie3(
     roots: &mut Vec<IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    todo!()
+    // Optimization logic will go here (e.g., merging identical subgraphs)
 }
 
 /// Runs a global optimization across all per-terminal templates.
