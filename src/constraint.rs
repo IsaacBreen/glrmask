@@ -57,7 +57,7 @@ pub use crate::constraint_precompute0_utils::Trie0Config;
 pub use crate::constraint_precompute1_utils::Trie1Config;
 pub use crate::constraint_precompute2_utils::Trie2Config;
 pub use crate::constraint_precompute3_utils::Trie3Config;
-use crate::constraint_precompute3_utils::{clone_trie3_graph, has_true_cycle_intermediate_trie3, optimize_trie3_size};
+use crate::constraint_precompute3_utils::{clone_trie3_graph, optimize_trie3_size};
 use crate::datastructures::EntryApi;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::trie::{God, GodWrapper};
@@ -1922,7 +1922,6 @@ impl GrammarConstraint {
         stage_vocab: &mut StageVocab,
     ) -> (Precomputed3, Trie3GodWrapper) {
         crate::debug!(2, "Precomputing Trie 3 (template-driven)...");
-        let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
         let roots: Vec<PrecomputeNode1Index> = precomputed1.values().cloned().collect();
         assert!(!Trie::has_cycle(trie1_god, roots));
         let mut intermediate_precomputed3 = BTreeMap::new();
@@ -2158,8 +2157,6 @@ impl GrammarConstraint {
             |_, node| node.value.end,
         );
 
-        has_true_cycle_intermediate_trie3(&intermediate_trie3_god, &intermediate_roots, internal_max_llm_token, max_state_id);
-
         // Update the roots in the map after optimization
         for root in intermediate_precomputed3.values_mut() {
             if let Some(new_root) = node_map.get(root) {
@@ -2200,6 +2197,7 @@ impl GrammarConstraint {
         // );
 
         crate::debug!(2, "Finished precomputing Trie 3.");
+        let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
         optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
         (precomputed3, trie3_god)
     }
