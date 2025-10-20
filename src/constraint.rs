@@ -1333,14 +1333,14 @@ impl GrammarConstraint {
         }
 
         let (precomputed1, trie1_god) = Self::precompute1(
-            &precomputed0,
-            &trie0_god,
             &tokenizer,
             Some(&parser),
-            &terminal_follow_map,
-            &mut precompute_vocab,
-            &config.trie1,
+            Some(llm_vocab.clone()),
+            &internal_llm_token_map_for_precompute,
             &token_name_map,
+            &mut precompute_vocab,
+            &terminal_follow_map,
+            config,
         );
 
         precompute2_vocab = precompute_vocab.clone();
