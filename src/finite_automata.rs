@@ -239,6 +239,12 @@ impl JSONConvertible for FinalStateReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionResult {
+    pub matches: Vec<Match>,
+    pub end_state: Option<usize>,
+}
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegexState<'a> {
@@ -1094,10 +1100,11 @@ impl DFA {
 }
 
 impl RegexState<'_> {
-    pub fn execute(&mut self, text: &[u8]) {
+    pub fn execute(&mut self, text: &[u8]) -> Vec<Match> {
+        let mut all_matches = Vec::new();
         if self.done {
             self.position += text.len();
-            return;
+            return all_matches;
         }
         let dfa = &self.regex.dfa;
         let mut local_position = 0;
@@ -1107,8 +1114,10 @@ impl RegexState<'_> {
             if let Some(&next_state) = state_data.transitions.get(next_u8) {
                 self.current_state = next_state;
                 local_position += 1;
-                // Handle greedy finalizers
+                // Handle greedy finalizers and collect all matches
                 for &group_id in &dfa.states[self.current_state].finalizers {
+                    all_matches.push(Match { group_id, position: self.position + local_position });
+
                     if dfa.non_greedy_finalizers.contains(&group_id) {
                         self.matches.entry(group_id).or_insert(self.position + local_position);
                     } else {
@@ -1127,13 +1136,13 @@ impl RegexState<'_> {
                 if should_terminate {
                     self.position += text.len();
                     self.done = true;
-                    return;
+                    return all_matches;
                 }
             } else {
                 // No matching transition, we're done
                 self.position += text.len();
                 self.done = true;
-                return;
+                return all_matches;
             }
         }
         // Reached the end of input, mark as done if no further transitions
@@ -1141,6 +1150,7 @@ impl RegexState<'_> {
         if dfa.states[self.current_state].transitions.is_empty() {
             self.done = true;
         }
+        all_matches
     }
 
     pub fn end(&mut self) {
@@ -1325,6 +1335,16 @@ impl Regex {
         }
         max_gid.map(|m| m + 1).unwrap_or(0)
     }
+
+    pub fn execute_from_state(&self, text: &[u8], state: usize) -> ExecutionResult {
+        let mut regex_state = self.init_to_state(state);
+        let matches = regex_state.execute(text);
+
+        let end_state = if regex_state.done { None } else { Some(regex_state.current_state) };
+
+        ExecutionResult { matches, end_state }
+    }
+
 
     pub fn init_to_state(&self, state: usize) -> RegexState {
         let done = self.dfa.states[state].transitions.is_empty();

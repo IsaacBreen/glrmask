@@ -1,5 +1,5 @@
-use crate::finite_automata::{GroupID, Match, Regex};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use crate::finite_automata::{ExecutionResult, GroupID, Match, Regex};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
@@ -11,11 +11,10 @@ const VERIFY_EQUIVALENCE_CLASSES: bool = true;
 // It represents the result of a single greedy tokenization step.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct CanonicalSignature {
-    // If a greedy match is found, we store its group, position,
-    // and the signature ID of the remainder of the string.
-    match_and_remainder: Option<(GroupID, usize, SignatureId)>,
-    // If no greedy match is found, we store the final DFA state the regex ended in.
-    final_state_if_no_match: Option<usize>,
+    // All possible matches and the signature of their remainders.
+    matches: BTreeSet<(GroupID, usize, SignatureId)>,
+    // If the string can be fully consumed without a match, the final DFA state.
+    final_state: Option<usize>,
 }
 
 // An ID representing a unique canonical signature.
@@ -35,8 +34,8 @@ impl SignatureInterner {
         };
         // Pre-intern a signature for the empty string case.
         interner.intern(CanonicalSignature {
-            match_and_remainder: None,
-            final_state_if_no_match: Some(0), // Assuming start_state is 0
+            matches: BTreeSet::new(),
+            final_state: Some(0), // Assuming start_state is 0
         });
         interner
     }
@@ -106,25 +105,29 @@ impl<'a> EquivalenceAnalyzer<'a> {
             pb.inc(1);
             let mut state_sigs = BTreeMap::new();
             for &dfa_state in &relevant_states {
-                let mut rs = self.regex.init_to_state(dfa_state);
-                rs.execute(suffix);
+                let result = self.regex.execute_from_state(suffix, dfa_state);
 
-                let sig = if let Some(m) = rs.get_greedy_match() {
+                let mut matches = BTreeSet::new();
+                for m in result.matches {
+                    // Filter out zero-width tokens, as they can cause infinite loops.
+                    if m.position == 0 {
+                        continue;
+                    }
+
                     let remainder = &suffix[m.position..];
-                    let remainder_sigs = memo.get(remainder)
+                    let remainder_sigs = memo
+                        .get(remainder)
                         .expect("BUG: remainder signature should be pre-computed");
-                    let remainder_sig_id = remainder_sigs.get(&self.regex.dfa.start_state)
+                    let remainder_sig_id = remainder_sigs
+                        .get(&self.regex.dfa.start_state)
                         .expect("BUG: remainder signature for start_state should exist");
 
-                    CanonicalSignature {
-                        match_and_remainder: Some((m.group_id, m.position, *remainder_sig_id)),
-                        final_state_if_no_match: None,
-                    }
-                } else {
-                    CanonicalSignature {
-                        match_and_remainder: None,
-                        final_state_if_no_match: Some(rs.current_state),
-                    }
+                    matches.insert((m.group_id, m.position, *remainder_sig_id));
+                }
+
+                let sig = CanonicalSignature {
+                    matches,
+                    final_state: result.end_state,
                 };
                 state_sigs.insert(dfa_state, signature_interner.intern(sig));
             }
@@ -178,60 +181,55 @@ fn verify_equivalence_classes(
 ) {
     println!("Verifying equivalence classes (this may be slow)...");
 
-    let mut brute_force_classes: BTreeMap<Vec<Vec<Match>>, Vec<usize>> = BTreeMap::new();
+    // A canonical representation of the tokenization graph for verification.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct VerificationSignature {
+        matches: BTreeSet<(GroupID, usize, VerificationSignature)>,
+        final_state: Option<usize>,
+    }
 
-    // Using a nested function for recursion with memoization to perform brute-force tokenization.
-    fn tokenize_recursive(
+    fn build_verification_signature(
         regex: &Regex,
         text: &[u8],
         initial_state: usize,
-        memo: &mut HashMap<(Vec<u8>, usize), Vec<Match>>,
-    ) -> Vec<Match> {
-        if text.is_empty() {
-            return Vec::new();
-        }
+        memo: &mut HashMap<(Vec<u8>, usize), VerificationSignature>,
+    ) -> VerificationSignature {
         let key = (text.to_vec(), initial_state);
         if let Some(result) = memo.get(&key) {
             return result.clone();
         }
 
-        let mut rs = regex.init_to_state(initial_state);
-        rs.execute(text);
+        let result = regex.execute_from_state(text, initial_state);
 
-        let result = if let Some(m) = rs.get_greedy_match() {
-            let match_len = m.position;
-            if match_len == 0 {
-                // Avoid infinite recursion on zero-length matches.
-                // This string cannot be tokenized further from this state.
-                Vec::new()
-            } else {
-                let mut matches = vec![Match { group_id: m.group_id, position: match_len }];
-                let remainder = &text[match_len..];
-                // Subsequent tokens always start from the DFA's main start state.
-                let rest_of_matches =
-                    tokenize_recursive(regex, remainder, regex.dfa.start_state, memo);
-
-                for mut rest_m in rest_of_matches {
-                    rest_m.position += match_len;
-                    matches.push(rest_m);
-                }
-                matches
+        let mut sig_matches = BTreeSet::new();
+        for m in result.matches {
+            if m.position == 0 {
+                continue;
             }
-        } else {
-            Vec::new()
+            let remainder = &text[m.position..];
+            let remainder_sig =
+                build_verification_signature(regex, remainder, regex.dfa.start_state, memo);
+            sig_matches.insert((m.group_id, m.position, remainder_sig));
+        }
+
+        let signature = VerificationSignature {
+            matches: sig_matches,
+            final_state: result.end_state,
         };
 
-        memo.insert(key, result.clone());
-        result
+        memo.insert(key, signature.clone());
+        signature
     }
 
-    let mut memo: HashMap<(Vec<u8>, usize), Vec<Match>> = HashMap::new();
+    let mut brute_force_classes: BTreeMap<Vec<VerificationSignature>, Vec<usize>> =
+        BTreeMap::new();
+    let mut memo: HashMap<(Vec<u8>, usize), VerificationSignature> = HashMap::new();
 
     for (i, s) in strings.iter().enumerate() {
         let mut signature_vector = Vec::with_capacity(initial_states.len());
         for &initial_state in initial_states {
-            let matches = tokenize_recursive(regex, s, initial_state, &mut memo);
-            signature_vector.push(matches);
+            let signature = build_verification_signature(regex, s, initial_state, &mut memo);
+            signature_vector.push(signature);
         }
         brute_force_classes.entry(signature_vector).or_default().push(i);
     }
