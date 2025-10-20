@@ -90,6 +90,7 @@ pub fn optimize_intermediate_trie3(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
     is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
+    // The return type is correct for a node mapping (old node -> new node)
 ) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
     // TODO
     Default::default()
