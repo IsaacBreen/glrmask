@@ -359,10 +359,9 @@ fn rewire_to_canonical(
                             continue;
                         }
                         if let Some(ev) = map.remove(&old_dst) {
-                            // Only insert if not already present; otherwise drop the ev.
-                            if !map.contains_key(&new_dst) {
-                                map.insert(new_dst, ev);
-                            }
+                            // Insert the new edge. This correctly handles cases where multiple children
+                            // are remapped to the same canonical destination.
+                            map.insert(new_dst, ev);
                             edges_rewired += 1;
                         }
                     }
@@ -463,6 +462,25 @@ fn prune_unproductive_paths_intermediate_trie3(
     println!("[optimize_intermediate_trie3] Finished end-reachability pruning.");
 }
 
+fn gc_preserving_ends(
+    god: &IntermediateTrie3GodWrapper,
+    roots: &[IntermediatePrecomputeNode3Index],
+) {
+    let mut effective_roots = roots.to_vec();
+
+    // Arena::to_vec() is expensive, but it's the way to get all items.
+    // We need to preserve all end nodes, even if they become disconnected.
+    let all_entries = god.to_vec();
+    for (idx, trie) in all_entries {
+        if trie.value.end {
+            effective_roots.push(IntermediatePrecomputeNode3Index::new(idx));
+        }
+    }
+    effective_roots.sort();
+    effective_roots.dedup();
+    Trie::gc(god, &effective_roots);
+}
+
 pub fn optimize_intermediate_trie3(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
@@ -486,6 +504,9 @@ pub fn optimize_intermediate_trie3(
         }
     }
     if passes > 0 {
+        println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC.");
+        gc_preserving_ends(god, roots);
+    } else {
         println!("[optimize_intermediate_trie3] NoOp chains contracted.");
     }
     has_true_cycle_intermediate_trie3(god, roots);
@@ -513,6 +534,9 @@ pub fn optimize_intermediate_trie3(
         .iter()
         .map(|r| *node_map.get(r).unwrap_or(r))
         .collect();
+
+    println!("[optimize_intermediate_trie3] Running final GC.");
+    gc_preserving_ends(god, &new_roots);
 
     // assert!(
     //     are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
