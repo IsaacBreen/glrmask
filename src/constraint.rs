@@ -1770,8 +1770,21 @@ impl GrammarConstraint {
         }
 
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
+        let template_roots: Vec<_> = out.values().map(|(start, _end)| start.clone()).collect();
+        let root_map = optimize_intermediate_trie3(
+            &template_roots,
+            trie3_god,
+            |_, node| node.value.end,
+        );
 
-        out
+        // Update the start nodes in the template map
+        let mut new_out = BTreeMap::new();
+        for (tid, (start, end)) in out {
+            let new_start = root_map.get(&start).unwrap_or(&start).clone();
+            new_out.insert(tid, (new_start, end));
+        }
+
+        new_out
     }
 
 
