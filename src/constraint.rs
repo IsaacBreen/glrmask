@@ -2627,18 +2627,18 @@ impl<'r> Precomputer1<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let edge_key = Some(terminal_id);
-                                let mut inserter = EdgeInserter::new(
-                                    &self.trie1_god,
-                                    src_node_wrapper.as_arc().clone(),
-                                    edge_key,
-                                    &edge_bv & src_contextual_tokens,
-                                    |e, n| *e |= n,
-                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                    |ev, t| *ev &= &t.live_tokens,
-                                );
+                                let src_node_idx = src_node_wrapper.as_arc().clone();
                                 let end_idx = self.get_leaf_node();
-                                let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                                assert_ne!(&actual_dst, src_node_wrapper);
+
+                                let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
+                                let final_edge_bv = &(&edge_bv & src_contextual_tokens) & &src_live_tokens;
+
+                                if !final_edge_bv.is_empty() {
+                                    self.trie1_god.insert_edge_simple(src_node_idx, end_idx, edge_key, final_edge_bv.clone());
+                                    if let Some(mut end_guard) = end_idx.write(&self.trie1_god) {
+                                        end_guard.value.live_tokens |= &final_edge_bv;
+                                    }
+                                }
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
@@ -2653,24 +2653,21 @@ impl<'r> Precomputer1<'r> {
                             if edge_bv_for_inserter.is_empty() { continue; }
 
                             let edge_key = Some(terminal_id);
-                            let mut inserter = EdgeInserter::new(
-                                &self.trie1_god,
-                                src_node_wrapper.as_arc().clone(),
-                                edge_key,
-                                edge_bv_for_inserter.clone(),
-                                |e, n| *e |= n,
-                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                |ev, t| *ev &= &t.live_tokens,
-                            );
+                            let src_node_idx = src_node_wrapper.as_arc().clone();
+
+                            let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
+                            let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
+
+                            if final_edge_bv.is_empty() { continue; }
 
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
-                            let eligible_destinations_from_queue = dest_nodes_in_queue.iter().filter_map(|(dest_node, dest_contextual_tokens)| {
+                            let mut dest_node_opt = dest_nodes_in_queue.iter().filter_map(|(dest_node, dest_contextual_tokens)| {
                                 if dest_node.read(&self.trie1_god).unwrap().value.end {
                                     return None;
                                 }
-                                let risky_tokens = &edge_bv_for_inserter - dest_contextual_tokens;
+                                let risky_tokens = &edge_bv_for_inserter - dest_contextual_tokens; // Note: using edge_bv_for_inserter for filtering to match original logic
                                 if risky_tokens.is_empty() {
                                     return Some(dest_node.clone());
                                 }
@@ -2680,22 +2677,31 @@ impl<'r> Precomputer1<'r> {
                                 } else {
                                     None
                                 }
-                            }).collect::<Vec<_>>();
-                            inserter = inserter.try_destinations_iter(eligible_destinations_from_queue.into_iter());
+                            }).next();
 
-                            if !inserter.is_some() {
+                            if dest_node_opt.is_none() {
                                 let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie1_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                                let eligible_children = children_of_src.iter().filter(|child_arc| {
+                                dest_node_opt = children_of_src.iter().filter(|child_arc| {
                                     let guard = child_arc.read(&self.trie1_god).unwrap();
                                     if guard.value.end {
                                         return false;
                                     }
                                     (&guard.value.live_tokens & &edge_bv_for_inserter).is_empty()
-                                }).cloned();
-                                inserter = inserter.try_destinations_iter(eligible_children);
+                                }).cloned().next();
                             }
 
-                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::internal()).unwrap();
+                            let result_node = if let Some(dest_idx) = dest_node_opt {
+                                dest_idx
+                            } else {
+                                let new_node = PrecomputeNode1::new(PrecomputedNodeContents::internal());
+                                Trie2Index::new(self.trie1_god.insert(new_node))
+                            };
+
+                            self.trie1_god.insert_edge_simple(src_node_idx, result_node, edge_key, final_edge_bv.clone());
+                            if let Some(mut dest_guard) = result_node.write(&self.trie1_god) {
+                                dest_guard.value.live_tokens |= &final_edge_bv;
+                            }
+
                             assert_ne!(&result_node, src_node_wrapper);
                             dest_nodes_in_queue.entry(result_node.clone()).or_insert_with(LLMTokenBV::zeros).bitor_assign(&edge_bv_for_inserter);
                         }
@@ -2713,18 +2719,18 @@ impl<'r> Precomputer1<'r> {
 
                             for terminal_id in &accessible_terminals {
                                 let edge_key = Some(terminal_id);
-                                let mut inserter = EdgeInserter::new(
-                                    &self.trie1_god,
-                                    src_node_wrapper.as_arc().clone(),
-                                    edge_key.copied(),
-                                    edge_bv_for_inserter.clone(),
-                                    |e, n| *e |= n,
-                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                    |ev, t| *ev &= &t.live_tokens,
-                                );
+                                let src_node_idx = src_node_wrapper.as_arc().clone();
                                 let end_idx = self.get_leaf_node();
-                                let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                                assert_ne!(&actual_dst, src_node_wrapper);
+
+                                let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
+                                let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
+
+                                if !final_edge_bv.is_empty() {
+                                    self.trie1_god.insert_edge_simple(src_node_idx, end_idx, edge_key.copied(), final_edge_bv.clone());
+                                    if let Some(mut end_guard) = end_idx.write(&self.trie1_god) {
+                                        end_guard.value.live_tokens |= &final_edge_bv;
+                                    }
+                                }
                             }
                         }
                         let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();

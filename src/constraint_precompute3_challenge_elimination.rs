@@ -60,12 +60,6 @@ impl Display for Intermediate2Trie3EdgeKey {
     }
 }
 
-impl MergeableEdgeValue for LLMTokenBV {
-    fn merge(&mut self, other: Self) {
-        *self |= &other;
-    }
-}
-
 pub type Intermediate2PrecomputeNode3 =
     Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
 pub type Intermediate2PrecomputeNode3Index = Trie2Index;

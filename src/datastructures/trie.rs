@@ -11,6 +11,7 @@ use deterministic_hash::DeterministicHasher;
 use kdam::{tqdm, BarExt};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use profiler_macro::time_it;
+use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::EntryApi;
 
 /// Represents statistics about a Trie graph reachable from a set of roots.
@@ -2703,6 +2704,12 @@ pub trait MergeableEdgeValue: Sized {
 impl MergeableEdgeValue for () {
     fn merge(&mut self, _other: Self) {
         // Nothing to do for unit type.
+    }
+}
+
+impl MergeableEdgeValue for HybridBitset {
+    fn merge(&mut self, other: Self) {
+        *self |= &other;
     }
 }
 
