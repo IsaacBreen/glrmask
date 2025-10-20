@@ -37,9 +37,9 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
 /// Compares two Intermediate Trie3 graphs for equivalence by comparing their sets of normalized paths.
 /// This is a strong equivalence check, suitable for testing optimization passes.
 pub fn are_intermediate_trie3_graphs_equal<F>(
-    root_a: IntermediatePrecomputeNode3Index,
+    roots_a: &[IntermediatePrecomputeNode3Index],
     god_a: &IntermediateTrie3GodWrapper,
-    root_b: IntermediatePrecomputeNode3Index,
+    roots_b: &[IntermediatePrecomputeNode3Index],
     god_b: &IntermediateTrie3GodWrapper,
     is_end: &F,
     max_path_length: usize,
@@ -56,7 +56,7 @@ where
     // 1. Get all paths for graph A
     let paths_a = Trie::get_all_paths_with_cycles(
         god_a,
-        &[root_a],
+        roots_a,
         is_end,
         &counts_toward_length,
         max_path_length,
@@ -65,7 +65,7 @@ where
     // 2. Get all paths for graph B
     let paths_b = Trie::get_all_paths_with_cycles(
         god_b,
-        &[root_b],
+        roots_b,
         is_end,
         &counts_toward_length,
         max_path_length,
@@ -104,7 +104,7 @@ pub fn optimize_intermediate_trie3(
     for original_root in &original_roots {
         let new_root = node_map.get(original_root).unwrap_or(original_root);
         assert!(
-            are_intermediate_trie3_graphs_equal(*original_root, &original_god, *new_root, god, &is_end, 100),
+            are_intermediate_trie3_graphs_equal(&[*original_root], &original_god, &[*new_root], god, &is_end, 100),
             "Optimization failed to preserve graph equivalence for root {}", original_root
         );
     }
