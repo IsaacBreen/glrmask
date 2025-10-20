@@ -1773,11 +1773,13 @@ impl GrammarConstraint {
 
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
         let template_roots: Vec<_> = out.values().map(|(start, _end)| start.clone()).collect();
+        let template_roots: Vec<_> = template_roots[0..=1].to_vec();
         let node_map = optimize_intermediate_trie3(
             &template_roots,
             trie3_god,
             |_, node| node.value.end,
         );
+        // let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>  = BTreeMap::new();
 
         // Update the start nodes in the template map
         let mut new_out = BTreeMap::new();
@@ -2153,18 +2155,18 @@ impl GrammarConstraint {
         // --- New: Optimize intermediate trie before path processing ---
         crate::debug!(2, "Optimizing intermediate trie3...");
         let intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        let node_map = optimize_intermediate_trie3(
-            &intermediate_roots,
-            &intermediate_trie3_god,
-            |_, node| node.value.end,
-        );
-
-        // Update the roots in the map after optimization
-        for root in intermediate_precomputed3.values_mut() {
-            if let Some(new_root) = node_map.get(root) {
-                *root = new_root.clone();
-            }
-        }
+        // let node_map = optimize_intermediate_trie3(
+        //     &intermediate_roots,
+        //     &intermediate_trie3_god,
+        //     |_, node| node.value.end,
+        // );
+        //
+        // // Update the roots in the map after optimization
+        // for root in intermediate_precomputed3.values_mut() {
+        //     if let Some(new_root) = node_map.get(root) {
+        //         *root = new_root.clone();
+        //     }
+        // }
 
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
