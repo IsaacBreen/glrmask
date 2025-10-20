@@ -6,9 +6,10 @@ use crate::{
     },
     datastructures::trie::Trie,
 };
-use kdam::{tqdm, BarExt};
+use kdam::tqdm;
+use ordered_hash_map::OrderedHashMap;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use crate::profiler::PROGRESS_BAR_ENABLED;
+use crate::{profiler::PROGRESS_BAR_ENABLED};
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -96,6 +97,94 @@ fn build_node_signature(
     NodeSignature { end, edges }
 }
 
+fn contract_noop_chains(
+    roots: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) -> bool {
+    let mut changed_anything = false;
+    let all_nodes = Trie::all_nodes(god, roots);
+    if all_nodes.is_empty() {
+        return false;
+    }
+
+    // Phase 1: Identify all nodes that are part of a simple NoOp chain.
+    // A node is a candidate if it's not an end node and has a single outgoing NoOp edge
+    // to a single destination.
+    let mut bypass_target: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
+        HashMap::new();
+    for idx in &all_nodes {
+        let guard = idx.read(god).expect("read");
+        if guard.value.end {
+            continue;
+        }
+
+        if guard.children().len() == 1 {
+            if let Some((key, dests)) = guard.children().iter().next() {
+                if matches!(key, IntermediateTrie3EdgeKey::NoOp) && dests.len() == 1 {
+                    let dest_idx = *dests.keys().next().unwrap();
+                    bypass_target.insert(*idx, dest_idx);
+                }
+            }
+        }
+    }
+
+    if bypass_target.is_empty() {
+        return false;
+    }
+
+    // Phase 2: Resolve bypass chains. e.g., if A->B and B->C, update map to A->C.
+    // This makes rewiring direct to the end of the chain.
+    for node_idx in bypass_target.keys().copied().collect::<Vec<_>>() {
+        let mut target = bypass_target[&node_idx];
+        let mut visited = HashSet::from([node_idx]);
+        while let Some(next_target) = bypass_target.get(&target) {
+            if !visited.insert(target) {
+                // Cycle of NoOp nodes detected. This is a "true cycle" and should have been caught.
+                // Break to prevent an infinite loop.
+                break;
+            }
+            target = *next_target;
+        }
+        bypass_target.insert(node_idx, target);
+    }
+
+    // Phase 3: Rewire the graph.
+    // For each node, check if any of its children should be bypassed.
+    for idx in &all_nodes {
+        if bypass_target.contains_key(idx) {
+            continue;
+        }
+
+        let mut write_guard = idx.write(god).expect("write");
+        let old_children = std::mem::take(write_guard.children_mut());
+        let mut local_change = false;
+
+        for (key, dests) in old_children {
+            let mut new_dests = OrderedHashMap::new();
+            for (dest_idx, ev) in dests {
+                let final_dest = bypass_target.get(&dest_idx).copied().unwrap_or(dest_idx);
+                if final_dest != dest_idx {
+                    local_change = true;
+                }
+                new_dests.insert(final_dest, ev);
+            }
+            if !new_dests.is_empty() {
+                // It's possible for multiple old (key, dests) to now have the same key.
+                // We must merge them correctly.
+                let entry = write_guard.children_mut().entry(key).or_default();
+                for (dest, ev) in new_dests {
+                    entry.insert(dest, ev);
+                }
+            }
+        }
+        if local_change {
+            changed_anything = true;
+        }
+    }
+
+    changed_anything
+}
+
 fn wl_color_refine(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
@@ -120,12 +209,24 @@ fn wl_color_refine(
         edge_count
     );
 
-    // Initial colors: separate by 'end' flag only (0 = not end, 1 = end).
+    // Initial colors: based on 'end' flag and out-degree for faster convergence.
     let mut colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
+    let mut initial_color_map: BTreeMap<(bool, usize), usize> = BTreeMap::new();
+    let mut next_initial_color = 0;
     for idx in &reachable {
-        let end = idx.read(god).map(|g| g.value.end).unwrap_or(false);
-        colors.insert(*idx, if end { 1 } else { 0 });
+        let g = idx.read(god).expect("read");
+        let end = g.value.end;
+        let out_degree = g.children().values().map(|dests| dests.len()).sum();
+        let key = (end, out_degree);
+        let color = *initial_color_map.entry(key).or_insert_with(|| {
+            let c = next_initial_color;
+            next_initial_color += 1;
+            c
+        });
+        colors.insert(*idx, color);
     }
+
+    println!("[optimize_intermediate_trie3] Initial classes: {}", next_initial_color);
 
     // Iteratively refine until stable.
     let mut iter = 0usize;
@@ -373,6 +474,21 @@ pub fn optimize_intermediate_trie3(
     has_true_cycle_intermediate_trie3(god, roots);
 
     prune_unproductive_paths_intermediate_trie3(roots, god);
+
+    println!("[optimize_intermediate_trie3] Contracting NoOp chains...");
+    let mut passes = 0;
+    while contract_noop_chains(roots, god) {
+        passes += 1;
+        println!("[optimize_intermediate_trie3] NoOp chain contraction pass {} complete.", passes);
+        if passes > 10 {
+             println!("[optimize_intermediate_trie3] WARN: NoOp chain contraction took too many passes, breaking.");
+             break;
+        }
+    }
+    if passes > 0 {
+        println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC.");
+        Trie::gc(god, roots);
+    }
     has_true_cycle_intermediate_trie3(god, roots);
 
     let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
@@ -474,15 +590,9 @@ pub fn has_true_cycle_intermediate_trie3(
     god: &IntermediateTrie3GodWrapper,
     roots: &[IntermediatePrecomputeNode3Index],
 ) {
-    #[cfg(not(rustrover))]
-    let mut pbar = tqdm!(total = roots.len(), desc = "Intermediate Trie3 Cycle Check", disable = !PROGRESS_BAR_ENABLED, leave = true);
-
     let mut visited: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
     for &root in roots {
-        #[cfg(not(rustrover))]
-        pbar.update(1).unwrap();
-
-        if visited.contains(&root) {
+        if !visited.contains(&root) {
             continue;
         }
         if let Some(cycle_path) = detect_true_cycle_recursive_intermediate_trie3(

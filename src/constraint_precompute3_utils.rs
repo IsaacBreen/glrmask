@@ -27,18 +27,17 @@ pub fn clone_trie3_graph(
     let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
 
     let root_ptr = *root;
-    let root_value = { root.read(trie3_god).expect("poison").value.clone() };
-    let new_root = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(root_value)));
-    map.insert(root_ptr, new_root.clone());
-    q.push_back(root.clone());
+    let root_value = trie3_god.with(root_ptr, |n| n.value.clone()).expect("root must exist");
+    let new_root = IntermediatePrecomputeNode3Index::new(trie3_god.insert(Trie::new(root_value)));
+    map.insert(root_ptr, new_root);
+    q.push_back(root_ptr);
 
     while let Some(old_arc) = q.pop_front() {
         let old_ptr = old_arc;
         let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
 
         let children_snapshot: Vec<( IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, ())> )> = {
-            let g = old_arc.read(trie3_god).expect("poison");
-            g.children()
+            trie3_god.with(old_arc, |g| g.children()
                 .iter()
                 .map(|(ek, dest_map)| {
                     let entries = dest_map
@@ -49,34 +48,30 @@ pub fn clone_trie3_graph(
                         .collect::<Vec<_>>();
                     (ek.clone(), entries)
                 })
-                .collect()
+                .collect()).expect("old_arc must exist")
         };
 
         for (_ek, entries) in &children_snapshot {
             for (node_ptr, _ev) in entries {
-                let child_arc_old = node_ptr.as_arc().clone();
-                let child_ptr_old = child_arc_old;
+                let child_ptr_old = *node_ptr;
                 if !map.contains_key(&child_ptr_old) {
-                    let child_value = { child_arc_old.read(trie3_god).expect("poison").value.clone() };
-                    let child_arc_new = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(child_value)));
+                    let child_value = trie3_god.with(child_ptr_old, |n| n.value.clone()).expect("child must exist");
+                    let child_arc_new = IntermediatePrecomputeNode3Index::new(trie3_god.insert(Trie::new(child_value)));
                     map.insert(child_ptr_old, child_arc_new);
-                    q.push_back(child_arc_old);
+                    q.push_back(child_ptr_old);
                 }
             }
         }
 
         {
-            let mut new_g = new_arc.write(trie3_god).expect("poison");
-            for (ek, entries) in children_snapshot {
-                let dest_map = new_g.children_mut().entry(ek).or_default();
-                for (old_node_ptr, ev) in entries {
-                    let child_arc_old = old_node_ptr.as_arc().clone();
-                    let child_ptr_old = child_arc_old;
-                    let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
-                    let new_key = child_arc_new;
-                    dest_map.insert(new_key, ev);
+            trie3_god.with_mut(new_arc, |new_g| {
+                for (ek, entries) in children_snapshot {
+                    for (old_node_ptr, ev) in entries {
+                        let new_key = *map.get(old_node_ptr).expect("must exist");
+                        new_g.children_mut().entry(ek).or_default().insert(new_key, ev);
+                    }
                 }
-            }
+            }).expect("new_arc must exist");
         }
     }
 
@@ -1176,9 +1171,7 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
 
         for (edge_key, dest_map) in guard.children() {
             for child_wrap in dest_map.keys() {
-                let child_arc = child_wrap.as_arc().clone();
-                let child_ptr = child_arc;
-                predecessors.entry(child_ptr).or_default().push((node_ptr, edge_key.clone()));
+                predecessors.entry(*child_wrap).or_default().push((node_ptr, edge_key.clone()));
             }
         }
     }
@@ -1230,9 +1223,7 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
 
         for (edge_key, dest_map) in guard.children() {
             for (child_wrapper, edge_value_sids) in dest_map {
-                let child_arc = child_wrapper.as_arc().clone();
-                let child_ptr = child_arc;
-                let live_from_child = live.get(&child_ptr).unwrap();
+                let live_from_child = live.get(child_wrapper).unwrap();
 
                 let live_on_edge = &edge_key.1 & live_from_child;
 
