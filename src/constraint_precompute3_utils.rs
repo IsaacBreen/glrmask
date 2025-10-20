@@ -374,49 +374,53 @@ pub fn optimize_trie3_size(
 	crate::debug!(2, "Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
-    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token);
+    has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token, max_state_id);
 
 	crate::debug!(2, "Finished optimizing Trie 3 size.");
 }
 
-type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize);
+type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize, usize);
 
 fn has_true_cycle_trie3(
     arena: &Trie3GodWrapper,
     roots: &[PrecomputeNode3Index],
     internal_max_llm_token: usize,
+    max_state_id: usize,
 ) {
-    // We check for each token individually. This is slow but thorough.
+    // We check for each token and state individually. This is slow but thorough.
     for llm_token_id in 0..=internal_max_llm_token {
-        let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
-        for &root in roots {
-            if visited.contains(&root) {
-                continue;
-            }
-            if let Some((cycle_path, _)) = detect_true_cycle_recursive_trie3(
-                root,
-                None,
-                llm_token_id,
-                arena,
-                &mut HashMap::new(),
-                &mut visited,
-                &mut Vec::new(),
-            ) {
-                let mut report = format!(
-                    "LLM-compatible cycle with pop=0 detected in precompute3 trie for internal LLM token ID {}.\nCycle path:\n",
-                    llm_token_id
-                );
-                for i in 0..cycle_path.len() {
-                    let (node_idx, _) = cycle_path[i];
-                    let next_i = (i + 1) % cycle_path.len();
-                    let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
-                    let edge_str = edge_to_next_opt.as_ref().map_or_else(
-                        || " (root edge)".to_string(),
-                        |ek| format!("pop={}, llm_bv=[...]", ek.0),
-                    );
-                    report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
+        for state_id in 0..=max_state_id {
+            let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
+            for &root in roots {
+                if visited.contains(&root) {
+                    continue;
                 }
-                panic!("{}", report);
+                if let Some((cycle_path, _, _)) = detect_true_cycle_recursive_trie3(
+                    root,
+                    None,
+                    llm_token_id,
+                    state_id,
+                    arena,
+                    &mut HashMap::new(),
+                    &mut visited,
+                    &mut Vec::new(),
+                ) {
+                    let mut report = format!(
+                        "LLM-compatible cycle with pop=0 detected in precompute3 trie for internal LLM token ID {} and state ID {}.\nCycle path:\n",
+                        llm_token_id, state_id
+                    );
+                    for i in 0..cycle_path.len() {
+                        let (node_idx, _) = cycle_path[i];
+                        let next_i = (i + 1) % cycle_path.len();
+                        let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
+                        let edge_str = edge_to_next_opt.as_ref().map_or_else(
+                            || " (root edge)".to_string(),
+                            |ek| format!("pop={}, llm_bv=[...]", ek.0),
+                        );
+                        report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
+                    }
+                    panic!("{}", report);
+                }
             }
         }
     }
@@ -426,6 +430,7 @@ fn detect_true_cycle_recursive_trie3(
     node_idx: PrecomputeNode3Index,
     edge_key_opt: Option<(isize, LLMTokenBV)>,
     llm_token_id: usize,
+    state_id: usize,
     arena: &Trie3GodWrapper,
     recursion_stack: &mut HashMap<PrecomputeNode3Index, usize>,
     visited: &mut HashSet<PrecomputeNode3Index>,
@@ -436,7 +441,7 @@ fn detect_true_cycle_recursive_trie3(
     if let Some(&path_start_idx) = recursion_stack.get(&node_idx) {
         let cycle_path = path[path_start_idx..].to_vec();
         path.pop();
-        return Some((cycle_path, llm_token_id));
+        return Some((cycle_path, llm_token_id, state_id));
     }
 
     if visited.contains(&node_idx) {
@@ -457,17 +462,20 @@ fn detect_true_cycle_recursive_trie3(
     for (edge_key, dest_map) in children_to_visit.iter() {
         let (pop, llm_bv) = edge_key;
         if *pop == 0 && llm_bv.contains(llm_token_id) {
-            for child_idx in dest_map.keys() {
-                if let Some(report) = detect_true_cycle_recursive_trie3(
-                    *child_idx,
-                    Some(edge_key.clone()),
-                    llm_token_id,
-                    arena,
-                    recursion_stack,
-                    visited,
-                    path,
-                ) {
-                    return Some(report);
+            for (child_idx, sids_bv) in dest_map.iter() {
+                if sids_bv.contains(state_id) {
+                    if let Some(report) = detect_true_cycle_recursive_trie3(
+                        *child_idx,
+                        Some(edge_key.clone()),
+                        llm_token_id,
+                        state_id,
+                        arena,
+                        recursion_stack,
+                        visited,
+                        path,
+                    ) {
+                        return Some(report);
+                    }
                 }
             }
         }
