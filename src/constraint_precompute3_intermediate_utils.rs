@@ -36,14 +36,16 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
 
 /// Compares two Intermediate Trie3 graphs for equivalence by comparing their sets of normalized paths.
 /// This is a strong equivalence check, suitable for testing optimization passes.
-pub fn are_intermediate_trie3_graphs_equal(
+pub fn are_intermediate_trie3_graphs_equal<F>(
     root_a: IntermediatePrecomputeNode3Index,
     god_a: &IntermediateTrie3GodWrapper,
     root_b: IntermediatePrecomputeNode3Index,
     god_b: &IntermediateTrie3GodWrapper,
     max_path_length: usize,
-) -> bool {
-    let is_end = |_, node: &IntermediatePrecomputeNode3| node.value.end;
+) -> bool
+where
+    F: Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool + Clone,
+{
     let counts_toward_length = |ek: &IntermediateTrie3EdgeKey, _, _| {
         // Only Pop and Push operations count towards path length for cycle detection.
         // CheckLLM and NoOp are considered "free" moves.
