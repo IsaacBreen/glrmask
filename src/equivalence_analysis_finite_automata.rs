@@ -20,14 +20,22 @@ type SignatureId = usize;
 struct SignatureInterner {
     signatures: Vec<CanonicalSignature>,
     map: HashMap<CanonicalSignature, SignatureId>,
+    next_id: SignatureId,
 }
 
 impl SignatureInterner {
     fn new() -> Self {
-        todo!()
+        SignatureInterner {
+            signatures: Vec::new(),
+            map: HashMap::new(),
+            next_id: 0,
+        }
     }
     fn intern(&mut self, sig: CanonicalSignature) -> SignatureId {
-        todo!()
+        // Placeholder: Always return a new unique ID, ignoring the signature content.
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 }
 
@@ -44,18 +52,28 @@ struct ExecResult {
 struct StringTrie {
     // Implementation details might include:
     // nodes: Vec<TrieNode>,
-    // root: usize,
+    // root: usize,    
+    // Placeholder: We'll use the string index as the trie node ID.
+    original_indices: Vec<usize>,
 }
 
 impl StringTrie {
     fn new() -> Self {
-        todo!()
+        StringTrie { original_indices: Vec::new() }
     }
     fn insert(&mut self, s: &[u8], index: usize) {
-        todo!()
+        // Placeholder: In a real trie, this would build the structure.
+        // Here, we just record the original index.
+        self.original_indices.push(index);
     }
     // A post-order traversal method would be useful for compute_signatures.
-    // fn post_order_traversal(&self) -> Vec</*trie_node_id*/> { todo!() }
+    fn post_order_traversal(&self) -> Vec<usize> {
+        // Placeholder: Return a list of "trie node IDs" (which are 0..N-1).
+        (0..self.original_indices.len()).collect()
+    }
+    fn get_original_index(&self, trie_node_id: usize) -> usize {
+        self.original_indices[trie_node_id]
+    }
 }
 
 pub struct EquivalenceAnalyzer<'a> {
@@ -76,7 +94,15 @@ pub struct EquivalenceAnalyzer<'a> {
 
 impl<'a> EquivalenceAnalyzer<'a> {
     pub fn new(regex: &'a Regex, strings: &'a [Vec<u8>], initial_states: &'a [usize]) -> Self {
-        todo!()
+        EquivalenceAnalyzer {
+            regex,
+            strings,
+            initial_states,
+            trie: StringTrie::new(),
+            exec_results: HashMap::new(),
+            signature_memo: HashMap::new(),
+            signature_interner: SignatureInterner::new(),
+        }
     }
 
     pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
@@ -96,14 +122,17 @@ impl<'a> EquivalenceAnalyzer<'a> {
     }
 
     fn build_trie(&mut self) {
-        todo!()
+        // Placeholder: Simulate trie building by inserting all strings.
+        for (index, s) in self.strings.iter().enumerate() {
+            self.trie.insert(s, index);
+        }
     }
 
     fn precompute_exec_results(&mut self) {
         // Traverse the trie (e.g., BFS or DFS) and compute execute results.
         // For a node representing prefix `p` and its child for `p+c`, we can compute
         // the result for `p+c` from the result for `p`.
-        todo!()
+        // Placeholder: No-op.
     }
 
     fn compute_signatures(&mut self) {
@@ -111,14 +140,51 @@ impl<'a> EquivalenceAnalyzer<'a> {
         // For each node, for each relevant dfa_state, compute its signature.
         // The signature depends on the `exec_result` for that node/state,
         // and the already-computed signatures of suffixes (which correspond to other trie nodes).
-        todo!()
+        
+        // Placeholder: Assign a unique SignatureId to each (string_index, dfa_state) pair.
+        // This ensures each string gets a unique signature vector, placing it in its own class.
+        
+        // We include the start state in the set of states to compute signatures for, 
+        // in case it's not in initial_states but is needed for internal consistency.
+        let all_relevant_states: BTreeSet<usize> = self.initial_states.iter()
+            .cloned()
+            .chain(std::iter::once(self.regex.dfa.start_state))
+            .collect();
+
+        for trie_node_id in self.trie.post_order_traversal() {
+            for dfa_state in &all_relevant_states {
+                let dummy_sig = CanonicalSignature {
+                    matches: BTreeSet::new(),
+                    final_state_if_done: Some(*dfa_state),
+                };
+                let signature_id = self.signature_interner.intern(dummy_sig);
+                self.signature_memo.insert((trie_node_id, *dfa_state), signature_id);
+            }
+        }
     }
 
     fn classify_strings(&self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
         // For each input string, construct its signature vector by looking up
         // the signature for each initial state at the trie node for that string.
         // Group string indices by this signature vector.
-        todo!()
+        let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
+
+        for trie_node_id in self.trie.post_order_traversal() {
+            let original_index = self.trie.get_original_index(trie_node_id);
+            let mut signature_vector = Vec::with_capacity(self.initial_states.len());
+
+            for &initial_state in self.initial_states {
+                let signature_id = *self.signature_memo.get(&(trie_node_id, initial_state))
+                    .expect("Signature should have been computed for all initial states.");
+                signature_vector.push(signature_id);
+            }
+
+            // Since each call to intern was unique, the signature_vector is unique for each string,
+            // resulting in each string being in its own class.
+            equivalence_classes.entry(signature_vector).or_default().push(original_index);
+        }
+
+        equivalence_classes
     }
 }
 
