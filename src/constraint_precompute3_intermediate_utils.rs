@@ -357,7 +357,6 @@ fn prune_unproductive_paths_intermediate_trie3(
     }
 
     // 5. GC everything now unreachable from roots
-    Trie::gc(god, roots);
     Trie::recompute_all_max_depths(god, roots);
 
     println!("[optimize_intermediate_trie3] Finished end-reachability pruning.");
