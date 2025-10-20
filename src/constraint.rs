@@ -806,31 +806,49 @@ impl GrammarConstraint {
 
     pub(crate) fn setup_llm_token_mappings(
         original_llm_token_map: &LLMTokenMap,
+        tokenizer: &Regex,
     ) -> BTreeMap<usize, usize>
     {
-        // // TODO: delete this
-        // let mut original_to_internal_id_bimap = BTreeMap::new();
-        // for (_, id) in original_llm_token_map.iter() {
-        //     original_to_internal_id_bimap.insert(id.0, id.0);
-        // }
-        // return original_to_internal_id_bimap;
+        // 1. Prepare inputs for equivalence analysis.
+        // We sort the tokens by their byte representation to ensure determinism.
+        let mut sorted_tokens: Vec<_> = original_llm_token_map.iter().collect();
+        sorted_tokens.sort_by_key(|(bytes, _id)| *bytes);
 
-        let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = original_llm_token_map
-            .iter()
-            .map(|(bytes, original_id)| (bytes.clone(), *original_id))
-            .collect();
-        sorted_tokens_with_original_ids.sort_by(|(bytes_a, _), (bytes_b, _)| bytes_a.cmp(bytes_b));
+        let mut llm_token_strings: Vec<Vec<u8>> = Vec::with_capacity(sorted_tokens.len());
+        let mut original_ids: Vec<LLMTokenID> = Vec::with_capacity(sorted_tokens.len());
 
-        let mut original_to_internal_id_bimap = BTreeMap::new();
-        let mut internal_id_counter = 0;
-
-        for (_bytes, original_llm_id) in sorted_tokens_with_original_ids {
-            let internal_llm_id_val = internal_id_counter;
-            original_to_internal_id_bimap.insert(original_llm_id.0, internal_llm_id_val);
-            internal_id_counter += 1;
+        for (bytes, id) in sorted_tokens {
+            llm_token_strings.push(bytes.clone());
+            original_ids.push(*id);
         }
 
-        original_to_internal_id_bimap
+        let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+
+        // 2. Find equivalence classes.
+        // The result maps a signature vector (representing an equivalence class) to a list
+        // of indices into the `llm_token_strings` vector.
+        let equivalence_classes = equivalence_analysis_finite_automata::find_equivalence_classes(
+            tokenizer,
+            &llm_token_strings,
+            &initial_states,
+        );
+
+        // 3. Build the mapping from original to internal IDs based on the computed classes.
+        // All tokens within the same class will be mapped to the same internal ID.
+        let mut original_to_internal_map = BTreeMap::new();
+        let mut internal_id_counter = 0;
+        // The BTreeMap gives us a deterministic order for assigning internal IDs.
+        for (_signature, string_indices) in equivalence_classes {
+            let internal_id = internal_id_counter;
+            internal_id_counter += 1;
+
+            for string_index in string_indices {
+                let original_llm_id = original_ids[string_index];
+                original_to_internal_map.insert(original_llm_id.0, internal_id);
+            }
+        }
+
+        original_to_internal_map
     }
 
     pub fn new(
@@ -861,7 +879,7 @@ impl GrammarConstraint {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
-        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map);
+        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &tokenizer);
 
 
 		let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
@@ -1118,7 +1136,7 @@ impl GrammarConstraint {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
-        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map);
+        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &tokenizer);
 
         let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
         // Build reverse mapping for global vocab
