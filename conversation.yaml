@@ -2102,7 +2102,7 @@ local_system:
       *   `pub use crate::constraint_precompute3_utils::Trie3Config;`
 
       These types provide stage-specific configuration options for the precomputation process, such as enabling or disabling certain optimizations.
-    src/constraint_precompute3_intermediate_utils.rs: |
+    src/constraint_precompute3_intermediate_utils.rs: |+
       // src/constraint_precompute3_intermediate_utils.rs
       use crate::{
           constraint::{
@@ -2169,6 +2169,213 @@ local_system:
           get_normalized_paths(god_a, roots_a) == get_normalized_paths(god_b, roots_b)
       }
 
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      struct NodeSignature {
+          end: bool,
+          // For each edge key, store the sorted list of child colors.
+          edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)>,
+      }
+
+      fn build_node_signature(
+          idx: IntermediatePrecomputeNode3Index,
+          god: &IntermediateTrie3GodWrapper,
+          color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
+      ) -> NodeSignature {
+          let guard = idx.read(god).expect("Invalid index during signature build");
+          let end = guard.value.end;
+
+          // Collect children grouped by edge key, mapped to their current colors.
+          let mut edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)> = Vec::new();
+          for (ek, dsts) in guard.children().iter() {
+              let mut cols: Vec<usize> = dsts
+                  .keys()
+                  .map(|d| *color_map.get(d).unwrap_or(&0usize))
+                  .collect();
+              cols.sort_unstable();
+              edges.push((ek.clone(), cols));
+          }
+          edges.sort(); // ensure deterministic order
+
+          NodeSignature { end, edges }
+      }
+
+      fn wl_color_refine(
+          roots: &[IntermediatePrecomputeNode3Index],
+          god: &IntermediateTrie3GodWrapper,
+      ) -> (BTreeMap<IntermediatePrecomputeNode3Index, usize>, usize, usize, usize) {
+          // Restrict to reachable nodes to keep work bounded.
+          let mut reachable = Trie::all_nodes(god, roots);
+          reachable.sort_unstable();
+          reachable.dedup();
+
+          // Compute an edge count for progress reporting.
+          let mut edge_count: usize = 0;
+          for idx in &reachable {
+              if let Some(g) = idx.read(god) {
+                  for (_ek, dsts) in g.children().iter() {
+                      edge_count += dsts.len();
+                  }
+              }
+          }
+          println!(
+              "[optimize_intermediate_trie3] Reachable nodes: {}, edges: {}",
+              reachable.len(),
+              edge_count
+          );
+
+          // Initial colors: separate by 'end' flag only (0 = not end, 1 = end).
+          let mut colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
+          for idx in &reachable {
+              let end = idx.read(god).map(|g| g.value.end).unwrap_or(false);
+              colors.insert(*idx, if end { 1 } else { 0 });
+          }
+
+          // Iteratively refine until stable.
+          let mut iter = 0usize;
+          loop {
+              iter += 1;
+              let mut sigs: Vec<(IntermediatePrecomputeNode3Index, NodeSignature)> = Vec::with_capacity(reachable.len());
+              for idx in &reachable {
+                  let sig = build_node_signature(*idx, god, &colors);
+                  sigs.push((*idx, sig));
+              }
+
+              // Intern signatures to compact color IDs.
+              let mut intern: BTreeMap<NodeSignature, usize> = BTreeMap::new();
+              let mut next_color_id: usize = 0;
+              let mut new_colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
+
+              for (idx, sig) in sigs {
+                  let cid = if let Some(c) = intern.get(&sig) {
+                      *c
+                  } else {
+                      let c = next_color_id;
+                      intern.insert(sig, c);
+                      next_color_id += 1;
+                      c
+                  };
+                  new_colors.insert(idx, cid);
+              }
+
+              // Compare with old colors to check for stability.
+              let mut changed = 0usize;
+              for (idx, new_c) in &new_colors {
+                  if colors.get(idx).copied().unwrap_or(usize::MAX) != *new_c {
+                      changed += 1;
+                  }
+              }
+
+              println!(
+                  "[optimize_intermediate_trie3] WL iteration {}: classes={}, changed={}",
+                  iter,
+                  new_colors.values().copied().collect::<HashSet<_>>().len(),
+                  changed
+              );
+
+              colors = new_colors;
+              if changed == 0 {
+                  break;
+              }
+          }
+
+          // Count classes and returns stats.
+          let classes = colors.values().copied().collect::<HashSet<_>>().len();
+          (colors, iter, classes, reachable.len())
+      }
+
+      fn rewire_to_canonical(
+          colors: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
+          roots: &[IntermediatePrecomputeNode3Index],
+          god: &IntermediateTrie3GodWrapper,
+          node_map: &mut BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>,
+      ) -> (usize, usize) {
+          // Compute reachable again to scope work.
+          let mut reachable = Trie::all_nodes(god, roots);
+          reachable.sort_unstable();
+          reachable.dedup();
+
+          // Build canonical representative per color (pick minimum index).
+          let mut canon_by_color: HashMap<usize, IntermediatePrecomputeNode3Index> = HashMap::new();
+          for idx in &reachable {
+              let c = colors[idx];
+              match canon_by_color.get(&c) {
+                  Some(existing) => {
+                      if idx.as_usize() < existing.as_usize() {
+                          canon_by_color.insert(c, *idx);
+                      }
+                  }
+                  None => {
+                      canon_by_color.insert(c, *idx);
+                  }
+              }
+          }
+
+          // Build node->canonical map (only store changed ones into node_map)
+          let mut merges = 0usize;
+          for idx in &reachable {
+              let c = colors[idx];
+              let canon = *canon_by_color.get(&c).expect("canonical missing");
+              if *idx != canon {
+                  merges += 1;
+                  node_map.insert(*idx, canon);
+              }
+          }
+          println!(
+              "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
+              canon_by_color.len(),
+              merges
+          );
+
+          // Prepare rewiring plan: for each src and edge key, move edges to canonical destination.
+          let mut plan: BTreeMap<
+              IntermediatePrecomputeNode3Index,
+              BTreeMap<IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>>
+          > = BTreeMap::new();
+
+          for src in &reachable {
+              if let Some(r) = src.read(god) {
+                  for (ek, dsts) in r.children().iter() {
+                      for (dst, _ev) in dsts.iter() {
+                          let c = colors[dst];
+                          let canon_dst = *canon_by_color.get(&c).unwrap();
+                          if canon_dst != *dst {
+                              plan.entry(*src)
+                                  .or_default()
+                                  .entry(ek.clone())
+                                  .or_default()
+                                  .push((*dst, canon_dst));
+                          }
+                      }
+                  }
+              }
+          }
+
+          // Apply rewiring plan.
+          let mut edges_rewired = 0usize;
+          for (src, by_key) in plan {
+              if let Some(mut w) = src.write(god) {
+                  for (ek, mods) in by_key {
+                      if let Some(map) = w.get_mut(&ek) {
+                          for (old_dst, new_dst) in mods {
+                              if old_dst == new_dst {
+                                  continue;
+                              }
+                              if let Some(ev) = map.remove(&old_dst) {
+                                  // Only insert if not already present; otherwise drop the ev.
+                                  if !map.contains_key(&new_dst) {
+                                      map.insert(new_dst, ev);
+                                  }
+                                  edges_rewired += 1;
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          (merges, edges_rewired)
+      }
+
       pub fn optimize_intermediate_trie3(
           roots: &[IntermediatePrecomputeNode3Index],
           god: &IntermediateTrie3GodWrapper,
@@ -2177,128 +2384,28 @@ local_system:
           let original_god = god.deep_clone();
           let original_roots = roots.to_vec();
 
-          // Helper for post-order traversal
-          fn post_order_dfs(
-              idx: IntermediatePrecomputeNode3Index,
-              god: &IntermediateTrie3GodWrapper,
-              visited: &mut HashSet<IntermediatePrecomputeNode3Index>,
-              post_order: &mut Vec<IntermediatePrecomputeNode3Index>,
-          ) {
-              if !visited.insert(idx) {
-                  return;
-              }
-              if god
-                  .with(idx.as_index(), |node| {
-                      for (_, children_map) in node.children() {
-                          for (child_idx, _) in children_map {
-                              post_order_dfs(*child_idx, god, visited, post_order);
-                          }
-                      }
-                  })
-                  .is_some()
-              {
-                  post_order.push(idx);
-              }
-          }
+          let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
+              BTreeMap::default();
 
-          // 1. Get all reachable nodes and build a post-order traversal list
-          let all_original_nodes = Trie::all_nodes(&original_god, &original_roots);
-          let mut post_order = Vec::new();
-          let mut visited = HashSet::new();
-          for root in &all_original_nodes {
-              post_order_dfs(*root, &original_god, &mut visited, &mut post_order);
-          }
-
-          // 2. Set up for optimization
-          #[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
-          struct NodeSignature {
-              is_end: bool,
-              edges: Vec<(IntermediateTrie3EdgeKey, IntermediatePrecomputeNode3Index)>,
-          }
-
-          let mut node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-              BTreeMap::new();
-          let mut signature_map: HashMap<NodeSignature, IntermediatePrecomputeNode3Index> =
-              HashMap::new();
-          let optimized_god = IntermediateTrie3GodWrapper::new();
-
-          let total_nodes = post_order.len();
-          println!("Optimizing intermediate trie3: {} nodes to process", total_nodes);
-
-          // 3. Process nodes in post-order
-          for (i, &original_idx) in post_order.iter().enumerate() {
-              if (i + 1) % 5000 == 0 || i == total_nodes - 1 {
-                  println!("  ...processed {}/{} nodes", i + 1, total_nodes);
-              }
-
-              let original_node = original_god
-                  .with(original_idx.as_index(), |n| n.clone())
-                  .unwrap();
-
-              // Build canonical list of optimized child edges
-              let mut optimized_edges = Vec::new();
-              for (edge_key, children_map) in original_node.children() {
-                  for (original_child_idx, _) in children_map {
-                      let optimized_child_idx = node_map.get(original_child_idx).expect(
-                          "Child node should have been processed in post-order traversal",
-                      );
-                      optimized_edges.push((edge_key.clone(), *optimized_child_idx));
-                  }
-              }
-              optimized_edges.sort_unstable();
-
-              let signature = NodeSignature {
-                  is_end: original_node.value.end,
-                  edges: optimized_edges,
-              };
-
-              if let Some(&existing_optimized_idx) = signature_map.get(&signature) {
-                  node_map.insert(original_idx, existing_optimized_idx);
-              } else {
-                  let new_optimized_idx = optimized_god.insert(original_node.value.clone()).into();
-
-                  optimized_god
-                      .with_mut(new_optimized_idx.as_index(), |new_node| {
-                          for (edge_key, optimized_child_idx) in &signature.edges {
-                              new_node.force_insert_to_node(edge_key.clone(), (), *optimized_child_idx);
-                          }
-                      })
-                      .unwrap();
-
-                  node_map.insert(original_idx, new_optimized_idx);
-                  signature_map.insert(signature, new_optimized_idx);
-              }
-          }
-
-          let optimized_roots: Vec<_> = original_roots
-              .iter()
-              .map(|r| *node_map.get(r).unwrap())
-              .collect();
-
-          let stats_before = Trie::stats(&original_god, &original_roots);
-          let stats_after = Trie::stats(&optimized_god, &optimized_roots);
+          // Pass 1: color-refinement-based structural deduplication with progress reporting.
+          println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
+          let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
           println!(
-              "Optimization complete. Nodes: {} -> {}, Edges: {} -> {}",
-              stats_before.num_reachable_nodes, stats_after.num_reachable_nodes,
-              stats_before.num_reachable_edges, stats_after.num_reachable_edges
+              "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
+              iters, classes, total_nodes
           );
 
-          god.clear();
-          let (_, optimized_to_final_map) =
-              Trie::deep_copy_subtrees_into(&optimized_god, god, &optimized_roots);
+          let mut node_map = node_map; // make mutable for update
+          let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
+          println!(
+              "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
+              merges, edges_rewired
+          );
 
-          let final_node_map: BTreeMap<_, _> = node_map
-              .into_iter()
-              .filter_map(|(original_idx, optimized_idx)| {
-                  optimized_to_final_map
-                      .get(&optimized_idx)
-                      .map(|&final_idx| (original_idx, final_idx))
-              })
-              .collect();
-
+          // Check equivalence after optimization (currently no-op)
           let new_roots: Vec<_> = original_roots
               .iter()
-              .map(|r| *final_node_map.get(r).unwrap_or(r))
+              .map(|r| *node_map.get(r).unwrap_or(r))
               .collect();
 
           assert!(
@@ -2306,8 +2413,9 @@ local_system:
               "Optimization failed to preserve graph equivalence for all roots"
           );
 
-          final_node_map
+          node_map
       }
+
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -3560,6 +3668,7 @@ messages:
       - To create a new node, use `IntermediatePrecomputedNodeContents3::leaf()` or `IntermediatePrecomputedNodeContents3::internal()`.
       - To create a `IntermediatePrecomputeNode3Index` (which is just an alias of `Trie2Index`) from an `Index`, use `IntermediatePrecomputeNode3Index::new(index)`.
           - To get the index back, use `.as_index()`.
+      - `MergeableEdgeValue` is already implemented for `()`
       - Don't modify any of the existing code. Only add. E.g. keep `normalize_path` and `are_intermediate_trie3_graphs_equal` unchanged, and only change the middle part of `optimize_intermediate_trie3`, not the start and end parts that are to do with assertions.
       - The optimization methods should usually take roots, god, and node map (mutable reference), and return a bool indicating whether anything changed.
       - There are usually many cycles in the input graphs. These must be preserved.
@@ -3582,182 +3691,43 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the optimizations, followed by the corresponding git diff.
+      Below are step-by-step instructions followed by the exact git diff you can apply.
 
-      ### Step-by-step Instructions
+      Step-by-step instructions
 
-      1.  **Open `src/constraint_precompute3_intermediate_utils.rs`**.
+      File to modify:
+      - src/constraint_precompute3_intermediate_utils.rs
 
-      2.  **Add `HashMap` to imports**: Locate the `use` statements at the top of the file and modify the line for `std::collections` to also import `HashMap`.
+      What to do:
+      1. Add a color-refinement-based structural deduplication pass that:
+         - Computes the set of reachable nodes from the given roots.
+         - Iteratively computes stable “colors” (signatures) for nodes based on their end-flag and the multiset of colors of their children grouped by edge key.
+         - Picks a canonical representative for each final color class (smallest index).
+         - Rewrites edges to point to the canonical representative of their destination nodes.
+         - Populates the returned node_map with old->canonical mappings.
+         - Prints progress to the console at each step (reachable stats, iteration progress, classes and merges, rewire statistics).
 
-          ```rust
-          // Change this line:
-          use std::collections::{BTreeMap, HashSet};
-          // To this:
-          use std::collections::{BTreeMap, HashMap, HashSet};
-          ```
+      2. Keep normalize_path and are_intermediate_trie3_graphs_equal completely unchanged.
 
-      3.  **Implement `optimize_intermediate_trie3`**: Replace the entire body of the `optimize_intermediate_trie3` function with the new implementation below. This new version will:
-          *   Perform a post-order traversal of the graph to process leaf nodes first.
-          *   For each node, compute a "signature" based on its value and the canonical representation of its children.
-          *   Use a `HashMap` to find and merge nodes with identical signatures, effectively deduplicating shared subgraphs.
-          *   Build a new, optimized graph in a temporary arena.
-          *   Print progress to the console during the operation and show before/after statistics.
-          *   Safely copy the optimized graph back into the provided `god` arena.
-          *   Return a map from original node indices to their new, optimized counterparts.
+      3. Only modify the middle body of optimize_intermediate_trie3 (the TODO area) to call the new pass and emit progress logs.
 
-          ```rust
-          pub fn optimize_intermediate_trie3(
-              roots: &[IntermediatePrecomputeNode3Index],
-              god: &IntermediateTrie3GodWrapper,
-              is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
-          ) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
-              let original_god = god.deep_clone();
-              let original_roots = roots.to_vec();
-          
-              // Helper for post-order traversal
-              fn post_order_dfs(
-                  idx: IntermediatePrecomputeNode3Index,
-                  god: &IntermediateTrie3GodWrapper,
-                  visited: &mut HashSet<IntermediatePrecomputeNode3Index>,
-                  post_order: &mut Vec<IntermediatePrecomputeNode3Index>,
-              ) {
-                  if !visited.insert(idx) {
-                      return;
-                  }
-                  if god
-                      .with(idx.as_index(), |node| {
-                          for (_, children_map) in node.children() {
-                              for (child_idx, _) in children_map {
-                                  post_order_dfs(*child_idx, god, visited, post_order);
-                              }
-                          }
-                      })
-                      .is_some()
-                  {
-                      post_order.push(idx);
-                  }
-              }
-          
-              // 1. Get all reachable nodes and build a post-order traversal list
-              let all_original_nodes = Trie::all_nodes(&original_god, &original_roots);
-              let mut post_order = Vec::new();
-              let mut visited = HashSet::new();
-              for root in &all_original_nodes {
-                  post_order_dfs(*root, &original_god, &mut visited, &mut post_order);
-              }
-          
-              // 2. Set up for optimization
-              #[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
-              struct NodeSignature {
-                  is_end: bool,
-                  edges: Vec<(IntermediateTrie3EdgeKey, IntermediatePrecomputeNode3Index)>,
-              }
-          
-              let mut node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-                  BTreeMap::new();
-              let mut signature_map: HashMap<NodeSignature, IntermediatePrecomputeNode3Index> =
-                  HashMap::new();
-              let optimized_god = IntermediateTrie3GodWrapper::new();
-          
-              let total_nodes = post_order.len();
-              println!("Optimizing intermediate trie3: {} nodes to process", total_nodes);
-          
-              // 3. Process nodes in post-order
-              for (i, &original_idx) in post_order.iter().enumerate() {
-                  if (i + 1) % 5000 == 0 || i == total_nodes - 1 {
-                      println!("  ...processed {}/{} nodes", i + 1, total_nodes);
-                  }
-          
-                  let original_node = original_god
-                      .with(original_idx.as_index(), |n| n.clone())
-                      .unwrap();
-          
-                  // Build canonical list of optimized child edges
-                  let mut optimized_edges = Vec::new();
-                  for (edge_key, children_map) in original_node.children() {
-                      for (original_child_idx, _) in children_map {
-                          let optimized_child_idx = node_map.get(original_child_idx).expect(
-                              "Child node should have been processed in post-order traversal",
-                          );
-                          optimized_edges.push((edge_key.clone(), *optimized_child_idx));
-                      }
-                  }
-                  optimized_edges.sort_unstable();
-          
-                  let signature = NodeSignature {
-                      is_end: original_node.value.end,
-                      edges: optimized_edges,
-                  };
-          
-                  if let Some(&existing_optimized_idx) = signature_map.get(&signature) {
-                      node_map.insert(original_idx, existing_optimized_idx);
-                  } else {
-                      let new_optimized_idx = optimized_god.insert(original_node.value.clone()).into();
-          
-                      optimized_god
-                          .with_mut(new_optimized_idx.as_index(), |new_node| {
-                              for (edge_key, optimized_child_idx) in &signature.edges {
-                                  new_node.force_insert_to_node(edge_key.clone(), (), *optimized_child_idx);
-                              }
-                          })
-                          .unwrap();
-          
-                      node_map.insert(original_idx, new_optimized_idx);
-                      signature_map.insert(signature, new_optimized_idx);
-                  }
-              }
-          
-              let optimized_roots: Vec<_> = original_roots
-                  .iter()
-                  .map(|r| *node_map.get(r).unwrap())
-                  .collect();
-          
-              let stats_before = Trie::stats(&original_god, &original_roots);
-              let stats_after = Trie::stats(&optimized_god, &optimized_roots);
-              println!(
-                  "Optimization complete. Nodes: {} -> {}, Edges: {} -> {}",
-                  stats_before.num_reachable_nodes, stats_after.num_reachable_nodes,
-                  stats_before.num_reachable_edges, stats_after.num_reachable_edges
-              );
-          
-              god.clear();
-              let (_, optimized_to_final_map) =
-                  Trie::deep_copy_subtrees_into(&optimized_god, god, &optimized_roots);
-          
-              let final_node_map: BTreeMap<_, _> = node_map
-                  .into_iter()
-                  .filter_map(|(original_idx, optimized_idx)| {
-                      optimized_to_final_map
-                          .get(&optimized_idx)
-                          .map(|&final_idx| (original_idx, final_idx))
-                  })
-                  .collect();
-          
-              let new_roots: Vec<_> = original_roots
-                  .iter()
-                  .map(|r| *final_node_map.get(r).unwrap_or(r))
-                  .collect();
-          
-              assert!(
-                  are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
-                  "Optimization failed to preserve graph equivalence for all roots"
-              );
-          
-              final_node_map
-          }
-          ```
+      4. Do not remove any nodes from the arena; simply rewire edges. This preserves cycles and ensures the equivalence assertion holds for any max_path_length value.
 
-      ### Git Diff
+      5. The edge values (EV) are moved as we rewire. If an edge (key, new_dst) already exists, the removed EV is simply dropped. For intermediate tries EV is typically unit () and this is safe; if a merge was required it would be handled upstream by MergeableEdgeValue-aware helpers.
 
-      Here is the git patch to apply the changes.
+      Diffs
 
       ```diff
       diff --git a/src/constraint_precompute3_intermediate_utils.rs b/src/constraint_precompute3_intermediate_utils.rs
-      index 9411111..8888888 100644
+      index 4c9f66f..95eaf6b 100644
       --- a/src/constraint_precompute3_intermediate_utils.rs
       +++ b/src/constraint_precompute3_intermediate_utils.rs
-      @@ -6,7 +6,7 @@
+      @@ -1,13 +1,15 @@
+       // src/constraint_precompute3_intermediate_utils.rs
+       use crate::{
+           constraint::{
+               IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey,
+               IntermediateTrie3GodWrapper, LLMTokenBV,
            },
            datastructures::trie::Trie,
        };
@@ -3766,154 +3736,262 @@ messages:
        
        /// Normalizes a path for comparison purposes.
        /// - Removes NoOp edges.
-      @@ -59,26 +59,114 @@
+       /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
+       pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<IntermediateTrie3EdgeKey> {
+           let mut combined_llm_bv = LLMTokenBV::max_ones();
+           let mut has_llm_check = false;
+      @@ -64,6 +66,218 @@ where
+           get_normalized_paths(god_a, roots_a) == get_normalized_paths(god_b, roots_b)
+       }
+       
+      +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      +struct NodeSignature {
+      +    end: bool,
+      +    // For each edge key, store the sorted list of child colors.
+      +    edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)>,
+      +}
+      +
+      +fn build_node_signature(
+      +    idx: IntermediatePrecomputeNode3Index,
+      +    god: &IntermediateTrie3GodWrapper,
+      +    color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
+      +) -> NodeSignature {
+      +    let guard = idx.read(god).expect("Invalid index during signature build");
+      +    let end = guard.value.end;
+      +
+      +    // Collect children grouped by edge key, mapped to their current colors.
+      +    let mut edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)> = Vec::new();
+      +    for (ek, dsts) in guard.children().iter() {
+      +        let mut cols: Vec<usize> = dsts
+      +            .keys()
+      +            .map(|d| *color_map.get(d).unwrap_or(&0usize))
+      +            .collect();
+      +        cols.sort_unstable();
+      +        edges.push((ek.clone(), cols));
+      +    }
+      +    edges.sort(); // ensure deterministic order
+      +
+      +    NodeSignature { end, edges }
+      +}
+      +
+      +fn wl_color_refine(
+      +    roots: &[IntermediatePrecomputeNode3Index],
+      +    god: &IntermediateTrie3GodWrapper,
+      +) -> (BTreeMap<IntermediatePrecomputeNode3Index, usize>, usize, usize, usize) {
+      +    // Restrict to reachable nodes to keep work bounded.
+      +    let mut reachable = Trie::all_nodes(god, roots);
+      +    reachable.sort_unstable();
+      +    reachable.dedup();
+      +
+      +    // Compute an edge count for progress reporting.
+      +    let mut edge_count: usize = 0;
+      +    for idx in &reachable {
+      +        if let Some(g) = idx.read(god) {
+      +            for (_ek, dsts) in g.children().iter() {
+      +                edge_count += dsts.len();
+      +            }
+      +        }
+      +    }
+      +    println!(
+      +        "[optimize_intermediate_trie3] Reachable nodes: {}, edges: {}",
+      +        reachable.len(),
+      +        edge_count
+      +    );
+      +
+      +    // Initial colors: separate by 'end' flag only (0 = not end, 1 = end).
+      +    let mut colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
+      +    for idx in &reachable {
+      +        let end = idx.read(god).map(|g| g.value.end).unwrap_or(false);
+      +        colors.insert(*idx, if end { 1 } else { 0 });
+      +    }
+      +
+      +    // Iteratively refine until stable.
+      +    let mut iter = 0usize;
+      +    loop {
+      +        iter += 1;
+      +        let mut sigs: Vec<(IntermediatePrecomputeNode3Index, NodeSignature)> = Vec::with_capacity(reachable.len());
+      +        for idx in &reachable {
+      +            let sig = build_node_signature(*idx, god, &colors);
+      +            sigs.push((*idx, sig));
+      +        }
+      +
+      +        // Intern signatures to compact color IDs.
+      +        let mut intern: BTreeMap<NodeSignature, usize> = BTreeMap::new();
+      +        let mut next_color_id: usize = 0;
+      +        let mut new_colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
+      +
+      +        for (idx, sig) in sigs {
+      +            let cid = if let Some(c) = intern.get(&sig) {
+      +                *c
+      +            } else {
+      +                let c = next_color_id;
+      +                intern.insert(sig, c);
+      +                next_color_id += 1;
+      +                c
+      +            };
+      +            new_colors.insert(idx, cid);
+      +        }
+      +
+      +        // Compare with old colors to check for stability.
+      +        let mut changed = 0usize;
+      +        for (idx, new_c) in &new_colors {
+      +            if colors.get(idx).copied().unwrap_or(usize::MAX) != *new_c {
+      +                changed += 1;
+      +            }
+      +        }
+      +
+      +        println!(
+      +            "[optimize_intermediate_trie3] WL iteration {}: classes={}, changed={}",
+      +            iter,
+      +            new_colors.values().copied().collect::<HashSet<_>>().len(),
+      +            changed
+      +        );
+      +
+      +        colors = new_colors;
+      +        if changed == 0 {
+      +            break;
+      +        }
+      +    }
+      +
+      +    // Count classes and returns stats.
+      +    let classes = colors.values().copied().collect::<HashSet<_>>().len();
+      +    (colors, iter, classes, reachable.len())
+      +}
+      +
+      +fn rewire_to_canonical(
+      +    colors: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
+      +    roots: &[IntermediatePrecomputeNode3Index],
+      +    god: &IntermediateTrie3GodWrapper,
+      +    node_map: &mut BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>,
+      +) -> (usize, usize) {
+      +    // Compute reachable again to scope work.
+      +    let mut reachable = Trie::all_nodes(god, roots);
+      +    reachable.sort_unstable();
+      +    reachable.dedup();
+      +
+      +    // Build canonical representative per color (pick minimum index).
+      +    let mut canon_by_color: HashMap<usize, IntermediatePrecomputeNode3Index> = HashMap::new();
+      +    for idx in &reachable {
+      +        let c = colors[idx];
+      +        match canon_by_color.get(&c) {
+      +            Some(existing) => {
+      +                if idx.as_usize() < existing.as_usize() {
+      +                    canon_by_color.insert(c, *idx);
+      +                }
+      +            }
+      +            None => {
+      +                canon_by_color.insert(c, *idx);
+      +            }
+      +        }
+      +    }
+      +
+      +    // Build node->canonical map (only store changed ones into node_map)
+      +    let mut merges = 0usize;
+      +    for idx in &reachable {
+      +        let c = colors[idx];
+      +        let canon = *canon_by_color.get(&c).expect("canonical missing");
+      +        if *idx != canon {
+      +            merges += 1;
+      +            node_map.insert(*idx, canon);
+      +        }
+      +    }
+      +    println!(
+      +        "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
+      +        canon_by_color.len(),
+      +        merges
+      +    );
+      +
+      +    // Prepare rewiring plan: for each src and edge key, move edges to canonical destination.
+      +    let mut plan: BTreeMap<
+      +        IntermediatePrecomputeNode3Index,
+      +        BTreeMap<IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>>
+      +    > = BTreeMap::new();
+      +
+      +    for src in &reachable {
+      +        if let Some(r) = src.read(god) {
+      +            for (ek, dsts) in r.children().iter() {
+      +                for (dst, _ev) in dsts.iter() {
+      +                    let c = colors[dst];
+      +                    let canon_dst = *canon_by_color.get(&c).unwrap();
+      +                    if canon_dst != *dst {
+      +                        plan.entry(*src)
+      +                            .or_default()
+      +                            .entry(ek.clone())
+      +                            .or_default()
+      +                            .push((*dst, canon_dst));
+      +                    }
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    // Apply rewiring plan.
+      +    let mut edges_rewired = 0usize;
+      +    for (src, by_key) in plan {
+      +        if let Some(mut w) = src.write(god) {
+      +            for (ek, mods) in by_key {
+      +                if let Some(map) = w.get_mut(&ek) {
+      +                    for (old_dst, new_dst) in mods {
+      +                        if old_dst == new_dst {
+      +                            continue;
+      +                        }
+      +                        if let Some(ev) = map.remove(&old_dst) {
+      +                            // Only insert if not already present; otherwise drop the ev.
+      +                            if !map.contains_key(&new_dst) {
+      +                                map.insert(new_dst, ev);
+      +                            }
+      +                            edges_rewired += 1;
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    (merges, edges_rewired)
+      +}
+      +
+       pub fn optimize_intermediate_trie3(
+           roots: &[IntermediatePrecomputeNode3Index],
            god: &IntermediateTrie3GodWrapper,
            is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
        ) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
            let original_god = god.deep_clone();
            let original_roots = roots.to_vec();
        
-      -    let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-      -        BTreeMap::default();
-      -
+           let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
+               BTreeMap::default();
+       
       -    // TODO
-      -
-      -    // Check equivalence after optimization (currently no-op)
-      -    let new_roots: Vec<_> = original_roots
-      +    // Helper for post-order traversal
-      +    fn post_order_dfs(
-      +        idx: IntermediatePrecomputeNode3Index,
-      +        god: &IntermediateTrie3GodWrapper,
-      +        visited: &mut HashSet<IntermediatePrecomputeNode3Index>,
-      +        post_order: &mut Vec<IntermediatePrecomputeNode3Index>,
-      +    ) {
-      +        if !visited.insert(idx) {
-      +            return;
-      +        }
-      +        if god
-      +            .with(idx.as_index(), |node| {
-      +                for (_, children_map) in node.children() {
-      +                    for (child_idx, _) in children_map {
-      +                        post_order_dfs(*child_idx, god, visited, post_order);
-      +                    }
-      +                }
-      +            })
-      +            .is_some()
-      +        {
-      +            post_order.push(idx);
-      +        }
-      +    }
-      +
-      +    // 1. Get all reachable nodes and build a post-order traversal list
-      +    let all_original_nodes = Trie::all_nodes(&original_god, &original_roots);
-      +    let mut post_order = Vec::new();
-      +    let mut visited = HashSet::new();
-      +    for root in &all_original_nodes {
-      +        post_order_dfs(*root, &original_god, &mut visited, &mut post_order);
-      +    }
-      +
-      +    // 2. Set up for optimization
-      +    #[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
-      +    struct NodeSignature {
-      +        is_end: bool,
-      +        edges: Vec<(IntermediateTrie3EdgeKey, IntermediatePrecomputeNode3Index)>,
-      +    }
-      +
-      +    let mut node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-      +        BTreeMap::new();
-      +    let mut signature_map: HashMap<NodeSignature, IntermediatePrecomputeNode3Index> =
-      +        HashMap::new();
-      +    let optimized_god = IntermediateTrie3GodWrapper::new();
-      +
-      +    let total_nodes = post_order.len();
-      +    println!("Optimizing intermediate trie3: {} nodes to process", total_nodes);
-      +
-      +    // 3. Process nodes in post-order
-      +    for (i, &original_idx) in post_order.iter().enumerate() {
-      +        if (i + 1) % 5000 == 0 || i == total_nodes - 1 {
-      +            println!("  ...processed {}/{} nodes", i + 1, total_nodes);
-      +        }
-      +
-      +        let original_node = original_god
-      +            .with(original_idx.as_index(), |n| n.clone())
-      +            .unwrap();
-      +
-      +        // Build canonical list of optimized child edges
-      +        let mut optimized_edges = Vec::new();
-      +        for (edge_key, children_map) in original_node.children() {
-      +            for (original_child_idx, _) in children_map {
-      +                let optimized_child_idx = node_map.get(original_child_idx).expect(
-      +                    "Child node should have been processed in post-order traversal",
-      +                );
-      +                optimized_edges.push((edge_key.clone(), *optimized_child_idx));
-      +            }
-      +        }
-      +        optimized_edges.sort_unstable();
-      +
-      +        let signature = NodeSignature {
-      +            is_end: original_node.value.end,
-      +            edges: optimized_edges,
-      +        };
-      +
-      +        if let Some(&existing_optimized_idx) = signature_map.get(&signature) {
-      +            node_map.insert(original_idx, existing_optimized_idx);
-      +        } else {
-      +            let new_optimized_idx = optimized_god.insert(original_node.value.clone()).into();
-      +
-      +            optimized_god
-      +                .with_mut(new_optimized_idx.as_index(), |new_node| {
-      +                    for (edge_key, optimized_child_idx) in &signature.edges {
-      +                        new_node.force_insert_to_node(edge_key.clone(), (), *optimized_child_idx);
-      +                    }
-      +                })
-      +                .unwrap();
-      +
-      +            node_map.insert(original_idx, new_optimized_idx);
-      +            signature_map.insert(signature, new_optimized_idx);
-      +        }
-      +    }
-      +
-      +    let optimized_roots: Vec<_> = original_roots
-               .iter()
-      -        .map(|r| *node_map.get(r).unwrap_or(r))
-      +        .map(|r| *node_map.get(r).unwrap())
-               .collect();
-      +
-      +    let stats_before = Trie::stats(&original_god, &original_roots);
-      +    let stats_after = Trie::stats(&optimized_god, &optimized_roots);
+      +    // Pass 1: color-refinement-based structural deduplication with progress reporting.
+      +    println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
+      +    let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
       +    println!(
-      +        "Optimization complete. Nodes: {} -> {}, Edges: {} -> {}",
-      +        stats_before.num_reachable_nodes, stats_after.num_reachable_nodes,
-      +        stats_before.num_reachable_edges, stats_after.num_reachable_edges
+      +        "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
+      +        iters, classes, total_nodes
       +    );
       +
-      +    god.clear();
-      +    let (_, optimized_to_final_map) =
-      +        Trie::deep_copy_subtrees_into(&optimized_god, god, &optimized_roots);
-      +
-      +    let final_node_map: BTreeMap<_, _> = node_map
-      +        .into_iter()
-      +        .filter_map(|(original_idx, optimized_idx)| {
-      +            optimized_to_final_map
-      +                .get(&optimized_idx)
-      +                .map(|&final_idx| (original_idx, final_idx))
-      +        })
-      +        .collect();
-      +
-      +    let new_roots: Vec<_> = original_roots
-      +        .iter()
-      +        .map(|r| *final_node_map.get(r).unwrap_or(r))
-      +        .collect();
+      +    let mut node_map = node_map; // make mutable for update
+      +    let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
+      +    println!(
+      +        "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
+      +        merges, edges_rewired
+      +    );
+       
+           // Check equivalence after optimization (currently no-op)
+           let new_roots: Vec<_> = original_roots
+               .iter()
+               .map(|r| *node_map.get(r).unwrap_or(r))
+               .collect();
        
            assert!(
                are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
                "Optimization failed to preserve graph equivalence for all roots"
            );
        
-      -    node_map
-      +    final_node_map
+           node_map
        }
-
+       
       ```
     metadata:
   - user: |
@@ -3925,7 +4003,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_intermediate_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_intermediate_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Implement graph optimization for
-      IntermediateTrie3 by deduplicating nodes"'
+  - user: 'Changes committed with message: "Implement structural deduplication in
+      intermediate Trie3 optimization using WL color refinement and edge rewiring."'
     metadata:
 ...
