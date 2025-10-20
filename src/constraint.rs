@@ -2164,6 +2164,7 @@ impl GrammarConstraint {
             }
         }
 
+
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
         Self::_process_and_rebuild_trie3_paths(
@@ -2178,66 +2179,6 @@ impl GrammarConstraint {
         //     .omit_depth()
         //     ;
         // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
-
-        if is_debug_level_enabled(2) {
-            println!("\n--- Final Intermediate Trie3 Template Statistics ---");
-            println!("{:<25} {:<5} {:>10} {:>10}", "Terminal Name", "ID", "Nodes", "Edges");
-            println!("{:-<25} {:-<5} {:-<10} {:-<10}", "", "", "", "");
-
-            let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
-            sorted_templates.sort_by_key(|(tid, _)| *tid);
-
-            for (tid, (start_node, _end_node)) in sorted_templates {
-                let mut stats = crate::constraint_extra::PrecomputeStats::default();
-                crate::constraint_extra::calculate_intermediate_stats3(
-                    &[*start_node],
-                    &mut stats,
-                    &intermediate_trie3_god,
-                );
-                let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
-                println!(
-                    "{:<25} {:<5} {:>10} {:>10}",
-                    format!("'{}'", terminal_name),
-                    tid.0,
-                    stats.final_unique_nodes_count,
-                    stats.final_edges_count
-                );
-            }
-            println!("--------------------------------------------\n");
-
-            // Aggregate stats across all templates: union nodes/edges and shared nodes count
-            {
-                use std::collections::{HashMap, HashSet};
-
-                let mut union_nodes: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-                let mut coverage: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
-
-                for (_tid, (start_node, _end_node)) in &terminal_templates {
-                    let nodes = Trie::all_nodes(&intermediate_trie3_god, &[*start_node]);
-                    for n in nodes {
-                        union_nodes.insert(n);
-                        *coverage.entry(n).or_insert(0) += 1;
-                    }
-                }
-
-                let mut union_edges = 0usize;
-                for n in &union_nodes {
-                    if let Some(g) = n.read(&intermediate_trie3_god) {
-                        for (_ek, dm) in g.children() {
-                            union_edges += dm.len();
-                        }
-                    }
-                }
-                let shared_nodes = coverage.values().filter(|&&c| c > 1).count();
-                let shared_pct = if union_nodes.is_empty() { 0.0 } else { (shared_nodes as f64) * 100.0 / (union_nodes.len() as f64) };
-
-                println!("Union Across All Templates:");
-                println!("  Unique nodes: {}", union_nodes.len());
-                println!("  Total edges: {}", union_edges);
-                println!("  Nodes shared by >= 2 templates: {} ({:.1}%)", shared_nodes, shared_pct);
-                println!("--------------------------------------------\n");
-            }
-        }
 
         // --- Convert intermediate trie to final Trie3 format ---
         crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");
