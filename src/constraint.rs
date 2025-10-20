@@ -833,6 +833,33 @@ impl GrammarConstraint {
             &initial_states,
         );
 
+        if is_debug_level_enabled(2) {
+            let num_original_tokens = llm_token_strings.len();
+            let num_classes = equivalence_classes.len();
+            crate::debug!(2, "LLM Token Equivalence Analysis:");
+            crate::debug!(2, "  - Original LLM tokens: {}", num_original_tokens);
+            crate::debug!(2, "  - Equivalence classes: {}", num_classes);
+            if num_classes > 0 {
+                crate::debug!(2, "  - Reduction factor: {:.2}x", num_original_tokens as f64 / num_classes as f64);
+            }
+
+            let mut class_size_dist: BTreeMap<usize, usize> = BTreeMap::new();
+            for string_indices in equivalence_classes.values() {
+                *class_size_dist.entry(string_indices.len()).or_insert(0) += 1;
+            }
+
+            let mut dist_str = String::from("  - Class size distribution (top 10 largest):");
+            let mut sorted_dist: Vec<_> = class_size_dist.into_iter().collect();
+            sorted_dist.sort_by_key(|&(size, _count)| std::cmp::Reverse(size));
+            for (size, count) in sorted_dist.iter().take(10) {
+                dist_str.push_str(&format!("\n    - size {}: {} classes", size, count));
+            }
+            if sorted_dist.len() > 10 {
+                dist_str.push_str("\n    - ...");
+            }
+            crate::debug!(2, "{}", dist_str);
+        }
+
         // 3. Build the mapping from original to internal IDs based on the computed classes.
         // All tokens within the same class will be mapped to the same internal ID.
         let mut original_to_internal_map = BTreeMap::new();
