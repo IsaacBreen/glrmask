@@ -105,7 +105,7 @@ impl<'a> EquivalenceAnalyzer<'a> {
             pb.inc(1);
             let mut state_sigs = BTreeMap::new();
             for &dfa_state in &relevant_states {
-                let result = self.regex.execute_from_state(suffix, dfa_state);
+                let result = self.regex.execute_from_state2(suffix, dfa_state);
 
                 let mut matches = BTreeSet::new();
                 for m in result.matches {
@@ -199,7 +199,7 @@ fn verify_equivalence_classes(
             return result.clone();
         }
 
-        let result = regex.execute_from_state(text, initial_state);
+        let result = regex.execute_from_state2(text, initial_state);
 
         let mut sig_matches = BTreeSet::new();
         for m in result.matches {

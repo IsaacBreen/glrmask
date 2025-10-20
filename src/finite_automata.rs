@@ -1336,7 +1336,7 @@ impl Regex {
         max_gid.map(|m| m + 1).unwrap_or(0)
     }
 
-    pub fn execute_from_state(&self, text: &[u8], state: usize) -> ExecutionResult {
+    pub fn execute_from_state2(&self, text: &[u8], state: usize) -> ExecutionResult {
         let mut regex_state = self.init_to_state(state);
         let matches = regex_state.execute(text);
 
@@ -1344,7 +1344,6 @@ impl Regex {
 
         ExecutionResult { matches, end_state }
     }
-
 
     pub fn init_to_state(&self, state: usize) -> RegexState {
         let done = self.dfa.states[state].transitions.is_empty();
