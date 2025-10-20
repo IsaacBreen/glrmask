@@ -24,7 +24,7 @@ pub(crate) fn normalize_path(path: Vec<IntermediateTrie3EdgeKey>) -> Vec<Interme
                 None
             }
             IntermediateTrie3EdgeKey::NoOp => None,
-            _ => Some(ek),
+            IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::Pop(_, _) => Some(ek),
         })
         .collect();
 
@@ -51,7 +51,7 @@ where
     // Only Pop and Push operations count towards path length for cycle detection.
     let is_path_edge: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool =
         |ek, _, _| {
-            matches!(ek, IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_))
+            matches!(ek, IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::CheckLLM(_))
         };
 
     let get_normalized_paths = |god, roots| {
