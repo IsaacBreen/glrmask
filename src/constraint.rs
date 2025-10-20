@@ -2631,26 +2631,28 @@ impl<'r> Precomputer1<'r> {
 
                         for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
                             if next_pos == segment_bytes.len() {
-                                // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
-                                let llm_token_id = child_vocab_node.token_id();
-                                let mut edge_bv = HybridBitset::zeros();
-                                edge_bv.insert(llm_token_id);
-                                let edge_key = Some(terminal_id);
-                                let mut inserter = EdgeInserter::new(
-                                    &self.trie1_god,
-                                    src_node_wrapper.as_arc().clone(),
-                                    edge_key,
-                                    &edge_bv & src_contextual_tokens,
-                                    |e, n| *e |= n,
-                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                    |ev, t| *ev &= &t.live_tokens,
-                                );
-                                let end_idx = {
-                                    let s0 = self.tokenizer.initial_state_id();
-                                    self.get_end_node(s0)
-                                };
-                                let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                                assert_ne!(&actual_dst, src_node_wrapper);
+                                if child_vocab_node.is_token_end() {
+                                    // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
+                                    let llm_token_id = child_vocab_node.token_id();
+                                    let mut edge_bv = HybridBitset::zeros();
+                                    edge_bv.insert(llm_token_id);
+                                    let edge_key = Some(terminal_id);
+                                    let mut inserter = EdgeInserter::new(
+                                        &self.trie1_god,
+                                        src_node_wrapper.as_arc().clone(),
+                                        edge_key,
+                                        &edge_bv & src_contextual_tokens,
+                                        |e, n| *e |= n,
+                                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                        |ev, t| *ev &= &t.live_tokens,
+                                    );
+                                    let end_idx = {
+                                        let s0 = self.tokenizer.initial_state_id();
+                                        self.get_end_node(s0)
+                                    };
+                                    let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                    assert_ne!(&actual_dst, src_node_wrapper);
+                                }
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
@@ -2714,23 +2716,25 @@ impl<'r> Precomputer1<'r> {
                     }
 
                     if let Some(end_state_val) = exec_result.end_state {
-                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
-                            let llm_token_id = child_vocab_node.token_id();
-                            let mut edge_bv = HybridBitset::zeros();
-                            edge_bv.insert(llm_token_id);
-                            let edge_key = None;
-                            let mut inserter = EdgeInserter::new(
-                                &self.trie1_god,
-                                src_node_wrapper.as_arc().clone(),
-                                edge_key,
-                                &edge_bv & src_contextual_tokens,
-                                |e, n| *e |= n,
-                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                |ev, t| *ev &= &t.live_tokens,
-                            );
-                            let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
-                            let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                            assert_ne!(&actual_dst, src_node_wrapper);
+                        if child_vocab_node.is_token_end() {
+                            for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
+                                let llm_token_id = child_vocab_node.token_id();
+                                let mut edge_bv = HybridBitset::zeros();
+                                edge_bv.insert(llm_token_id);
+                                let edge_key = None;
+                                let mut inserter = EdgeInserter::new(
+                                    &self.trie1_god,
+                                    src_node_wrapper.as_arc().clone(),
+                                    edge_key,
+                                    &edge_bv & src_contextual_tokens,
+                                    |e, n| *e |= n,
+                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                    |ev, t| *ev &= &t.live_tokens,
+                                );
+                                let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
+                                let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                assert_ne!(&actual_dst, src_node_wrapper);
+                            }
                         }
                         let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
                         for (node, tokens) in precompute_nodes_with_tokens {
