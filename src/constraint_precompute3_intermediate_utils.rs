@@ -51,7 +51,7 @@ where
     // Only Pop and Push operations count towards path length for cycle detection.
     let is_path_edge: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool =
         |ek, _, _| {
-            matches!(ek, IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::CheckLLM(_))
+            !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
         };
 
     let get_normalized_paths = |god, roots| {
