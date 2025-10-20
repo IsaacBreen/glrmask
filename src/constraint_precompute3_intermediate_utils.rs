@@ -41,6 +41,7 @@ pub fn are_intermediate_trie3_graphs_equal<F>(
     god_a: &IntermediateTrie3GodWrapper,
     root_b: IntermediatePrecomputeNode3Index,
     god_b: &IntermediateTrie3GodWrapper,
+    is_end: F,
     max_path_length: usize,
 ) -> bool
 where
