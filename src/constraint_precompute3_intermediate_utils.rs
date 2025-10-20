@@ -6,7 +6,7 @@ use crate::{
     },
     datastructures::trie::Trie,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
@@ -48,7 +48,7 @@ pub fn are_intermediate_trie3_graphs_equal<F>(
 where
     F: Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
 {
-    // Only Pop and Push operations count towards path length for cycle detection.
+    // Count all edges except NoOp towards the max_path_length bound. This keeps CheckLLM cycles in check.
     let is_path_edge: fn(&IntermediateTrie3EdgeKey, &(), IntermediatePrecomputeNode3Index) -> bool =
         |ek, _, _| {
             !matches!(ek, IntermediateTrie3EdgeKey::NoOp)
@@ -64,37 +64,100 @@ where
     get_normalized_paths(god_a, roots_a) == get_normalized_paths(god_b, roots_b)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct NodeSignature {
-    end: bool,
-    // For each edge key, store the sorted list of child colors.
-    edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)>,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct NormalizedNodeSignature {
+    // End-frontiers reachable via only NoOp/CheckLLM from this node.
+    // None => no CheckLLM seen; Some(bv) => normalized CheckLLM(bv) precedes termination.
+    end_frontiers: Vec<Option<LLMTokenBV>>,
+    // First non-(NoOp|CheckLLM) frontier ops (Push/Pop), with optional accumulated CheckLLM,
+    // mapped to the sorted multiset of child colors behind that op.
+    edges: Vec<(IntermediateTrie3EdgeKey, Option<LLMTokenBV>, Vec<usize>)>,
 }
 
-fn build_node_signature(
+fn build_normalized_node_signature(
     idx: IntermediatePrecomputeNode3Index,
     god: &IntermediateTrie3GodWrapper,
     color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
-) -> NodeSignature {
-    let guard = idx.read(god).expect("Invalid index during signature build");
-    let end = guard.value.end;
+) -> NormalizedNodeSignature {
+    // BFS over (node, accumulated_check) states following only NoOp and CheckLLM,
+    // emitting frontiers on first Push/Pop or "end" nodes.
+    let mut end_frontiers: BTreeSet<Option<LLMTokenBV>> = BTreeSet::new();
+    let mut frontier: BTreeMap<(IntermediateTrie3EdgeKey, Option<LLMTokenBV>), Vec<usize>> =
+        BTreeMap::new();
 
-    // Collect children grouped by edge key, mapped to their current colors.
-    let mut edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)> = Vec::new();
-    for (ek, dsts) in guard.children().iter() {
-        let mut cols: Vec<usize> = dsts
-            .keys()
-            .map(|d| *color_map.get(d).unwrap_or(&0usize))
-            .collect();
-        cols.sort_unstable();
-        edges.push((ek.clone(), cols));
+    let mut visited: BTreeMap<IntermediatePrecomputeNode3Index, BTreeSet<Option<LLMTokenBV>>> =
+        BTreeMap::new();
+    let mut q: VecDeque<(IntermediatePrecomputeNode3Index, Option<LLMTokenBV>)> = VecDeque::new();
+
+    visited.entry(idx).or_default().insert(None);
+    q.push_back((idx, None));
+
+    while let Some((cur, acc_opt)) = q.pop_front() {
+        let guard = cur
+            .read(god)
+            .unwrap_or_else(|| panic!("Invalid index during normalized signature build: {:?}", cur));
+
+        // If we can terminate here (before any Push/Pop), record an end-frontier with current accumulated check.
+        if guard.value.end {
+            end_frontiers.insert(acc_opt.clone());
+        }
+
+        for (ek, dsts) in guard.children().iter() {
+            match ek {
+                IntermediateTrie3EdgeKey::NoOp => {
+                    for (dst, _ev) in dsts.iter() {
+                        let seen = visited.entry(*dst).or_default();
+                        if seen.insert(acc_opt.clone()) {
+                            q.push_back((*dst, acc_opt.clone()));
+                        }
+                    }
+                }
+                IntermediateTrie3EdgeKey::CheckLLM(bv) => {
+                    // Accumulate CheckLLM by intersection; None means "no check yet".
+                    let new_acc_opt = if let Some(ref a) = acc_opt {
+                        let mut m = a.clone();
+                        m &= bv.clone();
+                        Some(m)
+                    } else {
+                        Some(bv.clone())
+                    };
+                    for (dst, _ev) in dsts.iter() {
+                        let seen = visited.entry(*dst).or_default();
+                        if seen.insert(new_acc_opt.clone()) {
+                            q.push_back((*dst, new_acc_opt.clone()));
+                        }
+                    }
+                }
+                // First non-(NoOp|CheckLLM) operation => frontier edge.
+                IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::Pop(_, _) => {
+                    // Collect colors of destinations reached via this (op, acc_opt).
+                    let key = (ek.clone(), acc_opt.clone());
+                    let entry = frontier.entry(key).or_default();
+                    for (dst, _ev) in dsts.iter() {
+                        entry.push(*color_map.get(dst).unwrap_or(&0usize));
+                    }
+                }
+            }
+        }
     }
-    edges.sort(); // ensure deterministic order
 
-    NodeSignature { end, edges }
+    // Normalize frontier child color buckets.
+    let mut edges: Vec<(IntermediateTrie3EdgeKey, Option<LLMTokenBV>, Vec<usize>)> = Vec::new();
+    for ((ek, acc), mut cols) in frontier {
+        cols.sort_unstable();
+        edges.push((ek, acc, cols));
+    }
+    edges.sort(); // deterministic
+
+    let end_frontiers: Vec<Option<LLMTokenBV>> = end_frontiers.into_iter().collect();
+
+    NormalizedNodeSignature {
+        end_frontiers,
+        edges,
+    }
 }
 
-fn wl_color_refine(
+fn wl_color_refine_normalized(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
 ) -> (BTreeMap<IntermediatePrecomputeNode3Index, usize>, usize, usize, usize) {
@@ -118,25 +181,25 @@ fn wl_color_refine(
         edge_count
     );
 
-    // Initial colors: separate by 'end' flag only (0 = not end, 1 = end).
+    // Initial colors: coarse (all zero). The normalized frontier signature will refine it rapidly.
     let mut colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
     for idx in &reachable {
-        let end = idx.read(god).map(|g| g.value.end).unwrap_or(false);
-        colors.insert(*idx, if end { 1 } else { 0 });
+        colors.insert(*idx, 0);
     }
 
     // Iteratively refine until stable.
     let mut iter = 0usize;
     loop {
         iter += 1;
-        let mut sigs: Vec<(IntermediatePrecomputeNode3Index, NodeSignature)> = Vec::with_capacity(reachable.len());
+        let mut sigs: Vec<(IntermediatePrecomputeNode3Index, NormalizedNodeSignature)> =
+            Vec::with_capacity(reachable.len());
         for idx in &reachable {
-            let sig = build_node_signature(*idx, god, &colors);
+            let sig = build_normalized_node_signature(*idx, god, &colors);
             sigs.push((*idx, sig));
         }
 
         // Intern signatures to compact color IDs.
-        let mut intern: BTreeMap<NodeSignature, usize> = BTreeMap::new();
+        let mut intern: BTreeMap<NormalizedNodeSignature, usize> = BTreeMap::new();
         let mut next_color_id: usize = 0;
         let mut new_colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
 
@@ -161,7 +224,7 @@ fn wl_color_refine(
         }
 
         println!(
-            "[optimize_intermediate_trie3] WL iteration {}: classes={}, changed={}",
+            "[optimize_intermediate_trie3] Normalized WL iteration {}: classes={}, changed={}",
             iter,
             new_colors.values().copied().collect::<HashSet<_>>().len(),
             changed
@@ -283,8 +346,8 @@ pub fn optimize_intermediate_trie3(
         BTreeMap::default();
 
     // Pass 1: color-refinement-based structural deduplication with progress reporting.
-    println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
-    let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
+    println!("[optimize_intermediate_trie3] Starting normalized-path deduplication (WL color refinement)...");
+    let (colors, iters, classes, total_nodes) = wl_color_refine_normalized(roots, god);
     println!(
         "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
         iters, classes, total_nodes
@@ -306,6 +369,50 @@ pub fn optimize_intermediate_trie3(
     // assert!(
     //     are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
     //     "Optimization failed to preserve graph equivalence for all roots"
+    // );
+
+    node_map
+}
+
+/// Perform normalized-path-aware optimization across the union of all templates.
+/// This enables maximal sharing across templates in the same arena.
+pub fn optimize_intermediate_trie3_templates_global(
+    all_roots: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+    is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
+) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
+    let original_god = god.deep_clone();
+    let original_roots = all_roots.to_vec();
+
+    println!(
+        "[optimize_intermediate_trie3] Global optimization over {} roots",
+        all_roots.len()
+    );
+
+    // Global normalized WL refinement.
+    let (colors, iters, classes, total_nodes) = wl_color_refine_normalized(all_roots, god);
+    println!(
+        "[optimize_intermediate_trie3] Global refinement: iterations={}, classes={}, nodes={}",
+        iters, classes, total_nodes
+    );
+
+    // Canonicalize globally.
+    let mut node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
+        BTreeMap::default();
+    let (merges, edges_rewired) = rewire_to_canonical(&colors, all_roots, god, &mut node_map);
+    println!(
+        "[optimize_intermediate_trie3] Global rewiring: merges={}, edges_rewired={}",
+        merges, edges_rewired
+    );
+
+    // Post-check (keep ready if you want to assert equivalence globally).
+    let new_roots: Vec<_> = original_roots
+        .iter()
+        .map(|r| *node_map.get(r).unwrap_or(r))
+        .collect();
+    // assert!(
+    //     are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
+    //     "Global optimization failed to preserve graph equivalence"
     // );
 
     node_map
