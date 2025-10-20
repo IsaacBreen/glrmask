@@ -180,7 +180,72 @@ fn verify_equivalence_classes(
 
     let mut brute_force_classes: BTreeMap<Vec<Vec<Match>>, Vec<usize>> = BTreeMap::new();
 
-    todo!();
+    // Using a nested function for recursion with memoization to perform brute-force tokenization.
+    fn tokenize_recursive(
+        regex: &Regex,
+        text: &[u8],
+        initial_state: usize,
+        memo: &mut HashMap<(Vec<u8>, usize), Vec<Match>>,
+    ) -> Vec<Match> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        let key = (text.to_vec(), initial_state);
+        if let Some(result) = memo.get(&key) {
+            return result.clone();
+        }
+
+        let mut rs = regex.init_to_state(initial_state);
+        rs.execute(text);
+
+        let result = if let Some(m) = rs.get_greedy_match() {
+            let match_len = m.position;
+            if match_len == 0 {
+                // Avoid infinite recursion on zero-length matches.
+                // This string cannot be tokenized further from this state.
+                Vec::new()
+            } else {
+                let mut matches = vec![Match { group_id: m.group_id, position: match_len }];
+                let remainder = &text[match_len..];
+                // Subsequent tokens always start from the DFA's main start state.
+                let rest_of_matches =
+                    tokenize_recursive(regex, remainder, regex.dfa.start_state, memo);
+
+                for mut rest_m in rest_of_matches {
+                    rest_m.position += match_len;
+                    matches.push(rest_m);
+                }
+                matches
+            }
+        } else {
+            Vec::new()
+        };
+
+        memo.insert(key, result.clone());
+        result
+    }
+
+    let mut memo: HashMap<(Vec<u8>, usize), Vec<Match>> = HashMap::new();
+
+    for (i, s) in strings.iter().enumerate() {
+        let mut signature_vector = Vec::with_capacity(initial_states.len());
+        for &initial_state in initial_states {
+            let matches = tokenize_recursive(regex, s, initial_state, &mut memo);
+            signature_vector.push(matches);
+        }
+        brute_force_classes.entry(signature_vector).or_default().push(i);
+    }
+
+    // Convert both computed and brute-force classes into partitions (sets of sets of indices) for comparison.
+    let computed_partitions: BTreeSet<BTreeSet<usize>> = computed_classes
+        .values()
+        .map(|class| class.iter().cloned().collect())
+        .collect();
+
+    let brute_force_partitions: BTreeSet<BTreeSet<usize>> = brute_force_classes
+        .values()
+        .map(|class| class.iter().cloned().collect())
+        .collect();
 
     if computed_partitions == brute_force_partitions {
         println!("Equivalence class verification successful!");
