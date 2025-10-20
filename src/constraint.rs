@@ -2487,9 +2487,16 @@ impl<'r> Precomputer1<'r> {
         }
 
         let leaf_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
-        let end_nodes = tokenizer.iter_states()
-            .map(|tsid| (tsid, leaf_node.clone()))
-            .collect();
+        let mut end_nodes = BTreeMap::new();
+        let all_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
+        for tsid in tokenizer.iter_states() {
+            let end_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
+            let accessible_terminals = tokenizer.tokens_accessible_from_state(tsid);
+            for terminal_id in accessible_terminals {
+                trie1_god.insert_edge_simple(end_node, leaf_node.clone(), Some(terminal_id), all_tokens.clone());
+            }
+        end_nodes.insert(tsid, end_node);
+        }
 
         crate::debug!(2, "Created trie1 leaf node for {} tokenizer states", tokenizer.iter_states().count());
 
