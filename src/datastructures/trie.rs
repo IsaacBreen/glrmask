@@ -2628,15 +2628,6 @@ impl<T> Arena<T> {
             .collect()
     }
 
-    /// Acquires the write lock and executes a closure with mutable access to ArenaInner.
-    pub fn with_write_lock<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut ArenaInner<T>) -> R
-    {
-        let mut guard = self.inner.write();
-        f(&mut *guard)
-    }
-
     pub fn deep_clone(&self) -> Self
     where
         T: Clone,
@@ -2727,35 +2718,6 @@ impl<T: Ord> MergeableEdgeValue for BTreeSet<T> {
     }
 }
 
-impl<EK, EV, T> ArenaInner<Trie<EK, EV, T>>
-where
-    EK: Ord + Clone,
-    EV: Clone + MergeableEdgeValue,
-{
-    /// Directly inserts or merges an edge without acquiring/releasing the RwLock.
-    /// Requires the Arena's write lock to be held externally.
-    pub fn insert_edge_direct(
-        &mut self,
-        src: Trie2Index,
-        dst: Trie2Index,
-        edge_key: EK,
-        edge_value: EV,
-    ) {
-        if let Some(src_node) = self.values[src.as_usize()].as_mut() {
-            src_node.children.entry(edge_key).or_default()
-                .entry(dst)
-                .and_modify(|ev| ev.merge(edge_value.clone()))
-                .or_insert(edge_value);
-        }
-    }
-
-    /// Directly gets a mutable reference to a node without acquiring/releasing the RwLock.
-    /// Requires the Arena's write lock to be held externally.
-    pub fn get_node_mut(&mut self, idx: Trie2Index) -> Option<&mut Trie<EK, EV, T>> {
-        self.values[idx.as_usize()].as_mut()
-    }
-}
-
 impl<EK, EV, T> Arena<Trie<EK, EV, T>>
 where
     EK: Ord + Clone,
@@ -2776,6 +2738,29 @@ where
                 .entry(dst)
                 .and_modify(|ev| ev.merge(edge_value.clone()))
                 .or_insert(edge_value);
+        }
+    }
+    /// Inserts multiple edges from a single `src` node.
+    /// This is more efficient than calling `insert_edge_simple` multiple times as it
+    /// only acquires one write lock on the source node.
+    pub fn insert_edges_bulk_per_src<I, J>(
+        &self,
+        src: Trie2Index,
+        per_key: I,
+    )
+    where
+        I: IntoIterator<Item = (EK, J)>,
+        J: IntoIterator<Item = (Trie2Index, EV)>,
+    {
+        if let Some(mut src_guard) = src.write(self) {
+            for (key, dsts) in per_key {
+                let dst_map = src_guard.children.entry(key).or_default();
+                for (dst, val) in dsts {
+                    dst_map.entry(dst)
+                        .and_modify(|ev| ev.merge(val.clone()))
+                        .or_insert(val);
+                }
+            }
         }
     }
 

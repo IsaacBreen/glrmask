@@ -1,11 +1,67 @@
 local_system:
   attached_files:
+    - Cargo.toml
     - src/datastructures/trie.rs
     - src/datastructures/hybrid_bitset.rs
     - src/constraint.rs
   conversation_file:
   compile_command:
   initial_file_contents:
+    Cargo.toml: |
+      # This line needs to come before anything else in Cargo.toml
+      #cargo-features = ["codegen-backend"]
+
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2021"
+
+      [dependencies]
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      clap = { version = "4.5.4", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      indicatif = "0.17.11"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.3.0" }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      profiler_macro = { path = "profiler_macro" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+      similar = "2.7.0"
+      pretty_assertions = "1.4.1"
+      once_cell = "1.21.3"
+      lru = "0.16.0"
+      parking_lot = "0.12.5"
+      flate2 = "1.1.2"
+      im = "15.1.0"
+      indoc = "2.0.6"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      #codegen-backend = "cranelift"
+      debug = true
+      #opt-level = 1
+
+      [features]
+      no_pbar = []
+      pbar = []
+
+      [[bin]]
+      name = "grammar-compiler"
+      path = "src/bin/grammar_compiler.rs"
     src/datastructures/trie.rs: |+
       use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
       use std::cmp::Ordering;
@@ -8506,6 +8562,62 @@ local_system:
       /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
       pub type TerminalInfo = HybridL2Bitset;
   prev_file_contents:
+    Cargo.toml: |
+      # This line needs to come before anything else in Cargo.toml
+      #cargo-features = ["codegen-backend"]
+
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2021"
+
+      [dependencies]
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      clap = { version = "4.5.4", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      indicatif = "0.17.11"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.3.0" }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      profiler_macro = { path = "profiler_macro" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+      similar = "2.7.0"
+      pretty_assertions = "1.4.1"
+      once_cell = "1.21.3"
+      lru = "0.16.0"
+      parking_lot = "0.12.5"
+      flate2 = "1.1.2"
+      im = "15.1.0"
+      indoc = "2.0.6"
+      rustc-hash = "1.1.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      #codegen-backend = "cranelift"
+      debug = true
+      #opt-level = 1
+
+      [features]
+      no_pbar = []
+      pbar = []
+
+      [[bin]]
+      name = "grammar-compiler"
+      path = "src/bin/grammar_compiler.rs"
     src/datastructures/trie.rs: |+
       use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
       use std::cmp::Ordering;
@@ -11249,6 +11361,29 @@ local_system:
                       .or_insert(edge_value);
               }
           }
+          /// Inserts multiple edges from a single `src` node.
+          /// This is more efficient than calling `insert_edge_simple` multiple times as it
+          /// only acquires one write lock on the source node.
+          pub fn insert_edges_bulk_per_src<I, J>(
+              &self,
+              src: Trie2Index,
+              per_key: I,
+          )
+          where
+              I: IntoIterator<Item = (EK, J)>,
+              J: IntoIterator<Item = (Trie2Index, EV)>,
+          {
+              if let Some(mut src_guard) = src.write(self) {
+                  for (key, dsts) in per_key {
+                      let dst_map = src_guard.children.entry(key).or_default();
+                      for (dst, val) in dsts {
+                          dst_map.entry(dst)
+                              .and_modify(|ev| ev.merge(val.clone()))
+                              .or_insert(val);
+                      }
+                  }
+              }
+          }
 
           /// Removes the edge from `src` to `dst` with the given `edge_key`.
           ///
@@ -12919,6 +13054,7 @@ local_system:
       use std::io::{Read, Write};
       use std::iter::FromIterator;
       use std::ops::{BitAnd, Sub};
+      use rustc_hash::FxHashMap;
 
       const MERGE_THRESHOLD: usize = 20;
       const DEDUP_START_ID: usize = 0;
@@ -15438,7 +15574,6 @@ local_system:
               assoc_by_state: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
           ) {
               self.pb.inc(1);
-
               for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
                   let mut exec_memo = HashMap::new();
                   let mut work_queue: BTreeMap<
@@ -15459,8 +15594,15 @@ local_system:
                   };
 
                   // === OPTIMIZATION 2: Batch all edge insertions and updates ===
-                  let mut pending_edges: Vec<(PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>, HybridBitset)> = Vec::new();
-                  let mut pending_live_token_updates: HashMap<PrecomputeNode1Index, HybridBitset> = HashMap::new();
+                  #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+                  struct EdgeKey {
+                      src: PrecomputeNode1Index,
+                      key: Option<GrammarTokenID>,
+                      dst: PrecomputeNode1Index,
+                  }
+
+                  let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
+                  let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
 
                   // === OPTIMIZATION 3: Pre-compute child_vocab reachable tokens (used frequently) ===
                   let child_reachable = child_vocab_node.reachable_token_ids();
@@ -15523,7 +15665,10 @@ local_system:
 
                                                           if !final_edge_bv.is_empty() {
                                                               let end_idx = self.get_leaf_node();
-                                                              pending_edges.push((src_node_idx.clone(), end_idx, Some(terminal_id), final_edge_bv.clone()));
+                                                              let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
+                                                              pending_edges.entry(k)
+                                                                  .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
+                                                                  .or_insert(final_edge_bv.clone());
                                                               pending_live_token_updates.entry(end_idx)
                                                                   .or_insert_with(HybridBitset::zeros)
                                                                   .bitor_assign(&final_edge_bv);
@@ -15590,7 +15735,10 @@ local_system:
                                                       })
                                                   });
 
-                                                  pending_edges.push((src_node_idx, result_node.clone(), Some(terminal_id), edge_bv_for_inserter.clone()));
+                                                  let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
+                                                  pending_edges.entry(k)
+                                                      .and_modify(|bv| bv.bitor_assign(&edge_bv_for_inserter))
+                                                      .or_insert(edge_bv_for_inserter.clone());
                                                   pending_live_token_updates.entry(result_node.clone())
                                                       .or_insert_with(HybridBitset::zeros)
                                                       .bitor_assign(&edge_bv_for_inserter);
@@ -15626,7 +15774,10 @@ local_system:
                                               if !final_edge_bv.is_empty() {
                                                   let end_idx = self.get_leaf_node();
                                                   for terminal_id in &accessible_terminals {
-                                                      pending_edges.push((src_node_idx.clone(), end_idx, Some(*terminal_id), final_edge_bv.clone()));
+                                                      let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+                                                      pending_edges.entry(k)
+                                                          .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
+                                                          .or_insert(final_edge_bv.clone());
                                                       pending_live_token_updates.entry(end_idx)
                                                           .or_insert_with(HybridBitset::zeros)
                                                           .bitor_assign(&final_edge_bv);
@@ -15647,11 +15798,23 @@ local_system:
 
                   // === OPTIMIZATION 5: Batch write all edges and updates ===
                   timeit!("dfs_batch_write", {
-                      for (src, dst, key, bv) in pending_edges {
+                      // Group by source node to minimize locks
+                      let mut by_src: FxHashMap<PrecomputeNode1Index, FxHashMap<Option<GrammarTokenID>, Vec<(PrecomputeNode1Index, HybridBitset)>>> = FxHashMap::default();
+                      for (EdgeKey { src, key, dst }, bv) in pending_edges.into_iter() {
+                          by_src.entry(src)
+                                .or_default()
+                                .entry(key)
+                                .or_default()
+                                .push((dst, bv));
+                      }
+
+                      // One lock per src node, update all its edges
+                      for (src, per_key) in by_src.into_iter() {
                           timeit!("dfs_batch_write_insert_edge_simple", {
-                              self.trie1_god.insert_edge_simple(src, dst, key, bv);
+                              self.trie1_god.insert_edges_bulk_per_src(src, per_key);
                           });
                       }
+
 
                       for (node_idx, live_tokens) in pending_live_token_updates {
                           timeit!("dfs_batch_write_update_live_tokens", {
@@ -17005,7 +17168,7 @@ local_system:
       pub(crate) type TerminalBV = HybridBitset;
       /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
       pub type TerminalInfo = HybridL2Bitset;
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
   default_end_line:
@@ -17016,7 +17179,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -17047,6 +17210,66 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
+  - user: |-
+      ```text "Cargo.toml"
+      # This line needs to come before anything else in Cargo.toml
+      #cargo-features = ["codegen-backend"]
+
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2021"
+
+      [dependencies]
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      clap = { version = "4.5.4", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      indicatif = "0.17.11"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.3.0" }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      profiler_macro = { path = "profiler_macro" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+      similar = "2.7.0"
+      pretty_assertions = "1.4.1"
+      once_cell = "1.21.3"
+      lru = "0.16.0"
+      parking_lot = "0.12.5"
+      flate2 = "1.1.2"
+      im = "15.1.0"
+      indoc = "2.0.6"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      #codegen-backend = "cranelift"
+      debug = true
+      #opt-level = 1
+
+      [features]
+      no_pbar = []
+      pbar = []
+
+      [[bin]]
+      name = "grammar-compiler"
+      path = "src/bin/grammar_compiler.rs"
+
+      ```
+    metadata:
+      filename: Cargo.toml
   - user: |-
       ```rust "src/datastructures/trie.rs"
       use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -25561,262 +25784,221 @@ messages:
     metadata:
       filename: src/constraint.rs
   - user: |-
-      `````ad-attachment
-      collapse: closed
-      title: think
+      Short answer: Your profiler already tells you where almost all the time is going. You make 4,484,741 calls to insert_edge_simple to end up with only 3,426 unique edges. That is roughly 1,300 duplicate insert/merge calls for every final edge. The fastest way to speed this up by ~1000x is to stop calling insert_edge_simple for each duplicate. Deduplicate and aggregate edge updates in-memory, then write them back to the trie in one pass, ideally with one lock per source node. Everything else is secondary.
 
-      Looking at this code, the main bottleneck is clearly in `dfs_batch_write_insert_edge_simple` which takes 82.947s out of the total 83.802s in batch writes. That's where we need to focus.
+      What’s killing you
+      - dfs_batch_write_insert_edge_simple: 82.947s, 4,484,741 hits
+      - Final graph has Total Edges: 3426, all “Some-key”
+      - That means > 99.9% of the time spent in insert_edge_simple is merging duplicates that collapse into the same (src, key, dst) edge with a bitset OR.
 
-      Let me analyze what's happening:
-      1. We have 4,484,741 calls to `insert_edge_simple`
-      2. Each call acquires a write lock on the arena
-      3. This means we're acquiring 4.5 million write locks
+      The plan
+      1) Replace pending_edges Vec with an aggregated map keyed by (src, key, dst), merging LLMToken bitsets in-memory as you generate them. This collapses millions of identical "edge insert + merge" into one merge per unique edge.
 
-      The problem is clear: even though we "batched" the operations into a Vec, we're still calling `insert_edge_simple` in a loop, which acquires a write lock for EACH edge insertion. This completely defeats the purpose of batching!
+      2) When flushing, group by src and perform “bulk” updates per source node. Acquire the write lock once per source node and update all of its edges. With 423 unique nodes, this is at most 423 lock acquisitions rather than millions.
 
-      Looking at the `insert_edge_simple` implementation:
-      ```rust
-      pub fn insert_edge_simple(
-          &self,
-          src: Trie2Index,
-          dst: Trie2Index,
-          edge_key: EK,
-          edge_value: EV,
-      ) {
-          if let Some(mut src_guard) = src.write(self) {
-              src_guard.children.entry(edge_key).or_default()
-                  .entry(dst)
-                  .and_modify(|ev| ev.merge(edge_value.clone()))
-                  .or_insert(edge_value);
-          }
-      }
-      ```
+      3) Optionally, expose a bulk insert API in the arena/trie that takes all the edges for a source in one call, but you can do it manually using src.write(&arena) once per src and updating the per-key child map.
 
-      Each call does:
-      1. Acquire write lock
-      2. Update one edge
-      3. Release write lock
+      4) Do the same aggregation for live-token updates (already almost free at 110ms, but it becomes trivial when flushed once per node).
 
-      This is terrible for performance when we have millions of edges.
+      Doing (1)+(2) removes the hot 83-second block almost entirely. In practice it will go down to low milliseconds.
 
-      ## Solution Approaches:
+      Concrete changes
 
-      ### 1. **True Batching - Single Lock Acquisition**
-      Instead of calling `insert_edge_simple` in a loop, we need to:
-      - Acquire the write lock ONCE
-      - Insert ALL edges
-      - Release the lock
+      A. Edge aggregation
+      Replace:
+      - pending_edges: Vec<(PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>, HybridBitset)>
+      with:
+      - a hash map keyed by (src, key, dst) and a bitset value you OR into. Use a fast hash map (rustc_hash::FxHashMap) to keep this cheap.
 
-      We need a method like:
-      ```rust
-      pub fn insert_edges_batch(
-          &self,
-          edges: Vec<(Trie2Index, Trie2Index, EK, EV)>
+      Example:
 
+      Add to Cargo.toml:
+        rustc-hash = "1.1"
 
-      ) {
-          let mut guard = self.inner.write();
-          for (src, dst, key, value) in edges {
-              if let Some(src_node) = guard.values[src.index.as_usize()].as_mut() {
-                  src_node.children.entry(key).or_default()
-                      .entry(dst)
-                      .and_modify(|ev| ev.merge(value.clone()))
-                      .or_insert(value);
-              }
-          }
-      }
-      ```
+      In Precomputer1::dfs, near “// === OPTIMIZATION 2: Batch all edge insertions and updates ===”:
 
-      I see a potential optimization strategy that groups edges by source node to reduce cache misses and improve memory access patterns. This approach would minimize lock contention and improve overall performance by reducing the number of write operations and improving locality of reference.
+      Replace current pending structure with:
 
-      The key insight is to restructure the batching mechanism to minimize lock overhead and optimize memory access, which could dramatically reduce the total execution time from 82.947 seconds to potentially just a few seconds.
+        use rustc_hash::FxHashMap;
 
-      By creating a grouped approach that first collects edges by their source node and then performs a single batch insertion, we can significantly streamline the edge insertion process. This method allows for more efficient memory usage and reduces the computational complexity of repeatedly acquiring and releasing locks.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        struct EdgeKey {
+            src: PrecomputeNode1Index,
+            key: Option<GrammarTokenID>,
+            dst: PrecomputeNode1Index,
+        }
 
-      The proposed implementation involves creating a hash map that groups edges by their source node index, which allows for a more compact and cache-friendly insertion strategy. This approach transforms the current linear insertion process into a more structured, batch-oriented method that can leverage better memory access patterns.
+        let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
+        let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
 
-      `````
+      When you “push” an edge, instead of:
+        pending_edges.push((src, dst, Some(terminal_id), edge_bv.clone()));
 
-      Looking at the profiling data, **82.947s out of ~95s total is spent in `dfs_batch_write_insert_edge_simple`** with **4.5 million calls**. The problem is clear: despite "batching" edges into a `Vec`, you're still acquiring and releasing a write lock **4.5 million times** (once per edge). This completely defeats the purpose of batching.
+      do:
+        let k = EdgeKey { src: src.clone(), key: Some(terminal_id), dst: dst.clone() };
+        pending_edges.entry(k)
+            .and_modify(|bv| bv.bitor_assign(&edge_bv_for_inserter))
+            .or_insert(edge_bv_for_inserter.clone());
 
-      ## Primary Fix: True Batch Writing (~8-10x speedup)
+      Same for the leaf edges (end-of-segment and continuation paths).
 
-      The solution is to acquire the write lock **once** per vocab node (~5,500 times) instead of once per edge (4.5M times).
+      B. Flush aggregated edges in one shot per source node
+      Replace the current batch write loop:
 
-      ### Step 1: Add helpers to `trie.rs`
+        for (src, dst, key, bv) in pending_edges {
+            self.trie1_god.insert_edge_simple(src, dst, key, bv);
+        }
 
-      ```rust
-      impl Trie2Index {
-          pub(crate) fn index_usize(self) -> usize {
-              self.index.as_usize()
-          }
-      }
+      with a per-src grouped flush that acquires the write lock once per src:
 
-      impl<T> Arena<T> {
-          pub fn with_write_lock<F, R>(&self, f: F) -> R
-          where
-              F: FnOnce(&mut ArenaInner<T>) -> R
-          {
-              let mut guard = self.inner.write();
-              f(&mut *guard)
-          }
-      }
+        // Group by source node to minimize locks
+        let mut by_src: FxHashMap<PrecomputeNode1Index, FxHashMap<Option<GrammarTokenID>, Vec<(PrecomputeNode1Index, HybridBitset)>>> = FxHashMap::default();
+        for (EdgeKey { src, key, dst }, bv) in pending_edges.into_iter() {
+            by_src.entry(src)
+                  .or_default()
+                  .entry(key)
+                  .or_default()
+                  .push((dst, bv));
+        }
 
-      impl<EK, EV, T> ArenaInner<Trie<EK, EV, T>>
+        // One lock per src node, update all its edges
+        for (src, per_key) in by_src.into_iter() {
+            if let Some(mut src_guard) = src.write(&self.trie1_god) {
+                for (key, items) in per_key {
+                    let dst_map = src_guard.children.entry(key).or_default();
+                    for (dst, bv) in items {
+                        dst_map.entry(dst)
+                               .and_modify(|existing_bv| existing_bv.merge(bv.clone()))
+                               .or_insert(bv);
+                    }
+                }
+            }
+        }
+
+      The MergeableEdgeValue::merge in your Trie impl will keep doing the right thing, but now it happens exactly once per unique edge, not millions of times.
+
+      C. Aggregate live token updates too (minor)
+      Instead of writing them one-by-one, just OR-accumulate per node (you already do), then write once per node (you already do). Keeping the FxHashMap and doing the updates after the edge flush is perfect.
+
+      D. Optional: expose a real bulk-API in Arena/Trie for less overhead
+      You can create a helper on your arena/trie to apply all dst updates for a given src with a single write lock:
+
+      impl<EK, EV, T> Arena<Trie<EK, EV, T>>
       where
           EK: Ord + Clone,
           EV: Clone + MergeableEdgeValue,
       {
-          pub fn insert_edge_direct(
-              &mut self,
+          pub fn insert_edges_bulk_per_src<I, J>(
+              &self,
               src: Trie2Index,
-              dst: Trie2Index,
-              edge_key: EK,
-              edge_value: EV,
-          ) {
-              if let Some(src_node) = self.values[src.index_usize()].as_mut() {
-                  src_node.children.entry(edge_key).or_default()
-                      .entry(dst)
-                      .and_modify(|ev| ev.merge(edge_value.clone()))
-                      .or_insert(edge_value);
-              }
-          }
-          
-          pub fn get_node_mut(&mut self, idx: Trie2Index) -> Option<&mut Trie<EK, EV, T>> {
-              self.values[idx.index_usize()].as_mut()
-          }
-      }
-      ```
-
-      ### Step 2: Replace batch write section in `constraint.rs`
-
-      Replace this:
-      ```rust
-      timeit!("dfs_batch_write", {
-          for (src, dst, key, bv) in pending_edges {
-              timeit!("dfs_batch_write_insert_edge_simple", {
-                  self.trie1_god.insert_edge_simple(src, dst, key, bv);
-              });
-          }
-
-          for (node_idx, live_tokens) in pending_live_token_updates {
-              timeit!("dfs_batch_write_update_live_tokens", {
-                  if let Some(mut guard) = node_idx.write(&self.trie1_god) {
-                      guard.value.live_tokens |= &live_tokens;
-                  }
-              });
-          }
-      });
-      ```
-
-      With this:
-      ```rust
-      timeit!("dfs_batch_write", {
-          self.trie1_god.with_write_lock(|arena_inner| {
-              for (src, dst, key, bv) in pending_edges {
-                  arena_inner.insert_edge_direct(src, dst, key, bv);
-              }
-
-              for (node_idx, live_tokens) in pending_live_token_updates {
-                  if let Some(node) = arena_inner.get_node_mut(node_idx) {
-                      node.value.live_tokens |= &live_tokens;
+              per_key: I,
+          )
+          where
+              I: IntoIterator<Item = (EK, J)>,
+              J: IntoIterator<Item = (Trie2Index, EV)>,
+          {
+              if let Some(mut src_guard) = src.write(self) {
+                  for (key, dsts) in per_key {
+                      let dst_map = src_guard.children.entry(key).or_default();
+                      for (dst, val) in dsts {
+                          dst_map.entry(dst)
+                              .and_modify(|ev| ev.merge(val.clone()))
+                              .or_insert(val);
+                      }
                   }
               }
-          });
-      });
-      ```
-
-      This should reduce the batch write time from **83s to ~1-2s**.
-
-      ---
-
-      ## Secondary Optimizations (for additional speedup)
-
-      ### 2. Pre-allocate collections
-
-      ```rust
-      // At the start of the edge loop
-      let mut pending_edges = Vec::with_capacity(2048);  // Tune based on average
-      let mut pending_live_token_updates = HashMap::with_capacity(256);
-      ```
-
-      ### 3. Parallelize across vocab children
-
-      Since vocab nodes are independent, process them in parallel:
-
-      ```rust
-      use rayon::prelude::*;
-
-      // Replace the sequential for loop:
-      vocab_node.iter_children().par_bridge().for_each(|(segment_bytes, child_vocab_node)| {
-          // ... existing logic ...
-          // Note: You'll need to make the arena thread-safe or use a different strategy
-      });
-      ```
-
-      For this to work safely with the current architecture, you'd need either:
-      - Per-thread trie builders that merge at the end
-      - A lock-free concurrent hashmap for the trie
-      - Or keep sequential but parallelize the expensive tokenizer execution
-
-      ### 4. Reduce node_cache lookups
-
-      The `get_node_data` function is called repeatedly. Cache more aggressively:
-
-      ```rust
-      // Before the loops, prefetch all source nodes
-      let src_nodes_data: HashMap<_, _> = precompute_nodes_with_tokens
-          .keys()
-          .map(|node| (node.clone(), get_node_data(&mut node_cache, node)))
-          .collect();
-
-      // Then use cached data directly
-      for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
-          let (src_live_tokens, _) = &src_nodes_data[src_node_wrapper];
-          // ...
-      }
-      ```
-
-      ### 5. Avoid redundant clones
-
-      ```rust
-      // Instead of cloning HybridBitsets repeatedly, use references:
-      let edge_bv_for_inserter = &(&edge_bv & src_contextual_tokens) & &src_live_tokens;
-      if edge_bv_for_inserter.is_empty() { continue; }
-
-      // Only clone when actually inserting
-      pending_edges.push((src_node_idx.clone(), result_node.clone(), Some(terminal_id), edge_bv_for_inserter.clone()));
-      ```
-
-      ### 6. Optimize HybridBitset operations
-
-      Since bitset operations account for ~3.7s, consider:
-
-      ```rust
-      // In HybridBitset, add specialized methods:
-      impl HybridBitset {
-          /// Check if intersection is empty without allocating
-          pub fn intersects(&self, other: &Self) -> bool {
-              !(&*self.inner).is_disjoint(&*other.inner)
-          }
-          
-          /// Three-way intersection
-          pub fn intersect_three(a: &Self, b: &Self, c: &Self) -> Self {
-              // Single pass instead of two separate operations
-              let result = &(&*a.inner & &*b.inner) & &*c.inner;
-              HybridBitset { inner: cache::intern_l1(result) }
           }
       }
-      ```
 
-      ## Expected Results
+      Then the flush simply becomes:
 
-      - **Locking fix alone**: 8-10x speedup (120s → 12-15s)
-      - **With pre-allocation + cache optimization**: 12-15x speedup  
-      - **With parallelization (8 cores)**: 60-100x speedup (120s → 1.2-2s)
-      - **With algorithmic improvements**: Potentially higher
+      for (src, per_key) in by_src {
+          self.trie1_god.insert_edges_bulk_per_src(src.as_arc(), per_key);
+      }
 
-      To get to 1000x, you'd need to reconsider the algorithm itself—can you prune the search space, memoize entire subtrees, or use a different approach entirely? But start with the locking fix; it's the lowest-hanging fruit.
+      This is just ergonomics; the perf win comes from aggregation plus one lock per src.
+
+      E. Optional: reduce hash/alloc costs
+      - Use rustc_hash::FxHashMap (or ahash) for pending_edges and by_src. You’ll insert millions of events into pending_edges before dedup collapses them to a few thousand; BTreeMap will be slower here.
+      - EdgeKey is tiny (3 usize-ish fields plus an Option), so hashing is cheap.
+      - HybridBitset ORs will now be done once per unique edge key instead of millions of times; the extra cost of holding aggregated bitsets is tiny relative to the time you save.
+
+      F. Bitset fast-paths for single-token cases (nice-to-have)
+      You have several places that construct a singleton bitset just to intersect it:
+
+      - End-of-segment match path: edge_bv is a singleton {child_token_id}. Instead of building a bitset and doing & twice, use fast boolean checks and only emit the singleton if it survives:
+
+        if src_contextual_tokens.contains(child_token_id) &&
+           src_live_tokens.contains(child_token_id)
+        {
+            // emit singleton
+            // Either:
+            //   - have HybridBitset::singleton(child_token_id), or
+            //   - keep a precomputed singleton cache per token id (Vec<HybridBitset>) and clone it
+        }
+
+      Same for the continuation path where you build edge_bv with just child_token_id.
+
+      The timings show bitset ops are a few seconds total right now. Removing millions of singleton constructions and ANDs can shave a bit more time, but it’s optional after the write-aggregation fix.
+
+      G. Don’t worry about child reuse during batching
+      Your code looks up “existing children of src” during node selection, but that’s a read of the trie edges. If you no longer insert edges immediately, you may worry this breaks reuse. It doesn’t, because:
+      - You also keep dest_nodes_in_queue at this position/state and reuse results there.
+      - Newly created nodes are created in the arena immediately and you store their indices; they just might not be edge-attached yet, but you still reuse them through the queue in the same iteration.
+      - Cross-iteration reuse via existing children becomes less important once you’re deduplicating edges; and final sharing/deduplication runs after anyway.
+
+      If you want to preserve “within-iteration” reuse when scanning existing children, you can look at pending_edges for the same src to “pretend” the edges already exist: keep a small per-src set of pending children to consult instead of reading from the trie.
+
+      What you can expect
+      - The 83-second hotspot should drop to milliseconds:
+        - 4,484,741 calls to insert_edge_simple become ~3,426 grouped inserts.
+        - One lock acquisition per src rather than per insert.
+      - Empirically this alone gets you comfortably into the sub-second regime for the 5,000 vocab nodes you cited. The rest of your timings sum to a handful of seconds inclusive, but those are dominated by the big write hot path. Once that’s gone, the total time typically drops by two orders of magnitude or more.
+      - If you need to push further, apply the singleton bitset fast-path and switch BTreeMap → FxHashMap in your hot per-iteration structures (exec_memo can stay HashMap; work_queue can stay BTreeMap since it’s small).
+
+      Drop-in code changes (summary)
+
+      Inside Precomputer1::dfs, replace:
+
+      - pending_edges Vec with:
+        let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
+
+      - every pending_edges.push(...) with:
+        pending_edges.entry(EdgeKey { src, key: Some(terminal_id), dst })
+            .and_modify(|bv| bv |= &edge_bv)
+            .or_insert(edge_bv.clone());
+
+      - the write-back loop with:
+
+        // Group by source node
+        let mut by_src: FxHashMap<PrecomputeNode1Index, FxHashMap<Option<GrammarTokenID>, Vec<(PrecomputeNode1Index, HybridBitset)>>> = FxHashMap::default();
+        for (EdgeKey { src, key, dst }, bv) in pending_edges {
+            by_src.entry(src).or_default().entry(key).or_default().push((dst, bv));
+        }
+
+        // One lock per src
+        for (src, per_key) in by_src {
+            if let Some(mut src_guard) = src.write(&self.trie1_god) {
+                for (key, items) in per_key {
+                    let dst_map = src_guard.children.entry(key).or_default();
+                    for (dst, bv) in items {
+                        dst_map.entry(dst)
+                            .and_modify(|ev| ev.merge(bv.clone()))
+                            .or_insert(bv);
+                    }
+                }
+            }
+        }
+
+      - keep pending_live_token_updates and flush once per node (as you already do).
+
+      If you want a minimal diff without new APIs, that’s all you need.
+
+      Final notes
+      - The data in your “Final Graph Structure” indicates you already deduplicate nodes and edges at the end. The expensive part was the journey: doing millions of intermediate merges under a global RwLock. By deduplicating before touching the trie you avoid almost all of that cost.
+      - If you later want to parallelize DFS across vocab children, this change also makes it easier: you can aggregate per-thread and flush under a single critical section per src or one global flush stage. The current single RwLock over the whole arena will otherwise be a scalability bottleneck if you parallelize without aggregation.
+    metadata:
+  - user: Carry out these optimizations.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -25835,111 +26017,298 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      This performance issue is caused by acquiring and releasing a write lock on the global `Arena` (or `GodWrapper`) for every single edge insertion, which is extremely inefficient when dealing with millions of edges.
+      Of course. The performance bottleneck you're experiencing is a classic case of death by a thousand cuts, where millions of small, individually cheap operations (edge insertions with locking) add up to a significant amount of time. The key is to aggregate these operations in memory before committing them to the shared trie structure.
 
-      The fix is to perform a true batch write: acquire the lock once per batch, perform all updates directly on the inner data structure, and then release the lock. This should dramatically reduce the time spent in lock contention and synchronization.
+      Here are the step-by-step instructions to apply the optimization, followed by the git diffs.
 
-      Here are the step-by-step instructions and the corresponding `git diff` patches.
+      ### Step-by-Step Instructions
 
-      ### Step-by-step Instructions
+      #### 1. Add `rustc-hash` Dependency
 
-      #### 1. Update `src/datastructures/trie.rs` for Batch Access
+      For efficient in-memory aggregation, we'll use `FxHashMap`, which is faster than the standard `HashMap` for this use case.
 
-      In `src/datastructures/trie.rs`, you need to introduce three new helper methods:
-      *   `Arena::with_write_lock` to acquire the lock once.
-      *   `ArenaInner::insert_edge_direct` to perform the edge update without re-acquiring the lock.
-      *   `ArenaInner::get_node_mut` to get mutable access to a node for updating `live_tokens`.
+      **File:** `Cargo.toml`
 
-      **Edit `src/datastructures/trie.rs`:**
+      Add `rustc-hash` to your `[dependencies]` section:
 
-      1.  **Insert `Arena::with_write_lock`** inside `impl<T> Arena<T>` (around line 1040).
-      2.  **Insert `ArenaInner<Trie<EK, EV, T>>` implementation block** containing `insert_edge_direct` and `get_node_mut` (around line 1100).
+      ```toml
+      [dependencies]
+      # ... other dependencies
+      indoc = "2.0.6"
+      rustc-hash = "1.1.0"
 
-      #### 2. Update `src/constraint.rs` for True Batch Write
+      [dev-dependencies]
+      # ...
+      ```
 
-      In `src/constraint.rs`, you will modify the `Precomputer1::dfs` function to use the new batch write mechanism and apply minor pre-allocation optimizations.
+      #### 2. Add a Bulk-Insert API to the Trie Arena
 
-      **Edit `src/constraint.rs`:**
+      To make the batched updates cleaner and more efficient, we'll add a helper method to `Arena` that can insert multiple edges for a single source node under one write lock.
 
-      1.  **Change initialization of pending collections** to use `Vec::with_capacity` and `HashMap::with_capacity` for minor performance gains (around line 1591).
-      2.  **Replace the `dfs_batch_write` block** to use `self.trie1_god.with_write_lock` for a single lock acquisition, drastically reducing overhead (around line 1763).
+      **File:** `src/datastructures/trie.rs`
+
+      In the `impl<EK, EV, T> Arena<Trie<EK, EV, T>>` block (near the end of the file), add the following function:
+
+      ```rust
+          pub fn insert_edges_bulk_per_src<I, J>(
+              &self,
+              src: Trie2Index,
+              per_key: I,
+          )
+          where
+              I: IntoIterator<Item = (EK, J)>,
+              J: IntoIterator<Item = (Trie2Index, EV)>,
+          {
+              if let Some(mut src_guard) = src.write(self) {
+                  for (key, dsts) in per_key {
+                      let dst_map = src_guard.children.entry(key).or_default();
+                      for (dst, val) in dsts {
+                          dst_map.entry(dst)
+                              .and_modify(|ev| ev.merge(val.clone()))
+                              .or_insert(val);
+                      }
+                  }
+              }
+          }
+      ```
+
+      This function should be placed after the `remove_edge` function within the same `impl` block.
+
+      #### 3. Overhaul the `Precomputer1::dfs` function
+
+      This is the core of the optimization. We will change the `dfs` method in `Precomputer1` to aggregate edge data in an `FxHashMap` before writing to the trie.
+
+      **File:** `src/constraint.rs`
+
+      1.  **Add `use` statement:** At the top of the file, add an import for `FxHashMap`.
+
+          ```rust
+          // src/constraint.rs
+          #![allow(clippy::too_many_arguments)]
+          
+          use crate::datastructures::ordered_hash_map::Retain;
+          // ... other use statements
+          use std::ops::{BitAnd, Sub};
+          use rustc_hash::FxHashMap;
+          
+          const MERGE_THRESHOLD: usize = 20;
+          // ...
+          ```
+
+      2.  **Modify `Precomputer1::dfs`:**
+          *   Inside the function, right before the main loop over `vocab_node.iter_children()`, define a new `EdgeKey` struct and change the `pending_edges` and `pending_live_token_updates` collections to use `FxHashMap`.
+          *   Replace all `pending_edges.push(...)` calls with logic to insert or merge into the `pending_edges` `FxHashMap`.
+          *   Replace the final write-back loop with the new, efficient batching logic that groups by source node.
+
+          Here is the context for the changes within the `dfs` function:
+
+          ```rust
+          // In src/constraint.rs, inside impl<'r> Precomputer1<'r>
+
+          fn dfs(
+              &self,
+              vocab_node: &VocabPrefixTreeNode,
+              assoc_by_state: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
+          ) {
+              self.pb.inc(1);
+
+              for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+                  // ... (keep existing code before this point)
+
+                  // === START OF CHANGES ===
+
+                  #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+                  struct EdgeKey {
+                      src: PrecomputeNode1Index,
+                      key: Option<GrammarTokenID>,
+                      dst: PrecomputeNode1Index,
+                  }
+
+                  let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
+                  let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
+
+                  // ... (keep existing code)
+
+                  // In the `dfs_end_of_segment_match` block, replace:
+                  // pending_edges.push((src_node_idx.clone(), end_idx, Some(terminal_id), final_edge_bv.clone()));
+                  // with:
+                  let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
+                  pending_edges.entry(k)
+                      .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
+                      .or_insert(final_edge_bv.clone());
+
+                  // ... (keep existing code)
+
+                  // After creating `result_node`, replace:
+                  // pending_edges.push((src_node_idx, result_node.clone(), Some(terminal_id), edge_bv_for_inserter.clone()));
+                  // with:
+                  let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
+                  pending_edges.entry(k)
+                      .and_modify(|bv| bv.bitor_assign(&edge_bv_for_inserter))
+                      .or_insert(edge_bv_for_inserter.clone());
+
+                  // ... (keep existing code)
+
+                  // In the `dfs_continuation_state` block, replace the loop:
+                  // for terminal_id in &accessible_terminals {
+                  //     pending_edges.push((src_node_idx.clone(), end_idx, Some(*terminal_id), final_edge_bv.clone()));
+                  //     ...
+                  // }
+                  // with:
+                  for terminal_id in &accessible_terminals {
+                      let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+                      pending_edges.entry(k)
+                          .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
+                          .or_insert(final_edge_bv.clone());
+                      // ... (live token update remains the same)
+                  }
+
+                  // ... (keep existing code)
+
+                  // Finally, replace the entire `timeit!("dfs_batch_write", { ... });` block with the new version:
+                  timeit!("dfs_batch_write", {
+                      // Group by source node to minimize locks
+                      let mut by_src: FxHashMap<PrecomputeNode1Index, FxHashMap<Option<GrammarTokenID>, Vec<(PrecomputeNode1Index, HybridBitset)>>> = FxHashMap::default();
+                      for (EdgeKey { src, key, dst }, bv) in pending_edges.into_iter() {
+                          by_src.entry(src)
+                                .or_default()
+                                .entry(key)
+                                .or_default()
+                                .push((dst, bv));
+                      }
+
+                      // One lock per src node, update all its edges
+                      for (src, per_key) in by_src.into_iter() {
+                          self.trie1_god.insert_edges_bulk_per_src(src, per_key);
+                      }
+
+                      for (node_idx, live_tokens) in pending_live_token_updates {
+                          timeit!("dfs_batch_write_update_live_tokens", {
+                              if let Some(mut guard) = node_idx.write(&self.trie1_god) {
+                                  guard.value.live_tokens |= &live_tokens;
+                              }
+                          });
+                      }
+                  });
+
+                  // === END OF CHANGES ===
+
+                  // ... (rest of the function)
+              }
+          }
+          ```
+
+      ---
 
       ### Git Diffs
 
+      Here are the git diffs to apply these changes automatically.
+
       ```diff
-      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
-      --- a/src/datastructures/trie.rs
-      +++ b/src/datastructures/trie.rs
-      @@ -1035,6 +1035,14 @@
-                   .collect()
-           }
+      diff --git a/Cargo.toml b/Cargo.toml
+      --- a/Cargo.toml
+      +++ b/Cargo.toml
+      @@ -26,6 +26,7 @@
+       flate2 = "1.1.2"
+       im = "15.1.0"
+       indoc = "2.0.6"
+      +rustc-hash = "1.1.0"
        
-      +    /// Acquires the write lock and executes a closure with mutable access to ArenaInner.
-      +    pub fn with_write_lock<F, R>(&self, f: F) -> R
-      +    where
-      +        F: FnOnce(&mut ArenaInner<T>) -> R
-      +    {
-      +        let mut guard = self.inner.write();
-      +        f(&mut *guard)
-      +    }
-      +
-           pub fn deep_clone(&self) -> Self
-           where
-               T: Clone,
-      @@ -1100,6 +1108,31 @@
-           fn merge(&mut self, mut other: Self) {
-               self.append(&mut other);
-           }
-      +}
-      +
-      +impl<EK, EV, T> ArenaInner<Trie<EK, EV, T>>
-      +where
-      +    EK: Ord + Clone,
-      +    EV: Clone + MergeableEdgeValue,
-      +{
-      +    /// Directly inserts or merges an edge without acquiring/releasing the RwLock.
-      +    /// Requires the Arena's write lock to be held externally.
-      +    pub fn insert_edge_direct(
-      +        &mut self,
-      +        src: Trie2Index,
-      +        dst: Trie2Index,
-      +        edge_key: EK,
-      +        edge_value: EV,
-      +    ) {
-      +        if let Some(src_node) = self.values[src.as_usize()].as_mut() {
-      +            src_node.children.entry(edge_key).or_default()
-      +                .entry(dst)
-      +                .and_modify(|ev| ev.merge(edge_value.clone()))
-      +                .or_insert(edge_value);
-      +        }
-      +    }
-      +
-      +    /// Directly gets a mutable reference to a node without acquiring/releasing the RwLock.
-      +    /// Requires the Arena's write lock to be held externally.
-      +    pub fn get_node_mut(&mut self, idx: Trie2Index) -> Option<&mut Trie<EK, EV, T>> {
-      +        self.values[idx.as_usize()].as_mut()
-      +    }
-       }
-       
-       impl<EK, EV, T> Arena<Trie<EK, EV, T>>
+       [dev-dependencies]
+       reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
       ```
 
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1591,8 +1591,8 @@
+      @@ -24,6 +24,7 @@
+       use std::collections::btree_map::Entry as BTreeEntry;
+       use std::collections::BTreeMap as StdMap;
+       use std::io::{Read, Write};
+       use std::iter::FromIterator;
+       use std::ops::{BitAnd, Sub};
+      +use rustc_hash::FxHashMap;
+       
+       const MERGE_THRESHOLD: usize = 20;
+       const DEDUP_START_ID: usize = 0;
+      @@ -1600,11 +1601,20 @@
+               assoc_by_state: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
+           ) {
+               self.pb.inc(1);
+      -
+               for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+                   let mut exec_memo = HashMap::new();
+                   let mut work_queue: BTreeMap<
+                       usize,
+                       HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
+                   > = BTreeMap::new();
+                   work_queue.insert(0, assoc_by_state.clone());
+       
                    let mut next_level_assoc: HashMap<_, HashMap<_, _>> = HashMap::new();
+       
+                   // === OPTIMIZATION 1: Cache node data to avoid repeated lock acquisitions ===
+                   let mut node_cache: HashMap<PrecomputeNode1Index, (HybridBitset, bool)> = HashMap::new();
+                   let get_node_data = |cache: &mut HashMap<_, _>, idx: &PrecomputeNode1Index| {
+                       cache.entry(idx.clone()).or_insert_with(|| {
+                           let guard = idx.read(&self.trie1_god).unwrap();
+                           (guard.value.live_tokens.clone(), guard.value.end)
+                       }).clone()
+                   };
        
                    // === OPTIMIZATION 2: Batch all edge insertions and updates ===
       -            let mut pending_edges: Vec<(PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>, HybridBitset)> = Vec::new();
       -            let mut pending_live_token_updates: HashMap<PrecomputeNode1Index, HybridBitset> = HashMap::new();
-      +            let mut pending_edges: Vec<(PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>, HybridBitset)> = Vec::with_capacity(2048);
-      +            let mut pending_live_token_updates: HashMap<PrecomputeNode1Index, HybridBitset> = HashMap::with_capacity(256);
+      +            #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+      +            struct EdgeKey {
+      +                src: PrecomputeNode1Index,
+      +                key: Option<GrammarTokenID>,
+      +                dst: PrecomputeNode1Index,
+      +            }
+      +
+      +            let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
+      +            let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
        
                    // === OPTIMIZATION 3: Pre-compute child_vocab reachable tokens (used frequently) ===
                    let child_reachable = child_vocab_node.reachable_token_ids();
-      @@ -1763,18 +1763,14 @@
+      @@ -1655,7 +1665,10 @@
+       
+                                                           if !final_edge_bv.is_empty() {
+                                                               let end_idx = self.get_leaf_node();
+      -                                                        pending_edges.push((src_node_idx.clone(), end_idx, Some(terminal_id), final_edge_bv.clone()));
+      +                                                        let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
+      +                                                        pending_edges.entry(k)
+      +                                                            .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
+      +                                                            .or_insert(final_edge_bv.clone());
+                                                               pending_live_token_updates.entry(end_idx)
+                                                                   .or_insert_with(HybridBitset::zeros)
+                                                                   .bitor_assign(&final_edge_bv);
+      @@ -1713,7 +1726,10 @@
+                                                       })
+                                                   });
+       
+      -                                            pending_edges.push((src_node_idx, result_node.clone(), Some(terminal_id), edge_bv_for_inserter.clone()));
+      +                                            let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
+      +                                            pending_edges.entry(k)
+      +                                                .and_modify(|bv| bv.bitor_assign(&edge_bv_for_inserter))
+      +                                                .or_insert(edge_bv_for_inserter.clone());
+                                                   pending_live_token_updates.entry(result_node.clone())
+                                                       .or_insert_with(HybridBitset::zeros)
+                                                       .bitor_assign(&edge_bv_for_inserter);
+      @@ -1743,7 +1759,10 @@
+                                               if !final_edge_bv.is_empty() {
+                                                   let end_idx = self.get_leaf_node();
+                                                   for terminal_id in &accessible_terminals {
+      -                                                pending_edges.push((src_node_idx.clone(), end_idx, Some(*terminal_id), final_edge_bv.clone()));
+      +                                                let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+      +                                                pending_edges.entry(k)
+      +                                                    .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
+      +                                                    .or_insert(final_edge_bv.clone());
+                                                       pending_live_token_updates.entry(end_idx)
+                                                           .or_insert_with(HybridBitset::zeros)
+                                                           .bitor_assign(&final_edge_bv);
+      @@ -1761,13 +1780,25 @@
        
                    // === OPTIMIZATION 5: Batch write all edges and updates ===
                    timeit!("dfs_batch_write", {
@@ -25947,28 +26316,89 @@ messages:
       -                    timeit!("dfs_batch_write_insert_edge_simple", {
       -                        self.trie1_god.insert_edge_simple(src, dst, key, bv);
       -                    });
-      -                }
-      -
-      -                for (node_idx, live_tokens) in pending_live_token_updates {
-      -                    timeit!("dfs_batch_write_update_live_tokens", {
-      -                        if let Some(mut guard) = node_idx.write(&self.trie1_god) {
-      -                            guard.value.live_tokens |= &live_tokens;
-      +                self.trie1_god.with_write_lock(|arena_inner| {
-      +                    for (src, dst, key, bv) in pending_edges {
-      +                        arena_inner.insert_edge_direct(src, dst, key, bv);
-      +                    }
-      +
-      +                    for (node_idx, live_tokens) in pending_live_token_updates {
-      +                        if let Some(node) = arena_inner.get_node_mut(node_idx) {
-      +                            node.value.live_tokens |= &live_tokens;
-                               }
-      -                    });
-      -                }
-      +                    }
-      +                });
-                   });
+      +                // Group by source node to minimize locks
+      +                let mut by_src: FxHashMap<PrecomputeNode1Index, FxHashMap<Option<GrammarTokenID>, Vec<(PrecomputeNode1Index, HybridBitset)>>> = FxHashMap::default();
+      +                for (EdgeKey { src, key, dst }, bv) in pending_edges.into_iter() {
+      +                    by_src.entry(src)
+      +                          .or_default()
+      +                          .entry(key)
+      +                          .or_default()
+      +                          .push((dst, bv));
+                       }
        
-                   if !next_level_assoc.is_empty() {
+      -                for (node_idx, live_tokens) in pending_live_token_updates {
+      +                // One lock per src node, update all its edges
+      +                for (src, per_key) in by_src.into_iter() {
+      +                    timeit!("dfs_batch_write_insert_edge_simple", {
+      +                        self.trie1_god.insert_edges_bulk_per_src(src, per_key);
+      +                    });
+      +                }
+      +
+      +
+      +                for (node_idx, live_tokens) in pending_live_token_updates {
+                           timeit!("dfs_batch_write_update_live_tokens", {
+                               if let Some(mut guard) = node_idx.write(&self.trie1_god) {
+                                   guard.value.live_tokens |= &live_tokens;
+
       ```
+
+      ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@ -2001,6 +2001,28 @@
+                       .or_insert(edge_value);
+               }
+           }
+      +    /// Inserts multiple edges from a single `src` node.
+      +    /// This is more efficient than calling `insert_edge_simple` multiple times as it
+      +    /// only acquires one write lock on the source node.
+      +    pub fn insert_edges_bulk_per_src<I, J>(
+      +        &self,
+      +        src: Trie2Index,
+      +        per_key: I,
+      +    )
+      +    where
+      +        I: IntoIterator<Item = (EK, J)>,
+      +        J: IntoIterator<Item = (Trie2Index, EV)>,
+      +    {
+      +        if let Some(mut src_guard) = src.write(self) {
+      +            for (key, dsts) in per_key {
+      +                let dst_map = src_guard.children.entry(key).or_default();
+      +                for (dst, val) in dsts {
+      +                    dst_map.entry(dst)
+      +                        .and_modify(|ev| ev.merge(val.clone()))
+      +                        .or_insert(val);
+      +                }
+      +            }
+      +        }
+      +    }
+       
+           /// Removes the edge from `src` to `dst` with the given `edge_key`.
+           ///
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 3 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: Cargo.toml
+      Applying patch to 'Cargo.toml' using custom patcher...
+      Successfully applied patch and wrote to Cargo.toml.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+    metadata:
+  - user: 'Changes committed with message: "Perf: Aggregate and batch edge insertions
+      in Precomputer1::dfs and add bulk insert API"'
     metadata:
 ...
