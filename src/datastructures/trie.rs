@@ -920,6 +920,7 @@ where
                 Self::get_all_paths_with_cycles_recursive(
                     arena,
                     root,
+                    &mut vec![],
                     &mut all_paths,
                     &is_end,
                     &is_path_edge,
@@ -934,6 +935,7 @@ where
     fn get_all_paths_with_cycles_recursive<F, G>(
         arena: &Arena<Self>,
         node_idx: Trie2Index,
+        current_path: &mut Vec<(EK, EV, T)>,
         all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
         is_end: &F,
         is_path_edge: &G,
@@ -953,7 +955,7 @@ where
         // - Prevent infinite loops formed solely by uncounted edges using an "active stamps" map:
         //   a node cannot be revisited at the same counted length (stamp), but can be revisited after progress.
         // Work on a local copy of the path, so callers' mutable reference remains unchanged.
-        let mut path: Vec<(EK, EV, T)> = Vec::new();
+        let mut path: Vec<(EK, EV, T)> = current_path.clone();
         // Stack frame for iterative DFS.
         struct Frame<EK2, EV2> {
             node: Trie2Index,
