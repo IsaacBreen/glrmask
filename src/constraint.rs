@@ -2638,7 +2638,9 @@ impl<'r> Precomputer1<'r> {
             crate::debug!(6, "  {}: {}", sid.0, root);
         }
         crate::profiler::reset();
-        self.dfs(&self.vocab.root, assoc, &mut self.dfs_stats);
+        let mut stats = std::mem::take(&mut self.dfs_stats);
+        self.dfs(&self.vocab.root, assoc, &mut stats);
+        self.dfs_stats = stats;
         self.dfs_stats.print();
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish();
@@ -2882,13 +2884,13 @@ impl<'r> Precomputer1<'r> {
                 }
 
                 // Apply edge insertions
-                for (EdgeKey { src, key, dst }, bv) in pending_edges {
+                for (&EdgeKey { src, key, dst }, bv) in &pending_edges {
                     timeit!("dfs_batch_write_insert_edge_simple", {
                         if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
                             src_node.children_mut().entry(key).or_default()
                                 .entry(dst)
-                                .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
-                                .or_insert(bv);
+                                .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv)
+                                .or_insert(bv.clone());
                         }
                     });
                 }
