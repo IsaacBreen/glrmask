@@ -313,24 +313,6 @@ pub fn eliminate_pushes_and_pops(
         }
     }
 
-    // Keep reverse_adj consistent after inserts (dedup entries for same (a_idx, key) -> c_idx).
-    let mut update_reverse_adj_after_insert = |a_idx: Intermediate2PrecomputeNode3Index,
-                                               c_idx: Intermediate2PrecomputeNode3Index,
-                                               new_key: Intermediate2Trie3EdgeKey| {
-        if let Some(aguard) = a_idx.read(&god2) {
-            if let Some(dest_map) = aguard.children().get(&new_key) {
-                if let Some(val) = dest_map.get(&c_idx) {
-                    let vec = reverse_adj.entry(c_idx).or_default();
-                    if let Some(pos) = vec.iter().position(|(uu, kk, _)| *uu == a_idx && *kk == new_key) {
-                        vec[pos].2 = val.clone();
-                    } else {
-                        vec.push((a_idx, new_key.clone(), val.clone()));
-                    }
-                }
-            }
-        }
-    };
-
     loop {
         let mut made_progress = false;
 
@@ -441,7 +423,20 @@ pub fn eliminate_pushes_and_pops(
                             false
                         };
                         god2.insert_edge_simple(a_idx, *c_idx, new_key.clone(), new_tokens.clone());
-                        update_reverse_adj_after_insert(a_idx, *c_idx, new_key.clone());
+                        if let Some(aguard) = a_idx.read(&god2) {
+                            if let Some(dest_map) = aguard.children().get(&new_key) {
+                                if let Some(val) = dest_map.get(c_idx) {
+                                    let vec = reverse_adj.entry(*c_idx).or_default();
+                                    if let Some(pos) =
+                                        vec.iter().position(|(uu, kk, _)| *uu == a_idx && *kk == new_key)
+                                    {
+                                        vec[pos].2 = val.clone();
+                                    } else {
+                                        vec.push((a_idx, new_key.clone(), val.clone()));
+                                    }
+                                }
+                            }
+                        }
                         match &new_key {
                             Intermediate2Trie3EdgeKey::Push(_) => {
                                 if !existed_before {
@@ -514,7 +509,20 @@ pub fn eliminate_pushes_and_pops(
                 };
             for (k, c_idx, val) in &to_move {
                 god2.insert_edge_simple(b_np_idx, *c_idx, k.clone(), val.clone());
-                update_reverse_adj_after_insert(b_np_idx, *c_idx, k.clone());
+                if let Some(aguard) = b_np_idx.read(&god2) {
+                    if let Some(dest_map) = aguard.children().get(k) {
+                        if let Some(val) = dest_map.get(c_idx) {
+                            let vec = reverse_adj.entry(*c_idx).or_default();
+                            if let Some(pos) =
+                                vec.iter().position(|(uu, kk, _)| *uu == b_np_idx && kk == k)
+                            {
+                                vec[pos].2 = val.clone();
+                            } else {
+                                vec.push((b_np_idx, k.clone(), val.clone()));
+                            }
+                        }
+                    }
+                }
                 god2.remove_edge(b_idx, *c_idx, k);
                 if let Some(vec) = reverse_adj.get_mut(&c_idx) {
                     vec.retain(|(uu, kk, _)| !(*uu == b_idx && *kk == *k));
@@ -528,7 +536,20 @@ pub fn eliminate_pushes_and_pops(
             if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
                 for (a_idx, k, val) in incoming {
                     god2.insert_edge_simple(a_idx, b_np_idx, k.clone(), val.clone());
-                    update_reverse_adj_after_insert(a_idx, b_np_idx, k.clone());
+                    if let Some(aguard) = a_idx.read(&god2) {
+                        if let Some(dest_map) = aguard.children().get(&k) {
+                            if let Some(val) = dest_map.get(&b_np_idx) {
+                                let vec = reverse_adj.entry(b_np_idx).or_default();
+                                if let Some(pos) =
+                                    vec.iter().position(|(uu, kk, _)| *uu == a_idx && *kk == k)
+                                {
+                                    vec[pos].2 = val.clone();
+                                } else {
+                                    vec.push((a_idx, k.clone(), val.clone()));
+                                }
+                            }
+                        }
+                    }
                     if matches!(k, Intermediate2Trie3EdgeKey::Push(_)) {
                         *incoming_push_count.entry(b_np_idx).or_insert(0) += 1;
                     }
