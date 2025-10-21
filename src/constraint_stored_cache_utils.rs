@@ -92,7 +92,7 @@ fn merge_trie3_nodes_and_get_map_internal(
     let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
 
     for (u_dense, u_idx) in old_of.iter().enumerate() {
-        let guard = u_idx.read(trie3_god);
+        let guard = u_idx.read(trie3_god).unwrap();
         ends[u_dense] = guard.value.end;
         for (ek, dest_map) in guard.children() {
             for (v_idx, _bv) in dest_map {
@@ -170,7 +170,7 @@ fn merge_trie3_nodes_and_get_map_internal(
             for (i, &c) in final_partition.iter().enumerate() {
                 if c == class_id {
                     let u_idx = old_of[i];
-                    let guard = u_idx.read(trie3_god);
+                    let guard = u_idx.read(trie3_god).unwrap();
                     for (ek, dest_map) in guard.children() {
                         for (v_idx, _ev) in dest_map {
                             let v_dense = dense_of[v_idx];
@@ -183,7 +183,7 @@ fn merge_trie3_nodes_and_get_map_internal(
                 }
             }
 
-            let mut guard = rep_idx.write(trie3_god);
+            let mut guard = rep_idx.write(trie3_god).unwrap();
             *guard.children_mut() = new_children;
         }
     }

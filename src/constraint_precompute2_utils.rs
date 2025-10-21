@@ -38,12 +38,12 @@ fn sample_normalized_path(
 ) -> Option<NormalizedPath> {
     let mut current_node = root.clone();
     let mut path = NormalizedPath::new();
-    let mut current_k: usize = 0;
-    let mut bv = root.read(trie2_god).value.live_tokens.clone();
+    let mut current_k = 0;
+    let mut bv = root.read(trie2_god).unwrap().value.live_tokens.clone();
 
     while path.len() < max_len {
-        let can_terminate = current_node.read(trie2_god).value.end;
-        let can_continue = !current_node.read(trie2_god).children().is_empty();
+        let can_terminate = current_node.read(trie2_god).unwrap().value.end;
+        let can_continue = !current_node.read(trie2_god).unwrap().children().is_empty();
 
         if !can_continue {
             return if can_terminate { Some(path) } else { None };
@@ -53,7 +53,7 @@ fn sample_normalized_path(
             return Some(path);
         }
 
-        let all_outgoing_edges: Vec<_> = current_node.read(trie2_god)
+        let all_outgoing_edges: Vec<_> = current_node.read(trie2_god).unwrap()
             .children()
             .iter()
             .flat_map(|(ek, dest_map)| {
@@ -62,7 +62,7 @@ fn sample_normalized_path(
             .collect();
 
         if all_outgoing_edges.is_empty() {
-            return if current_node.read(trie2_god).value.end { Some(path) } else { None };
+            return if current_node.read(trie2_god).unwrap().value.end { Some(path) } else { None };
         }
 
         let (ek, dest_ptr, edge_bv) = all_outgoing_edges.choose(rng)?;
@@ -96,7 +96,7 @@ fn get_bv_for_normalized_path(
     let mut q: VecDeque<(Trie2Index, usize, usize, LLMTokenBV)> = VecDeque::new();
     let mut final_bv = LLMTokenBV::zeros();
 
-    let initial_bv = root.read(trie2_god).value.live_tokens.clone();
+    let initial_bv = root.read(trie2_god).unwrap().value.live_tokens.clone();
     q.push_back((root.clone(), 0, 0, initial_bv.clone()));
 
     // To handle cycles and redundant exploration
@@ -116,7 +116,7 @@ fn get_bv_for_normalized_path(
         let (target_k, target_sid) = path[path_idx];
 
         // Explore children
-        let guard = node.read(trie2_god);
+        let guard = node.read(trie2_god).unwrap();
         for (ek, dest_map) in guard.children() {
             for (dest_ptr, edge_bv) in dest_map {
                 let new_bv = &bv & edge_bv;
@@ -176,7 +176,7 @@ fn find_end_bv_from_node_via_none_edges(
     let mut visited: HashMap<PrecomputeNode2Index, LLMTokenBV> = HashMap::new();
 
     while let Some((node, bv)) = q.pop_front() {
-        let guard = node.read(trie2_god);
+        let guard = node.read(trie2_god).unwrap();
         if guard.value.end {
             end_bv |= &bv;
         }
@@ -297,18 +297,18 @@ pub fn clone_trie2_graph(
     let mut q: VecDeque<PrecomputeNode2Index> = VecDeque::new();
 
     let root_ptr = *root;
-    let root_value = { root.read(trie2_god).value.clone() };
+    let root_value = { root.read(trie2_god).expect("poison").value.clone() };
     let new_root = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(root_value)));
     map.insert(root_ptr, new_root.clone());
     q.push_back(root.clone());
 
     while let Some(old_arc) = q.pop_front() {
         let old_ptr = old_arc;
-        let new_arc = *map.get(&old_ptr).expect("parent must be created");
+        let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
 
         // Snapshot children outside of lock to avoid recursive lock explosion.
         let children_snapshot: Vec<( (usize, Option<StateID>), Vec<(PrecomputeNode2Index, LLMTokenBV)> )> = {
-            let g = old_arc.read(trie2_god);
+            let g = old_arc.read(trie2_god).expect("poison");
             g.children()
                 .iter()
                 .map(|(ek, dest_map)| {
@@ -329,7 +329,7 @@ pub fn clone_trie2_graph(
                 let child_arc_old = node_ptr.as_arc().clone();
                 let child_ptr_old = child_arc_old;
                 if !map.contains_key(&child_ptr_old) {
-                    let child_value = { child_arc_old.read(trie2_god).value.clone() };
+                    let child_value = { child_arc_old.read(trie2_god).expect("poison").value.clone() };
                     let child_arc_new = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(child_value)));
                     map.insert(child_ptr_old, child_arc_new);
                     q.push_back(child_arc_old);
@@ -339,7 +339,7 @@ pub fn clone_trie2_graph(
 
         // Now wire edges on new_arc
         {
-            let mut new_g = new_arc.write(trie2_god);
+            let mut new_g = new_arc.write(trie2_god).expect("poison");
             for (ek, entries) in children_snapshot {
                 let dest_map = new_g.children_mut().entry(ek).or_default();
                 for (old_node_ptr, ev) in entries {

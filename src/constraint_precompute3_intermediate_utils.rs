@@ -77,7 +77,7 @@ fn build_node_signature(
     god: &IntermediateTrie3GodWrapper,
     color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
 ) -> NodeSignature {
-    let guard = idx.read(god);
+    let guard = idx.read(god).expect("Invalid index during signature build");
     let end = guard.value.end;
 
     // Collect children grouped by edge key, mapped to their current colors.
@@ -126,7 +126,7 @@ fn normalize_checkllm_edges_on_node(
     god: &IntermediateTrie3GodWrapper,
 ) -> bool {
     let mut changed = false;
-    let mut w = idx.write(god);
+    let mut w = if let Some(w) = idx.write(god) { w } else { return false };
 
     // Take children out to rebuild.
     let old_children = std::mem::take(w.children_mut());
@@ -243,7 +243,7 @@ fn contract_checkllm_chains(
             if dm1.len() != 1 {
                 continue;
             }
-            let &mid = dm1.keys().next().unwrap();
+            let (&mid, _) = dm1.iter().next().unwrap();
             if indeg.get(&mid).copied().unwrap_or(0) != 1 {
                 continue;
             }
@@ -283,7 +283,7 @@ fn contract_checkllm_chains(
     // Apply rewiring tasks.
     let mut changed = false;
     for t in tasks {
-        if let Some(mut wsrc) = t.src.write(god).as_mut() {
+        if let Some(mut wsrc) = t.src.write(god) {
             if let Some(dm) = wsrc.get_mut(&t.src_ek) {
                 if dm.remove(&t.mid).is_some() {
                     changed = true;
@@ -320,7 +320,7 @@ fn contract_noop_chains(
     let mut bypass_target: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
         HashMap::new();
     for idx in &all_nodes {
-        let guard = idx.read(god);
+        let guard = idx.read(god).expect("read");
         if guard.value.end {
             continue;
         }
@@ -362,7 +362,7 @@ fn contract_noop_chains(
             continue;
         }
 
-        let mut write_guard = idx.write(god);
+        let mut write_guard = idx.write(god).expect("write");
         let old_children = std::mem::take(write_guard.children_mut());
         let mut local_change = false;
 
@@ -421,7 +421,7 @@ fn wl_color_refine(
     let mut initial_color_map: BTreeMap<(bool, usize), usize> = BTreeMap::new();
     let mut next_initial_color = 0;
     for idx in &reachable {
-        let g = idx.read(god);
+        let g = idx.read(god).expect("read");
         let end = g.value.end;
         let out_degree = g.children().values().map(|dests| dests.len()).sum();
         let key = (end, out_degree);
@@ -597,7 +597,7 @@ fn prune_unproductive_paths_intermediate_trie3(
     // 1. Build reverse adjacency list: dest -> sources
     let mut incoming: HashMap<IntermediatePrecomputeNode3Index, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
     for src in &all_nodes {
-        let g = src.read(god);
+        let g = src.read(god).expect("read");
         for (_ek, dm) in g.children() {
             for (dst, _ev) in dm {
                 incoming.entry(*dst).or_default().push(*src);
@@ -610,7 +610,7 @@ fn prune_unproductive_paths_intermediate_trie3(
     let mut q: VecDeque<IntermediatePrecomputeNode3Index> = VecDeque::new();
     let mut end_nodes_count = 0usize;
     for n in &all_nodes {
-        let r = n.read(god);
+        let r = n.read(god).expect("read");
         if r.value.end {
             end_nodes_count += 1;
             if productive.insert(*n) {
@@ -648,7 +648,7 @@ fn prune_unproductive_paths_intermediate_trie3(
 
     // 4. Remove any edge to a non-productive destination
     for n in &all_nodes {
-        let mut w = n.write(god);
+        let mut w = n.write(god).expect("write");
         let old_children = std::mem::take(w.children_mut());
         for (ek, dm) in old_children {
             let mut new_dm = ordered_hash_map::OrderedHashMap::new();

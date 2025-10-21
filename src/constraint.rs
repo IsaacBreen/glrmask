@@ -9,9 +9,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
+use std::mem;
 use std::ops::{BitOr, BitOrAssign};
 use std::sync::Arc;
-use parking_lot::{Mutex, RwLock};
+use std::sync::{Mutex, RwLock};
 
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
@@ -1622,7 +1623,7 @@ impl GrammarConstraint {
         for tid in term_ids {
             let (start, end) = Self::build_trie3_template_for_terminal(parser, trie3_god, tid, internal_max_llm_token);
             // Temporarily mark the end node as 'end' for optimization purposes
-            end.write(trie3_god).value.end = true;
+            end.write(trie3_god).unwrap().value.end = true;
             out.insert(tid, (start, end));
         }
 
@@ -1646,7 +1647,7 @@ impl GrammarConstraint {
         // The optimization process relies on the 'end' flag being set for the template end node,
         // but the final trie3 construction needs it to be false (as it's an internal node).
         for (_tid, (_start, end)) in new_out.iter() {
-            end.write(trie3_god).value.end = false;
+            end.write(trie3_god).unwrap().value.end = false;
         }
 
         new_out
@@ -1997,7 +1998,7 @@ impl GrammarConstraint {
 
         // Ensure that the only node with end == true is trie3_end
         for node in Trie::all_nodes(&intermediate_trie3_god, &intermediate_precomputed3.values().cloned().collect::<Vec<_>>()) {
-            let contents = &node.read(&intermediate_trie3_god).value;
+            let contents = &node.read(&intermediate_trie3_god).unwrap().value;
             if contents.end {
                 assert_eq!(node, trie3_end);
             }
@@ -2014,7 +2015,9 @@ impl GrammarConstraint {
 
         // Update the roots in the map after optimization
         for root in intermediate_precomputed3.values_mut() {
-            *root = *node_map.get(root).unwrap_or(root);
+            if let Some(new_root) = node_map.get(root) {
+                *root = new_root.clone();
+            }
         }
 
 
@@ -2080,12 +2083,12 @@ impl GrammarConstraint {
             if !visited.insert(old_idx) { continue; }
 
             let new_idx = *node_map.get(&old_idx).unwrap();
-            let old_guard = old_idx.read(intermediate_trie3_god);
+            let old_guard = old_idx.read(intermediate_trie3_god).unwrap();
 
             for (edge_key, dest_map) in old_guard.children() {
                 for (old_child_idx, _) in dest_map {
                     let new_child_idx = *node_map.entry(*old_child_idx).or_insert_with(|| {
-                        let old_child_guard = old_child_idx.read(intermediate_trie3_god);
+                        let old_child_guard = old_child_idx.read(intermediate_trie3_god).unwrap();
                         let new_node_contents = if old_child_guard.value.end {
                             PrecomputedNodeContents::leaf()
                         } else {
@@ -2626,7 +2629,8 @@ impl<'r> Precomputer1<'r> {
                                 let edge_key = Some(terminal_id);
                                 let src_node_idx = src_node_wrapper.as_arc().clone();
                                 let end_idx = self.get_leaf_node();
-                                let src_live_tokens = src_node_idx.read(&self.trie1_god).value.live_tokens.clone();
+
+                                let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
                                 let final_edge_bv = &(&edge_bv & src_contextual_tokens) & &src_live_tokens;
 
                                 if !final_edge_bv.is_empty() {
@@ -2651,20 +2655,21 @@ impl<'r> Precomputer1<'r> {
                             let edge_key = Some(terminal_id);
                             let src_node_idx = src_node_wrapper.as_arc().clone();
 
-                            let src_live_tokens = src_node_idx.read(&self.trie1_god).value.live_tokens.clone();
+                            let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
                             let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
 
                             if final_edge_bv.is_empty() { continue; }
 
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
-                            let mut dest_node_opt = dest_nodes_in_queue.iter().find_map(|(dest_node, dest_contextual_tokens)| {
-                                if dest_node.read(&self.trie1_god).value.end {
+
+                            let mut dest_node_opt = dest_nodes_in_queue.iter().filter_map(|(dest_node, dest_contextual_tokens)| {
+                                if dest_node.read(&self.trie1_god).unwrap().value.end {
                                     return None;
                                 }
                                 let risky_tokens = &edge_bv_for_inserter - dest_contextual_tokens; // Note: using edge_bv_for_inserter for filtering to match original logic
                                 if risky_tokens.is_empty() {
-                                    return Some(*dest_node);
+                                    return Some(dest_node.clone());
                                 }
                                 let dest_live_tokens = &dest_node.read(&self.trie1_god).unwrap().value.live_tokens;
                                 if (&risky_tokens & dest_live_tokens).is_empty() {
@@ -2672,10 +2677,10 @@ impl<'r> Precomputer1<'r> {
                                 } else {
                                     None
                                 }
-                            });
+                            }).next();
 
                             if dest_node_opt.is_none() {
-                                let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie1_god).children().values().flat_map(|m| m.keys().cloned()).collect();
+                                let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie1_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
                                 dest_node_opt = children_of_src.iter().filter(|child_arc| {
                                     let guard = child_arc.read(&self.trie1_god).unwrap();
                                     if guard.value.end {
@@ -2716,7 +2721,8 @@ impl<'r> Precomputer1<'r> {
                                 let edge_key = Some(terminal_id);
                                 let src_node_idx = src_node_wrapper.as_arc().clone();
                                 let end_idx = self.get_leaf_node();
-                                let src_live_tokens = src_node_idx.read(&self.trie1_god).value.live_tokens.clone();
+
+                                let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
                                 let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
 
                                 if !final_edge_bv.is_empty() {
@@ -3023,7 +3029,7 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut num_end = 0;
                 let mut num_non_end = 0;
                 for child_node_trie_data in dest_map.keys() {
-                    if child_node_trie_data.as_arc().read(&self.parent.trie1_god).value.end {
+                    if child_node_trie_data.as_arc().read(&self.parent.trie1_god).unwrap().value.end {
                         num_end += 1;
                     } else {
                         num_non_end += 1;
@@ -3064,7 +3070,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut glr_s = glr_s.clone();
 
                     if let Some(gtid) = grammar_token_opt {
-                        let mut counts_guard = step_counts_clone1.write();
+                        let mut counts_guard = step_counts_clone1.write().unwrap();
                         let entry = counts_guard.entry(*gtid).or_default();
                         entry.total += 1;
 
@@ -3107,7 +3113,7 @@ impl<'a> GrammarConstraintState<'a> {
                             continue;
                         }
 
-                        if child_node_trie_data.as_arc().read(&self.parent.trie1_god).value.end {
+                        if child_node_trie_data.as_arc().read(&self.parent.trie1_god).unwrap().value.end {
                             let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                             crate::debug!(4, "Adding active tokens {:?} to final mask", glr_active_tokens);
                             // timeit!("get_mask final_mask update", {
@@ -3148,7 +3154,7 @@ impl<'a> GrammarConstraintState<'a> {
                                 num_outgoing_edges_that_lead_to_non_end_nodes += 1
                             } else {
                                 for (child_node_trie_data, _edge_llm_tokens_bv) in dest_map.iter() {
-                                    if !child_node_trie_data.as_arc().read(&self.parent.trie1_god).value.end {
+                                    if !child_node_trie_data.as_arc().read(&self.parent.trie1_god).unwrap().value.end {
                                         num_outgoing_edges_that_lead_to_non_end_nodes += 1;
                                         break;
                                     }
@@ -3212,7 +3218,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::profiler::print_summary_flat();
 
-        let counts = step_counts.read();
+        let counts = step_counts.read().unwrap();
         if !counts.is_empty() {
             let mut sorted_counts: Vec<_> = counts.iter().collect();
             sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));
@@ -3421,7 +3427,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::profiler::print_summary_flat();
 
-        let counts = step_counts.read();
+        let counts = step_counts.read().unwrap();
         if !counts.is_empty() {
             let mut sorted_counts: Vec<_> = counts.iter().collect();
             sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));

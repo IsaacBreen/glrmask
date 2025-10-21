@@ -126,7 +126,7 @@ impl<'r> Precomputer0<'r> {
                     // of the cycle), effectively breaking the cycle instead of just displacing it.
                     // A full clone would copy the children, which would just recreate the cycle
                     // with the cloned node, leading to an infinite loop.
-                    let new_node_content = PrecomputeNode0::new(old_dest_idx.read(&self.trie0_god).value.clone());
+                    let new_node_content = PrecomputeNode0::new(old_dest_idx.read(&self.trie0_god).unwrap().value.clone());
                     let new_node_arc = self.trie0_god.insert(new_node_content);
                     PrecomputeNode0Index::new(new_node_arc)
                 }).clone();
@@ -134,7 +134,7 @@ impl<'r> Precomputer0<'r> {
             }
 
             for (src_idx, key, old_dest_idx, new_dest_idx) in changes {
-                let mut src_guard = src_idx.write(&self.trie0_god);
+                let mut src_guard = src_idx.write(&self.trie0_god).unwrap();
                 if let Some(dest_map) = src_guard.children_mut().get_mut(&key) {
                     if let Some(bv) = dest_map.remove(&old_dest_idx) {
                         dest_map.insert(new_dest_idx, bv);
@@ -176,7 +176,7 @@ impl<'r> Precomputer0<'r> {
 
         recursion_stack.insert(node_idx.clone());
 
-        let children_to_visit = node_idx.read(&self.trie0_god).children().clone();
+        let children_to_visit = node_idx.read(&self.trie0_god).unwrap().children().clone();
 
         for (edge_key, dest_map) in children_to_visit.iter() {
             for (child_idx, _edge_val) in dest_map.iter() {
@@ -215,7 +215,7 @@ impl<'r> Precomputer0<'r> {
         let all_nodes = Trie::all_nodes(&self.trie0_god, &roots_vec);
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
-            let mut node_guard = node_arc.write(&self.trie0_god);
+            let mut node_guard = node_arc.write(&self.trie0_god).expect("poison");
             let mut edges_to_move = Vec::new();
 
             for (key, dest_map) in node_guard.children() {
@@ -283,7 +283,7 @@ impl<'r> Precomputer0<'r> {
 
         for src_arc in &all_nodes {
             let src_ptr = src_arc;
-            let guard = src_arc.read(&self.trie0_god);
+            let guard = src_arc.read(&self.trie0_god).expect("poison");
             // Record all outgoing edges for incoming map
             for (ek, dest_map) in guard.children().iter() {
                 for (child_wrap, ev_bv) in dest_map.iter() {
@@ -327,7 +327,7 @@ impl<'r> Precomputer0<'r> {
                     // Not a root and no predecessors means it's an unreachable internal node.
                     // It's safe to remove its outgoing None edges.
                     if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
-                        let mut b_guard = b_arc.write(&self.trie0_god);
+                        let mut b_guard = b_arc.write(&self.trie0_god).expect("poison");
                         b_guard.children_mut().retain(|k, _| k.is_some());
                     }
                     continue;
@@ -350,7 +350,7 @@ impl<'r> Precomputer0<'r> {
                     continue;
                 }
 
-                let mut a_guard = a_arc.write(&self.trie0_god);
+                let mut a_guard = a_arc.write(&self.trie0_god).expect("poison");
                 let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
 
                 // Add/merge edges to each C with per-child mask
@@ -381,7 +381,7 @@ impl<'r> Precomputer0<'r> {
 
             // Finally, remove all None edges out of B
             {
-                let mut b_guard = b_arc.write(&self.trie0_god);
+                let mut b_guard = b_arc.write(&self.trie0_god).expect("poison");
                 b_guard.children_mut().retain(|k, _| k.is_some());
             }
         }
@@ -457,11 +457,11 @@ impl<'r> Precomputer0<'r> {
         let all_nodes = Trie::all_nodes(&self.trie0_god, &roots_vec);
         for node_arc in all_nodes {
             let node_ptr: NodePtr = {
-                let guard = node_arc.read(&self.trie0_god);
+                let guard = node_arc.read(&self.trie0_god).expect("poison");
                 &*guard as *const _
             };
             if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
-                let mut node_guard = node_arc.write(&self.trie0_god);
+                let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
                 node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
             }
         }
@@ -513,7 +513,7 @@ impl<'r> Precomputer0<'r> {
 
         // We must collect children before recursing to avoid holding the lock.
         let children_to_check: Vec<PrecomputeNode0Index> = {
-            let node_guard = node_arc.read(&self.trie0_god);
+            let node_guard = node_arc.read(&self.trie0_god).unwrap();
             node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
         };
 
@@ -525,7 +525,7 @@ impl<'r> Precomputer0<'r> {
         // Now that the cache is populated for all children, we can prune the current node.
         let mut live_tokens_for_this_node = LLMTokenBV::zeros();
         {
-            let mut node_guard = node_arc.write(&self.trie0_god);
+            let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
 
             // A node is live if it's an end node itself. The tokens that end here are
             // on the edges pointing to this node.
@@ -598,7 +598,7 @@ impl<'r> Precomputer0<'r> {
 
         for src_arc in &all_nodes {
             let src_ptr = src_arc;
-            let guard = src_arc.read(&self.trie0_god);
+            let guard = src_arc.read(&self.trie0_god).expect("poison");
             for (edge_key, dest_map) in guard.children() {
                 if edge_key.is_some() { // Only consider non-None edges
                     for (dest_wrapper, bv) in dest_map {
@@ -627,7 +627,7 @@ impl<'r> Precomputer0<'r> {
                     }
 
                     {
-                        let mut intermediate_guard = intermediate_node.write(&self.trie0_god);
+                        let mut intermediate_guard = intermediate_node.write(&self.trie0_god).expect("poison");
                         let mut edge_val_opt = Some(union_bv.clone());
                         // No cycle possible since I is new. Use unchecked for speed.
                         // Depth will be propagated to D.
@@ -638,7 +638,7 @@ impl<'r> Precomputer0<'r> {
                     // c. For each source, remove old edge and add new `None` edge to `I`.
                     for (src_ptr, bv) in &sources {
                         let src_arc = arc_map.get(src_ptr).unwrap();
-                        let mut src_guard = src_arc.write(&self.trie0_god);
+                        let mut src_guard = src_arc.write(&self.trie0_god).expect("poison");
 
                         // Remove S --(edge_key)--> D
                         if let Some(dest_map_for_key) = src_guard.children_mut().get_mut(&edge_key) {
@@ -725,14 +725,14 @@ impl<'r> Precomputer0<'r> {
             // Calling recompute_max_depth while holding a write lock can deadlock on
             // self-loops, because it may attempt to acquire a read lock on the same node.
             // We recompute max depths globally after merging (see optimize()), which is safe.
-            let mut node_guard = node_arc.write(&self.trie0_god);
+            let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
             *node_guard.children_mut() = new_children_map;
             // IMPORTANT: No recompute_max_depth here to avoid deadlocks on self-loops.
             // The live_tokens field will be recomputed by prune_dead_paths after merging.
         }
 
         let canonical_arc = {
-            let node_guard = node_arc.read(&self.trie0_god);
+            let node_guard = node_arc.read(&self.trie0_god).unwrap();
             let node_content = (*node_guard).clone();
             canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
         };
