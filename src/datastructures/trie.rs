@@ -14,6 +14,7 @@ use deterministic_hash::DeterministicHasher;
 use kdam::{tqdm, BarExt};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use profiler_macro::time_it;
+use range_set_blaze::RangeSetBlaze;
 
 /// Represents statistics about a Trie graph reachable from a set of roots.
 #[derive(Debug, Clone, PartialEq)]
@@ -2725,6 +2726,13 @@ impl MergeableEdgeValue for () {
 }
 
 impl MergeableEdgeValue for HybridBitset {
+    #[time_it]
+    fn merge(&mut self, other: Self) {
+        *self |= &other;
+    }
+}
+
+impl MergeableEdgeValue for RangeSetBlaze<usize> {
     #[time_it]
     fn merge(&mut self, other: Self) {
         *self |= &other;
