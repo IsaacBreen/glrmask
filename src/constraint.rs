@@ -2639,53 +2639,47 @@ impl<'r> Precomputer1<'r> {
         self.pb.finish();
         crate::debug!(2, "Precomputation complete");
     }
+
     fn dfs(
         &self,
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
     ) {
         self.pb.inc(1);
-    
+
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            // Per-segment work structures
-            // We keep the old per-segment pos->state queue structure, but everything else is cached globally.
             let base_ptr = segment_bytes.as_ptr();
             let seg_len = segment_bytes.len();
-    
-            // Queue keyed by byte position within the segment
+
             let mut work_queue: BTreeMap<
                 usize,
                 HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
-    
-            // To pass down to DFS for the next vocab level
+
             let mut next_level_assoc: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>> = HashMap::new();
-    
-            // We'll batch edge insertions: (src, dst, edge_key) -> bitset (OR-merged)
+
             type EdgeKey = (PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>);
             let mut edge_buffer: HashMap<EdgeKey, LLMTokenBV> = HashMap::new();
-    
-            // Accumulate live_tokens updates per destination node (including the leaf), then apply once.
+
             let mut pending_live_updates: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
-    
-            // Cache src live_tokens to avoid locking repeatedly
             let mut src_live_cache: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
-    
-            // Prepare references/values reused in loops
+
+            // *** THE FIX IS HERE ***
+            // This cache ensures we create only ONE destination node per unique continuation path
+            // within this segment's processing.
+            // Key: (source_node, next_byte_pos, next_tokenizer_state)
+            type DestCacheKey = (PrecomputeNode1Index, usize, TokenizerStateID);
+            let mut dest_node_cache: HashMap<DestCacheKey, PrecomputeNode1Index> = HashMap::new();
+
             let child_token_id = child_vocab_node.token_id();
-            let child_reachable = child_vocab_node.reachable_token_ids(); // &HybridBitset
-    
-            // Pre-calc singleton bitset for the child LLM token (used for leaf edges)
+            let child_reachable = child_vocab_node.reachable_token_ids();
             let mut child_singleton_bv = HybridBitset::zeros();
             child_singleton_bv.insert(child_token_id);
-    
-            // Empty map for "no possible matches at end"
             let empty_matches_at_end: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
-    
+
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == seg_len {
-                    // We have consumed the whole segment; carry forward the same (node -> tokens) per state.
                     for (tok_state, nodes_with_tokens) in states_at_pos {
                         let entry = next_level_assoc.entry(tok_state).or_default();
                         for (node, tokens) in nodes_with_tokens {
@@ -2694,60 +2688,39 @@ impl<'r> Precomputer1<'r> {
                     }
                     continue;
                 }
-    
-                // Process each tokenizer state starting at this pos
+
                 for (tok_state, precompute_nodes_with_tokens) in states_at_pos {
-                    // Execute the tokenizer DFA once for (segment, pos, state)
                     let exec = self.fast_execute(segment_bytes, base_ptr, pos, tok_state);
                     let exec_ref: &ExecuteResult = &exec;
-    
-                    // Precompute matches available at the end of this segment if DFA didn't terminate prematurely.
+
                     let possible_matches_at_end = if let Some(end_state_val) = exec_ref.end_state {
-                        // Cached by vocab-node pointer and tokenizer-state
                         self.possible_matches(child_vocab_node, TokenizerStateID(end_state_val))
                     } else {
                         empty_matches_at_end.clone()
                     };
-    
-                    // For each match we can emit an edge and, if not at the end, continue scanning from next_pos
+
                     for m in &exec_ref.matches {
                         let terminal_id = GrammarTokenID(m.id);
                         let next_pos = pos + m.width;
-    
                         let at_segment_end = next_pos == seg_len;
-    
-                        // Compute a base edge bitset for this terminal once:
-                        // Start with all tokens reachable under child
+
                         let mut edge_bv_common = child_reachable.clone();
-    
-                        // If we end exactly at the segment end, don't keep the "finish-here" token in common edges;
-                        // that case is handled as a separate "leaf" edge below.
                         if at_segment_end {
                             edge_bv_common.set(child_token_id, false);
                         }
-    
-                        // Remove matches that will also be accounted for via possible_matches_at_end to avoid double counting
                         if let Some(deny) = possible_matches_at_end.get(&terminal_id) {
                             edge_bv_common -= deny;
                         }
-    
-                        // Now specialize per source-node: intersect with contextual tokens and with src live tokens.
+
                         for (src_node_idx, src_contextual_tokens) in &precompute_nodes_with_tokens {
-                            // Special-case the "exact end-of-segment terminal match" -> leaf edge with a single bit
                             if at_segment_end {
-                                // Build final_edge_bv for leaf only if this src allows the child token and it's live there
-                                // Compute final_edge_bv = (child_singleton) & src_contextual_tokens & src_live
-                                // This remains very cheap because it's a single bit.
                                 let mut final_leaf = child_singleton_bv.clone();
                                 final_leaf &= src_contextual_tokens;
-    
                                 if !final_leaf.is_empty() {
-                                    // intersect with src live tokens (cached)
                                     let src_live = src_live_cache.entry(*src_node_idx).or_insert_with(|| {
                                         src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone()
                                     });
                                     final_leaf &= &*src_live;
-    
                                     if !final_leaf.is_empty() {
                                         let leaf_idx = self.get_leaf_node();
                                         let key = (*src_node_idx, leaf_idx, Some(terminal_id));
@@ -2756,85 +2729,68 @@ impl<'r> Precomputer1<'r> {
                                     }
                                 }
                             }
-    
-                            // Non-leaf edge path: base edge set for this terminal
+
                             let mut filtered = edge_bv_common.clone();
                             filtered &= src_contextual_tokens;
-                            if filtered.is_empty() {
-                                continue;
-                            }
-    
-                            // intersect with src live
+                            if filtered.is_empty() { continue; }
+
                             let src_live = src_live_cache.entry(*src_node_idx).or_insert_with(|| {
                                 src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone()
                             });
                             filtered &= &*src_live;
-                            if filtered.is_empty() {
-                                continue;
-                            }
-    
-                            // Always create a fresh internal node.
-                            let new_node_idx = {
-                                let new_node = PrecomputeNode1::new(PrecomputedNodeContents::internal());
-                                Trie2Index::new(self.trie1_god.insert(new_node))
-                            };
-    
-                            // Emit the edge (batched)
-                            let key = (*src_node_idx, new_node_idx, Some(terminal_id));
+                            if filtered.is_empty() { continue; }
+
+                            // *** USE THE CACHE TO GET OR CREATE THE DESTINATION NODE ***
+                            let dest_node_idx = *dest_node_cache
+                                .entry((*src_node_idx, next_pos, self.tokenizer_start_state))
+                                .or_insert_with(|| {
+                                    let new_node = PrecomputeNode1::new(PrecomputedNodeContents::internal());
+                                    Trie2Index::new(self.trie1_god.insert(new_node))
+                                });
+
+                            let key = (*src_node_idx, dest_node_idx, Some(terminal_id));
                             edge_buffer.entry(key).or_insert_with(HybridBitset::zeros).bitor_assign(&filtered);
-    
-                            // We'll need these tokens if we continue scanning at next_pos from tokenizer start state
-                            // Insert into work_queue (tokens carried forward are the contextual ones BEFORE intersecting with src live;
-                            // but to stay faithful to original code, we carry the set that was used to permit this edge)
+
                             let entry = work_queue
                                 .entry(next_pos)
                                 .or_default()
                                 .entry(self.tokenizer_start_state)
                                 .or_default();
                             entry
-                                .entry(new_node_idx)
+                                .entry(dest_node_idx)
                                 .or_insert_with(HybridBitset::zeros)
                                 .bitor_assign(&filtered);
-    
-                            // Defer live-token update for the dest node
+
                             pending_live_updates
-                                .entry(new_node_idx)
+                                .entry(dest_node_idx)
                                 .or_insert_with(HybridBitset::zeros)
                                 .bitor_assign(&filtered);
                         }
                     }
-    
-                    // If the DFA run didn't terminate and we can reach an end_state inside this segment,
-                    // push all accessible terminals from that end_state as "leaf edges" with the single child bit.
+
                     if let Some(end_state_val) = exec_ref.end_state {
                         let final_tok_state = TokenizerStateID(end_state_val);
                         let accessible_terminals = self.accessible_terminals(final_tok_state);
                         let leaf_idx = self.get_leaf_node();
-    
+
                         for (src_node_idx, src_contextual_tokens) in &precompute_nodes_with_tokens {
                             let mut final_leaf = child_singleton_bv.clone();
                             final_leaf &= src_contextual_tokens;
-                            if final_leaf.is_empty() {
-                                continue;
-                            }
-                            // intersect with src live tokens (cached)
+                            if final_leaf.is_empty() { continue; }
+
                             let src_live = src_live_cache.entry(*src_node_idx).or_insert_with(|| {
                                 src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone()
                             });
                             final_leaf &= &*src_live;
-                            if final_leaf.is_empty() {
-                                continue;
-                            }
-    
-                            // Add leaf edges for all accessible terminals (batched)
+                            if final_leaf.is_empty() { continue; }
+
                             for terminal_id in accessible_terminals {
                                 let key = (*src_node_idx, leaf_idx, Some(*terminal_id));
                                 edge_buffer.entry(key).or_insert_with(HybridBitset::zeros).bitor_assign(&final_leaf);
                             }
                             pending_live_updates.entry(leaf_idx).or_insert_with(HybridBitset::zeros).bitor_assign(&final_leaf);
                         }
-    
-                        // Carry forward the original (src node -> contextual tokens) to the next vocab level
+
                         let entry = next_level_assoc.entry(final_tok_state).or_default();
                         for (node, tokens) in precompute_nodes_with_tokens {
                             entry.entry(node).or_insert_with(HybridBitset::zeros).bitor_assign(tokens);
@@ -2842,25 +2798,20 @@ impl<'r> Precomputer1<'r> {
                     }
                 }
             }
-    
-            // Flush all batched edges in one go, with a single lock per source node
+
             for ((src_idx, dst_idx, edge_key), bv) in edge_buffer.drain() {
                 if !bv.is_empty() {
-                    self.trie1_god.insert_edge_simple(src_idx, dst_idx, edge_key, bv.clone());
+                    self.trie1_god.insert_edge_simple(src_idx, dst_idx, edge_key, bv);
                 }
             }
-    
-            // Apply all live_tokens updates once per destination
+
             for (dst_idx, bv) in pending_live_updates.drain() {
-                if bv.is_empty() {
-                    continue;
-                }
+                if bv.is_empty() { continue; }
                 if let Some(mut guard) = dst_idx.write(&self.trie1_god) {
                     guard.value.live_tokens |= &bv;
                 }
             }
-    
-            // Recurse into the next vocab level if we carried anything forward
+
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
             }
