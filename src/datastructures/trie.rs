@@ -291,7 +291,7 @@ impl JSONConvertible for Trie2Index {
 
 // Implementation block for core Trie functionality
 // Added Clone bound for EK needed in insertion and others
-impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
+impl<EK: Ord + Clone, EV: Clone, T> Trie<EK, EV, T> {
     /// Creates a new trie node with the given value and no children.
     /// The max_depth is initialized to usize::MAX and will be updated later
     /// when recompute_all_max_depths is called.
@@ -706,13 +706,14 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         visited.insert(node_idx);
 
         // We must read children, release the lock, recurse, and then re-acquire a write lock to modify.
-        let children_snapshot = if let Some(guard) = node_idx.read(arena) {
-            guard.children().clone()
+        let children_snapshot;
+        if let Some(guard) = node_idx.read(arena) {
+            children_snapshot = guard.children().clone();
         } else {
             // Node not found, probably an invalid index.
             visiting.remove(&node_idx);
             return;
-        };
+        }
 
         let mut back_edges: Vec<(EK, Trie2Index)> = Vec::new();
 
