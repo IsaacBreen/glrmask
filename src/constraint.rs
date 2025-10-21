@@ -2097,6 +2097,7 @@ impl GrammarConstraint {
         // Shared end node for Trie1-end positions
         let trie3_end = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
 
+        crate::debug!(2, "Entering precompute3 special_map_grouped");
         Trie::special_map_grouped( // TODO: fix this
             &trie1_god,
             initial_values_for_map,
