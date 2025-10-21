@@ -2814,7 +2814,7 @@ impl<'r> Precomputer1<'r> {
 
                 // Apply live token updates
                 for (node_idx, live_tokens) in pending_live_token_updates {
-                    timeit!("dfs_batch_write_insert_edge_simple", {
+                    timeit!("dfs_batch_write_update_live_tokens", {
                         if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
                             node.value.live_tokens |= &live_tokens;
                         }
@@ -2823,7 +2823,7 @@ impl<'r> Precomputer1<'r> {
 
                 // Apply edge insertions
                 for (EdgeKey { src, key, dst }, bv) in pending_edges {
-                    timeit!("dfs_batch_write_update_live_tokens", {
+                    timeit!("dfs_batch_write_insert_edge_simple", {
                         if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
                             src_node.children_mut().entry(key).or_default()
                                 .entry(dst)
