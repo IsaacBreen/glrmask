@@ -8,10 +8,14 @@ from pathlib import Path
 import requests
 
 # --- Helper Functions ---
-def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
+def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
     """
-    Loads a vocabulary from a local path or downloads it from a URL, using a cache.
+    Loads a vocabulary from a local path, a URL, or a direct list of strings.
     """
+    if vocab_list:
+        print(f"Loading vocabulary from command-line list ({len(vocab_list)} tokens).")
+        return {token: i for i, token in enumerate(vocab_list)}
+
     if not url and not path:
         raise ValueError("Either --vocab-url or --vocab-path must be provided.")
     if url and path:
@@ -154,6 +158,11 @@ Examples:
 
   # 3. Do everything in one step (from scratch)
   python scripts/compile.py -g src/js.ebnf -o .cache/constraints/js_gpt2.json.gz --vocab-url <URL>
+
+  # 4. Use a small, explicit vocabulary for testing
+  python scripts/compile.py \\
+    -g src/js.ebnf -o .cache/constraints/js_simple.json.gz \\
+    --vocab-list '{' '}' '[' ']' ',"' '":' ' "' 'true' 'false' 'null' '123'
 """
     parser = argparse.ArgumentParser(
         description="A helper script to compile a grammar constraint file.",
@@ -166,6 +175,7 @@ Examples:
     vocab_group = parser.add_mutually_exclusive_group(required=True)
     vocab_group.add_argument("--vocab-url", type=str, help="URL of the JSON vocabulary file to download.")
     vocab_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
+    vocab_group.add_argument("--vocab-list", type=str, nargs='+', help="A list of strings to use as the vocabulary.")
 
     parser.add_argument("--cache-dir", type=Path, default=Path(".cache/vocabs"), help="Directory to cache downloaded vocabularies.")
     parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
@@ -194,7 +204,7 @@ Examples:
         parser.error(f"The path specified for --from-precompute0 does not exist: {args.from_precompute0}")
 
     # 1. Get the vocabulary
-    vocab = get_vocab(args.vocab_url, args.vocab_path, args.cache_dir, args.force_download)
+    vocab = get_vocab(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
 
     # 2. Apply filters
     modified_vocab = filter_vocab(vocab, args.max_token_len)
