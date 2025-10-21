@@ -146,6 +146,11 @@ impl HybridBitset {
         }
     }
 
+    /// Creates a HybridBitset from a single index. Alias for `from_item`.
+    pub fn from_singleton(index: usize) -> Self {
+        Self::from_item(index)
+    }
+
     /// A bitset is simple if it has a small number of ranges, making operations fast
     /// enough that caching overhead is not worthwhile.
     pub fn is_simple(&self) -> bool {
@@ -172,6 +177,21 @@ impl HybridBitset {
     /// Checks if a specific index is set.
     pub fn contains(&self, index: usize) -> bool {
         self.inner.contains(index)
+    }
+
+    /// Cheaply checks if two HybridBitsets point to the same underlying interned data.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Returns true if the bitset contains exactly one set bit.
+    pub fn is_singleton(&self) -> bool {
+        self.len() == 1
+    }
+
+    /// Returns the first index in the set, if any.
+    pub fn first(&self) -> Option<usize> {
+        self.inner.iter().next()
     }
 
     pub fn is_subset(&self, other: &Self) -> bool {
