@@ -2659,16 +2659,12 @@ impl<'r> Precomputer1<'r> {
 
             let mut next_level_assoc: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>> = HashMap::new();
 
-            type EdgeKey = (PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>);
-            let mut edge_buffer: HashMap<EdgeKey, LLMTokenBV> = HashMap::new();
+            type EdgeKeyTuple = (PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>);
+            let mut edge_buffer: HashMap<EdgeKeyTuple, LLMTokenBV> = HashMap::new();
 
             let mut pending_live_updates: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
             let mut src_live_cache: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
 
-            // *** THE FIX IS HERE ***
-            // This cache ensures we create only ONE destination node per unique continuation path
-            // within this segment's processing.
-            // Key: (source_node, next_byte_pos, next_tokenizer_state)
             type DestCacheKey = (PrecomputeNode1Index, usize, TokenizerStateID);
             let mut dest_node_cache: HashMap<DestCacheKey, PrecomputeNode1Index> = HashMap::new();
 
@@ -2730,17 +2726,24 @@ impl<'r> Precomputer1<'r> {
                                 }
                             }
 
-                            let mut filtered = edge_bv_common.clone();
-                            filtered &= src_contextual_tokens;
-                            if filtered.is_empty() { continue; }
+                            // *** THE FIX IS HERE ***
+                            // We must distinguish between the tokens for the edge vs. for the next context.
 
+                            // 1. This is the context for the rest of the segment traversal.
+                            //    It is NOT filtered by src_live_tokens.
+                            let mut contextual_tokens_for_dest = edge_bv_common.clone();
+                            contextual_tokens_for_dest &= src_contextual_tokens;
+                            if contextual_tokens_for_dest.is_empty() { continue; }
+
+                            // 2. This is the bitset for the edge itself and the live_tokens update.
+                            //    It IS filtered by src_live_tokens.
                             let src_live = src_live_cache.entry(*src_node_idx).or_insert_with(|| {
                                 src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone()
                             });
-                            filtered &= &*src_live;
-                            if filtered.is_empty() { continue; }
+                            let mut final_edge_bv = contextual_tokens_for_dest.clone();
+                            final_edge_bv &= &*src_live;
+                            if final_edge_bv.is_empty() { continue; }
 
-                            // *** USE THE CACHE TO GET OR CREATE THE DESTINATION NODE ***
                             let dest_node_idx = *dest_node_cache
                                 .entry((*src_node_idx, next_pos, self.tokenizer_start_state))
                                 .or_insert_with(|| {
@@ -2748,9 +2751,15 @@ impl<'r> Precomputer1<'r> {
                                     Trie2Index::new(self.trie1_god.insert(new_node))
                                 });
 
+                            // Use final_edge_bv for the edge and live update
                             let key = (*src_node_idx, dest_node_idx, Some(terminal_id));
-                            edge_buffer.entry(key).or_insert_with(HybridBitset::zeros).bitor_assign(&filtered);
+                            edge_buffer.entry(key).or_insert_with(HybridBitset::zeros).bitor_assign(&final_edge_bv);
+                            pending_live_updates
+                                .entry(dest_node_idx)
+                                .or_insert_with(HybridBitset::zeros)
+                                .bitor_assign(&final_edge_bv);
 
+                            // Use contextual_tokens_for_dest to populate the work queue
                             let entry = work_queue
                                 .entry(next_pos)
                                 .or_default()
@@ -2759,12 +2768,7 @@ impl<'r> Precomputer1<'r> {
                             entry
                                 .entry(dest_node_idx)
                                 .or_insert_with(HybridBitset::zeros)
-                                .bitor_assign(&filtered);
-
-                            pending_live_updates
-                                .entry(dest_node_idx)
-                                .or_insert_with(HybridBitset::zeros)
-                                .bitor_assign(&filtered);
+                                .bitor_assign(&contextual_tokens_for_dest);
                         }
                     }
 
