@@ -5,8 +5,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
+use parking_lot::RwLock;
 
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
@@ -1547,7 +1547,7 @@ pub(crate) fn merge_stored_trie_nodes(
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         if !root.acc.stored_trie_nodes.iter().any(
             // TODO: can this condition be relaxed to a subset or something?
-            |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
+            |n| n.as_arc().read(stored_trie_god).expect("Node not found").value.live_tokens != root.acc.llm_tokens_union
         ) {
             return Some(root.acc.clone());
         }
@@ -1577,7 +1577,7 @@ pub(crate) fn merge_stored_trie_nodes(
         }
 
         // Update the live tokens on the new destination node.
-        new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
+        new_destination.write(stored_trie_god).expect("Node not found").value.live_tokens |= &tokens_for_edge;
 
         // The acc now points only to this new merged destination.
         new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);

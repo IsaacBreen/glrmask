@@ -84,7 +84,7 @@ fn convert_to_intermediate2(
 
     for (sid, root1) in roots1 {
         let root2 = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(
-            root1.read(god1).unwrap().value.clone(),
+            root1.read(god1).value.clone(),
         )));
         roots2.insert(*sid, root2);
         node_map.insert(*root1, root2);
@@ -97,14 +97,14 @@ fn convert_to_intermediate2(
             continue;
         }
         let idx2 = *node_map.get(&idx1).unwrap();
-        let guard1 = idx1.read(god1).unwrap();
+        let guard1 = idx1.read(god1);
 
         for (edge_key1, dest_map1) in guard1.children() {
             for (child1_idx, _) in dest_map1 {
                 let child2_idx = *node_map.entry(*child1_idx).or_insert_with(|| {
-                    let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(
-                        Intermediate2PrecomputeNode3::new(child1_idx.read(god1).unwrap().value.clone()),
-                    ));
+                    let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(
+                        child1_idx.read(god1).value.clone(),
+                    )));
                     q.push_back(*child1_idx);
                     new_node
                 });
@@ -149,7 +149,7 @@ fn convert_from_intermediate2(
 
     for (sid, root2) in roots2 {
         let root1 = IntermediatePrecomputeNode3Index::new(god1.insert(IntermediatePrecomputeNode3::new(
-            root2.read(god2).unwrap().value.clone(),
+            root2.read(god2).value.clone(),
         )));
         roots1.insert(*sid, root1);
         node_map.insert(*root2, root1);
@@ -162,14 +162,14 @@ fn convert_from_intermediate2(
             continue;
         }
         let idx1 = *node_map.get(&idx2).unwrap();
-        let guard2 = idx2.read(god2).unwrap();
+        let guard2 = idx2.read(god2);
 
         for (edge_key2, dest_map2) in guard2.children() {
             for (child2_idx, edge_value2) in dest_map2 {
                 let child1_idx = *node_map.entry(*child2_idx).or_insert_with(|| {
-                    let new_node = IntermediatePrecomputeNode3Index::new(god1.insert(
-                        IntermediatePrecomputeNode3::new(child2_idx.read(god2).unwrap().value.clone()),
-                    ));
+                    let new_node = IntermediatePrecomputeNode3Index::new(god1.insert(IntermediatePrecomputeNode3::new(
+                        child2_idx.read(god2).value.clone(),
+                    )));
                     q.push_back(*child2_idx);
                     new_node
                 });
@@ -284,7 +284,7 @@ pub fn eliminate_pushes_and_pops(
         // - Has no outgoing Push edges.
         let mut nodes_to_process = Vec::new();
         for &b_idx in &all_nodes {
-            let b_guard = b_idx.read(&god2).unwrap();
+            let b_guard = b_idx.read(&god2);
             if b_guard.value.end {
                 continue;
             }
@@ -385,7 +385,7 @@ pub fn eliminate_pushes_and_pops(
             // edges to preserve behavior. Then retry the main loop.
             let mut split_candidates = Vec::new();
             for &b_idx in &all_nodes {
-                let b_guard = b_idx.read(&god2).unwrap();
+                let b_guard = b_idx.read(&god2);
                 if b_guard.value.end {
                     continue;
                 }
@@ -419,7 +419,7 @@ pub fn eliminate_pushes_and_pops(
                 );
                 for &b_idx in &split_candidates {
                 // Create the new "non-push" clone node
-                let b_value = b_idx.read(&god2).unwrap().value.clone();
+                let b_value = b_idx.read(&god2).value.clone();
                 let b_np_idx = Intermediate2PrecomputeNode3Index::new(
                     god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
                 );

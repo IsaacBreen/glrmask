@@ -74,7 +74,7 @@ fn constrain_bitvecs_trie1(
     crate::debug!(3, "Trie1: constraining LLM token bitvectors and removing empty edges...");
     let all_nodes = Trie::all_nodes(trie1_god, roots);
     for n in all_nodes {
-        let mut w = n.write(trie1_god).expect("write");
+        let mut w = n.write(trie1_god);
         let old_children = std::mem::take(w.children_mut());
         let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
         for (ek, dest_map) in old_children {
@@ -112,7 +112,7 @@ fn shortcut_none_chains_trie1(
     // Build summary snapshot
     let mut summary: HashMap<PrecomputeNode1Index, (bool, EdgeList)> = HashMap::new();
     for u in &nodes {
-        let g = u.read(trie1_god).expect("read");
+        let g = u.read(trie1_god);
         let edges: EdgeList = g.children()
             .iter()
             .map(|(ek, dm)| {
@@ -178,15 +178,14 @@ fn shortcut_none_chains_trie1(
     for u in &nodes {
         // Snapshot current None edges for this node
         let none_edges_snapshot: Vec<(PrecomputeNode1Index, LLMTokenBV)> = {
-            let g = u.read(trie1_god).expect("read");
+            let g = u.read(trie1_god);
             match g.children().get(&None) {
                 Some(dm) => dm.iter().map(|(d, bv)| (*d, bv.clone())).collect(),
                 None => Vec::new(),
             }
         };
         if none_edges_snapshot.is_empty() { continue; }
-
-        let mut w = u.write(trie1_god).expect("write");
+        let mut w = u.write(trie1_god);
         for (v, b1) in none_edges_snapshot {
             if let Some(chain) = follow_none_chain(v, trie1_god, &summary, &mut memo) {
                 // Remove U --(None)--> V
@@ -229,7 +228,7 @@ fn prune_dead_paths_trie1(
     // Initialize live sets and predecessors
     for u in &all_nodes {
         live.insert(*u, LLMTokenBV::zeros());
-        let g = u.read(trie1_god).expect("read");
+        let g = u.read(trie1_god);
         if g.value.end {
             live.insert(*u, all_tokens.clone()); // conservative seed
             worklist.push_back(*u);
@@ -260,7 +259,7 @@ fn prune_dead_paths_trie1(
 
     // Prune edges based on liveness intersections and write node live_tokens
     for u in &all_nodes {
-        let mut w = u.write(trie1_god).expect("write");
+        let mut w = u.write(trie1_god);
         let old_children = std::mem::take(w.children_mut());
         let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in old_children {
@@ -312,7 +311,7 @@ fn merge_nodes_trie1(
     let mut raw_edges: Vec<Vec<RawEdge1>> = vec![Vec::new(); n];
 
     for (u_dense, u_idx) in old_of.iter().enumerate() {
-        let g = u_idx.read(trie1_god).expect("read");
+        let g = u_idx.read(trie1_god);
         ends[u_dense] = g.value.end;
         for (ek, dm) in g.children() {
             for (v_idx, bv) in dm {
@@ -422,12 +421,10 @@ fn merge_nodes_trie1(
             }
 
             for (i, &c) in prev_class.iter().enumerate() {
-                if c == cid {
-                    new_live_tokens |= &old_of[i].read(trie1_god).unwrap().value.live_tokens;
-                }
+                if c == cid { new_live_tokens |= &old_of[i].read(trie1_god).value.live_tokens; }
             }
 
-            let mut w = rep_idx.write(trie1_god).expect("write");
+            let mut w = rep_idx.write(trie1_god);
             *w.children_mut() = new_children;
             w.value.live_tokens = new_live_tokens;
         }
@@ -543,7 +540,7 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
 
     let mut former_end_nodes1: HashSet<PrecomputeNode1Index> = HashSet::new();
     for (node0_idx, node1_idx) in node0_to_node1_map {
-        let node0_guard = node0_idx.read(trie0_god).unwrap();
+        let node0_guard = node0_idx.read(trie0_god);
         if node0_guard.value.final_tokenizer_state.is_some() {
             former_end_nodes1.insert(*node1_idx);
         }
@@ -557,12 +554,11 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
         let mut none_edges_to_b_to_remove = Vec::new();
 
         { // read lock scope
-            let a_guard = a_arc.read(trie1_god).unwrap();
+            let a_guard = a_arc.read(trie1_god);
             if let Some(none_dest_map) = a_guard.children().get(&None) {
                 for (b_arc_wrapper, bv_ab) in none_dest_map {
                     if former_end_nodes1.contains(b_arc_wrapper) {
-                        let b_arc = b_arc_wrapper.as_arc();
-                        let b_guard = b_arc.read(trie1_god).unwrap();
+                        let b_arc = b_arc_wrapper.as_arc(); let b_guard = b_arc.read(trie1_god);
 
                         if !b_guard.children().is_empty() {
                             // This is a candidate for simplification: A -(None)-> B, where B has children.
@@ -586,7 +582,7 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
         } // end read lock
 
         if !none_edges_to_b_to_remove.is_empty() {
-            let mut a_guard = a_arc.write(trie1_god).unwrap();
+            let mut a_guard = a_arc.write(trie1_god);
 
             // Remove the None edges that point to former end nodes that we are shortcutting.
             if let Some(none_dest_map) = a_guard.children_mut().get_mut(&None) {
@@ -628,7 +624,7 @@ fn replace_ignore_token_edges_with_none_edges_trie1(
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
 
     for node_arc in all_nodes {
-        let mut node_guard = node_arc.write(trie1_god).expect("poison");
+        let mut node_guard = node_arc.write(trie1_god);
         if let Some(dest_map_to_move) = node_guard.children_mut().remove(&Some(ignore_tid)) {
             let dest_map_for_new_key = node_guard.children_mut().entry(None).or_default();
             for (dest_wrapper, edge_bv) in dest_map_to_move {
@@ -671,7 +667,7 @@ fn none_closure_for_node<'a>(
         while let Some(u) = q.pop_front() {
             let mask_u = reach.get(&u).cloned().unwrap_or_else(LLMTokenBV::zeros);
             if mask_u.is_empty() { continue; }
-            let g = u.read(trie1_god).expect("read");
+            let g = u.read(trie1_god);
             if let Some(dm) = g.children().get(&None) {
                 for (v, edge_bv) in dm {
                     if edge_bv.is_empty() { continue; }
@@ -720,7 +716,7 @@ fn reduce_some_edges_via_post_none_dominance_trie1(
     for u in &all_nodes {
         // Snapshot keyed edges: t -> Vec<(dst, bv)>
         let keyed_snapshot: BTreeMap<GrammarTokenID, Vec<(PrecomputeNode1Index, LLMTokenBV)>> = {
-            let r = u.read(trie1_god).expect("read");
+            let r = u.read(trie1_god);
             let mut map: BTreeMap<GrammarTokenID, Vec<(PrecomputeNode1Index, LLMTokenBV)>> = BTreeMap::new();
             for (ek, dm) in r.children() {
                 if let Some(tid) = ek {
@@ -803,7 +799,7 @@ fn reduce_some_edges_via_post_none_dominance_trie1(
 
         // Apply reductions
         {
-            let mut w = u.write(trie1_god).expect("write");
+            let mut w = u.write(trie1_god);
             let old_children = std::mem::take(w.children_mut());
             let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
 
@@ -861,7 +857,7 @@ fn count_total_ranges_trie1(
 ) -> usize {
     let mut count = 0;
     for n in all_nodes {
-        let g = n.read(trie1_god).expect("read");
+        let g = n.read(trie1_god);
         count += g.value.live_tokens.inner().ranges_len();
         for (_ek, dm) in g.children() {
             for (_dst, bv) in dm {
@@ -963,7 +959,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
-        let g = n.read(trie1_god).expect("read");
+        let g = n.read(trie1_god);
         if !g.value.live_tokens.is_empty() {
             all_bvs.insert(g.value.live_tokens.clone());
         }
@@ -1062,7 +1058,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     for n in it {
         // Quick check: does this node reference any affected bitvector?
         let needs_update = {
-            let r = n.read(trie1_god).expect("read");
+            let r = n.read(trie1_god);
             let lv_ptr = Arc::as_ptr(&r.value.live_tokens.inner);
             if affected_ptrs.contains(&lv_ptr) {
                 true
@@ -1083,7 +1079,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
         };
         if !needs_update { continue; }
 
-        let mut w = n.write(trie1_god).expect("write");
+        let mut w = n.write(trie1_god);
 
         // Remap live_tokens if needed
         if !w.value.live_tokens.is_empty() {
@@ -1170,7 +1166,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
-        let g = n.read(trie1_god).expect("read");
+        let g = n.read(trie1_god);
         if !g.value.live_tokens.is_empty() {
             *bv_counts.entry(g.value.live_tokens.clone()).or_default() += 1;
         }
@@ -1225,7 +1221,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
-        let r = n.read(trie1_god).expect("read");
+        let r = n.read(trie1_god);
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
         } else {
@@ -1255,7 +1251,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     #[cfg(rustrover)]
     let it = all_nodes.iter().enumerate();
     for (i, n) in it {
-        let mut w = n.write(trie1_god).expect("write");
+        let mut w = n.write(trie1_god);
         let (live_tokens, children) = &new_states[i];
         w.value.live_tokens = live_tokens.clone();
         *w.children_mut() = children.clone();
@@ -1311,7 +1307,7 @@ fn prune_nodes_not_reaching_end_trie1(
     // Build reverse adjacency: dest -> sources having an edge to dest (for any key)
     let mut incoming: HashMap<PrecomputeNode1Index, Vec<PrecomputeNode1Index>> = HashMap::new();
     for src in &all_nodes {
-        let g = src.read(trie1_god).expect("read");
+        let g = src.read(trie1_god);
         for (_ek, dm) in g.children() {
             for (dst, _bv) in dm {
                 incoming.entry(*dst).or_default().push(*src);
@@ -1324,7 +1320,7 @@ fn prune_nodes_not_reaching_end_trie1(
     let mut q: VecDeque<PrecomputeNode1Index> = VecDeque::new();
     let mut end_nodes_count = 0usize;
     for n in &all_nodes {
-        let r = n.read(trie1_god).expect("read");
+        let r = n.read(trie1_god);
         if r.value.end {
             end_nodes_count += 1;
             if productive.insert(*n) {
@@ -1359,7 +1355,7 @@ fn prune_nodes_not_reaching_end_trie1(
 
     // Remove any edge to a non-productive destination, recompute node live_tokens
     for n in &all_nodes {
-        let mut w = n.write(trie1_god).expect("write");
+        let mut w = n.write(trie1_god);
         let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in w.children().clone() {
             let mut new_dm: OrderedHashMap<PrecomputeNode1Index, LLMTokenBV> = OrderedHashMap::new();
@@ -1454,11 +1450,11 @@ fn prune_on_no_terminal_follow_trie1(
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     for node_arc in all_nodes {
         let node_ptr: NodePtr = {
-            let guard = node_arc.read(trie1_god).expect("poison");
+            let guard = node_arc.read(trie1_god);
             &*guard as *const _
         };
         if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
-            let mut node_guard = node_arc.write(trie1_god).unwrap();
+            let mut node_guard = node_arc.write(trie1_god);
             node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
         }
     }
@@ -1495,7 +1491,7 @@ fn flatten_all_none_edges_trie1(
     let mut all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     // Sort by descending depth so that children are processed (flattened) first.
     all_nodes.sort_by_key(|idx| {
-        idx.read(trie1_god).expect("read").max_depth
+        idx.read(trie1_god).max_depth
     });
     all_nodes.reverse();
 
@@ -1514,7 +1510,7 @@ fn flatten_all_none_edges_trie1(
     for node_idx in &all_nodes {
         // Snapshot current children to avoid lock re-entrancy
         let (children_snapshot, node_is_end) = {
-            let g = node_idx.read(trie1_god).expect("read");
+            let g = node_idx.read(trie1_god);
             (g.children().clone(), g.value.end)
         };
 
@@ -1558,7 +1554,7 @@ fn flatten_all_none_edges_trie1(
                 } else {
                     // Fallback: use child's immediate keyed edges.
                     let child_children_snapshot: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = {
-                        let cg = child_idx.read(trie1_god).expect("read");
+                        let cg = child_idx.read(trie1_god);
                         cg.children().clone()
                     };
                     child_children_snapshot
@@ -1586,7 +1582,7 @@ fn flatten_all_none_edges_trie1(
 
         // Write back: replace children with new map and recompute live_tokens
         {
-            let mut w = node_idx.write(trie1_god).expect("write");
+            let mut w = node_idx.write(trie1_god);
             *w.children_mut() = new_children.clone();
             // Recompute live_tokens as union of all edge masks
             let mut lt = LLMTokenBV::zeros();

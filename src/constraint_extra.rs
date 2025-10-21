@@ -11,9 +11,10 @@ use crate::types::TerminalID as GrammarTokenID;
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
 use std::collections::BTreeMap as StdMap;
-use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 /// Creates a neat string representation of a HybridBitset, showing values as ranges.
 fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
@@ -96,7 +97,7 @@ pub fn dump_precompute_trie0_recursive(
     let children_to_visit;
 
     {
-        let node = node_arc.read(trie0_god).expect("RwLock poisoned during dump");
+        let node = node_arc.read(trie0_god).expect("Node not found during dump");
         // Collect children information while holding the lock
         children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
@@ -140,7 +141,7 @@ pub fn dump_precompute_trie0_recursive(
         let is_visited;
         let is_end_node;
         {
-            let child_node = child_arc.read(trie0_god).unwrap();
+            let child_node = child_arc.read(trie0_god);
             child_ptr = child_arc;
             is_visited = visited.contains(&child_ptr);
             is_end_node = child_node.value.final_tokenizer_state.is_some();
@@ -188,7 +189,7 @@ pub fn dump_precompute_trie_recursive(
     let children_to_visit;
 
     {
-        let node = node_arc.read(trie1_god).expect("RwLock poisoned during dump");
+        let node = node_arc.read(trie1_god).expect("Node not found during dump");
         // Collect children information while holding the lock
         children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
@@ -226,7 +227,7 @@ pub fn dump_precompute_trie_recursive(
         let is_visited;
         let is_end_node;
         {
-            let child_node = child_arc.read(trie1_god).unwrap();
+            let child_node = child_arc.read(trie1_god);
             child_ptr = child_arc;
             is_visited = visited.contains(&child_ptr);
             is_end_node = child_node.value.end;
@@ -297,7 +298,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             let root_ptr;
             let root_info;
             {
-                let root_node = root_node_trie.read(trie0_god).unwrap();
+                let root_node = root_node_trie.read(trie0_god);
                 root_ptr = root_node_trie;
                 let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(internal_to_original_map), Some(llm_token_map), 5);
                 let end_str = if root_node.value.final_tokenizer_state.is_some() {
@@ -341,7 +342,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             let root_ptr;
             let root_info;
             {
-                let root_node = root_node_trie.read(trie1_god).unwrap();
+                let root_node = root_node_trie.read(trie1_god);
                 root_ptr = root_node_trie;
                 let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(internal_to_original_map), Some(llm_token_map), 5);
                 root_info = format!("Root Node {} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
@@ -380,7 +381,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             let root_ptr;
             let root_info;
             {
-                let root_node = root_node_trie.read(trie2_god).unwrap();
+                let root_node = root_node_trie.read(trie2_god);
                 root_ptr = root_node_trie;
                 let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(internal_to_original_map), Some(llm_token_map), 5);
                 root_info = format!("Root Node {} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
@@ -432,7 +433,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             let root_ptr;
             let root_info;
             {
-                let root_node = root_node_trie.read(trie3_god).unwrap();
+                let root_node = root_node_trie.read(trie3_god);
                 root_ptr = root_node_trie;
                 let max_depth_str = if root_node.max_depth == usize::MAX {
                     "".to_string()
@@ -471,7 +472,7 @@ pub fn dump_precompute_trie2_recursive(
     trie2_god: &Trie2GodWrapper,
 ) {
     let children_to_visit = {
-        let node = node_arc.read(trie2_god).expect("RwLock poisoned during dump");
+        let node = node_arc.read(trie2_god).expect("Node not found during dump");
         node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
                 (
@@ -488,7 +489,7 @@ pub fn dump_precompute_trie2_recursive(
         let connector = if is_last { "└──" } else { "├──" };
         let (pop_len, state_id_opt) = edge_key; let edge_key_display = format!("(pop: {}, state: {})", pop_len, state_id_opt.map_or("None".to_string(), |sid| sid.0.to_string())); let tokens_display = format_bv_with_tokens(edge_val_bv, internal_to_original_map, llm_token_map, 5);
         let (child_ptr, child_info, is_visited, is_end_node) = {
-            let child_node = child_arc.read(trie2_god).unwrap();
+            let child_node = child_arc.read(trie2_god);
             let ptr = child_arc;
             let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, internal_to_original_map, llm_token_map, 5);
             (ptr, format!("Node {} (MaxDepth: {}){} [Live: {}]", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }, live_tokens_str), visited.contains(&ptr), child_node.value.end)
@@ -516,7 +517,7 @@ pub fn dump_precompute_trie3_recursive(
     trie3_god: &Trie3GodWrapper,
 ) {
     let children_to_visit = {
-        let node = node_arc.read(trie3_god).expect("RwLock poisoned during dump");
+        let node = node_arc.read(trie3_god).expect("Node not found during dump");
         node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
                 (
@@ -547,7 +548,7 @@ pub fn dump_precompute_trie3_recursive(
         };
 
         let (child_ptr, child_info, is_visited, is_end_node) = {
-            let child_node = child_arc.read(trie3_god).unwrap();
+            let child_node = child_arc.read(trie3_god);
             let ptr = child_arc;
             let max_depth_str = if child_node.max_depth == usize::MAX {
                 "".to_string()
@@ -583,7 +584,7 @@ pub fn calculate_final_stats2(
 
     while let Some(node_arc) = queue.pop_front() {
         let (children_to_queue, node_ptr) = {
-            let node_guard = node_arc.read(trie2_god).unwrap();
+            let node_guard = node_arc.read(trie2_god);
             let ptr = node_arc;
             let children = node_guard.children()
                 .values()
@@ -610,14 +611,14 @@ pub fn calculate_final_stats2(
     let root_node_pointers: HashSet<PrecomputeNode2Index> = precomputed_roots
         .values()
         .map(|arc| {
-            let guard = arc.read(trie2_god).unwrap();
+            let _guard = arc.read(trie2_god);
             arc.clone()
         })
         .collect();
     stats.final_root_nodes_count = root_node_pointers.len();
 
     for (node_ptr, node_arc) in &all_reachable_nodes {
-        let node_guard = node_arc.read(trie2_god).expect("RwLock poisoned during final stats calculation");
+        let node_guard = node_arc.read(trie2_god);
 
         if !root_node_pointers.contains(node_ptr) {
             if node_guard.children().is_empty() {
@@ -663,7 +664,7 @@ pub fn calculate_final_stats3(
 
     while let Some(node_arc) = queue.pop_front() {
         let (children_to_queue, node_ptr) = {
-            let node_guard = node_arc.read(trie3_god).unwrap();
+            let node_guard = node_arc.read(trie3_god);
             let ptr = node_arc;
             let children = node_guard.children()
                 .values()
@@ -690,14 +691,14 @@ pub fn calculate_final_stats3(
     let root_node_pointers: HashSet<PrecomputeNode3Index> = precomputed_roots
         .values()
         .map(|arc| {
-            let guard = arc.read(trie3_god).unwrap();
+            let _guard = arc.read(trie3_god);
             arc.clone()
         })
         .collect();
     stats.final_root_nodes_count = root_node_pointers.len();
 
     for (node_ptr, node_arc) in &all_reachable_nodes {
-        let node_guard = node_arc.read(trie3_god).expect("RwLock poisoned during final stats calculation");
+        let node_guard = node_arc.read(trie3_god);
 
         if !root_node_pointers.contains(node_ptr) {
             if node_guard.children().is_empty() {
@@ -737,7 +738,7 @@ pub fn calculate_intermediate_stats3(
 
     while let Some(node_arc) = queue.pop_front() {
         let (children_to_queue, node_ptr) = {
-            let node_guard = node_arc.read(trie3_god).unwrap();
+            let node_guard = node_arc.read(trie3_god);
             let ptr = node_arc;
             let children = node_guard.children()
                 .values()
@@ -764,14 +765,14 @@ pub fn calculate_intermediate_stats3(
     let root_node_pointers: HashSet<IntermediatePrecomputeNode3Index> = precomputed_roots
         .iter()
         .map(|arc| {
-            let guard = arc.read(trie3_god).unwrap();
+            let _guard = arc.read(trie3_god);
             arc.clone()
         })
         .collect();
     stats.final_root_nodes_count = root_node_pointers.len();
 
     for (node_ptr, node_arc) in &all_reachable_nodes {
-        let node_guard = node_arc.read(trie3_god).expect("RwLock poisoned during final stats calculation");
+        let node_guard = node_arc.read(trie3_god);
 
         if !root_node_pointers.contains(node_ptr) {
             if node_guard.children().is_empty() {
@@ -950,7 +951,7 @@ pub fn calculate_final_stats0(
 
     while let Some(node_arc) = queue.pop_front() {
         let (children_to_queue, node_ptr) = {
-            let node_guard = node_arc.read(trie0_god).unwrap();
+            let node_guard = node_arc.read(trie0_god);
             let ptr = node_arc;
             let children = node_guard.children()
                 .values()
@@ -975,14 +976,14 @@ pub fn calculate_final_stats0(
     let root_node_pointers: HashSet<PrecomputeNode0Index> = precomputed_roots
         .values()
         .map(|arc| {
-            let guard = arc.read(trie0_god).unwrap();
+            let _guard = arc.read(trie0_god);
             *arc
         })
         .collect();
     stats.final_root_nodes_count = root_node_pointers.len();
 
     for (node_ptr, node_arc) in &all_reachable_nodes {
-        let node_guard = node_arc.read(trie0_god).expect("RwLock poisoned during final stats calculation");
+        let node_guard = node_arc.read(trie0_god);
 
         if !root_node_pointers.contains(node_ptr) {
             if node_guard.children().is_empty() {
@@ -1045,7 +1046,7 @@ pub fn calculate_final_stats1(
 
     while let Some(node_arc) = queue.pop_front() {
         let (children_to_queue, node_ptr) = {
-            let node_guard = node_arc.read(trie1_god).unwrap();
+            let node_guard = node_arc.read(trie1_god);
             let ptr = node_arc;
             let children = node_guard.children()
                 .values()
@@ -1069,7 +1070,7 @@ pub fn calculate_final_stats1(
     let root_node_pointers: HashSet<PrecomputeNode1Index> = precomputed_roots
         .values()
         .map(|arc| {
-            let guard = arc.read(trie1_god).unwrap();
+            let _guard = arc.read(trie1_god);
             *arc
         })
         .collect();
@@ -1094,7 +1095,7 @@ pub fn calculate_final_stats1(
     stats.final_total_ranges_in_bvs = 0;
 
     for (node_ptr, node_arc) in &all_reachable_nodes {
-        let node_guard = node_arc.read(trie1_god).expect("RwLock poisoned during final stats calculation");
+        let node_guard = node_arc.read(trie1_god);
 
         // New logic for non-root internal and leaf nodes
         if !root_node_pointers.contains(node_ptr) {

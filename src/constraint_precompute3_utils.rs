@@ -169,7 +169,7 @@ fn count_total_ranges_trie3(
 ) -> usize {
     let mut count = 0;
     for n in all_nodes {
-        let g = n.read(trie3_god).expect("read");
+        let g = n.read(trie3_god);
         count += g.value.live_tokens.inner().ranges_len();
         for ((_pop, llm_bv), _dm) in g.children() {
             count += llm_bv.inner().ranges_len();
@@ -448,7 +448,7 @@ fn detect_true_cycle_recursive_trie3_new(
                             let u = cycle_nodes[i];
                             let v = if i + 1 < cycle_nodes.len() { cycle_nodes[i + 1] } else { *child_idx };
 
-                            let u_guard = u.read(arena).unwrap();
+                            let u_guard = u.read(arena);
                             let mut edge_llm_union = LLMTokenBV::zeros();
                             let mut edge_sids_union = StateIDBV::zeros();
 
@@ -694,7 +694,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
-        let g = n.read(trie3_god).expect("read");
+        let g = n.read(trie3_god);
         for ((_, llm_bv), _dm) in g.children() {
             if !llm_bv.is_empty() {
                 all_bvs.insert(llm_bv.clone());
@@ -788,7 +788,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
     for n in it {
         // Quick check whether this node references any affected bitvector.
         let needs_update = {
-            let r = n.read(trie3_god).expect("read");
+            let r = n.read(trie3_god);
             let lv_ptr = Arc::as_ptr(&r.value.live_tokens.inner);
             if affected_ptrs.contains(&lv_ptr) {
                 true
@@ -806,7 +806,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
         };
         if !needs_update { continue; }
 
-        let mut w = n.write(trie3_god).expect("write");
+        let mut w = n.write(trie3_god);
 
         // Remap edge keys (pop, LLMTokenBV)
         let old_children = std::mem::take(w.children_mut());
@@ -881,7 +881,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
-        let g = n.read(trie3_god).expect("read");
+        let g = n.read(trie3_god);
         for ((_, llm_bv), _dm) in g.children() {
             if !llm_bv.is_empty() {
                 *bv_counts.entry(llm_bv.clone()).or_default() += 1;
@@ -927,7 +927,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
-        let r = n.read(trie3_god).expect("read");
+        let r = n.read(trie3_god);
         let mut new_children = BTreeMap::new();
         for ((pop, llm_bv), dm) in r.children() {
             let mapped_key_bv = memo.entry(llm_bv.clone())
@@ -946,7 +946,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     #[cfg(rustrover)]
     let it = all_nodes.iter().enumerate();
     for (i, n) in it {
-        let mut w = n.write(trie3_god).expect("write");
+        let mut w = n.write(trie3_god);
         let children = &new_states[i];
         let mut new_live = LLMTokenBV::zeros();
         for ((_, llm_bv), _) in children {
@@ -1004,7 +1004,7 @@ fn simplify_llm_token_bvs_trie3(
     let it = all_nodes.iter();
 
     for node_idx in it {
-        let mut w = node_idx.write(trie3_god).expect("write");
+        let mut w = node_idx.write(trie3_god);
         if w.children().is_empty() {
             continue;
         }
@@ -1055,7 +1055,7 @@ fn prune_nodes_not_reaching_end_trie3(
     // Build reverse adjacency: dest -> sources
     let mut incoming: HashMap<PrecomputeNode3Index, Vec<PrecomputeNode3Index>> = HashMap::new();
     for src in &all_nodes {
-        let g = src.read(trie3_god).expect("read");
+        let g = src.read(trie3_god);
         for (_ek, dm) in g.children() {
             for (dst, _bv) in dm {
                 incoming.entry(*dst).or_default().push(*src);
@@ -1068,7 +1068,7 @@ fn prune_nodes_not_reaching_end_trie3(
     let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
     let mut end_nodes_count = 0usize;
     for n in &all_nodes {
-        let r = n.read(trie3_god).expect("read");
+        let r = n.read(trie3_god);
         if r.value.end {
             end_nodes_count += 1;
             if productive.insert(*n) {
@@ -1102,7 +1102,7 @@ fn prune_nodes_not_reaching_end_trie3(
 
     // Remove any edge to a non-productive destination
     for n in &all_nodes {
-        let mut w = n.write(trie3_god).expect("write");
+        let mut w = n.write(trie3_god);
         let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
         for (ek, dm) in w.children().clone() {
             let mut new_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
@@ -1152,7 +1152,7 @@ fn factor_common_destinations_trie3(
     > = HashMap::new();
 
     for src_idx in &all_nodes {
-        let guard = src_idx.read(trie3_god).expect("read");
+        let guard = src_idx.read(trie3_god);
         for (edge_key, dest_map) in guard.children() {
             for (dest_idx, sids_bv) in dest_map {
                 incoming_map
@@ -1176,7 +1176,7 @@ fn factor_common_destinations_trie3(
 
                     // Add edge from intermediate to original destination
                     {
-                        let mut intermediate_guard = intermediate_node.write(trie3_god).expect("write");
+                        let mut intermediate_guard = intermediate_node.write(trie3_god);
                         let dest_map = intermediate_guard.children_mut().entry(edge_key.clone()).or_default();
                         dest_map.insert(dest_idx, sids_bv.clone());
                         intermediate_guard.value.live_tokens |= &edge_key.1;
@@ -1184,7 +1184,7 @@ fn factor_common_destinations_trie3(
 
                     // Reroute sources to point to intermediate node
                     for src_idx in &sources {
-                        let mut src_guard = src_idx.write(trie3_god).expect("write");
+                        let mut src_guard = src_idx.write(trie3_god);
 
                         // Remove old edge
                         if let Some(dest_map_for_key) = src_guard.children_mut().get_mut(&edge_key) {
@@ -1224,7 +1224,7 @@ fn constrain_bitvecs_trie3(
     if all_nodes.is_empty() { return; }
 
     for node_arc in all_nodes {
-        let mut guard = node_arc.write(trie3_god).unwrap();
+        let mut guard = node_arc.write(trie3_god);
 
         // Constrain live_tokens on the node value
         guard.value.live_tokens.constrain(max_llm_token_id);
@@ -1273,7 +1273,7 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
         let node_ptr = *node_arc;
         live.insert(node_ptr, LLMTokenBV::zeros());
 
-        let guard = node_arc.read(trie3_god).unwrap();
+        let guard = node_arc.read(trie3_god);
         if guard.value.end {
             // Seed end nodes with 'all tokens' to allow backward propagation through edge masks.
             live.insert(node_ptr, LLMTokenBV::max_ones());
@@ -1329,7 +1329,7 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
 
     // 3. Prune the graph based on the computed live sets.
     for node_arc in &all_nodes {
-        let mut guard = node_arc.write(trie3_god).unwrap();
+        let mut guard = node_arc.write(trie3_god);
         let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
 
         for (edge_key, dest_map) in guard.children() {
@@ -1385,7 +1385,7 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
     let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
 
     for (u_dense, u_idx) in old_of.iter().enumerate() {
-        let guard = u_idx.read(trie3_god).unwrap();
+        let guard = u_idx.read(trie3_god);
         ends[u_dense] = guard.value.end;
         for (ek, dest_map) in guard.children() {
             for (v_idx, bv) in dest_map {
@@ -1479,7 +1479,7 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
                 new_live_tokens |= llm_bv;
             }
 
-            let mut guard = rep_idx.write(trie3_god).unwrap();
+            let mut guard = rep_idx.write(trie3_god);
             *guard.children_mut() = new_children;
             guard.value.live_tokens = new_live_tokens;
         }
@@ -1513,7 +1513,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
     let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
 
     for (u_dense, u_idx) in old_of.iter().enumerate() {
-        let guard = u_idx.read(trie3_god).unwrap();
+        let guard = u_idx.read(trie3_god);
         ends[u_dense] = guard.value.end;
         for (ek, dest_map) in guard.children() {
             for (v_idx, bv) in dest_map {
@@ -1599,7 +1599,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
 
             // Merge all edges from all nodes in the class into the representative.
             for node_idx in &nodes_in_class {
-                let guard = node_idx.read(trie3_god).unwrap();
+                let guard = node_idx.read(trie3_god);
 
                 for ((pop, llm_bv), dest_map) in guard.children() {
                     for (dest_idx, sids) in dest_map {
@@ -1623,7 +1623,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
                 new_live_tokens |= llm_bv;
             }
 
-            let mut guard = rep_idx.write(trie3_god).unwrap();
+            let mut guard = rep_idx.write(trie3_god);
             *guard.children_mut() = new_children;
             guard.value.live_tokens = new_live_tokens;
         }
@@ -1671,7 +1671,7 @@ pub fn merge_nodes_trie3_ultrafast(
     #[cfg(rustrover)]
     let it = old_of.iter().enumerate();
     for (i, node_idx) in it {
-        let g = node_idx.read(trie3_god).expect("read");
+        let g = node_idx.read(trie3_god);
         ends[i] = if g.value.end { 1 } else { 0 };
         live_llm_ptrs[i] = Arc::as_ptr(&g.value.live_tokens.inner);
 
@@ -1724,7 +1724,7 @@ pub fn merge_nodes_trie3_ultrafast(
     #[cfg(rustrover)]
     let it = old_of.iter().enumerate();
     for (i, node_idx) in it {
-        let g = node_idx.read(trie3_god).expect("read");
+        let g = node_idx.read(trie3_god);
         let mut p = offsets[i];
         for (ek, dm) in g.children() {
             let pop_u32 = ek.0 as u32;
@@ -1879,7 +1879,7 @@ pub fn merge_nodes_trie3_ultrafast(
         for idx in it {
             let u_dense = membership[idx].1 as usize;
             let node_idx = old_of[u_dense];
-            let g = node_idx.read(trie3_god).expect("read");
+            let g = node_idx.read(trie3_god);
 
             // Aggregate SIDs per (pop, llm_id, coarse_dest_class)
             let mut aggr: BTreeMap<(u32, u32, u32), StateIDBV> = BTreeMap::new();
@@ -1952,7 +1952,7 @@ pub fn merge_nodes_trie3_ultrafast(
     let it = rep_set.iter();
     for rep_dense in it {
         let rep_idx = old_of[*rep_dense as usize];
-        let mut w = rep_idx.write(trie3_god).expect("write");
+        let mut w = rep_idx.write(trie3_god);
         let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
 
         // Build new children by remapping destinations to their representatives
@@ -2023,7 +2023,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         for node_idx in it {
             // Snapshot current children
             let old_children = {
-                let g = node_idx.read(trie3_god).expect("read");
+                let g = node_idx.read(trie3_god);
                 g.children().clone() // BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>
             };
             if old_children.is_empty() { continue; }
@@ -2059,7 +2059,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
             }
 
             if new_children != old_children {
-                let mut w = node_idx.write(trie3_god).expect("write");
+                let mut w = node_idx.write(trie3_god);
                 // Recompute node live tokens as union of outgoing LLM masks.
                 let mut union_bv = LLMTokenBV::zeros();
                 for ((_, llm_bv), _) in &new_children {
@@ -2087,7 +2087,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         // 1. Identify all single-exit nodes.
         let mut single_exit_info: HashMap<Trie2Index, (isize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
         for n in &nodes {
-            let g = n.read(trie3_god).expect("read");
+            let g = n.read(trie3_god);
             if g.value.end { continue; }
             if g.children().len() == 1 {
                 let ((p2, l2), dm) = g.children().iter().next().unwrap();
@@ -2104,7 +2104,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         #[cfg(rustrover)]
         let it = nodes.iter();
         for u in it {
-            let old_children = u.read(trie3_god).expect("read").children().clone();
+            let old_children = u.read(trie3_god).children().clone();
             if old_children.is_empty() { continue; }
 
             let mut new_children = old_children.clone();
@@ -2139,7 +2139,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
 
             if local_changed {
                 changed_any = true;
-                let mut u_guard = u.write(trie3_god).expect("write");
+                let mut u_guard = u.write(trie3_god);
                 *u_guard.children_mut() = new_children;
                 // Recompute live tokens as they may have changed
                 let mut new_live = LLMTokenBV::zeros();
