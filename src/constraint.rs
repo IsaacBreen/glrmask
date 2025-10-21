@@ -2503,9 +2503,9 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) dfs_stats:        DfsStats,
     pub(crate) trie1_god:        Trie1GodWrapper,
     singletons: Vec<HybridBitset>,
-    global_edges: FxHashMap<EdgeKey, HybridBitset>,
-    global_live: FxHashMap<PrecomputeNode1Index, HybridBitset>,
-    known_children: FxHashMap<(PrecomputeNode1Index, Option<GrammarTokenID>), FxHashMap<PrecomputeNode1Index, HybridBitset>>,
+    global_edges: RefCell<FxHashMap<EdgeKey, HybridBitset>>,
+    global_live: RefCell<FxHashMap<PrecomputeNode1Index, HybridBitset>>,
+    known_children: RefCell<FxHashMap<(PrecomputeNode1Index, Option<GrammarTokenID>), FxHashMap<PrecomputeNode1Index, HybridBitset>>>,
 }
 
 impl<'r> Precomputer0<'r> {}
@@ -2584,9 +2584,9 @@ impl<'r> Precomputer1<'r> {
             dfs_stats: DfsStats::default(),
             trie1_god,
             singletons,
-            global_edges: FxHashMap::default(),
-            global_live: FxHashMap::default(),
-            known_children: FxHashMap::default(),
+            global_edges: RefCell::new(FxHashMap::default()),
+            global_live: RefCell::new(FxHashMap::default()),
+            known_children: RefCell::new(FxHashMap::default()),
         }
     }
 
@@ -2597,16 +2597,18 @@ impl<'r> Precomputer1<'r> {
     fn flush_globals(&mut self) {
         timeit!("flush_globals", {
             let mut inner_guard = self.trie1_god.inner.write();
+            let global_live = self.global_live.borrow_mut().drain().collect::<FxHashMap<_, _>>();
+            let global_edges = self.global_edges.borrow_mut().drain().collect::<FxHashMap<_, _>>();
 
             // Apply live token updates
-            for (node_idx, live_tokens) in &self.global_live {
+            for (node_idx, live_tokens) in &global_live {
                 if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
                     node.value.live_tokens |= live_tokens;
                 }
             }
 
             // Apply edge insertions
-            for (EdgeKey { src, key, dst }, bv) in &self.global_edges {
+            for (EdgeKey { src, key, dst }, bv) in &global_edges {
                 if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
                     src_node.children_mut().entry(*key).or_default()
                         .entry(dst.clone())
@@ -2681,7 +2683,7 @@ impl<'r> Precomputer1<'r> {
         let mut stats = std::mem::take(&mut self.dfs_stats);
         self.dfs(&self.vocab.root, assoc, &mut stats);
 
-        stats.analyze_pending_edges(&self.global_edges);
+        stats.analyze_pending_edges(&self.global_edges.borrow());
         self.dfs_stats = stats;
         self.dfs_stats.print();
         crate::debug!(2, "Finished precompute DFS");
@@ -2784,10 +2786,10 @@ impl<'r> Precomputer1<'r> {
                                                     if !final_edge_bv.is_empty() {
                                                         let end_idx = self.get_leaf_node();
                                                         let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx.clone() };
-                                                        self.global_edges.entry(k)
+                                                        self.global_edges.borrow_mut().entry(k)
                                                             .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
                                                             .or_insert(final_edge_bv.clone());
-                                                        self.global_live.entry(end_idx)
+                                                        self.global_live.borrow_mut().entry(end_idx)
                                                             .or_insert_with(HybridBitset::zeros)
                                                             .bitor_assign(&final_edge_bv);
                                                     }
@@ -2828,7 +2830,7 @@ impl<'r> Precomputer1<'r> {
 
                                             if dest_node_opt.is_none() {
                                                 timeit!("dfs_find_dest_node_in_children", {
-                                                    if let Some(children_of_src) = self.known_children.get(&(src_node_idx.clone(), Some(terminal_id))) {
+                                                    if let Some(children_of_src) = self.known_children.borrow().get(&(src_node_idx.clone(), Some(terminal_id))) {
                                                         dest_node_opt = children_of_src.keys()
                                                             .filter(|child_arc| {
                                                                 let (child_live_tokens, is_end) = get_node_data(&mut node_cache, child_arc, &self.trie1_god);
@@ -2848,13 +2850,13 @@ impl<'r> Precomputer1<'r> {
                                             });
 
                                             let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: result_node.clone() };
-                                            self.global_edges.entry(k)
+                                            self.global_edges.borrow_mut().entry(k)
                                                 .and_modify(|bv| bv.bitor_assign(&edge_bv_for_inserter))
                                                 .or_insert(edge_bv_for_inserter.clone());
-                                            self.global_live.entry(result_node.clone())
+                                            self.global_live.borrow_mut().entry(result_node.clone())
                                                 .or_insert_with(HybridBitset::zeros)
                                                 .bitor_assign(&edge_bv_for_inserter);
-                                            self.known_children.entry((src_node_idx, Some(terminal_id))).or_default()
+                                            self.known_children.borrow_mut().entry((src_node_idx, Some(terminal_id))).or_default()
                                                 .entry(result_node.clone()).or_default().bitor_assign(&edge_bv_for_inserter);
 
                                             node_cache.entry(result_node.clone())
@@ -2887,10 +2889,10 @@ impl<'r> Precomputer1<'r> {
                                             let end_idx = self.get_leaf_node();
                                             for terminal_id in &accessible_terminals {
                                                 let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx.clone() };
-                                                self.global_edges.entry(k)
+                                                self.global_edges.borrow_mut().entry(k)
                                                     .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
                                                     .or_insert(final_edge_bv.clone());
-                                                self.global_live.entry(end_idx.clone())
+                                                self.global_live.borrow_mut().entry(end_idx.clone())
                                                     .or_insert_with(HybridBitset::zeros)
                                                     .bitor_assign(&final_edge_bv);
                                             }
