@@ -2704,13 +2704,26 @@ impl<'r> Precomputer1<'r> {
                                             let dest_nodes_in_queue = work_queue.entry(next_pos)
                                                 .or_default()
                                                 .entry(next_tokenizer_state)
-                                            .or_default();
+                                                .or_default();
 
                                             // Find or create destination node
-                                            let mut dest_node_opt = None;
+                                            let mut dest_node_opt = timeit!("dfs_find_dest_node", {
+                                                dest_nodes_in_queue.iter()
+                                                    .filter_map(|(dest_node, dest_contextual_tokens)| {
+                                                        let (dest_live_tokens, is_end) = get_node_data(&mut node_cache, dest_node);
+                                                        if is_end { return None; }
+
+                                                        let risky_tokens = timeit!("dfs_bitset_sub_2", { &edge_bv_for_inserter - dest_contextual_tokens });
+                                                        if risky_tokens.is_empty() || (&risky_tokens & &dest_live_tokens).is_empty() {
+                                                            Some(dest_node.clone())
+                                                        } else {
+                                                            None
+                                                        }
+                                                    }).next()
+                                            });
+
                                             if dest_node_opt.is_none() {
                                                 timeit!("dfs_find_dest_node_in_children", {
-                                                    // Check existing children - read once and cache
                                                     // Check existing children - read once and cache
                                                     let children_of_src: Vec<PrecomputeNode1Index> = {
                                                         let guard = src_node_wrapper.as_arc().read(&self.trie1_god).unwrap();
