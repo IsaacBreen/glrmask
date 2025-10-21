@@ -97,7 +97,7 @@ impl DfsStats {
             *self.dst_counts.entry(edge_key.dst).or_default() += 1;
             *self.key_counts.entry(edge_key.key).or_default() += 1;
 
-            let len = bitset.iter().count();
+            let len = bitset.len();
             *self.bitset_len_dist.entry(len).or_default() += 1;
 
             *dsts_per_src_key.entry((edge_key.src, edge_key.key)).or_default() += 1;
@@ -2934,12 +2934,12 @@ impl<'r> Precomputer1<'r> {
                                             }
 
                                             // Compute edge_bv once
-                                            let mut edge_bv = child_reachable.clone();
+                                            let mut edge_bv = (*child_reachable.clone().inner).clone();
                                             if next_pos == segment_bytes.len() {
-                                                edge_bv.set(child_token_id, false);
+                                                edge_bv.remove(child_token_id);
                                             }
                                             if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
-                                                timeit!("dfs_bitset_sub", edge_bv -= matches_for_terminal);
+                                                edge_bv = &edge_bv - matches_for_terminal.inner.as_ref();
                                             }
 
                                             let edge_bv_for_inserter = timeit!("dfs_bitset_and_and_2", { &(&edge_bv & src_contextual_tokens) & &src_live_tokens });
