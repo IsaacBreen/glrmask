@@ -2822,7 +2822,7 @@ impl<'r> Precomputer1<'r> {
                                                 pending_live_token_updates.entry(result_node.clone()).or_default().add_token(token);
                                             } else {
                                                 pending_edges.entry(k).or_default().add_bitset(edge_bv_for_inserter.clone());
-                                                pending_live_token_updates.entry(result_node.clone()).or_default().add_bitset(edge_bv_for_inserter);
+                                                pending_live_token_updates.entry(result_node.clone()).or_default().add_bitset(edge_bv_for_inserter.clone());
                                             }
                                             // Update cache
                                             node_cache.entry(result_node.clone())
