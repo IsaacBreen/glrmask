@@ -263,8 +263,9 @@ fn contract_checkllm_chains(
             if dm2.len() != 1 {
                 continue;
             }
-            let &dst = dm2.keys().next().unwrap();
-
+            let (&dst, _) = dm2.iter().next().unwrap();
+            let mut new_bv = bv1.clone();
+            new_bv &= bv2.clone();
             tasks.push(CheckLLMChainTask {
                 src: *src,
                 src_ek: ek1.clone(),

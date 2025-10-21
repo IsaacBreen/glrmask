@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Display};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::Arc;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::EntryApi;
@@ -87,15 +88,15 @@ impl Trie2Index {
     pub fn read<'a, EK: Ord, EV, T>(
         self,
         arena: &'a Arena<Trie<EK, EV, T>>,
-    ) -> Option<Trie2ReadGuard<'a, EK, EV, T>> {
-        let guard = arena.inner.read().ok()?;
+    ) -> Trie2ReadGuard<'a, EK, EV, T> {
+        let guard = arena.inner.read();
         if guard.values.get(self.index.as_usize())?.is_none() {
             return None;
         }
-        Some(Trie2ReadGuard {
+        Trie2ReadGuard {
             guard,
             index: self.index.as_usize(),
-        })
+        }
     }
 
     /// Write-locks the Arena and returns a guard that derefs to &mut Trie at this index.
@@ -103,15 +104,15 @@ impl Trie2Index {
     pub fn write<'a, EK: Ord, EV, T>(
         self,
         arena: &'a Arena<Trie<EK, EV, T>>,
-    ) -> Option<Trie2WriteGuard<'a, EK, EV, T>> {
+    ) -> Trie2WriteGuard<'a, EK, EV, T> {
         let guard = arena.inner.write().ok()?;
         if guard.values.get(self.index.as_usize())?.is_none() {
             return None;
         }
-        Some(Trie2WriteGuard {
+        Trie2WriteGuard {
             guard,
             index: self.index.as_usize(),
-        })
+        }
     }
 
     /// Convenience constructor from usize.

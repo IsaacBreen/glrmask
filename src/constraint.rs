@@ -1616,7 +1616,7 @@ impl GrammarConstraint {
     ) -> BTreeMap<TerminalID, (IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)> {
         let mut out = BTreeMap::new();
         // Iterate terminals deterministically by ID
-        let mut term_ids: Vec<TerminalID> = parser.terminal_map.values().copied().collect();
+        let mut term_ids: Vec<TerminalID> = parser.terminal_map.iter().map(|(_l, r)| *r).collect();
         term_ids.sort_by_key(|t| t.0);
 
         for tid in term_ids {
