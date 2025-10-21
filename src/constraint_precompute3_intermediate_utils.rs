@@ -229,7 +229,7 @@ fn contract_checkllm_chains(
     if reachable.is_empty() {
         return false;
     }
-    let indeg = compute_in_degrees(roots, god);
+    let mut indeg = compute_in_degrees(roots, god);
     let mut tasks: Vec<CheckLLMChainTask> = Vec::new();
 
     for src in &reachable {
@@ -240,60 +240,39 @@ fn contract_checkllm_chains(
             } else {
                 continue;
             };
-            // Process each destination independently to allow multi-destination keys.
-            for (&mid_start, _) in dm1.iter() {
-                // Follow the maximal linear CheckLLM chain from mid_start.
-                let mut new_bv = bv1.clone();
-                let mut cur = mid_start;
-                let mut seen: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-                seen.insert(cur);
-
-                loop {
-                    // Only collapse through nodes that form a strict linear chain:
-                    // - single incoming edge (from exactly one predecessor),
-                    // - not an end node,
-                    // - exactly one outgoing edge,
-                    // - that edge is CheckLLM with a single destination.
-                    let cur_indeg = indeg.get(&cur).copied().unwrap_or(0);
-                    if cur_indeg != 1 {
-                        break;
-                    }
-                    let Some(rcur) = cur.read(god) else { break };
-                    if rcur.value.end {
-                        break;
-                    }
-                    if rcur.children().len() != 1 {
-                        break;
-                    }
-                    let (ek2, dm2) = rcur.children().iter().next().unwrap();
-                    let bv2 = if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek2 {
-                        bv.clone()
-                    } else {
-                        break;
-                    };
-                    if dm2.len() != 1 {
-                        break;
-                    }
-                    let (&next, _) = dm2.iter().next().unwrap();
-                    new_bv &= bv2;
-                    if !seen.insert(next) {
-                        // Cycle of CheckLLM-only nodes; do not contract across it.
-                        break;
-                    }
-                    cur = next;
-                }
-
-                let dst = cur;
-                if dst != mid_start || new_bv != bv1 {
-                    tasks.push(CheckLLMChainTask {
-                        src: *src,
-                        src_ek: ek1.clone(),
-                        mid: mid_start,
-                        new_bv,
-                        dst,
-                    });
-                }
+            if dm1.len() != 1 {
+                continue;
             }
+            let (&mid, _) = dm1.iter().next().unwrap();
+            if indeg.get(&mid).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let Some(rmid) = mid.read(god) else { continue };
+            if rmid.value.end {
+                continue; // cannot bypass acceptance point
+            }
+            if rmid.children().len() != 1 {
+                continue;
+            }
+            let (ek2, dm2) = rmid.children().iter().next().unwrap();
+            let bv2 = if let IntermediateTrie3EdgeKey::CheckLLM(bv) = ek2 {
+                bv.clone()
+            } else {
+                continue;
+            };
+            if dm2.len() != 1 {
+                continue;
+            }
+            let (&dst, _) = dm2.iter().next().unwrap();
+            let mut new_bv = bv1.clone();
+            new_bv &= bv2.clone();
+            tasks.push(CheckLLMChainTask {
+                src: *src,
+                src_ek: ek1.clone(),
+                mid,
+                new_bv,
+                dst,
+            });
         }
     }
 
@@ -316,6 +295,11 @@ fn contract_checkllm_chains(
             let new_ek = IntermediateTrie3EdgeKey::CheckLLM(t.new_bv);
             wsrc.children_mut().entry(new_ek).or_default().insert(t.dst, ());
         }
+        // Update in-degree snapshot for subsequent rewires in the same pass.
+        if let Some(v) = indeg.get_mut(&t.mid) {
+            *v = v.saturating_sub(1);
+        }
+        *indeg.entry(t.dst).or_insert(0) += 1;
     }
     changed
 }
@@ -600,6 +584,7 @@ fn prune_unproductive_paths_intermediate_trie3(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
 ) {
+    println!("[optimize_intermediate_trie3] Pruning nodes that cannot reach an end node...");
     if roots.is_empty() {
         return;
     }
@@ -635,6 +620,7 @@ fn prune_unproductive_paths_intermediate_trie3(
     }
 
     if end_nodes_count == 0 {
+        println!("[optimize_intermediate_trie3] No end nodes found; skipping pruning.");
         return;
     }
 
@@ -652,6 +638,10 @@ fn prune_unproductive_paths_intermediate_trie3(
     let total_nodes = all_nodes.len();
     let productive_nodes = productive.len();
     let prunable = total_nodes.saturating_sub(productive_nodes);
+    println!(
+        "[optimize_intermediate_trie3] End-reachability: total={}, productive={}, prunable={}",
+        total_nodes, productive_nodes, prunable
+    );
     if prunable == 0 {
         return;
     }
@@ -676,6 +666,7 @@ fn prune_unproductive_paths_intermediate_trie3(
     // 5. Recompute all max depths
     Trie::recompute_all_max_depths(god, roots);
 
+    println!("[optimize_intermediate_trie3] Finished end-reachability pruning.");
 }
 
 fn gc_preserving_ends(
@@ -702,36 +693,107 @@ pub fn optimize_intermediate_trie3(
     god: &IntermediateTrie3GodWrapper,
     is_end: impl Fn(IntermediatePrecomputeNode3Index, &IntermediatePrecomputeNode3) -> bool,
 ) -> BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> {
+    let original_god = god.deep_clone();
     let original_roots = roots.to_vec();
 
-    if cfg!(debug_assertions) {
-        has_true_cycle_intermediate_trie3(god, roots);
-    }
+    has_true_cycle_intermediate_trie3(god, roots);
 
     prune_unproductive_paths_intermediate_trie3(roots, god);
 
-    // Contract NoOp chains in a single pass.
-    let _ = contract_noop_chains(roots, god);
+    // Pass A: aggressively remove simple NoOp chains (epsilon-like edges).
+    println!("[optimize_intermediate_trie3] Contracting NoOp chains...");
+    let mut passes = 0;
+    while contract_noop_chains(roots, god) {
+        passes += 1;
+        println!("[optimize_intermediate_trie3] NoOp chain contraction pass {} complete.", passes);
+        if passes > 10 {
+             println!("[optimize_intermediate_trie3] WARN: NoOp chain contraction took too many passes, breaking.");
+             break;
+        }
+    }
+    if passes > 0 {
+        println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC.");
+        gc_preserving_ends(god, roots);
+    } else {
+        println!("[optimize_intermediate_trie3] NoOp chains contracted.");
+    }
+    has_true_cycle_intermediate_trie3(god, roots);
 
-    // Normalize and contract CheckLLM in a single pass (full-chain contraction).
-    normalize_checkllm_edges_for_all(roots, god);
-    let _ = contract_checkllm_chains(roots, god);
-    // Normalize again to coalesce any newly created partitions.
-    normalize_checkllm_edges_for_all(roots, god);
+    // Pass B: normalize CheckLLM partitions, then contract linear CheckLLM chains.
+    println!("[optimize_intermediate_trie3] Normalizing CheckLLM edges...");
+    let mut changed_any = normalize_checkllm_edges_for_all(roots, god);
+    println!("[optimize_intermediate_trie3] Contracting CheckLLM chains...");
+    let mut chain_passes = 0usize;
+    while contract_checkllm_chains(roots, god) {
+        chain_passes += 1;
+        changed_any = true;
+        if chain_passes > 10 {
+            println!("[optimize_intermediate_trie3] WARN: CheckLLM chain contraction took too many passes, breaking.");
+            break;
+        }
+    }
+    if changed_any {
+        println!("[optimize_intermediate_trie3] CheckLLM normalization/chain contraction made changes. Running GC.");
+        gc_preserving_ends(god, roots);
+    }
+    has_true_cycle_intermediate_trie3(god, roots);
 
     let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
         BTreeMap::default();
 
+    // Pass 1: color-refinement-based structural deduplication with progress reporting.
+    println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
+    let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
+    println!(
+        "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
+        iters, classes, total_nodes
+    );
+
+    // Normalize again before canonical rewiring to maximize equality exposure.
+    if normalize_checkllm_edges_for_all(roots, god) {
+        println!("[optimize_intermediate_trie3] Normalization revealed new opportunities pre-canonicalization.");
+    }
+
+    let mut node_map = node_map; // make mutable for update
+    let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
+    println!(
+        "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
+        merges, edges_rewired
+    );
+
+    // Quick polish pass: normalization + WL + canonicalization can sometimes collapse further.
+    let mut polish_changed = false;
+    if normalize_checkllm_edges_for_all(roots, god) {
+        polish_changed = true;
+    }
+    if polish_changed {
+        println!("[optimize_intermediate_trie3] Polishing: rerunning WL refinement after normalization...");
+        let (colors2, iters2, classes2, total_nodes2) = wl_color_refine(roots, god);
+        println!(
+            "[optimize_intermediate_trie3] Polish refinement complete: iterations={}, classes={}, nodes={}",
+            iters2, classes2, total_nodes2
+        );
+        let (merges2, edges_rewired2) = rewire_to_canonical(&colors2, roots, god, &mut node_map);
+        println!(
+            "[optimize_intermediate_trie3] Polish rewiring done: merges={}, edges_rewired={}",
+            merges2, edges_rewired2
+        );
+    }
+    // Check equivalence after optimization (currently no-op)
     let new_roots: Vec<_> = original_roots
         .iter()
         .map(|r| *node_map.get(r).unwrap_or(r))
         .collect();
 
+    println!("[optimize_intermediate_trie3] Running final GC.");
     gc_preserving_ends(god, &new_roots);
 
-    if cfg!(debug_assertions) {
-        has_true_cycle_intermediate_trie3(god, &new_roots);
-    }
+    // assert!(
+    //     are_intermediate_trie3_graphs_equal(&original_roots, &original_god, &new_roots, god, &is_end, 25),
+    //     "Optimization failed to preserve graph equivalence for all roots"
+    // );
+
+    has_true_cycle_intermediate_trie3(god, &new_roots);
 
     node_map
 }
