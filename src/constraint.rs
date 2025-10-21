@@ -2945,6 +2945,7 @@ impl<'r> Precomputer1<'r> {
             }
 
             // === OPTIMIZATION 5: Batch write all edges and updates ===
+            stats.analyze_pending_edges(&pending_edges);
             timeit!("dfs_batch_write", {
                 let mut inner_guard = self.trie1_god.inner.write();
 
@@ -2987,8 +2988,6 @@ impl<'r> Precomputer1<'r> {
                     });
                 }
             });
-
-            stats.analyze_pending_edges(&pending_edges);
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc, stats);
