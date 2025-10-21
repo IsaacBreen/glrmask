@@ -38,110 +38,6 @@ local_system:
           fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a>;
       }
 
-      /// The entry wrapper returned by EntryApi::entry.
-      /// It allows calling and_modify(...).or_insert(...) style chains.
-      pub struct OrderedMapEntry<'a, K, V> {
-          map: &'a mut OrderedHashMap<K, V>,
-          key: K,
-      }
-
-      impl<'a, K, V> OrderedMapEntry<'a, K, V>
-      where
-          K: Eq + Hash + Clone,
-      {
-          /// If the key is present, apply `f` to the existing value, then return self for chaining.
-          /// If the key is absent, do nothing and return self for chaining.
-          ///
-          /// Example:
-          ///   map.entry(k).and_modify(|v| *v += 1).or_insert(0);
-          pub fn and_modify<F>(mut self, f: F) -> Self
-          where
-              F: FnOnce(&mut V),
-          {
-              if let Some(v) = self.map.get_mut(&self.key) {
-                  f(v);
-              }
-              self
-          }
-
-          /// Inserts `default` if the key is absent, then returns a mutable reference
-          /// to the value for the key (existing or newly inserted).
-          pub fn or_insert(self, default: V) -> &'a mut V {
-              if self.map.contains_key(&self.key) {
-                  return self.map.get_mut(&self.key).unwrap();
-              }
-              self.map.insert(self.key.clone(), default);
-              self.map.get_mut(&self.key).unwrap()
-          }
-
-          /// Inserts the result of `f` if the key is absent, then returns a mutable reference
-          /// to the value for the key (existing or newly inserted).
-          pub fn or_insert_with<F>(self, f: F) -> &'a mut V
-          where
-              F: FnOnce() -> V,
-          {
-              if self.map.contains_key(&self.key) {
-                  return self.map.get_mut(&self.key).unwrap();
-              }
-              self.map.insert(self.key.clone(), f());
-              self.map.get_mut(&self.key).unwrap()
-          }
-
-          /// Inserts the default value for the value type if the key is absent,
-          /// then returns a mutable reference to the value for the key (existing or newly inserted).
-          pub fn or_default(self) -> &'a mut V
-          where
-              V: Default,
-          {
-              self.or_insert_with(V::default)
-          }
-      }
-
-      impl<K, V> EntryApi<K, V> for OrderedHashMap<K, V>
-      where
-          K: Eq + Hash + Clone,
-      {
-          type Entry<'a> = OrderedMapEntry<'a, K, V> where Self: 'a, K: 'a, V: 'a;
-
-          fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
-              OrderedMapEntry { map: self, key }
-          }
-      }
-  prev_file_contents:
-    src/datastructures/entry_api.rs: |
-      use ordered_hash_map::OrderedHashMap;
-      use std::hash::Hash;
-
-      /// A lightweight, trait-based "entry" API for OrderedHashMap.
-      ///
-      /// This is an extension trait that provides a familiar entry-style workflow:
-      /// map.entry(key).and_modify(|v| { .. }).or_insert(value)
-      ///
-      /// Notes:
-      /// - This implementation is intentionally minimal and only exposes the most commonly
-      ///   used methods: `or_insert`, `or_insert_with`, and `and_modify`.
-      /// - To keep the implementation generic and safe without depending on OrderedHashMap
-      ///   internals, we require K: Clone so that we can re-query after insertion.
-      ///   This allows returning an &'a mut V using only the standard get_mut/insert APIs.
-      ///
-      /// If your keys are not Clone, consider introducing a Clone wrapper (e.g., Arc, newtype
-      /// around indices, etc.) or extend OrderedHashMap with a more direct insert-and-get_mut
-      /// operation.
-      pub trait EntryApi<K, V> {
-          type Entry<'a>
-          where
-              Self: 'a,
-              K: 'a,
-              V: 'a;
-
-          /// Returns an "entry" object for the given key that supports:
-          /// - and_modify(|v| { ... })
-          /// - or_insert(default_value)
-          /// - or_insert_with(|| default_value)
-          /// - or_default()
-          fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a>;
-      }
-
       /// A view into a single entry in an `OrderedHashMap`, which may either be vacant or occupied.
       pub enum OrderedMapEntry<'a, K, V>
       where
@@ -149,20 +45,49 @@ local_system:
           V: 'a,
       {
           /// An occupied entry.
-          Occupied(OccupiedEntry<'a, K, V>),
+          Occupied(OccupiedEntry<'a, V>),
           /// A vacant entry.
           Vacant(VacantEntry<'a, K, V>),
       }
 
       /// A view into an occupied entry in an `OrderedHashMap`.
-      pub struct OccupiedEntry<'a, K, V> {
+      pub struct OccupiedEntry<'a, V> {
           value: &'a mut V,
+      }
+
+      impl<'a, V> OccupiedEntry<'a, V> {
+          /// Gets a reference to the value in the entry.
+          pub fn get(&self) -> &V {
+              self.value
+          }
+
+          /// Gets a mutable reference to the value in the entry.
+          pub fn get_mut(&mut self) -> &mut V {
+              self.value
+          }
+
+          /// Converts the entry into a mutable reference to the value in the entry
+          /// with a lifetime bound to the map itself.
+          pub fn into_mut(self) -> &'a mut V {
+              self.value
+          }
       }
 
       /// A view into a vacant entry in an `OrderedHashMap`.
       pub struct VacantEntry<'a, K, V> {
           map: &'a mut OrderedHashMap<K, V>,
           key: K,
+      }
+
+      impl<'a, K, V> VacantEntry<'a, K, V>
+      where
+          K: Eq + Hash + Clone,
+      {
+          /// Inserts the value into the entry and returns a mutable reference to it.
+          pub fn insert(self, value: V) -> &'a mut V {
+              self.map.insert(self.key.clone(), value);
+              self.map.get_mut(&self.key).unwrap()
+          }
       }
 
       impl<'a, K, V> OrderedMapEntry<'a, K, V>
@@ -265,6 +190,194 @@ local_system:
               }
           }
       }
+  prev_file_contents:
+    src/datastructures/entry_api.rs: |
+      use ordered_hash_map::OrderedHashMap;
+      use std::hash::Hash;
+
+      /// A lightweight, trait-based "entry" API for OrderedHashMap.
+      ///
+      /// This is an extension trait that provides a familiar entry-style workflow:
+      /// map.entry(key).and_modify(|v| { .. }).or_insert(value)
+      ///
+      /// Notes:
+      /// - This implementation is intentionally minimal and only exposes the most commonly
+      ///   used methods: `or_insert`, `or_insert_with`, and `and_modify`.
+      /// - To keep the implementation generic and safe without depending on OrderedHashMap
+      ///   internals, we require K: Clone so that we can re-query after insertion.
+      ///   This allows returning an &'a mut V using only the standard get_mut/insert APIs.
+      ///
+      /// If your keys are not Clone, consider introducing a Clone wrapper (e.g., Arc, newtype
+      /// around indices, etc.) or extend OrderedHashMap with a more direct insert-and-get_mut
+      /// operation.
+      pub trait EntryApi<K, V> {
+          type Entry<'a>
+          where
+              Self: 'a,
+              K: 'a,
+              V: 'a;
+
+          /// Returns an "entry" object for the given key that supports:
+          /// - and_modify(|v| { ... })
+          /// - or_insert(default_value)
+          /// - or_insert_with(|| default_value)
+          /// - or_default()
+          fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a>;
+      }
+
+      /// A view into a single entry in an `OrderedHashMap`, which may either be vacant or occupied.
+      pub enum OrderedMapEntry<'a, K, V>
+      where
+          K: 'a,
+          V: 'a,
+      {
+          /// An occupied entry.
+          Occupied(OccupiedEntry<'a, V>),
+          /// A vacant entry.
+          Vacant(VacantEntry<'a, K, V>),
+      }
+
+      /// A view into an occupied entry in an `OrderedHashMap`.
+      pub struct OccupiedEntry<'a, V> {
+          value: &'a mut V,
+      }
+
+      impl<'a, V> OccupiedEntry<'a, V> {
+          /// Gets a reference to the value in the entry.
+          pub fn get(&self) -> &V {
+              self.value
+          }
+
+          /// Gets a mutable reference to the value in the entry.
+          pub fn get_mut(&mut self) -> &mut V {
+              self.value
+          }
+
+          /// Converts the entry into a mutable reference to the value in the entry
+          /// with a lifetime bound to the map itself.
+          pub fn into_mut(self) -> &'a mut V {
+              self.value
+          }
+      }
+
+      /// A view into a vacant entry in an `OrderedHashMap`.
+      pub struct VacantEntry<'a, K, V> {
+          map: &'a mut OrderedHashMap<K, V>,
+          key: K,
+      }
+
+      impl<'a, K, V> VacantEntry<'a, K, V>
+      where
+          K: Eq + Hash + Clone,
+      {
+          /// Inserts the value into the entry and returns a mutable reference to it.
+          pub fn insert(self, value: V) -> &'a mut V {
+              self.map.insert(self.key.clone(), value);
+              self.map.get_mut(&self.key).unwrap()
+          }
+      }
+
+      impl<'a, K, V> OrderedMapEntry<'a, K, V>
+      where
+          K: Eq + Hash + Clone,
+      {
+          /// If the key is present, apply `f` to the existing value, then return self for chaining.
+          /// If the key is absent, do nothing and return self for chaining.
+          ///
+          /// Example:
+          ///   map.entry(k).and_modify(|v| *v += 1).or_insert(0);
+          pub fn and_modify<F>(self, f: F) -> Self
+          where
+              F: FnOnce(&mut V),
+          {
+              if let OrderedMapEntry::Occupied(mut entry) = self {
+                  f(entry.value);
+                  OrderedMapEntry::Occupied(entry)
+              } else {
+                  self
+              }
+          }
+
+          /// Inserts `default` if the key is absent, then returns a mutable reference
+          /// to the value for the key (existing or newly inserted).
+          pub fn or_insert(self, default: V) -> &'a mut V {
+              match self {
+                  OrderedMapEntry::Occupied(entry) => entry.value,
+                  OrderedMapEntry::Vacant(entry) => entry.or_insert(default),
+              }
+          }
+
+          /// Inserts the result of `f` if the key is absent, then returns a mutable reference
+          /// to the value for the key (existing or newly inserted).
+          pub fn or_insert_with<F>(self, f: F) -> &'a mut V
+          where
+              F: FnOnce() -> V,
+          {
+              match self {
+                  OrderedMapEntry::Occupied(entry) => entry.value,
+                  OrderedMapEntry::Vacant(entry) => entry.or_insert_with(f),
+              }
+          }
+
+          /// Inserts the default value for the value type if the key is absent,
+          /// then returns a mutable reference to the value for the key (existing or newly inserted).
+          pub fn or_default(self) -> &'a mut V
+          where
+              V: Default,
+          {
+              match self {
+                  OrderedMapEntry::Occupied(entry) => entry.value,
+                  OrderedMapEntry::Vacant(entry) => entry.or_default(),
+              }
+          }
+      }
+
+      impl<'a, K, V> VacantEntry<'a, K, V>
+      where
+          K: Eq + Hash + Clone,
+      {
+          /// Inserts `default` if the key is absent, then returns a mutable reference
+          /// to the value for the key (newly inserted).
+          pub fn or_insert(self, default: V) -> &'a mut V {
+              self.map.insert(self.key.clone(), default);
+              self.map.get_mut(&self.key).unwrap()
+          }
+
+          /// Inserts the result of `f` if the key is absent, then returns a mutable reference
+          /// to the value for the key (newly inserted).
+          pub fn or_insert_with<F>(self, f: F) -> &'a mut V
+          where
+              F: FnOnce() -> V,
+          {
+              self.map.insert(self.key.clone(), f());
+              self.map.get_mut(&self.key).unwrap()
+          }
+
+          /// Inserts the default value for the value type if the key is absent,
+          /// then returns a mutable reference to the value for the key (newly inserted).
+          pub fn or_default(self) -> &'a mut V
+          where
+              V: Default,
+          {
+              self.or_insert_with(V::default)
+          }
+      }
+
+      impl<K, V> EntryApi<K, V> for OrderedHashMap<K, V>
+      where
+          K: Eq + Hash + Clone,
+      {
+          type Entry<'a> = OrderedMapEntry<'a, K, V> where Self: 'a, K: 'a, V: 'a;
+
+          fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
+              if self.get(&key).is_some() {
+                  let value = self.get_mut(&key).unwrap();
+                  OrderedMapEntry::Occupied(OccupiedEntry { value })
+              } else {
+                  OrderedMapEntry::Vacant(VacantEntry { map: self, key })
+              }
+          }
+      }
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -342,11 +455,56 @@ messages:
           fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a>;
       }
 
-      /// The entry wrapper returned by EntryApi::entry.
-      /// It allows calling and_modify(...).or_insert(...) style chains.
-      pub struct OrderedMapEntry<'a, K, V> {
+      /// A view into a single entry in an `OrderedHashMap`, which may either be vacant or occupied.
+      pub enum OrderedMapEntry<'a, K, V>
+      where
+          K: 'a,
+          V: 'a,
+      {
+          /// An occupied entry.
+          Occupied(OccupiedEntry<'a, V>),
+          /// A vacant entry.
+          Vacant(VacantEntry<'a, K, V>),
+      }
+
+      /// A view into an occupied entry in an `OrderedHashMap`.
+      pub struct OccupiedEntry<'a, V> {
+          value: &'a mut V,
+      }
+
+      impl<'a, V> OccupiedEntry<'a, V> {
+          /// Gets a reference to the value in the entry.
+          pub fn get(&self) -> &V {
+              self.value
+          }
+
+          /// Gets a mutable reference to the value in the entry.
+          pub fn get_mut(&mut self) -> &mut V {
+              self.value
+          }
+
+          /// Converts the entry into a mutable reference to the value in the entry
+          /// with a lifetime bound to the map itself.
+          pub fn into_mut(self) -> &'a mut V {
+              self.value
+          }
+      }
+
+      /// A view into a vacant entry in an `OrderedHashMap`.
+      pub struct VacantEntry<'a, K, V> {
           map: &'a mut OrderedHashMap<K, V>,
           key: K,
+      }
+
+      impl<'a, K, V> VacantEntry<'a, K, V>
+      where
+          K: Eq + Hash + Clone,
+      {
+          /// Inserts the value into the entry and returns a mutable reference to it.
+          pub fn insert(self, value: V) -> &'a mut V {
+              self.map.insert(self.key.clone(), value);
+              self.map.get_mut(&self.key).unwrap()
+          }
       }
 
       impl<'a, K, V> OrderedMapEntry<'a, K, V>
@@ -358,24 +516,25 @@ messages:
           ///
           /// Example:
           ///   map.entry(k).and_modify(|v| *v += 1).or_insert(0);
-          pub fn and_modify<F>(mut self, f: F) -> Self
+          pub fn and_modify<F>(self, f: F) -> Self
           where
               F: FnOnce(&mut V),
           {
-              if let Some(v) = self.map.get_mut(&self.key) {
-                  f(v);
+              if let OrderedMapEntry::Occupied(mut entry) = self {
+                  f(entry.value);
+                  OrderedMapEntry::Occupied(entry)
+              } else {
+                  self
               }
-              self
           }
 
           /// Inserts `default` if the key is absent, then returns a mutable reference
           /// to the value for the key (existing or newly inserted).
           pub fn or_insert(self, default: V) -> &'a mut V {
-              if self.map.contains_key(&self.key) {
-                  return self.map.get_mut(&self.key).unwrap();
+              match self {
+                  OrderedMapEntry::Occupied(entry) => entry.value,
+                  OrderedMapEntry::Vacant(entry) => entry.or_insert(default),
               }
-              self.map.insert(self.key.clone(), default);
-              self.map.get_mut(&self.key).unwrap()
           }
 
           /// Inserts the result of `f` if the key is absent, then returns a mutable reference
@@ -384,15 +543,48 @@ messages:
           where
               F: FnOnce() -> V,
           {
-              if self.map.contains_key(&self.key) {
-                  return self.map.get_mut(&self.key).unwrap();
+              match self {
+                  OrderedMapEntry::Occupied(entry) => entry.value,
+                  OrderedMapEntry::Vacant(entry) => entry.or_insert_with(f),
               }
+          }
+
+          /// Inserts the default value for the value type if the key is absent,
+          /// then returns a mutable reference to the value for the key (existing or newly inserted).
+          pub fn or_default(self) -> &'a mut V
+          where
+              V: Default,
+          {
+              match self {
+                  OrderedMapEntry::Occupied(entry) => entry.value,
+                  OrderedMapEntry::Vacant(entry) => entry.or_default(),
+              }
+          }
+      }
+
+      impl<'a, K, V> VacantEntry<'a, K, V>
+      where
+          K: Eq + Hash + Clone,
+      {
+          /// Inserts `default` if the key is absent, then returns a mutable reference
+          /// to the value for the key (newly inserted).
+          pub fn or_insert(self, default: V) -> &'a mut V {
+              self.map.insert(self.key.clone(), default);
+              self.map.get_mut(&self.key).unwrap()
+          }
+
+          /// Inserts the result of `f` if the key is absent, then returns a mutable reference
+          /// to the value for the key (newly inserted).
+          pub fn or_insert_with<F>(self, f: F) -> &'a mut V
+          where
+              F: FnOnce() -> V,
+          {
               self.map.insert(self.key.clone(), f());
               self.map.get_mut(&self.key).unwrap()
           }
 
           /// Inserts the default value for the value type if the key is absent,
-          /// then returns a mutable reference to the value for the key (existing or newly inserted).
+          /// then returns a mutable reference to the value for the key (newly inserted).
           pub fn or_default(self) -> &'a mut V
           where
               V: Default,
@@ -408,14 +600,31 @@ messages:
           type Entry<'a> = OrderedMapEntry<'a, K, V> where Self: 'a, K: 'a, V: 'a;
 
           fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
-              OrderedMapEntry { map: self, key }
+              if let Some(value) = self.get_mut(&key) {
+                  OrderedMapEntry::Occupied(OccupiedEntry { value })
+              } else {
+                  OrderedMapEntry::Vacant(VacantEntry { map: self, key })
+              }
           }
       }
 
       ```
     metadata:
       filename: src/datastructures/entry_api.rs
-  - user: Make it so we can pattern match OrderedMapEntry as Occupied or Vacant.
+  - user: |+
+      error[E0499]: cannot borrow `*self` as mutable more than once at a time
+         --> src/datastructures/entry_api.rs:182:56
+          |
+      178 |     fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
+          |              -- lifetime `'a` defined here
+      179 |         if let Some(value) = self.get_mut(&key) {
+          |                              ---- first mutable borrow occurs here
+      180 |             OrderedMapEntry::Occupied(OccupiedEntry { value })
+          |             -------------------------------------------------- returning this value requires that `*self` is borrowed for `'a`
+      181 |         } else {
+      182 |             OrderedMapEntry::Vacant(VacantEntry { map: self, key })
+          |                                                        ^^^^ second mutable borrow occurs here
+
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -434,223 +643,50 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      This change refactors `OrderedMapEntry` from a struct into an enum with `Occupied` and `Vacant` variants, enabling pattern matching. It also introduces `OccupiedEntry` and `VacantEntry` structs to hold the necessary data for each state and moves the core logic to these new structures.
+      The compiler error `E0499: cannot borrow *self as mutable more than once at a time` occurs because the `if let` structure attempts to take a mutable borrow of `self` with `self.get_mut(&key)` in the `if` branch, and then, if that fails, it attempts to take a *second* mutable borrow of `self` for the `VacantEntry` in the `else` branch. Even though the branches are mutually exclusive, the borrow checker is conservative about the lifetime of the initial `get_mut` borrow.
 
-      ## Step-by-step Instructions
+      The fix is to perform a non-mutable check for the key's presence first, which releases the shared borrow immediately, and then only take the mutable borrow in the specific branch that requires it.
 
-      Apply the following edits to the file `src/datastructures/entry_api.rs`:
+      Here are the step-by-step instructions and the corresponding git diff.
 
-      1.  **Replace the `OrderedMapEntry` struct definition** (lines 37-41) with the new `OrderedMapEntry` enum, and the new `OccupiedEntry` and `VacantEntry` structs.
+      ### Step-by-step Instructions
 
-          *   **Delete:**
-              ```rust
-              /// The entry wrapper returned by EntryApi::entry.
-              /// It allows calling and_modify(...).or_insert(...) style chains.
-              pub struct OrderedMapEntry<'a, K, V> {
-                  map: &'a mut OrderedHashMap<K, V>,
-                  key: K,
+      In the file `src/datastructures/entry_api.rs`, modify the `entry` method implementation for `OrderedHashMap<K, V>` to use a shared borrow for the initial key presence check.
+
+      1.  Open `src/datastructures/entry_api.rs`.
+      2.  Locate the `entry` function within the `impl<K, V> EntryApi<K, V> for OrderedHashMap<K, V>` block (around lines 178-184).
+      3.  Replace the existing function body with the following code:
+
+      ```rust
+          fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
+              if self.get(&key).is_some() {
+                  // Key is present, now take the mutable borrow
+                  let value = self.get_mut(&key).unwrap();
+                  OrderedMapEntry::Occupied(OccupiedEntry { value })
+              } else {
+                  // Key is absent, take the mutable borrow for the VacantEntry
+                  OrderedMapEntry::Vacant(VacantEntry { map: self, key })
               }
-              ```
-          *   **Insert:**
-              ```rust
-              /// A view into a single entry in an `OrderedHashMap`, which may either be vacant or occupied.
-              pub enum OrderedMapEntry<'a, K, V>
-              where
-                  K: 'a,
-                  V: 'a,
-              {
-                  /// An occupied entry.
-                  Occupied(OccupiedEntry<'a, K, V>),
-                  /// A vacant entry.
-                  Vacant(VacantEntry<'a, K, V>),
-              }
+          }
+      ```
 
-              /// A view into an occupied entry in an `OrderedHashMap`.
-              pub struct OccupiedEntry<'a, K, V> {
-                  value: &'a mut V,
-              }
-
-              /// A view into a vacant entry in an `OrderedHashMap`.
-              pub struct VacantEntry<'a, K, V> {
-                  map: &'a mut OrderedHashMap<K, V>,
-                  key: K,
-              }
-              ```
-
-      2.  **Refactor the `impl OrderedMapEntry` block** (lines 43-98) to implement the methods on the new `OrderedMapEntry` enum, delegating the insertion logic to the new `VacantEntry` struct.
-
-          *   **In `impl<'a, K, V> OrderedMapEntry<'a, K, V>`:**
-              *   Update `and_modify` to pattern match on `self`.
-              *   Update `or_insert`, `or_insert_with`, and `or_default` to pattern match on `self` and call the corresponding method on the `VacantEntry` variant.
-
-      3.  **Add a new `impl VacantEntry` block** after the `impl OrderedMapEntry` block to contain the actual insertion logic for `or_insert`, `or_insert_with`, and `or_default`.
-
-      4.  **Update the `entry` method** in `impl EntryApi for OrderedHashMap` (lines 112-115) to check if the key exists and return the appropriate `OrderedMapEntry` variant (`Occupied` or `Vacant`).
-
-          *   **Replace:**
-              ```rust
-              fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
-                  OrderedMapEntry { map: self, key }
-              }
-              ```
-          *   **With:**
-              ```rust
-              fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
-                  if let Some(value) = self.get_mut(&key) {
-                      OrderedMapEntry::Occupied(OccupiedEntry { value })
-                  } else {
-                      OrderedMapEntry::Vacant(VacantEntry { map: self, key })
-                  }
-              }
-              ```
-
-      ## Git Diffs
+      ### Git Diff
 
       ```diff
       diff --git a/src/datastructures/entry_api.rs b/src/datastructures/entry_api.rs
       --- a/src/datastructures/entry_api.rs
       +++ b/src/datastructures/entry_api.rs
-      @@ -34,14 +34,23 @@
-           fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a>;
-       }
-       
-      -/// The entry wrapper returned by EntryApi::entry.
-      -/// It allows calling and_modify(...).or_insert(...) style chains.
-      -pub struct OrderedMapEntry<'a, K, V> {
-      +/// A view into a single entry in an `OrderedHashMap`, which may either be vacant or occupied.
-      +pub enum OrderedMapEntry<'a, K, V>
-      +where
-      +    K: 'a,
-      +    V: 'a,
-      +{
-      +    /// An occupied entry.
-      +    Occupied(OccupiedEntry<'a, K, V>),
-      +    /// A vacant entry.
-      +    Vacant(VacantEntry<'a, K, V>),
-      +}
-      +
-      +/// A view into an occupied entry in an `OrderedHashMap`.
-      +pub struct OccupiedEntry<'a, K, V> {
-      +    value: &'a mut V,
-      +}
-      +
-      +/// A view into a vacant entry in an `OrderedHashMap`.
-      +pub struct VacantEntry<'a, K, V> {
-           map: &'a mut OrderedHashMap<K, V>,
-           key: K,
-       }
-       
-       impl<'a, K, V> OrderedMapEntry<'a, K, V>
-       where
-           K: Eq + Hash + Clone,
-       {
-           /// If the key is present, apply `f` to the existing value, then return self for chaining.
-           /// If the key is absent, do nothing and return self for chaining.
-           ///
-           /// Example:
-           ///   map.entry(k).and_modify(|v| *v += 1).or_insert(0);
-      -    pub fn and_modify<F>(mut self, f: F) -> Self
-      +    pub fn and_modify<F>(self, f: F) -> Self
-           where
-               F: FnOnce(&mut V),
-           {
-      -        if let Some(v) = self.map.get_mut(&self.key) {
-      -            f(v);
-      +        if let OrderedMapEntry::Occupied(mut entry) = self {
-      +            f(entry.value);
-      +            OrderedMapEntry::Occupied(entry)
-      +        } else {
-      +            self
-               }
-      -        self
-           }
-       
-           /// Inserts `default` if the key is absent, then returns a mutable reference
-           /// to the value for the key (existing or newly inserted).
-           pub fn or_insert(self, default: V) -> &'a mut V {
-      -        if self.map.contains_key(&self.key) {
-      -            return self.map.get_mut(&self.key).unwrap();
-      -        }
-      -        self.map.insert(self.key.clone(), default);
-      -        self.map.get_mut(&self.key).unwrap()
-      +        match self {
-      +            OrderedMapEntry::Occupied(entry) => entry.value,
-      +            OrderedMapEntry::Vacant(entry) => entry.or_insert(default),
-      +        }
-           }
-       
-           /// Inserts the result of `f` if the key is absent, then returns a mutable reference
-           /// to the value for the key (existing or newly inserted).
-           pub fn or_insert_with<F>(self, f: F) -> &'a mut V
-           where
-               F: FnOnce() -> V,
-           {
-      -        if self.map.contains_key(&self.key) {
-      -            return self.map.get_mut(&self.key).unwrap();
-      -        }
-      -        self.map.insert(self.key.clone(), f());
-      -        self.map.get_mut(&self.key).unwrap()
-      +        match self {
-      +            OrderedMapEntry::Occupied(entry) => entry.value,
-      +            OrderedMapEntry::Vacant(entry) => entry.or_insert_with(f),
-      +        }
-           }
-       
-           /// Inserts the default value for the value type if the key is absent,
-           /// then returns a mutable reference to the value for the key (existing or newly inserted).
-           pub fn or_default(self) -> &'a mut V
-           where
-               V: Default,
-           {
-      -        self.or_insert_with(V::default)
-      +        match self {
-      +            OrderedMapEntry::Occupied(entry) => entry.value,
-      +            OrderedMapEntry::Vacant(entry) => entry.or_default(),
-      +        }
-      +    }
-      +}
-      +
-      +impl<'a, K, V> VacantEntry<'a, K, V>
-      +where
-      +    K: Eq + Hash + Clone,
-      +{
-      +    /// Inserts `default` if the key is absent, then returns a mutable reference
-      +    /// to the value for the key (newly inserted).
-      +    pub fn or_insert(self, default: V) -> &'a mut V {
-      +        self.map.insert(self.key.clone(), default);
-      +        self.map.get_mut(&self.key).unwrap()
-      +    }
-      +
-      +    /// Inserts the result of `f` if the key is absent, then returns a mutable reference
-      +    /// to the value for the key (newly inserted).
-      +    pub fn or_insert_with<F>(self, f: F) -> &'a mut V
-      +    where
-      +        F: FnOnce() -> V,
-      +    {
-      +        self.map.insert(self.key.clone(), f());
-      +        self.map.get_mut(&self.key).unwrap()
-      +    }
-      +
-      +    /// Inserts the default value for the value type if the key is absent,
-      +    /// then returns a mutable reference to the value for the key (newly inserted).
-      +    pub fn or_default(self) -> &'a mut V
-      +    where
-      +        V: Default,
-      +    {
-      +        self.or_insert_with(V::default)
-           }
-       }
-       
-      @@ -109,6 +162,10 @@
+      @@ -178,10 +178,10 @@
            type Entry<'a> = OrderedMapEntry<'a, K, V> where Self: 'a, K: 'a, V: 'a;
        
            fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
-      -        OrderedMapEntry { map: self, key }
-      +        if let Some(value) = self.get_mut(&key) {
-      +            OrderedMapEntry::Occupied(OccupiedEntry { value })
-      +        } else {
-      +            OrderedMapEntry::Vacant(VacantEntry { map: self, key })
-      +        }
+      -        if let Some(value) = self.get_mut(&key) {
+      +        if self.get(&key).is_some() {
+      +            let value = self.get_mut(&key).unwrap();
+                   OrderedMapEntry::Occupied(OccupiedEntry { value })
+               } else {
+                   OrderedMapEntry::Vacant(VacantEntry { map: self, key })
+               }
            }
        }
       ```
@@ -664,7 +700,7 @@ messages:
       Applying patch to 'src/datastructures/entry_api.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/entry_api.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor OrderedMapEntry to an enum for
-      Occupied/Vacant pattern matching"'
+  - user: 'Changes committed with message: "Fix: Resolve borrow checker error in OrderedHashMap::entry
+      by checking key presence first"'
     metadata:
 ...

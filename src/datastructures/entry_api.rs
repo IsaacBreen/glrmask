@@ -176,7 +176,8 @@ where
     type Entry<'a> = OrderedMapEntry<'a, K, V> where Self: 'a, K: 'a, V: 'a;
 
     fn entry<'a>(&'a mut self, key: K) -> Self::Entry<'a> {
-        if let Some(value) = self.get_mut(&key) {
+        if self.get(&key).is_some() {
+            let value = self.get_mut(&key).unwrap();
             OrderedMapEntry::Occupied(OccupiedEntry { value })
         } else {
             OrderedMapEntry::Vacant(VacantEntry { map: self, key })
