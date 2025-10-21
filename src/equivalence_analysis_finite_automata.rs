@@ -1,7 +1,7 @@
 use crate::finite_automata::{ExecutionResult, GroupID, Match, Regex};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // For debugging: verify equivalence classes using a brute-force method.
 const VERIFY_EQUIVALENCE_CLASSES: bool = false;
@@ -11,8 +11,8 @@ const VERIFY_EQUIVALENCE_CLASSES: bool = false;
 // It represents the result of a single greedy tokenization step.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct CanonicalSignature {
-    // All possible matches and the signature of their remainders.
-    matches: BTreeSet<(GroupID, usize, SignatureId)>,
+    // All possible matches and the signature of their remainders (sorted and deduped).
+    matches: Vec<(GroupID, usize, SignatureId)>,
     // If the string can be fully consumed without a match, the final DFA state.
     final_state: Option<usize>,
 }
@@ -28,16 +28,10 @@ struct SignatureInterner {
 
 impl SignatureInterner {
     fn new() -> Self {
-        let mut interner = SignatureInterner {
+        SignatureInterner {
             signatures: Vec::new(),
             map: HashMap::new(),
-        };
-        // Pre-intern a signature for the empty string case.
-        interner.intern(CanonicalSignature {
-            matches: BTreeSet::new(),
-            final_state: Some(0), // Assuming start_state is 0
-        });
-        interner
+        }
     }
 
     fn intern(&mut self, sig: CanonicalSignature) -> SignatureId {
@@ -49,6 +43,95 @@ impl SignatureInterner {
         self.map.insert(sig, id);
         id
     }
+}
+
+// Canonical representation of a suffix by referencing an original string and an offset.
+#[derive(Clone, Copy)]
+struct CanonicalSuffixRep {
+    str_idx: usize,
+    offset: usize,
+}
+
+// Deduplicates suffixes across all strings by content using a lightweight 128-bit hash,
+// verifying equality by comparing the actual bytes on collisions. Also caches lookups
+// by (str_idx, offset) to avoid re-hashing within the same process.
+struct SuffixDeduper<'a> {
+    strings: &'a [Vec<u8>],
+    // hash -> list of node IDs (we verify equality inside bucket)
+    buckets: HashMap<u128, Vec<usize>>,
+    // node_id -> canonical representative
+    nodes: Vec<CanonicalSuffixRep>,
+    // (str_idx, offset) -> node_id
+    offset_cache: HashMap<(usize, usize), usize>,
+}
+
+impl<'a> SuffixDeduper<'a> {
+    fn new(strings: &'a [Vec<u8>]) -> Self {
+        SuffixDeduper {
+            strings,
+            buckets: HashMap::new(),
+            nodes: Vec::new(),
+            offset_cache: HashMap::new(),
+        }
+    }
+
+    #[inline]
+    fn slice_of(&self, node_id: usize) -> &[u8] {
+        let rep = self.nodes[node_id];
+        &self.strings[rep.str_idx][rep.offset..]
+    }
+
+    fn get_or_intern(&mut self, str_idx: usize, offset: usize) -> usize {
+        if let Some(&nid) = self.offset_cache.get(&(str_idx, offset)) {
+            return nid;
+        }
+        let bytes = &self.strings[str_idx][offset..];
+        let h = hash128(bytes);
+        if let Some(bucket) = self.buckets.get(&h) {
+            for &nid in bucket.iter() {
+                let rep = self.nodes[nid];
+                let rep_bytes = &self.strings[rep.str_idx][rep.offset..];
+                if rep_bytes == bytes {
+                    self.offset_cache.insert((str_idx, offset), nid);
+                    return nid;
+                }
+            }
+        }
+        let nid = self.nodes.len();
+        self.nodes.push(CanonicalSuffixRep { str_idx, offset });
+        self.buckets.entry(h).or_default().push(nid);
+        self.offset_cache.insert((str_idx, offset), nid);
+        nid
+    }
+
+    #[inline]
+    fn remainder_of(&mut self, node_id: usize, pos: usize) -> usize {
+        let rep = self.nodes[node_id];
+        self.get_or_intern(rep.str_idx, rep.offset + pos)
+    }
+}
+
+// 128-bit non-cryptographic hash for byte slices, computed in one pass.
+#[inline]
+fn hash128(bytes: &[u8]) -> u128 {
+    const FNV_OFFSET_BASIS1: u64 = 1469598103934665603;
+    const FNV_OFFSET_BASIS2: u64 = 1099511628211;
+    const FNV_PRIME1: u64 = 1099511628211;
+    const FNV_PRIME2: u64 = 14029467366897019727;
+
+    let mut h1: u64 = FNV_OFFSET_BASIS1;
+    let mut h2: u64 = FNV_OFFSET_BASIS2 ^ 0x9E3779B97F4A7C15;
+
+    for &b in bytes {
+        h1 ^= b as u64;
+        h1 = h1.wrapping_mul(FNV_PRIME1);
+
+        let rb = (b as u64).rotate_left(5);
+        h2 ^= rb;
+        h2 = h2.wrapping_mul(FNV_PRIME2);
+    }
+
+    ((h1 as u128) << 64) | (h2 as u128)
 }
 
 pub struct EquivalenceAnalyzer<'a> {
@@ -66,21 +149,71 @@ impl<'a> EquivalenceAnalyzer<'a> {
         }
     }
 
-    pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
-        // 1. Collect all unique suffixes from the input strings.
-        //    We need all suffixes because a remainder after a match is a suffix of the string being processed.
-        let mut suffixes = HashSet::new();
-        suffixes.insert(&[] as &[u8]); // Base case for recursion
-        for s in self.strings {
-            for i in 0..=s.len() {
-                suffixes.insert(&s[i..]);
+    // Compute the canonical signature for a given canonical suffix node and DFA state,
+    // using on-demand recursion and memoization. Remainders always recurse into start_state.
+    fn compute_signature_for_state(
+        &self,
+        deduper: &mut SuffixDeduper<'a>,
+        cache_start: &mut HashMap<usize, SignatureId>,
+        cache_other: &mut HashMap<(usize, usize), SignatureId>,
+        interner: &mut SignatureInterner,
+        node_id: usize,
+        dfa_state: usize,
+    ) -> SignatureId {
+        if dfa_state == self.regex.dfa.start_state {
+            if let Some(&sid) = cache_start.get(&node_id) {
+                return sid;
             }
+        } else if let Some(&sid) = cache_other.get(&(node_id, dfa_state)) {
+            return sid;
         }
-        let mut sorted_suffixes: Vec<&[u8]> = suffixes.into_iter().collect();
-        sorted_suffixes.sort_by_key(|p| p.len());
 
-        crate::debug!(2, "Starting LLM token equivalence analysis for {} unique suffixes...", sorted_suffixes.len());
-        let pb = ProgressBar::new(sorted_suffixes.len() as u64);
+        let bytes = deduper.slice_of(node_id);
+        let result = self.regex.execute_from_state2(bytes, dfa_state);
+
+        let mut matches_vec: Vec<(GroupID, usize, SignatureId)> = Vec::with_capacity(result.matches.len());
+        for m in result.matches {
+            // Filter out zero-width tokens to avoid infinite recursion.
+            if m.position == 0 {
+                continue;
+            }
+            let remainder_node = deduper.remainder_of(node_id, m.position);
+            let remainder_sig = self.compute_signature_for_state(
+                deduper,
+                cache_start,
+                cache_other,
+                interner,
+                remainder_node,
+                self.regex.dfa.start_state,
+            );
+            matches_vec.push((m.group_id, m.position, remainder_sig));
+        }
+        // Canonicalize matches ordering and dedup identical entries if any.
+        matches_vec.sort_unstable();
+        matches_vec.dedup();
+
+        let sig = CanonicalSignature {
+            matches: matches_vec,
+            final_state: result.end_state,
+        };
+        let sid = interner.intern(sig);
+
+        if dfa_state == self.regex.dfa.start_state {
+            cache_start.insert(node_id, sid);
+        } else {
+            cache_other.insert((node_id, dfa_state), sid);
+        }
+        sid
+    }
+
+    pub fn find_equivalence_classes(&mut self) -> BTreeMap<Vec<SignatureId>, Vec<usize>> {
+        // On-demand analysis: dedupe suffixes globally; compute signatures lazily.
+        crate::debug!(
+            2,
+            "Starting LLM token equivalence analysis (on-demand) for {} strings...",
+            self.strings.len()
+        );
+        let pb = ProgressBar::new(self.strings.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) (Equivalence Analysis)")
@@ -90,64 +223,32 @@ impl<'a> EquivalenceAnalyzer<'a> {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
-        // 2. Identify all DFA states for which we need to compute signatures.
-        let relevant_states: BTreeSet<usize> = self.initial_states
-            .iter()
-            .cloned()
-            .chain(std::iter::once(self.regex.dfa.start_state))
-            .collect();
-
-        // 3. Compute signatures for all prefixes, from shortest to longest.
         let mut signature_interner = SignatureInterner::new();
-        let mut memo: HashMap<&[u8], BTreeMap<usize, SignatureId>> = HashMap::new();
+        let mut deduper = SuffixDeduper::new(self.strings);
+        // Cache for signatures at start_state and at other states.
+        let mut cache_start: HashMap<usize, SignatureId> = HashMap::new();
+        let mut cache_other: HashMap<(usize, usize), SignatureId> = HashMap::new();
 
-        for &suffix in &sorted_suffixes {
-            pb.inc(1);
-            let mut state_sigs = BTreeMap::new();
-            for &dfa_state in &relevant_states {
-                let result = self.regex.execute_from_state2(suffix, dfa_state);
-
-                let mut matches = BTreeSet::new();
-                for m in result.matches {
-                    // Filter out zero-width tokens, as they can cause infinite loops.
-                    if m.position == 0 {
-                        continue;
-                    }
-
-                    let remainder = &suffix[m.position..];
-                    let remainder_sigs = memo
-                        .get(remainder)
-                        .expect("BUG: remainder signature should be pre-computed");
-                    let remainder_sig_id = remainder_sigs
-                        .get(&self.regex.dfa.start_state)
-                        .expect("BUG: remainder signature for start_state should exist");
-
-                    matches.insert((m.group_id, m.position, *remainder_sig_id));
-                }
-
-                let sig = CanonicalSignature {
-                    matches,
-                    final_state: result.end_state,
-                };
-                state_sigs.insert(dfa_state, signature_interner.intern(sig));
-            }
-            memo.insert(suffix, state_sigs);
-        }
-        pb.finish();
-
-        // 4. Classify original strings based on their signature vectors.
+        // Classify original strings based on their signature vectors for the provided initial states.
         let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
-        for (i, s) in self.strings.iter().enumerate() {
+        for (i, _s) in self.strings.iter().enumerate() {
+            pb.inc(1);
+            let node_id = deduper.get_or_intern(i, 0);
             let mut signature_vector = Vec::with_capacity(self.initial_states.len());
-            if let Some(string_sigs) = memo.get(s.as_slice()) {
-                for &initial_state in self.initial_states {
-                    let sig_id = string_sigs.get(&initial_state)
-                        .expect("BUG: Signature for initial state not found");
-                    signature_vector.push(*sig_id);
-                }
+            for &initial_state in self.initial_states {
+                let sig_id = self.compute_signature_for_state(
+                    &mut deduper,
+                    &mut cache_start,
+                    &mut cache_other,
+                    &mut signature_interner,
+                    node_id,
+                    initial_state,
+                );
+                signature_vector.push(sig_id);
             }
             equivalence_classes.entry(signature_vector).or_default().push(i);
         }
+        pb.finish();
 
         if VERIFY_EQUIVALENCE_CLASSES {
             verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
