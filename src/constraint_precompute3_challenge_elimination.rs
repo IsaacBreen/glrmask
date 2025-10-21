@@ -252,201 +252,217 @@ pub fn eliminate_pushes_and_pops(
         &roots2.values().cloned().collect::<Vec<_>>(),
     );
 
-    let mut fwd: HashMap<Node, HashMap<Key2, HashMap<Node, LLMTokenBV>>> = HashMap::new();
-    let mut rev: HashMap<Node, HashMap<Key2, HashMap<Node, LLMTokenBV>>> = HashMap::new();
-    let mut out_push_count: HashMap<Node, usize> = HashMap::new();
-    let mut out_nonpush_count: HashMap<Node, usize> = HashMap::new();
-    let mut in_push_count: HashMap<Node, usize> = HashMap::new();
-    let mut is_end: HashMap<Node, bool> = HashMap::new();
-
     let is_push = |k: &Key2| matches!(k, Intermediate2Trie3EdgeKey::Push(_));
 
-    for &u in &all_nodes2 {
-        if let Some(uguard) = u.read(&god2) {
-            is_end.insert(u, uguard.value.end);
-            for (key, dest_map) in uguard.children() {
-                for (&v, val) in dest_map {
-                    fwd.entry(u)
-                        .or_default()
-                        .entry(key.clone())
-                        .or_default()
-                        .insert(v, val.clone());
-                    rev.entry(v)
-                        .or_default()
-                        .entry(key.clone())
-                        .or_default()
-                        .insert(u, val.clone());
-                    if is_push(key) {
-                        *out_push_count.entry(u).or_default() += 1;
-                        *in_push_count.entry(v).or_default() += 1;
-                    } else {
-                        *out_nonpush_count.entry(u).or_default() += 1;
+    struct GraphState<'a> {
+        god2: &'a Intermediate2Trie3GodWrapper,
+        fwd: HashMap<Node, HashMap<Key2, HashMap<Node, LLMTokenBV>>>,
+        rev: HashMap<Node, HashMap<Key2, HashMap<Node, LLMTokenBV>>>,
+        out_push_count: HashMap<Node, usize>,
+        out_nonpush_count: HashMap<Node, usize>,
+        in_push_count: HashMap<Node, usize>,
+        is_end: HashMap<Node, bool>,
+        split_done: HashSet<Node>,
+    }
+
+    impl<'a> GraphState<'a> {
+        fn new(god2: &'a Intermediate2Trie3GodWrapper, all_nodes2: &[Node]) -> Self {
+            let mut fwd = HashMap::new();
+            let mut rev = HashMap::new();
+            let mut out_push_count = HashMap::new();
+            let mut out_nonpush_count = HashMap::new();
+            let mut in_push_count = HashMap::new();
+            let mut is_end = HashMap::new();
+
+            for &u in all_nodes2 {
+                if let Some(uguard) = u.read(god2) {
+                    is_end.insert(u, uguard.value.end);
+                    for (key, dest_map) in uguard.children() {
+                        for (&v, val) in dest_map {
+                            fwd.entry(u)
+                                .or_default()
+                                .entry(key.clone())
+                                .or_default()
+                                .insert(v, val.clone());
+                            rev.entry(v)
+                                .or_default()
+                                .entry(key.clone())
+                                .or_default()
+                                .insert(u, val.clone());
+                            if is_push(key) {
+                                *out_push_count.entry(u).or_default() += 1;
+                                *in_push_count.entry(v).or_default() += 1;
+                            } else {
+                                *out_nonpush_count.entry(u).or_default() += 1;
+                            }
+                        }
                     }
                 }
             }
+            Self {
+                god2,
+                fwd,
+                rev,
+                out_push_count,
+                out_nonpush_count,
+                in_push_count,
+                is_end,
+                split_done: HashSet::new(),
+            }
+        }
+
+        fn remove_edge(&mut self, u: Node, v: Node, key: &Key2) {
+            if let Some(by_key) = self.fwd.get_mut(&u) {
+                if let Some(dest_map) = by_key.get_mut(key) {
+                    if dest_map.remove(&v).is_some() {
+                        if is_push(key) {
+                            if let Some(c) = self.out_push_count.get_mut(&u) {
+                                *c = c.saturating_sub(1);
+                            }
+                            if let Some(by_k) = self.rev.get_mut(&v) {
+                                if let Some(src_map) = by_k.get_mut(key) {
+                                    if src_map.remove(&u).is_some() {
+                                        if let Some(c) = self.in_push_count.get_mut(&v) {
+                                            *c = c.saturating_sub(1);
+                                        }
+                                    }
+                                    if src_map.is_empty() {
+                                        by_k.remove(key);
+                                    }
+                                }
+                            }
+                        } else {
+                            if let Some(c) = self.out_nonpush_count.get_mut(&u) {
+                                *c = c.saturating_sub(1);
+                            }
+                            if let Some(by_k) = self.rev.get_mut(&v) {
+                                if let Some(src_map) = by_k.get_mut(key) {
+                                    src_map.remove(&u);
+                                    if src_map.is_empty() {
+                                        by_k.remove(key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if dest_map.is_empty() {
+                        by_key.remove(key);
+                    }
+                }
+                if by_key.is_empty() {
+                    self.fwd.remove(&u);
+                }
+            }
+            self.god2.remove_edge(u, v, key);
+        }
+
+        fn insert_edge(&mut self, u: Node, v: Node, key: Key2, val: LLMTokenBV) {
+            if val.is_empty() {
+                return;
+            }
+            let entry_by_key = self.fwd.entry(u).or_default();
+            let entry_dest = entry_by_key.entry(key.clone()).or_default();
+            let existed_before = entry_dest.contains_key(&v);
+            if let Some(prev) = entry_dest.get_mut(&v) {
+                *prev = prev.clone() | val.clone();
+            } else {
+                entry_dest.insert(v, val.clone());
+                if is_push(&key) {
+                    *self.out_push_count.entry(u).or_default() += 1;
+                } else {
+                    *self.out_nonpush_count.entry(u).or_default() += 1;
+                }
+            }
+
+            let rev_by_key = self.rev.entry(v).or_default();
+            let rev_src = rev_by_key.entry(key.clone()).or_default();
+            if let Some(prev) = rev_src.get_mut(&u) {
+                *prev = prev.clone() | val.clone();
+            } else {
+                rev_src.insert(u, val.clone());
+                if is_push(&key) && !existed_before {
+                    *self.in_push_count.entry(v).or_default() += 1;
+                }
+            }
+
+            self.god2.insert_edge_simple(u, v, key, val);
+        }
+
+        fn split_node(&mut self, b_idx: Node) -> Option<Node> {
+            if *self.is_end.get(&b_idx).unwrap_or(&false) {
+                return None;
+            }
+            if self.split_done.contains(&b_idx) {
+                return None;
+            }
+            let has_out_push = *self.out_push_count.get(&b_idx).unwrap_or(&0) > 0;
+            let has_out_nonpush = *self.out_nonpush_count.get(&b_idx).unwrap_or(&0) > 0;
+            if !(has_out_push && has_out_nonpush) {
+                return None;
+            }
+
+            let b_value = b_idx.read(self.god2).unwrap().value.clone();
+            let b_np_idx = Intermediate2PrecomputeNode3Index::new(
+                self.god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
+            );
+            self.is_end.insert(b_np_idx, false);
+
+            let mut to_move: Vec<(Key2, Node, LLMTokenBV)> = Vec::new();
+            if let Some(by_key) = self.fwd.get(&b_idx) {
+                for (edge_key, dest_map) in by_key {
+                    if !is_push(edge_key) {
+                        for (&c_idx, val) in dest_map {
+                            to_move.push((edge_key.clone(), c_idx, val.clone()));
+                        }
+                    }
+                }
+            }
+            for (k, c_idx, val) in &to_move {
+                self.insert_edge(b_np_idx, *c_idx, k.clone(), val.clone());
+            }
+            for (k, c_idx, _) in &to_move {
+                self.remove_edge(b_idx, *c_idx, k);
+            }
+
+            if let Some(by_key) = self.rev.get(&b_idx).cloned() {
+                for (k, src_map) in by_key {
+                    for (a_idx, val) in src_map {
+                        self.insert_edge(a_idx, b_np_idx, k.clone(), val.clone());
+                    }
+                }
+            }
+
+            self.split_done.insert(b_idx);
+            Some(b_np_idx)
         }
     }
 
-    // Helpers to mutate both the graph (god2) and local adjacency consistently.
-    let mut remove_edge = |u: Node, v: Node, key: &Key2| {
-        // Update local maps
-        if let Some(by_key) = fwd.get_mut(&u) {
-            if let Some(dest_map) = by_key.get_mut(key) {
-                if dest_map.remove(&v).is_some() {
-                    if is_push(key) {
-                        if let Some(c) = out_push_count.get_mut(&u) {
-                            *c = c.saturating_sub(1);
-                        }
-                        if let Some(by_k) = rev.get_mut(&v) {
-                            if let Some(src_map) = by_k.get_mut(key) {
-                                if src_map.remove(&u).is_some() {
-                                    if let Some(c) = in_push_count.get_mut(&v) {
-                                        *c = c.saturating_sub(1);
-                                    }
-                                }
-                                if src_map.is_empty() {
-                                    by_k.remove(key);
-                                }
-                            }
-                        }
-                    } else {
-                        if let Some(c) = out_nonpush_count.get_mut(&u) {
-                            *c = c.saturating_sub(1);
-                        }
-                        if let Some(by_k) = rev.get_mut(&v) {
-                            if let Some(src_map) = by_k.get_mut(key) {
-                                src_map.remove(&u);
-                                if src_map.is_empty() {
-                                    by_k.remove(key);
-                                }
-                            }
-                        }
-                    }
-                }
-                if dest_map.is_empty() {
-                    by_key.remove(key);
-                }
-            }
-            if by_key.is_empty() {
-                fwd.remove(&u);
-            }
-        }
-        // Update god2
-        god2.remove_edge(u, v, key);
-    };
-
-    let mut insert_edge = |u: Node, v: Node, key: Key2, val: LLMTokenBV| {
-        if val.is_empty() {
-            return;
-        }
-        // Update local maps (merge tokens if the same (u, key, v) already exists)
-        let entry_by_key = fwd.entry(u).or_default();
-        let entry_dest = entry_by_key.entry(key.clone()).or_default();
-        let existed_before = entry_dest.contains_key(&v);
-        if let Some(prev) = entry_dest.get_mut(&v) {
-            // Merge token sets
-            *prev = prev.clone() | val.clone();
-        } else {
-            entry_dest.insert(v, val.clone());
-            if is_push(&key) {
-                *out_push_count.entry(u).or_default() += 1;
-            } else {
-                *out_nonpush_count.entry(u).or_default() += 1;
-            }
-        }
-
-        let rev_by_key = rev.entry(v).or_default();
-        let rev_src = rev_by_key.entry(key.clone()).or_default();
-        if let Some(prev) = rev_src.get_mut(&u) {
-            *prev = prev.clone() | val.clone();
-        } else {
-            rev_src.insert(u, val.clone());
-            if is_push(&key) && !existed_before {
-                *in_push_count.entry(v).or_default() += 1;
-            }
-        }
-
-        // Update god2 (it merges edge values internally as well)
-        god2.insert_edge_simple(u, v, key, val);
-    };
-
-    let mut split_done: HashSet<Node> = HashSet::new();
-    let mut split_node = |b_idx: Node| -> Option<Node> {
-        if *is_end.get(&b_idx).unwrap_or(&false) {
-            return None;
-        }
-        if split_done.contains(&b_idx) {
-            return None;
-        }
-        let has_out_push = *out_push_count.get(&b_idx).unwrap_or(&0) > 0;
-        let has_out_nonpush = *out_nonpush_count.get(&b_idx).unwrap_or(&0) > 0;
-        if !(has_out_push && has_out_nonpush) {
-            return None;
-        }
-
-        // Create non-push clone
-        let b_value = b_idx.read(&god2).unwrap().value.clone();
-        let b_np_idx = Intermediate2PrecomputeNode3Index::new(
-            god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
-        );
-        is_end.insert(b_np_idx, false);
-
-        // Move all non-push outgoing edges b -> (...) to b_np -> (...)
-        let mut to_move: Vec<(Key2, Node, LLMTokenBV)> = Vec::new();
-        if let Some(by_key) = fwd.get(&b_idx) {
-            for (edge_key, dest_map) in by_key {
-                if !is_push(edge_key) {
-                    for (&c_idx, val) in dest_map {
-                        to_move.push((edge_key.clone(), c_idx, val.clone()));
-                    }
-                }
-            }
-        }
-        for (k, c_idx, val) in &to_move {
-            insert_edge(b_np_idx, *c_idx, k.clone(), val.clone());
-        }
-        for (k, c_idx, _) in &to_move {
-            remove_edge(b_idx, *c_idx, k);
-        }
-
-        // Duplicate all incoming edges (...) -> b into (...) -> b_np
-        if let Some(by_key) = rev.get(&b_idx).cloned() {
-            for (k, src_map) in by_key {
-                for (a_idx, val) in src_map {
-                    insert_edge(a_idx, b_np_idx, k.clone(), val.clone());
-                }
-            }
-        }
-
-        split_done.insert(b_idx);
-        Some(b_np_idx)
-    };
-
+    let mut state = GraphState::new(&god2, &all_nodes2);
     // Initial batch-split: nodes that already have incoming Push and both Push and non-Push outgoing.
     {
         let mut initial_split_targets: Vec<Node> = Vec::new();
         for &b in &all_nodes2 {
-            if *is_end.get(&b).unwrap_or(&false) {
+            if *state.is_end.get(&b).unwrap_or(&false) {
                 continue;
             }
-            let in_push = *in_push_count.get(&b).unwrap_or(&0) > 0;
-            let out_push = *out_push_count.get(&b).unwrap_or(&0) > 0;
-            let out_nonpush = *out_nonpush_count.get(&b).unwrap_or(&0) > 0;
+            let in_push = *state.in_push_count.get(&b).unwrap_or(&0) > 0;
+            let out_push = *state.out_push_count.get(&b).unwrap_or(&0) > 0;
+            let out_nonpush = *state.out_nonpush_count.get(&b).unwrap_or(&0) > 0;
             if in_push && out_push && out_nonpush {
                 initial_split_targets.push(b);
             }
         }
         for b in initial_split_targets {
-            let _ = split_node(b);
+            let _ = state.split_node(b);
         }
     }
 
     // Worklist of standard candidates: incoming Push and no outgoing Push.
     let mut queue: std::collections::VecDeque<Node> = std::collections::VecDeque::new();
-    for (&node, &end_flag) in &is_end {
+    for (&node, &end_flag) in &state.is_end {
         if !end_flag
-            && *in_push_count.get(&node).unwrap_or(&0) > 0
-            && *out_push_count.get(&node).unwrap_or(&0) == 0
+            && *state.in_push_count.get(&node).unwrap_or(&0) > 0
+            && *state.out_push_count.get(&node).unwrap_or(&0) == 0
         {
             queue.push_back(node);
         }
@@ -454,16 +470,16 @@ pub fn eliminate_pushes_and_pops(
 
     // Main worklist loop
     while let Some(b_idx) = queue.pop_front() {
-        if *is_end.get(&b_idx).unwrap_or(&false) {
+        if *state.is_end.get(&b_idx).unwrap_or(&false) {
             continue;
         }
-        if *out_push_count.get(&b_idx).unwrap_or(&0) > 0 {
+        if *state.out_push_count.get(&b_idx).unwrap_or(&0) > 0 {
             continue; // Not a standard candidate anymore
         }
 
         // Gather incoming Push edges into B
         let mut incoming_pushes: Vec<(Node, Key2, LLMTokenBV)> = Vec::new();
-        if let Some(by_key) = rev.get(&b_idx) {
+        if let Some(by_key) = state.rev.get(&b_idx) {
             for (k, src_map) in by_key {
                 if matches!(k, Intermediate2Trie3EdgeKey::Push(_)) {
                     for (&a_idx, val) in src_map {
@@ -478,7 +494,7 @@ pub fn eliminate_pushes_and_pops(
 
         // Gather all outgoing edges from B (ignore Push edges)
         let mut outgoing_edges: Vec<(Key2, Node, LLMTokenBV)> = Vec::new();
-        if let Some(by_key) = fwd.get(&b_idx) {
+        if let Some(by_key) = state.fwd.get(&b_idx) {
             for (op_key, dest_map) in by_key {
                 if matches!(op_key, Intermediate2Trie3EdgeKey::Push(_)) {
                     continue;
@@ -523,26 +539,26 @@ pub fn eliminate_pushes_and_pops(
                     if matches!(new_key, Intermediate2Trie3EdgeKey::Push(_)) {
                         new_push_targets.insert(*c_idx);
                     }
-                    insert_edge(*a_idx, *c_idx, new_key, new_tokens);
+                    state.insert_edge(*a_idx, *c_idx, new_key, new_tokens);
                 }
             }
         }
 
         // Dynamic follow-ups for any node that just received a Push:
         for c in new_push_targets {
-            if *is_end.get(&c).unwrap_or(&false) {
+            if *state.is_end.get(&c).unwrap_or(&false) {
                 continue;
             }
-            let out_push = *out_push_count.get(&c).unwrap_or(&0);
-            let out_nonpush = *out_nonpush_count.get(&c).unwrap_or(&0);
-            let in_push = *in_push_count.get(&c).unwrap_or(&0);
+            let out_push = *state.out_push_count.get(&c).unwrap_or(&0);
+            let out_nonpush = *state.out_nonpush_count.get(&c).unwrap_or(&0);
+            let in_push = *state.in_push_count.get(&c).unwrap_or(&0);
             if out_push == 0 && in_push > 0 {
                 queue.push_back(c);
             } else if in_push > 0 && out_push > 0 && out_nonpush > 0 {
-                if let Some(c_np) = split_node(c) {
+                if let Some(c_np) = state.split_node(c) {
                     // The split duplicate includes the new incoming push; b_np has no outgoing pushes
-                    if *in_push_count.get(&c_np).unwrap_or(&0) > 0
-                        && *out_push_count.get(&c_np).unwrap_or(&0) == 0
+                    if *state.in_push_count.get(&c_np).unwrap_or(&0) > 0
+                        && *state.out_push_count.get(&c_np).unwrap_or(&0) == 0
                     {
                         queue.push_back(c_np);
                     }
@@ -552,7 +568,7 @@ pub fn eliminate_pushes_and_pops(
 
         // Remove all incoming push edges into B
         for (a_idx, push_key, _) in incoming_pushes {
-            remove_edge(a_idx, b_idx, &push_key);
+            state.remove_edge(a_idx, b_idx, &push_key);
         }
     }
 
