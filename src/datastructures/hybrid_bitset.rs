@@ -394,6 +394,19 @@ impl HybridBitset {
         // If max is usize::MAX, checked_add returns None, and we do nothing,
         // which is correct because all values are already <= usize::MAX.
     }
+
+    pub fn from_sorted_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+        let rs = RangeSetBlaze::from_iter(iter);
+        HybridBitset {
+            inner: cache::intern_l1(rs),
+        }
+    }
+
+    // Enumerate indices. This is cheap when cardinality is small.
+    pub fn for_each_index<F: FnMut(usize)>(&self, f: F) {
+        // RangeSetBlaze exposes an efficient iterator over its elements.
+        self.inner.iter().for_each(f);
+    }
 }
 
 // --- Iterator ---
