@@ -2,7 +2,6 @@
 
 use crate::datastructures::cache::{self, Acc};
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use parking_lot::Mutex;
 // Added
 use range_set_blaze::RangeSetBlaze;
 // Import RangeSetBlaze
@@ -291,23 +290,23 @@ impl HybridBitset {
         use std::collections::{HashMap, HashSet, VecDeque};
 
         // --- Step 1: Build Adjacency Graph and Collect All Nodes ---
-        let adj_graph = Mutex::new(HashMap::<usize, HashMap<usize, usize>>::new());
-        let all_nodes = Mutex::new(HashSet::<usize>::new());
+        let mut adj_graph: HashMap<usize, HashMap<usize, usize>> = HashMap::new();
+        let mut all_nodes: HashSet<usize> = HashSet::new();
 
         for set in sets.iter() {
             let mut iter = set.iter_indices().peekable();
             while let Some(u) = iter.next() {
-                all_nodes.lock().insert(u);
+                all_nodes.insert(u);
                 if let Some(&v) = iter.peek() {
-                    *adj_graph.lock().entry(u).or_default().entry(v).or_default() += 1;
-                    *adj_graph.lock().entry(v).or_default().entry(u).or_default() += 1;
+                    *adj_graph.entry(u).or_default().entry(v).or_default() += 1;
+                    *adj_graph.entry(v).or_default().entry(u).or_default() += 1;
                 }
             }
         }
 
         // --- Step 2: Generate Permutation Order ---
         let mut edges: Vec<(usize, usize, usize)> = Vec::new();
-        for (&u, neighbors) in adj_graph.lock().iter() {
+        for (&u, neighbors) in &adj_graph {
             for (&v, &weight) in neighbors {
                 if u < v {
                     edges.push((u, v, weight));
@@ -330,7 +329,7 @@ impl HybridBitset {
 
             let mut current_end = v;
             loop {
-                let best_neighbor = adj_graph.lock().get(&current_end).and_then(|neighbors| {
+                let best_neighbor = adj_graph.get(&current_end).and_then(|neighbors| {
                     neighbors
                         .iter()
                         .filter(|(node, _)| !used_nodes.contains(node))
@@ -349,7 +348,7 @@ impl HybridBitset {
 
             let mut current_start = u;
             loop {
-                let best_neighbor = adj_graph.lock().get(&current_start).and_then(|neighbors| {
+                let best_neighbor = adj_graph.get(&current_start).and_then(|neighbors| {
                     neighbors
                         .iter()
                         .filter(|(node, _)| !used_nodes.contains(node))
@@ -368,7 +367,7 @@ impl HybridBitset {
             chains.push(current_chain);
         }
 
-        for &node in all_nodes.lock().iter() {
+        for &node in &all_nodes {
             if !used_nodes.contains(&node) {
                 chains.push(VecDeque::from([node]));
             }
