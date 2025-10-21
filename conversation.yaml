@@ -1,9 +1,66 @@
 local_system:
   attached_files:
+    - Cargo.toml
     - src/datastructures/hybrid_bitset.rs
   conversation_file:
   compile_command:
   initial_file_contents:
+    Cargo.toml: |
+      # This line needs to come before anything else in Cargo.toml
+      #cargo-features = ["codegen-backend"]
+
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2021"
+
+      [dependencies]
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      clap = { version = "4.5.4", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      indicatif = "0.17.11"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.3.0" }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      profiler_macro = { path = "profiler_macro" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+      similar = "2.7.0"
+      pretty_assertions = "1.4.1"
+      once_cell = "1.21.3"
+      lru = "0.16.0"
+      parking_lot = "0.12.5"
+      flate2 = "1.1.2"
+      im = "15.1.0"
+      indoc = "2.0.6"
+      rustc-hash = "1.1.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      #codegen-backend = "cranelift"
+      debug = true
+      #opt-level = 1
+
+      [features]
+      no_pbar = []
+      pbar = []
+
+      [[bin]]
+      name = "grammar-compiler"
+      path = "src/bin/grammar_compiler.rs"
     src/datastructures/hybrid_bitset.rs: |
       #![allow(dead_code)] // Allow unused code for the example
 
@@ -27,7 +84,7 @@ local_system:
       // --- The Hybrid Bitset Struct ---
       #[derive(Default, Clone, Eq)]
       pub struct HybridBitset {
-          pub(crate) inner: Arc<RangeSetBlaze<usize>>,
+          pub(crate) inner: Acc<RangeSetBlaze<usize>>,
       }
 
       impl JSONConvertible for HybridBitset {
@@ -221,16 +278,19 @@ local_system:
               if !self.inner.contains(index) {
                   return false;
               }
-              let result = Arc::make_mut(&mut self.inner).remove(index);
-              self.inner = cache::intern_l1(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
+              let mut new_inner = (*self.inner).clone();
+              let result = new_inner.remove(index);
+              self.inner = cache::intern_l1(new_inner);
               result
           }
 
           /// Extends the bitset with the contents of an iterator over indices.
           pub fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
-              Arc::make_mut(&mut self.inner).extend(iter);
-              // self.inner = cache::intern_l1((*self.inner).clone());
+              let mut new_inner = (*self.inner).clone();
+              new_inner.extend(iter);
+              self.inner = cache::intern_l1(new_inner);
           }
+
           /// Removes all elements from the set.
           pub fn clear(&mut self) {
               self.inner = cache::intern_l1(RangeSetBlaze::new());
@@ -1391,9 +1451,66 @@ local_system:
           }
       }
   prev_file_contents:
+    Cargo.toml: |
+      # This line needs to come before anything else in Cargo.toml
+      #cargo-features = ["codegen-backend"]
+
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2021"
+
+      [dependencies]
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      clap = { version = "4.5.4", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      indicatif = "0.17.11"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.3.0" }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      profiler_macro = { path = "profiler_macro" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+      similar = "2.7.0"
+      pretty_assertions = "1.4.1"
+      parking_lot = "0.12.5"
+      once_cell = { version = "1.21.3", features = ["parking_lot"] }
+      lru = { version = "0.16.0", features = ["parking_lot"] }
+      flate2 = "1.1.2"
+      im = "15.1.0"
+      indoc = "2.0.6"
+      rustc-hash = "1.1.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      #codegen-backend = "cranelift"
+      debug = true
+      #opt-level = 1
+
+      [features]
+      no_pbar = []
+      pbar = []
+
+      [[bin]]
+      name = "grammar-compiler"
+      path = "src/bin/grammar_compiler.rs"
     src/datastructures/hybrid_bitset.rs: |
       #![allow(dead_code)] // Allow unused code for the example
 
+      use crate::datastructures::cache::{self, Acc};
       use crate::json_serialization::{JSONConvertible, JSONNode};
       // Added
       use range_set_blaze::RangeSetBlaze;
@@ -1408,11 +1525,12 @@ local_system:
       use std::ops::{
           BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, SubAssign,
       };
+      use std::sync::Arc;
 
       // --- The Hybrid Bitset Struct ---
       #[derive(Default, Clone, Eq)]
       pub struct HybridBitset {
-          pub(crate) inner: RangeSetBlaze<usize>,
+          pub(crate) inner: Acc<RangeSetBlaze<usize>>,
       }
 
       impl JSONConvertible for HybridBitset {
@@ -1441,7 +1559,7 @@ local_system:
                   ranges.push(start..=end);
               }
               Ok(HybridBitset {
-                  inner: RangeSetBlaze::from_iter(ranges),
+                  inner: cache::intern_l1(RangeSetBlaze::from_iter(ranges)),
               })
           }
       }
@@ -1504,7 +1622,7 @@ local_system:
           /// Creates a new, empty HybridBitset.
           pub fn zeros() -> Self {
               HybridBitset {
-                  inner: RangeSetBlaze::new(),
+                  inner: cache::intern_l1(RangeSetBlaze::new()),
               }
           }
 
@@ -1514,28 +1632,34 @@ local_system:
                   HybridBitset::zeros()
               } else {
                   HybridBitset {
-                      inner: RangeSetBlaze::from_iter([0..=len - 1]),
+                      inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=len - 1])),
                   }
               }
           }
 
           pub fn max_ones() -> Self {
               HybridBitset {
-                  inner: RangeSetBlaze::from_iter([0..=usize::MAX]),
+                  inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=usize::MAX])),
               }
           }
 
           /// Creates a HybridBitset from an iterator of indices.
           pub fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
               HybridBitset {
-                  inner: RangeSetBlaze::from_iter(iter),
+                  inner: cache::intern_l1(RangeSetBlaze::from_iter(iter)),
               }
           }
 
           pub fn from_item(item: usize) -> Self {
               HybridBitset {
-                  inner: RangeSetBlaze::from_iter([item..=item]),
+                  inner: cache::intern_l1(RangeSetBlaze::from_iter([item..=item])),
               }
+          }
+
+          /// A bitset is simple if it has a small number of ranges, making operations fast
+          /// enough that caching overhead is not worthwhile.
+          pub fn is_simple(&self) -> bool {
+              self.inner.ranges_len() < cache::SIMPLE_BITSET_THRESHOLD
           }
 
           /// Returns the exact number of set bits (cardinality).
@@ -1575,30 +1699,47 @@ local_system:
 
           /// Inserts an index into the set. Returns true if the index was not already present.
           pub fn insert(&mut self, index: usize) -> bool {
-              self.inner.insert(index)
+              if self.inner.contains(index) {
+                  return false;
+              }
+              let mut new_inner = (*self.inner).clone();
+              let result = new_inner.insert(index);
+              self.inner = cache::intern_l1(new_inner);
+              result
           }
 
           /// Sets or clears an index.
           pub fn set(&mut self, index: usize, value: bool) {
+              let mut new_inner = (*self.inner).clone();
               if value {
-                  self.inner.insert(index);
+                  new_inner.insert(index);
               } else {
-                  self.inner.remove(index);
+                  new_inner.remove(index);
               }
+              self.inner = cache::intern_l1(new_inner);
           }
 
           /// Removes an index from the set. Returns true if the index was present.
           pub fn remove(&mut self, index: usize) -> bool {
-              self.inner.remove(index)
+              if !self.inner.contains(index) {
+                  return false;
+              }
+              let mut new_inner = (*self.inner).clone();
+              let result = new_inner.remove(index);
+              self.inner = cache::intern_l1(new_inner);
+              result
           }
 
           /// Extends the bitset with the contents of an iterator over indices.
           pub fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
-              self.inner.extend(iter);
+              let mut new_inner = (*self.inner).clone();
+              new_inner.extend(iter);
+              self.inner = cache::intern_l1(new_inner);
           }
+
           /// Removes all elements from the set.
           pub fn clear(&mut self) {
-              self.inner.clear();
+              self.inner = cache::intern_l1(RangeSetBlaze::new());
           }
 
           pub fn inverted(&self) -> Self {
@@ -1821,7 +1962,10 @@ local_system:
 
           fn into_iter(self) -> Self::IntoIter {
               // To get an owning iterator, we need to take ownership of the RangeSetBlaze.
-              self.inner.into_iter()
+              // We can do this by cloning the inner data if the Arc is shared.
+              Arc::try_unwrap(self.inner)
+                  .unwrap_or_else(|arc| (*arc).clone())
+                  .into_iter()
           }
       }
 
@@ -1885,9 +2029,33 @@ local_system:
           type Output = HybridBitset;
 
           fn bitand(self, rhs: Self) -> Self::Output {
-              HybridBitset {
-                  inner: &self.inner & &rhs.inner,
+              if Arc::ptr_eq(&self.inner, &rhs.inner) {
+                  return self.clone();
               }
+              if self.is_simple() || rhs.is_simple() {
+                  let result_inner = &*self.inner & &*rhs.inner;
+                  return HybridBitset {
+                      inner: cache::intern_l1(result_inner),
+                  };
+              }
+              if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::And, &self.inner, &rhs.inner) {
+                  return HybridBitset { inner: cached };
+              }
+              if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::And, &rhs.inner, &self.inner) {
+                  return HybridBitset { inner: cached };
+              }
+
+              let result_inner = &*self.inner & &*rhs.inner;
+              let result_acc = cache::intern_l1(result_inner);
+
+              cache::put_l1_op_cache(
+                  cache::BinOp::And,
+                  self.inner.clone(),
+                  rhs.inner.clone(),
+                  result_acc.clone(),
+              );
+
+              HybridBitset { inner: result_acc }
           }
       }
 
@@ -1895,9 +2063,33 @@ local_system:
           type Output = HybridBitset;
 
           fn bitor(self, rhs: Self) -> Self::Output {
-              HybridBitset {
-                  inner: &self.inner | &rhs.inner,
+              if Arc::ptr_eq(&self.inner, &rhs.inner) {
+                  return self.clone();
               }
+              if self.is_simple() || rhs.is_simple() {
+                  let result_inner = &*self.inner | &*rhs.inner;
+                  return HybridBitset {
+                      inner: cache::intern_l1(result_inner),
+                  };
+              }
+              if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Or, &self.inner, &rhs.inner) {
+                  return HybridBitset { inner: cached };
+              }
+              if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Or, &rhs.inner, &self.inner) {
+                  return HybridBitset { inner: cached };
+              }
+
+              let result_inner = &*self.inner | &*rhs.inner;
+              let result_acc = cache::intern_l1(result_inner);
+
+              cache::put_l1_op_cache(
+                  cache::BinOp::Or,
+                  self.inner.clone(),
+                  rhs.inner.clone(),
+                  result_acc.clone(),
+              );
+
+              HybridBitset { inner: result_acc }
           }
       }
 
@@ -1905,9 +2097,33 @@ local_system:
           type Output = HybridBitset;
 
           fn bitxor(self, rhs: Self) -> Self::Output {
-              HybridBitset {
-                  inner: &self.inner ^ &rhs.inner,
+              if Arc::ptr_eq(&self.inner, &rhs.inner) {
+                  return HybridBitset::zeros();
               }
+              if self.is_simple() || rhs.is_simple() {
+                  let result_inner = &*self.inner ^ &*rhs.inner;
+                  return HybridBitset {
+                      inner: cache::intern_l1(result_inner),
+                  };
+              }
+              if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Xor, &self.inner, &rhs.inner) {
+                  return HybridBitset { inner: cached };
+              }
+              if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Xor, &rhs.inner, &self.inner) {
+                  return HybridBitset { inner: cached };
+              }
+
+              let result_inner = &*self.inner ^ &*rhs.inner;
+              let result_acc = cache::intern_l1(result_inner);
+
+              cache::put_l1_op_cache(
+                  cache::BinOp::Xor,
+                  self.inner.clone(),
+                  rhs.inner.clone(),
+                  result_acc.clone(),
+              );
+
+              HybridBitset { inner: result_acc }
           }
       }
 
@@ -1915,9 +2131,30 @@ local_system:
           type Output = HybridBitset;
 
           fn sub(self, rhs: Self) -> Self::Output {
-              HybridBitset {
-                  inner: &self.inner - &rhs.inner,
+              if Arc::ptr_eq(&self.inner, &rhs.inner) {
+                  return HybridBitset::zeros();
               }
+              if self.is_simple() || rhs.is_simple() {
+                  let result_inner = &*self.inner - &*rhs.inner;
+                  return HybridBitset {
+                      inner: cache::intern_l1(result_inner),
+                  };
+              }
+              if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Sub, &self.inner, &rhs.inner) {
+                  return HybridBitset { inner: cached };
+              }
+
+              let result_inner = &*self.inner - &*rhs.inner;
+              let result_acc = cache::intern_l1(result_inner);
+
+              cache::put_l1_op_cache(
+                  cache::BinOp::Sub,
+                  self.inner.clone(),
+                  rhs.inner.clone(),
+                  result_acc.clone(),
+              );
+
+              HybridBitset { inner: result_acc }
           }
       }
 
@@ -1950,7 +2187,14 @@ local_system:
       }
       impl BitOrAssign<&HybridBitset> for HybridBitset {
           fn bitor_assign(&mut self, rhs: &HybridBitset) {
-              self.inner |= &rhs.inner;
+              if Arc::ptr_eq(&self.inner, &rhs.inner) {
+                  return;
+              }
+              // A clone-modify-reintern pattern is safest with interning.
+              // This avoids the overhead of the full caching logic in the `bitor` operator.
+              let mut new_inner = (*self.inner).clone();
+              new_inner |= (*rhs.inner).clone();
+              self.inner = cache::intern_l1(new_inner);
           }
       }
       impl BitXorAssign<&HybridBitset> for HybridBitset {
@@ -1967,7 +2211,7 @@ local_system:
       // --- Equality, Hashing, Ordering ---
       impl PartialEq for HybridBitset {
           fn eq(&self, other: &Self) -> bool {
-              self.inner == other.inner
+              Arc::ptr_eq(&self.inner, &other.inner) || *self.inner == *other.inner
           }
       }
 
@@ -1979,6 +2223,9 @@ local_system:
 
       impl Ord for HybridBitset {
           fn cmp(&self, other: &Self) -> Ordering {
+              if Arc::ptr_eq(&self.inner, &other.inner) {
+                  return Ordering::Equal;
+              }
               self.inner.cmp(&other.inner)
           }
       }
@@ -2001,7 +2248,7 @@ local_system:
       impl From<BitVec<usize, Lsb0>> for HybridBitset {
           fn from(bitvec: BitVec<usize, Lsb0>) -> Self {
               HybridBitset {
-                  inner: RangeSetBlaze::from_iter(bitvec.iter_ones()),
+                  inner: cache::intern_l1(RangeSetBlaze::from_iter(bitvec.iter_ones())),
               }
           }
       }
@@ -2247,6 +2494,9 @@ local_system:
               assert_eq!(set1, set1_clone);
               assert_ne!(set1, set2);
               assert_ne!(set1, empty_set);
+
+              // Test pointer equality for interned values
+              assert!(Arc::ptr_eq(&set1.inner, &set1_clone.inner));
 
               use std::collections::hash_map::DefaultHasher;
               let hash = |s: &HybridBitset| -> u64 {
@@ -2689,6 +2939,67 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
+      ```text "Cargo.toml"
+      # This line needs to come before anything else in Cargo.toml
+      #cargo-features = ["codegen-backend"]
+
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2021"
+
+      [dependencies]
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      clap = { version = "4.5.4", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      indicatif = "0.17.11"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.3.0" }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      profiler_macro = { path = "profiler_macro" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+      similar = "2.7.0"
+      pretty_assertions = "1.4.1"
+      once_cell = "1.21.3"
+      lru = "0.16.0"
+      parking_lot = "0.12.5"
+      flate2 = "1.1.2"
+      im = "15.1.0"
+      indoc = "2.0.6"
+      rustc-hash = "1.1.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      #codegen-backend = "cranelift"
+      debug = true
+      #opt-level = 1
+
+      [features]
+      no_pbar = []
+      pbar = []
+
+      [[bin]]
+      name = "grammar-compiler"
+      path = "src/bin/grammar_compiler.rs"
+
+      ```
+    metadata:
+      filename: Cargo.toml
+  - user: |-
       ```rust "src/datastructures/hybrid_bitset.rs"
       #![allow(dead_code)] // Allow unused code for the example
 
@@ -2712,7 +3023,7 @@ messages:
       // --- The Hybrid Bitset Struct ---
       #[derive(Default, Clone, Eq)]
       pub struct HybridBitset {
-          pub(crate) inner: Arc<RangeSetBlaze<usize>>,
+          pub(crate) inner: Acc<RangeSetBlaze<usize>>,
       }
 
       impl JSONConvertible for HybridBitset {
@@ -2906,16 +3217,19 @@ messages:
               if !self.inner.contains(index) {
                   return false;
               }
-              let result = Arc::make_mut(&mut self.inner).remove(index);
-              self.inner = cache::intern_l1(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
+              let mut new_inner = (*self.inner).clone();
+              let result = new_inner.remove(index);
+              self.inner = cache::intern_l1(new_inner);
               result
           }
 
           /// Extends the bitset with the contents of an iterator over indices.
           pub fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
-              Arc::make_mut(&mut self.inner).extend(iter);
-              // self.inner = cache::intern_l1((*self.inner).clone());
+              let mut new_inner = (*self.inner).clone();
+              new_inner.extend(iter);
+              self.inner = cache::intern_l1(new_inner);
           }
+
           /// Removes all elements from the set.
           pub fn clear(&mut self) {
               self.inner = cache::intern_l1(RangeSetBlaze::new());
@@ -4079,7 +4393,7 @@ messages:
       ```
     metadata:
       filename: src/datastructures/hybrid_bitset.rs
-  - user: Remove interning entirely from this code. It's not helping performance.
+  - user: Modify this to use parking_lot
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4098,564 +4412,50 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to remove the interning and caching logic, followed by the corresponding git diff.
+      Based on your request to integrate `parking_lot`, I've identified that the necessary changes are in configuring the dependencies rather than in the `hybrid_bitset.rs` logic itself. The provided `hybrid_bitset.rs` file offloads its caching and concurrency control to a `cache` module, which was not included. This `cache` module likely uses other crates like `lru` and `once_cell` to implement its functionality.
 
-      ### Step-by-Step Instructions
+      By enabling the `parking_lot` feature for these dependency crates, their internal locking mechanisms will be replaced with the more performant ones from `parking_lot`, fulfilling your request.
 
-      #### File: `src/datastructures/hybrid_bitset.rs`
+      Here are the step-by-step instructions to apply the changes:
 
-      1.  **Remove Unused Imports:**
-          At the top of the file, delete the `use` statements for `cache` and `Arc`.
+      ### Step 1: Modify `Cargo.toml` to enable `parking_lot` features
 
-          ```rust
-          // Remove these lines
-          use crate::datastructures::cache::{self, Acc};
-          use std::sync::Arc;
+      In the `Cargo.toml` file, you will update the entries for the `once_cell` and `lru` crates to enable their respective `parking_lot` features.
+
+      1.  Open the file `Cargo.toml`.
+      2.  Locate the following lines under `[dependencies]`:
+          ```toml
+          once_cell = "1.21.3"
+          lru = "0.16.0"
+          ```
+      3.  Replace them with these lines:
+          ```toml
+          once_cell = { version = "1.21.3", features = ["parking_lot"] }
+          lru = { version = "0.16.0", features = ["parking_lot"] }
           ```
 
-      2.  **Update `HybridBitset` Struct Definition:**
-          Modify the `inner` field to hold `RangeSetBlaze<usize>` directly, removing the `Arc` wrapper.
-
-          ```rust
-          // Before
-          #[derive(Default, Clone, Eq)]
-          pub struct HybridBitset {
-              pub(crate) inner: Arc<RangeSetBlaze<usize>>,
-          }
-
-          // After
-          #[derive(Default, Clone, Eq)]
-          pub struct HybridBitset {
-              pub(crate) inner: RangeSetBlaze<usize>,
-          }
-          ```
-
-      3.  **Update `JSONConvertible` Implementation:**
-          In the `from_json` function, remove the call to `cache::intern_l1`.
-
-          ```rust
-          // Before
-          Ok(HybridBitset {
-              inner: cache::intern_l1(RangeSetBlaze::from_iter(ranges)),
-          })
-
-          // After
-          Ok(HybridBitset {
-              inner: RangeSetBlaze::from_iter(ranges),
-          })
-          ```
-
-      4.  **Update Constructor Methods:**
-          In the `impl HybridBitset` block, remove all calls to `cache::intern_l1` from the following methods: `zeros`, `ones`, `max_ones`, `from_iter`, and `from_item`. For example, `zeros` will change like this:
-
-          ```rust
-          // Before
-          pub fn zeros() -> Self {
-              HybridBitset {
-                  inner: cache::intern_l1(RangeSetBlaze::new()),
-              }
-          }
-
-          // After
-          pub fn zeros() -> Self {
-              HybridBitset {
-                  inner: RangeSetBlaze::new(),
-              }
-          }
-          ```
-          Apply the same change to the other four methods.
-
-      5.  **Remove `is_simple` Method:**
-          Delete the entire `is_simple` method, as it was part of the caching mechanism.
-
-      6.  **Simplify Mutable Methods:**
-          Rewrite `insert`, `set`, `remove`, `extend`, and `clear` to directly call the corresponding methods on `self.inner`, removing the clone-and-reintern pattern.
-
-          -   For `insert`:
-              ```rust
-              // Before
-              pub fn insert(&mut self, index: usize) -> bool {
-                  if self.inner.contains(index) {
-                      return false;
-                  }
-                  let mut new_inner = (*self.inner).clone();
-                  let result = new_inner.insert(index);
-                  self.inner = cache::intern_l1(new_inner);
-                  result
-              }
-
-              // After
-              pub fn insert(&mut self, index: usize) -> bool {
-                  self.inner.insert(index)
-              }
-              ```
-          -   Apply similar simplifications to `set`, `remove`, `extend`, and `clear`.
-
-      7.  **Simplify `IntoIterator`:**
-          Update the `into_iter` implementation for an owned `HybridBitset` to directly delegate to `self.inner`.
-
-          ```rust
-          // Before
-          impl IntoIterator for HybridBitset {
-              // ...
-              fn into_iter(self) -> Self::IntoIter {
-                  Arc::try_unwrap(self.inner)
-                      .unwrap_or_else(|arc| (*arc).clone())
-                      .into_iter()
-              }
-          }
-
-          // After
-          impl IntoIterator for HybridBitset {
-              // ...
-              fn into_iter(self) -> Self::IntoIter {
-                  self.inner.into_iter()
-              }
-          }
-          ```
-
-      8.  **Simplify Bitwise Operations:**
-          Remove all caching logic from the `BitAnd`, `BitOr`, `BitXor`, and `Sub` implementations for `&HybridBitset`.
-
-          -   For `BitAnd`:
-              ```rust
-              // Before
-              impl BitAnd for &HybridBitset {
-                  type Output = HybridBitset;
-                  fn bitand(self, rhs: Self) -> Self::Output {
-                      if Arc::ptr_eq(&self.inner, &rhs.inner) { /* ... caching logic ... */ }
-                      // ... more caching logic ...
-                      let result_inner = &*self.inner & &*rhs.inner;
-                      // ... more caching logic ...
-                      HybridBitset { inner: result_acc }
-                  }
-              }
-
-              // After
-              impl BitAnd for &HybridBitset {
-                  type Output = HybridBitset;
-                  fn bitand(self, rhs: Self) -> Self::Output {
-                      HybridBitset {
-                          inner: &self.inner & &rhs.inner,
-                      }
-                  }
-              }
-              ```
-          -   Apply the same simplification to `BitOr`, `BitXor`, and `Sub`.
-
-      9.  **Simplify In-place `BitOrAssign`:**
-          Rewrite the `BitOrAssign<&HybridBitset>` implementation to directly modify `self.inner`.
-
-          ```rust
-          // Before
-          impl BitOrAssign<&HybridBitset> for HybridBitset {
-              fn bitor_assign(&mut self, rhs: &HybridBitset) {
-                  if Arc::ptr_eq(&self.inner, &rhs.inner) {
-                      return;
-                  }
-                  let mut new_inner = (*self.inner).clone();
-                  new_inner |= (*rhs.inner).clone();
-                  self.inner = cache::intern_l1(new_inner);
-              }
-          }
-
-          // After
-          impl BitOrAssign<&HybridBitset> for HybridBitset {
-              fn bitor_assign(&mut self, rhs: &HybridBitset) {
-                  self.inner |= &rhs.inner;
-              }
-          }
-          ```
-
-      10. **Update Equality and Ordering:**
-          Remove the `Arc::ptr_eq` optimization from the `PartialEq` and `Ord` implementations.
-
-          -   For `PartialEq`:
-              ```rust
-              // Before
-              impl PartialEq for HybridBitset {
-                  fn eq(&self, other: &Self) -> bool {
-                      Arc::ptr_eq(&self.inner, &other.inner) || *self.inner == *other.inner
-                  }
-              }
-
-              // After
-              impl PartialEq for HybridBitset {
-                  fn eq(&self, other: &Self) -> bool {
-                      self.inner == other.inner
-                  }
-              }
-              ```
-          -   Apply the same change to `Ord`.
-
-      11. **Update `From<BitVec>`:**
-          In the `From<BitVec<...>>` implementation, remove the call to `cache::intern_l1`.
-
-          ```rust
-          // Before
-          inner: cache::intern_l1(RangeSetBlaze::from_iter(bitvec.iter_ones())),
-
-          // After
-          inner: RangeSetBlaze::from_iter(bitvec.iter_ones()),
-          ```
-
-      12. **Update Tests:**
-          In the `test_equality_and_hash` test function, remove the assertion that checked for pointer equality, as it was specific to the interning implementation.
-
-          ```rust
-          // Remove this line from the test
-          assert!(Arc::ptr_eq(&set1.inner, &set1_clone.inner));
-          ```
+      This change instructs Cargo to compile `once_cell` and `lru` with support for `parking_lot`, which will cause them to use `parking_lot`'s synchronization primitives internally. No changes are needed in `src/datastructures/hybrid_bitset.rs`.
 
       ### Git Diff
 
+      Here is the git diff for the required changes.
+
       ```diff
-      diff --git a/src/datastructures/hybrid_bitset.rs b/src/datastructures/hybrid_bitset.rs
-      index 788647c..9406086 100644
-      --- a/src/datastructures/hybrid_bitset.rs
-      +++ b/src/datastructures/hybrid_bitset.rs
-      @@ -1,6 +1,5 @@
-       #![allow(dead_code)] // Allow unused code for the example
-       
-      -use crate::datastructures::cache::{self, Acc};
-       use crate::json_serialization::{JSONConvertible, JSONNode};
-       // Added
-       use range_set_blaze::RangeSetBlaze;
-      @@ -13,12 +12,11 @@
-       use std::ops::{
-           BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, SubAssign,
-       };
-      -use std::sync::Arc;
-       
-       // --- The Hybrid Bitset Struct ---
-       #[derive(Default, Clone, Eq)]
-       pub struct HybridBitset {
-      -    pub(crate) inner: Arc<RangeSetBlaze<usize>>,
-      +    pub(crate) inner: RangeSetBlaze<usize>,
-       }
-       
-       impl JSONConvertible for HybridBitset {
-      @@ -45,7 +43,7 @@
-                   ranges.push(start..=end);
-               }
-               Ok(HybridBitset {
-      -            inner: cache::intern_l1(RangeSetBlaze::from_iter(ranges)),
-      +            inner: RangeSetBlaze::from_iter(ranges),
-               })
-           }
-       }
-      @@ -111,7 +109,7 @@
-           /// Creates a new, empty HybridBitset.
-           pub fn zeros() -> Self {
-               HybridBitset {
-      -            inner: cache::intern_l1(RangeSetBlaze::new()),
-      +            inner: RangeSetBlaze::new(),
-               }
-           }
-       
-      @@ -121,34 +119,28 @@
-                   HybridBitset::zeros()
-               } else {
-                   HybridBitset {
-      -                inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=len - 1])),
-      +                inner: RangeSetBlaze::from_iter([0..=len - 1]),
-                   }
-               }
-           }
-       
-           pub fn max_ones() -> Self {
-               HybridBitset {
-      -            inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=usize::MAX])),
-      +            inner: RangeSetBlaze::from_iter([0..=usize::MAX]),
-               }
-           }
-       
-           /// Creates a HybridBitset from an iterator of indices.
-           pub fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
-               HybridBitset {
-      -            inner: cache::intern_l1(RangeSetBlaze::from_iter(iter)),
-      +            inner: RangeSetBlaze::from_iter(iter),
-               }
-           }
-       
-           pub fn from_item(item: usize) -> Self {
-               HybridBitset {
-      -            inner: cache::intern_l1(RangeSetBlaze::from_iter([item..=item])),
-      -        }
-      -    }
-      -
-      -    /// A bitset is simple if it has a small number of ranges, making operations fast
-      -    /// enough that caching overhead is not worthwhile.
-      -    pub fn is_simple(&self) -> bool {
-      -        self.inner.ranges_len() < cache::SIMPLE_BITSET_THRESHOLD
-      +            inner: RangeSetBlaze::from_iter([item..=item]),
-      +        }
-           }
-       
-           /// Returns the exact number of set bits (cardinality).
-      @@ -188,48 +180,31 @@
-       
-           /// Inserts an index into the set. Returns true if the index was not already present.
-           pub fn insert(&mut self, index: usize) -> bool {
-      -        if self.inner.contains(index) {
-      -            return false;
-      -        }
-      -        let mut new_inner = (*self.inner).clone();
-      -        let result = new_inner.insert(index);
-      -        self.inner = cache::intern_l1(new_inner);
-      -        result
-      +        self.inner.insert(index)
-           }
-       
-           /// Sets or clears an index.
-           pub fn set(&mut self, index: usize, value: bool) {
-      -        let mut new_inner = (*self.inner).clone();
-               if value {
-      -            new_inner.insert(index);
-      +            self.inner.insert(index);
-               } else {
-      -            new_inner.remove(index);
-      -        }
-      -        self.inner = cache::intern_l1(new_inner);
-      +            self.inner.remove(index);
-      +        }
-           }
-       
-           /// Removes an index from the set. Returns true if the index was present.
-           pub fn remove(&mut self, index: usize) -> bool {
-      -        if !self.inner.contains(index) {
-      -            return false;
-      -        }
-      -        let result = Arc::make_mut(&mut self.inner).remove(index);
-      -        self.inner = cache::intern_l1(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
-      -        result
-      +        self.inner.remove(index)
-           }
-       
-           /// Extends the bitset with the contents of an iterator over indices.
-           pub fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
-      -        Arc::make_mut(&mut self.inner).extend(iter);
-      -        // self.inner = cache::intern_l1((*self.inner).clone());
-      +        self.inner.extend(iter);
-           }
-           /// Removes all elements from the set.
-           pub fn clear(&mut self) {
-      -        self.inner = cache::intern_l1(RangeSetBlaze::new());
-      +        self.inner.clear();
-           }
-       
-           pub fn inverted(&self) -> Self {
-      @@ -406,9 +381,7 @@
-       
-           fn into_iter(self) -> Self::IntoIter {
-               // To get an owning iterator, we need to take ownership of the RangeSetBlaze.
-      -        // We can do this by cloning the inner data if the Arc is shared.
-      -        Arc::try_unwrap(self.inner)
-      -            .unwrap_or_else(|arc| (*arc).clone())
-      -            .into_iter()
-      +        self.inner.into_iter()
-           }
-       }
-       
-      @@ -470,126 +443,46 @@
-           type Output = HybridBitset;
-       
-           fn bitand(self, rhs: Self) -> Self::Output {
-      -        if Arc::ptr_eq(&self.inner, &rhs.inner) {
-      -            return self.clone();
-      -        }
-      -        if self.is_simple() || rhs.is_simple() {
-      -            let result_inner = &*self.inner & &*rhs.inner;
-      -            return HybridBitset {
-      -                inner: cache::intern_l1(result_inner),
-      -            };
-      -        }
-      -        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::And, &self.inner, &rhs.inner) {
-      -            return HybridBitset { inner: cached };
-      -        }
-      -        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::And, &rhs.inner, &self.inner) {
-      -            return HybridBitset { inner: cached };
-      -        }
-      -
-      -        let result_inner = &*self.inner & &*rhs.inner;
-      -        let result_acc = cache::intern_l1(result_inner);
-      -
-      -        cache::put_l1_op_cache(
-      -            cache::BinOp::And,
-      -            self.inner.clone(),
-      -            rhs.inner.clone(),
-      -            result_acc.clone(),
-      -        );
-      -
-      -        HybridBitset { inner: result_acc }
-      +        HybridBitset {
-      +            inner: &self.inner & &rhs.inner,
-      +        }
-           }
-       }
-       
-       impl BitOr for &HybridBitset {
-           type Output = HybridBitset;
-       
-           fn bitor(self, rhs: Self) -> Self::Output {
-      -        if Arc::ptr_eq(&self.inner, &rhs.inner) {
-      -            return self.clone();
-      -        }
-      -        if self.is_simple() || rhs.is_simple() {
-      -            let result_inner = &*self.inner | &*rhs.inner;
-      -            return HybridBitset {
-      -                inner: cache::intern_l1(result_inner),
-      -            };
-      -        }
-      -        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Or, &self.inner, &rhs.inner) {
-      -            return HybridBitset { inner: cached };
-      -        }
-      -        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Or, &rhs.inner, &self.inner) {
-      -            return HybridBitset { inner: cached };
-      -        }
-      -
-      -        let result_inner = &*self.inner | &*rhs.inner;
-      -        let result_acc = cache::intern_l1(result_inner);
-      -
-      -        cache::put_l1_op_cache(
-      -            cache::BinOp::Or,
-      -            self.inner.clone(),
-      -            rhs.inner.clone(),
-      -            result_acc.clone(),
-      -        );
-      -
-      -        HybridBitset { inner: result_acc }
-      +        HybridBitset {
-      +            inner: &self.inner | &rhs.inner,
-      +        }
-           }
-       }
-       
-       impl BitXor for &HybridBitset {
-           type Output = HybridBitset;
-       
-           fn bitxor(self, rhs: Self) -> Self::Output {
-      -        if Arc::ptr_eq(&self.inner, &rhs.inner) {
-      -            return HybridBitset::zeros();
-      -        }
-      -        if self.is_simple() || rhs.is_simple() {
-      -            let result_inner = &*self.inner ^ &*rhs.inner;
-      -            return HybridBitset {
-      -                inner: cache::intern_l1(result_inner),
-      -            };
-      -        }
-      -        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Xor, &self.inner, &rhs.inner) {
-      -            return HybridBitset { inner: cached };
-      -        }
-      -        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Xor, &rhs.inner, &self.inner) {
-      -            return HybridBitset { inner: cached };
-      -        }
-      -
-      -        let result_inner = &*self.inner ^ &*rhs.inner;
-      -        let result_acc = cache::intern_l1(result_inner);
-      -
-      -        cache::put_l1_op_cache(
-      -            cache::BinOp::Xor,
-      -            self.inner.clone(),
-      -            rhs.inner.clone(),
-      -            result_acc.clone(),
-      -        );
-      -
-      -        HybridBitset { inner: result_acc }
-      +        HybridBitset {
-      +            inner: &self.inner ^ &rhs.inner,
-      +        }
-           }
-       }
-       
-       impl Sub for &HybridBitset {
-           type Output = HybridBitset;
-       
-           fn sub(self, rhs: Self) -> Self::Output {
-      -        if Arc::ptr_eq(&self.inner, &rhs.inner) {
-      -            return HybridBitset::zeros();
-      -        }
-      -        if self.is_simple() || rhs.is_simple() {
-      -            let result_inner = &*self.inner - &*rhs.inner;
-      -            return HybridBitset {
-      -                inner: cache::intern_l1(result_inner),
-      -            };
-      -        }
-      -        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Sub, &self.inner, &rhs.inner) {
-      -            return HybridBitset { inner: cached };
-      -        }
-      -
-      -        let result_inner = &*self.inner - &*rhs.inner;
-      -        let result_acc = cache::intern_l1(result_inner);
-      -
-      -        cache::put_l1_op_cache(
-      -            cache::BinOp::Sub,
-      -            self.inner.clone(),
-      -            rhs.inner.clone(),
-      -            result_acc.clone(),
-      -        );
-      -
-      -        HybridBitset { inner: result_acc }
-      +        HybridBitset {
-      +            inner: &self.inner - &rhs.inner,
-      +        }
-           }
-       }
-       
-      @@ -619,13 +512,7 @@
-       }
-       impl BitOrAssign<&HybridBitset> for HybridBitset {
-           fn bitor_assign(&mut self, rhs: &HybridBitset) {
-      -        if Arc::ptr_eq(&self.inner, &rhs.inner) {
-      -            return;
-      -        }
-      -        // A clone-modify-reintern pattern is safest with interning.
-      -        // This avoids the overhead of the full caching logic in the `bitor` operator.
-      -        let mut new_inner = (*self.inner).clone();
-      -        new_inner |= (*rhs.inner).clone();
-      -        self.inner = cache::intern_l1(new_inner);
-      +        self.inner |= &rhs.inner;
-           }
-       }
-       impl BitXorAssign<&HybridBitset> for HybridBitset {
-      @@ -641,7 +528,7 @@
-       // --- Equality, Hashing, Ordering ---
-       impl PartialEq for HybridBitset {
-           fn eq(&self, other: &Self) -> bool {
-      -        Arc::ptr_eq(&self.inner, &other.inner) || *self.inner == *other.inner
-      +        self.inner == other.inner
-           }
-       }
-       
-      @@ -653,9 +540,6 @@
-       
-       impl Ord for HybridBitset {
-           fn cmp(&self, other: &Self) -> Ordering {
-      -        if Arc::ptr_eq(&self.inner, &other.inner) {
-      -            return Ordering::Equal;
-      -        }
-               self.inner.cmp(&other.inner)
-           }
-       }
-      @@ -677,7 +561,7 @@
-       impl From<BitVec<usize, Lsb0>> for HybridBitset {
-           fn from(bitvec: BitVec<usize, Lsb0>) -> Self {
-               HybridBitset {
-      -            inner: cache::intern_l1(RangeSetBlaze::from_iter(bitvec.iter_ones())),
-      +            inner: RangeSetBlaze::from_iter(bitvec.iter_ones()),
-               }
-           }
-       }
-      @@ -870,8 +754,6 @@
-               assert_ne!(set1, set2);
-               assert_ne!(set1, empty_set);
-       
-      -        // Test pointer equality for interned values
-      -        assert!(Arc::ptr_eq(&set1.inner, &set1_clone.inner));
-      -
-               use std::collections::hash_map::DefaultHasher;
-               let hash = |s: &HybridBitset| -> u64 {
-                   let mut hasher = DeterministicHasher::new(DefaultHasher::new());
+      diff --git a/Cargo.toml b/Cargo.toml
+      --- a/Cargo.toml
+      +++ b/Cargo.toml
+      @@ -26,9 +26,9 @@
+       ordered_hash_map = "0.4.0"
+       similar = "2.7.0"
+       pretty_assertions = "1.4.1"
+      -once_cell = "1.21.3"
+      -lru = "0.16.0"
+       parking_lot = "0.12.5"
+      +once_cell = { version = "1.21.3", features = ["parking_lot"] }
+      +lru = { version = "0.16.0", features = ["parking_lot"] }
+       flate2 = "1.1.2"
+       im = "15.1.0"
+       indoc = "2.0.6"
 
       ```
     metadata:
@@ -4664,11 +4464,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/hybrid_bitset.rs
-      Applying patch to 'src/datastructures/hybrid_bitset.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/hybrid_bitset.rs.
+      Identified target file: Cargo.toml
+      Applying patch to 'Cargo.toml' using custom patcher...
+      Successfully applied patch and wrote to Cargo.toml.
     metadata:
-  - user: 'Changes committed with message: "Remove interning and caching logic from
-      HybridBitset"'
+  - user: 'Changes committed with message: "Enable parking_lot feature for once_cell
+      and lru dependencies"'
     metadata:
 ...
