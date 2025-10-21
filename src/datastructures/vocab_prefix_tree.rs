@@ -209,8 +209,10 @@ impl VocabPrefixTree {
         //    ancestor links across all tokens), which is typically far smaller than
         //    repeatedly unioning large sets.
         crate::debug!(2, "Computing reachable IDs (fast path)");
+        let t0 = std::time::Instant::now();
         tree.recompute_reachable_ids_via_paths();
-        crate::debug!(2, "Done computing reachable IDs");
+        let t1 = std::time::Instant::now();
+        crate::debug!(2, "Done computing reachable IDs in {:?}", t1.duration_since(t0));
 
         // 4. Adjust root's reachable IDs if its ID 0 is just the convention.
         if !tree.has_empty_string_token && tree.root.token_id == 0 && !tree.root.reachable_token_ids.is_empty() {
