@@ -291,7 +291,7 @@ impl JSONConvertible for Trie2Index {
 
 // Implementation block for core Trie functionality
 // Added Clone bound for EK needed in insertion and others
-impl<EK: Ord + Clone, EV: Clone, T> Trie<EK, EV, T> {
+impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     /// Creates a new trie node with the given value and no children.
     /// The max_depth is initialized to usize::MAX and will be updated later
     /// when recompute_all_max_depths is called.
@@ -675,76 +675,6 @@ impl<EK: Ord + Clone, EV: Clone, T> Trie<EK, EV, T> {
             max_out_degree,
             avg_out_degree,
         }
-    }
-
-    /// Breaks structural cycles in the graph by removing back-edges found during a DFS traversal.
-    /// This is intended for graphs that are cyclic in structure but acyclic in practice due to
-    /// edge properties (e.g., LLM token masks) that are not considered by structural analysis.
-    /// After this operation, the graph is guaranteed to be a DAG, which can be important for
-    /// algorithms like topological sorting (`recompute_all_max_depths`).
-    ///
-    /// Note: This modifies the graph in-place.
-    pub fn break_structural_cycles(arena: &Arena<Self>, roots: &[Trie2Index]) {
-        let mut visiting = HashSet::new(); // Nodes currently in the recursion stack (gray set).
-        let mut visited = HashSet::new();  // Nodes that have been fully explored (black set).
-
-        for &root in roots {
-            if !visited.contains(&root) {
-                Self::break_cycles_recursive(root, arena, &mut visiting, &mut visited);
-            }
-        }
-    }
-
-    /// Recursive helper for `break_structural_cycles`.
-    fn break_cycles_recursive(
-        node_idx: Trie2Index,
-        arena: &Arena<Self>,
-        visiting: &mut HashSet<Trie2Index>,
-        visited: &mut HashSet<Trie2Index>,
-    ) {
-        visiting.insert(node_idx);
-        visited.insert(node_idx);
-
-        // We must read children, release the lock, recurse, and then re-acquire a write lock to modify.
-        let children_snapshot;
-        if let Some(guard) = node_idx.read(arena) {
-            children_snapshot = guard.children().clone();
-        } else {
-            // Node not found, probably an invalid index.
-            visiting.remove(&node_idx);
-            return;
-        }
-
-        let mut back_edges: Vec<(EK, Trie2Index)> = Vec::new();
-
-        for (ek, dest_map) in children_snapshot {
-            for (child_idx, _ev) in dest_map {
-                if visiting.contains(&child_idx) {
-                    // This is a back-edge to a node on the current recursion stack. Mark for removal.
-                    back_edges.push((ek.clone(), child_idx));
-                } else if !visited.contains(&child_idx) {
-                    // Visit child if it hasn't been fully explored yet.
-                    Self::break_cycles_recursive(child_idx, arena, visiting, visited);
-                }
-            }
-        }
-
-        // After visiting all children, remove the identified back-edges from the current node.
-        if !back_edges.is_empty() {
-            if let Some(mut guard) = node_idx.write(arena) {
-                for (ek, child_idx_to_remove) in back_edges {
-                    if let Some(dest_map) = guard.children_mut().get_mut(&ek) {
-                        dest_map.remove(&child_idx_to_remove);
-                    }
-                    // Clean up the BTreeMap entry if the OrderedHashMap is now empty.
-                    if guard.children().get(&ek).map_or(false, |m| m.is_empty()) {
-                        guard.children_mut().remove(&ek);
-                    }
-                }
-            }
-        }
-
-        visiting.remove(&node_idx);
     }
 }
 
