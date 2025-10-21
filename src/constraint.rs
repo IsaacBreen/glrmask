@@ -86,7 +86,7 @@ struct EdgeKey {
 }
 
 impl DfsStats {
-    fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, HybridBitset>) {
+    fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, TokenAcc>) {
         self.num_pending_edges += pending_edges.len();
 
         let mut dsts_per_src_key: HashMap<(PrecomputeNode1Index, Option<GrammarTokenID>), usize> = HashMap::new();
@@ -2883,6 +2883,7 @@ impl<'r> Precomputer1<'r> {
             }
 
             // === OPTIMIZATION 5: Batch write all edges and updates ===
+            stats.analyze_pending_edges(&pending_edges);
             timeit!("dfs_batch_write", {
                 // Aggregate all updates before locking
                 let mut aggregated_live_tokens: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
@@ -2926,8 +2927,6 @@ impl<'r> Precomputer1<'r> {
                     });
                 }
             });
-
-            stats.analyze_pending_edges(&pending_edges);
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc, stats);
@@ -3014,6 +3013,10 @@ impl TokenAcc {
             bv |= big_bv;
         }
         bv
+    }
+
+    fn len(&self) -> usize {
+        self.small.len() + self.big.len()
     }
 }
 
