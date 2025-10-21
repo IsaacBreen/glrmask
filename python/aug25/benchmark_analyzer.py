@@ -30,21 +30,23 @@ def _normalize_intervals(ranges: Optional[List[List[int]]]) -> Tuple[Tuple[int, 
     return tuple(merged)
 
 def _format_token_bytes(b: bytes) -> str:
-    """Formats a token's bytes into a clean, readable string without the b'' prefix."""
-    if b == b'\n': return "'\\n'"
-    if b == b'\t': return "'\\t'"
-    if b == b'\r': return "'\\r'"
+    """Formats a token's bytes into a clean, readable string."""
+    # Handle common whitespace single-byte tokens specially for clarity.
+    if b == b'\n': return r"'\n'"
+    if b == b'\t': return r"'\t'"
+    if b == b'\r': return r"'\r'"
     if b == b' ': return "' '"
 
+    # Try to decode as UTF-8. If successful, return the string's repr().
+    # repr() will handle quotes and escape sequences correctly (e.g., 'a"b' -> '\'a"b\'').
     try:
         s = b.decode('utf-8')
-        # Use single quotes if it's a simple, printable ASCII string.
-        if all(32 <= ord(c) < 127 and c != "'" and c != "\\" for c in s):
-            return f"'{s}'"
+        return repr(s)
     except UnicodeDecodeError:
-        pass
-    # Fallback to the default repr() for bytes, which is b'...'.
-    return repr(b)
+        # If it's not valid UTF-8, fall back to a hex representation for readability.
+        # This is better than the default b'...' repr for raw bytes.
+        hex_str = b.hex()
+        return f"hex({hex_str})"
 
 def _print_vocab_summary(id_to_token: Dict[int, bytes]):
     """Prints a summarized, readable version of the vocabulary."""
