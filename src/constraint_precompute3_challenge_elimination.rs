@@ -224,111 +224,135 @@ pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    println!("Starting push/pop elimination...");
-    let initial_nodes =
-        IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
-            .len();
-    println!("Initial graph node count: {}", initial_nodes);
+    const DEBUG: bool = false;
+    if DEBUG {
+        let initial_nodes =
+            IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
+                .len();
+        println!("Starting push/pop elimination... nodes: {}", initial_nodes);
+    }
 
-    // 1. Convert to Intermediate2 format, which moves token constraints to edge values.
+    // Convert to Intermediate2 format (moves token constraints to edge values).
     let (roots2, god2) = convert_to_intermediate2(roots, god);
-    let intermediate_nodes = Intermediate2PrecomputeNode3::all_nodes(
-        &god2,
-        &roots2.values().cloned().collect::<Vec<_>>(),
-    )
-    .len();
-    println!(
-        "Intermediate graph node count: {}",
-        intermediate_nodes
-    );
-
-    let mut loop_count = 0;
-    // 2. Main loop: find and process nodes until no more candidates exist.
-    loop {
-        loop_count += 1;
-        let all_nodes = Intermediate2PrecomputeNode3::all_nodes(
+    if DEBUG {
+        let inter_nodes = Intermediate2PrecomputeNode3::all_nodes(
             &god2,
             &roots2.values().cloned().collect::<Vec<_>>(),
-        );
-        println!(
-            "\nLoop {}: starting with {} nodes.",
-            loop_count,
-            all_nodes.len()
-        );
+        )
+        .len();
+        println!("Intermediate graph node count: {}", inter_nodes);
+    }
 
-        // To efficiently find incoming edges, we build a reverse adjacency list.
-        let mut reverse_adj: HashMap<
+    // Build initial reverse adjacency and per-node stats once. We'll maintain them incrementally.
+    let mut known_nodes_vec = Intermediate2PrecomputeNode3::all_nodes(
+        &god2,
+        &roots2.values().cloned().collect::<Vec<_>>(),
+    );
+    let mut known_nodes: HashSet<Intermediate2PrecomputeNode3Index> =
+        known_nodes_vec.iter().cloned().collect();
+
+    // Reverse adjacency: for each node v, store list of (u, key, val) where u --key(val)--> v.
+    let mut reverse_adj: HashMap<
+        Intermediate2PrecomputeNode3Index,
+        Vec<(
             Intermediate2PrecomputeNode3Index,
-            Vec<(
-                Intermediate2PrecomputeNode3Index,
-                Intermediate2Trie3EdgeKey,
-                LLMTokenBV,
-            )>,
-        > = HashMap::new();
-        for &u in &all_nodes {
-            if let Some(u_guard) = u.read(&god2) {
-                for (edge_key, dest_map) in u_guard.children() {
-                    for (&v, edge_val) in dest_map {
-                        reverse_adj
-                            .entry(v)
-                            .or_default()
-                            .push((u, edge_key.clone(), edge_val.clone()));
+            Intermediate2Trie3EdgeKey,
+            LLMTokenBV,
+        )>,
+    > = HashMap::new();
+
+    // Per-node stats
+    let mut outgoing_push_count: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
+    let mut has_outgoing_push: HashMap<Intermediate2PrecomputeNode3Index, bool> = HashMap::new();
+    let mut has_outgoing_nonpush: HashMap<Intermediate2PrecomputeNode3Index, bool> = HashMap::new();
+    let mut incoming_push_count: HashMap<Intermediate2PrecomputeNode3Index, usize> = HashMap::new();
+    let mut is_end: HashSet<Intermediate2PrecomputeNode3Index> = HashSet::new();
+
+    for &u in &known_nodes_vec {
+        if let Some(guard) = u.read(&god2) {
+            if guard.value.end {
+                is_end.insert(u);
+            }
+            let mut push_count_u = 0usize;
+            let mut has_push = false;
+            let mut has_nonpush = false;
+            for (edge_key, dest_map) in guard.children() {
+                let is_push_key = matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_));
+                if is_push_key {
+                    has_push = true;
+                    push_count_u += dest_map.len();
+                } else {
+                    has_nonpush = true;
+                }
+                for (&v, val) in dest_map {
+                    reverse_adj.entry(v).or_default().push((u, edge_key.clone(), val.clone()));
+                }
+            }
+            outgoing_push_count.insert(u, push_count_u);
+            has_outgoing_push.insert(u, has_push);
+            has_outgoing_nonpush.insert(u, has_nonpush);
+        }
+    }
+    for (v, incomings) in &reverse_adj {
+        let cnt = incomings
+            .iter()
+            .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+            .count();
+        incoming_push_count.insert(*v, cnt);
+    }
+
+    // Candidate worklist: nodes with at least one incoming Push and no outgoing Push.
+    let mut queue: std::collections::VecDeque<Intermediate2PrecomputeNode3Index> =
+        std::collections::VecDeque::new();
+    for &b in &known_nodes {
+        if !is_end.contains(&b)
+            && !has_outgoing_push.get(&b).copied().unwrap_or(false)
+            && incoming_push_count.get(&b).copied().unwrap_or(0) > 0
+        {
+            queue.push_back(b);
+        }
+    }
+
+    // Keep reverse_adj consistent after inserts (dedup entries for same (a_idx, key) -> c_idx).
+    let mut update_reverse_adj_after_insert = |a_idx: Intermediate2PrecomputeNode3Index,
+                                               c_idx: Intermediate2PrecomputeNode3Index,
+                                               new_key: Intermediate2Trie3EdgeKey| {
+        if let Some(aguard) = a_idx.read(&god2) {
+            if let Some(dest_map) = aguard.children().get(&new_key) {
+                if let Some(val) = dest_map.get(&c_idx) {
+                    let vec = reverse_adj.entry(c_idx).or_default();
+                    if let Some(pos) = vec.iter().position(|(uu, kk, _)| *uu == a_idx && *kk == new_key) {
+                        vec[pos].2 = val.clone();
+                    } else {
+                        vec.push((a_idx, new_key.clone(), val.clone()));
                     }
                 }
             }
         }
+    };
 
-        // Find a candidate node 'B' to process:
-        // - Not an end state.
-        // - Has at least one incoming Push edge.
-        // - Has no outgoing Push edges.
-        let mut nodes_to_process = Vec::new();
-        for &b_idx in &all_nodes {
-            let b_guard = b_idx.read(&god2).unwrap();
-            if b_guard.value.end {
+    loop {
+        let mut made_progress = false;
+
+        // Process all standard candidates available in the queue.
+        while let Some(b_idx) = queue.pop_front() {
+            if is_end.contains(&b_idx) {
+                continue;
+            }
+            if has_outgoing_push.get(&b_idx).copied().unwrap_or(false) {
+                continue;
+            }
+            let incoming_list = reverse_adj.get(&b_idx).cloned().unwrap_or_default();
+            let incoming_pushes: Vec<_> = incoming_list
+                .into_iter()
+                .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+                .collect();
+            if incoming_pushes.is_empty() {
                 continue;
             }
 
-            let has_outgoing_push = b_guard
-                .children()
-                .keys()
-                .any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
-            if has_outgoing_push {
-                continue;
-            }
-
-            if let Some(incoming_edges) = reverse_adj.get(&b_idx) {
-                let has_incoming_push = incoming_edges
-                    .iter()
-                    .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
-                if has_incoming_push {
-                    nodes_to_process.push(b_idx);
-                }
-            }
-        }
-
-        if !nodes_to_process.is_empty() {
-            println!(
-                "  Found {} standard candidate nodes to process.",
-                nodes_to_process.len()
-            );
-
-            let mut edges_to_remove = Vec::new();
-            let mut edges_to_add = Vec::new();
-
-            for &b_idx in &nodes_to_process {
-                // Gather information about B's incoming pushes and all outgoing edges.
-                let incoming_pushes: Vec<_> = reverse_adj
-                    .get(&b_idx)
-                    .unwrap()
-                    .iter()
-                    .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-                    .cloned()
-                    .collect();
-
-                let outgoing_edges: Vec<_> = b_idx
-                    .read(&god2)
-                    .unwrap()
+            let outgoing_edges: Vec<_> = if let Some(guard) = b_idx.read(&god2) {
+                guard
                     .children()
                     .iter()
                     .flat_map(|(k, dest_map)| {
@@ -336,150 +360,207 @@ pub fn eliminate_pushes_and_pops(
                             .iter()
                             .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
                     })
-                    .collect();
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
-                // Remove all incoming push edges to B.
-                for (a_idx, edge_key, _) in &incoming_pushes {
-                    edges_to_remove.push((*a_idx, b_idx, edge_key.clone()));
+            made_progress = true;
+
+            for (a_idx, push_key, tokens_a_b) in incoming_pushes {
+                // Remove A --Push--> B edge completely.
+                god2.remove_edge(a_idx, b_idx, &push_key);
+                if let Some(vec) = reverse_adj.get_mut(&b_idx) {
+                    vec.retain(|(uu, kk, _)| !(*uu == a_idx && *kk == push_key));
+                }
+                if let Some(cnt) = incoming_push_count.get_mut(&b_idx) {
+                    if *cnt > 0 {
+                        *cnt -= 1;
+                    }
+                }
+                // Update A's outgoing push count and enqueue A if it becomes a candidate.
+                if matches!(push_key, Intermediate2Trie3EdgeKey::Push(_)) {
+                    let count_a = outgoing_push_count.entry(a_idx).or_insert(0);
+                    if *count_a > 0 {
+                        *count_a -= 1;
+                    }
+                    if *count_a == 0 {
+                        has_outgoing_push.insert(a_idx, false);
+                        if !is_end.contains(&a_idx)
+                            && incoming_push_count.get(&a_idx).copied().unwrap_or(0) > 0
+                        {
+                            queue.push_back(a_idx);
+                        }
+                    }
                 }
 
-                // Create new "shortcut" edges from A to C.
-                for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
-                    let s = match push_key {
-                        Intermediate2Trie3EdgeKey::Push(s) => s,
-                        _ => unreachable!(),
-                    };
-
-                    for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
-                        let new_tokens = tokens_a_b & tokens_b_c;
-                        if new_tokens.is_empty() {
+                // Compose A --Push(s)--> B --op--> C into A --new_key--> C
+                let s = match &push_key {
+                    Intermediate2Trie3EdgeKey::Push(s) => s.clone(),
+                    _ => unreachable!(),
+                };
+                for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
+                    let new_tokens = tokens_a_b.clone() & tokens_b_c.clone();
+                    if new_tokens.is_empty() {
+                        continue;
+                    }
+                    let new_key_opt = match op_key {
+                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
+                            if !s.is_disjoint(s_prime) {
+                                Some(Intermediate2Trie3EdgeKey::Push(s.clone() & s_prime.clone()))
+                            } else {
+                                None
+                            }
+                        }
+                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
+                            if !s.is_disjoint(s_prime) {
+                                Some(Intermediate2Trie3EdgeKey::NoOp)
+                            } else {
+                                None
+                            }
+                        }
+                        Intermediate2Trie3EdgeKey::Pop(n, s_prime) => {
+                            Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone()))
+                        }
+                        Intermediate2Trie3EdgeKey::NoOp => {
+                            Some(Intermediate2Trie3EdgeKey::Push(s.clone()))
+                        }
+                        Intermediate2Trie3EdgeKey::Push(_) => {
+                            // By invariant, B has no outgoing pushes.
                             continue;
                         }
-
-                        let new_key_opt = match op_key {
-                            Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
-                            Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
-                            Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
-                            Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
-                            Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
+                    };
+                    if let Some(new_key) = new_key_opt {
+                        // Check if (A --new_key--> C) already existed before inserting (to keep counts consistent).
+                        let existed_before = if let Some(aguard) = a_idx.read(&god2) {
+                            aguard
+                                .children()
+                                .get(&new_key)
+                                .map_or(false, |dm| dm.contains_key(c_idx))
+                        } else {
+                            false
                         };
-
-                        if let Some(new_key) = new_key_opt {
-                            edges_to_add.push((*a_idx, *c_idx, new_key, new_tokens));
-                        }
-                    }
-                }
-            }
-
-            for (u, v, k) in edges_to_remove {
-                god2.remove_edge(u, v, &k);
-            }
-            for (u, v, k, val) in edges_to_add {
-                god2.insert_edge_simple(u, v, k, val);
-            }
-        } else {
-            // No candidate with "incoming Push" and "no outgoing Push".
-            // Fallback: split a node that has both Push and non-Push outgoing edges
-            // and at least one incoming Push. This creates exactly one new node,
-            // moving all non-Push outgoing edges to it and duplicating all incoming
-            // edges to preserve behavior. Then retry the main loop.
-            let mut split_candidates = Vec::new();
-            for &b_idx in &all_nodes {
-                let b_guard = b_idx.read(&god2).unwrap();
-                if b_guard.value.end {
-                    continue;
-                }
-                let mut has_outgoing_push = false;
-                let mut has_outgoing_nonpush = false;
-                for k in b_guard.children().keys() {
-                    match k {
-                        Intermediate2Trie3EdgeKey::Push(_) => has_outgoing_push = true,
-                        _ => has_outgoing_nonpush = true,
-                    }
-                }
-                if !(has_outgoing_push && has_outgoing_nonpush) {
-                    continue;
-                }
-                let has_incoming_push = reverse_adj
-                    .get(&b_idx)
-                    .map_or(false, |incoming| {
-                        incoming
-                            .iter()
-                            .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-                    });
-                if has_incoming_push {
-                    split_candidates.push(b_idx);
-                }
-            }
-
-            if !split_candidates.is_empty() {
-                println!(
-                    "  No standard candidate. Found {} split candidates to process.",
-                    split_candidates.len()
-                );
-                for &b_idx in &split_candidates {
-                // Create the new "non-push" clone node
-                let b_value = b_idx.read(&god2).unwrap().value.clone();
-                let b_np_idx = Intermediate2PrecomputeNode3Index::new(
-                    god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
-                );
-
-                // Move all non-push outgoing edges from b_idx -> (...) to b_np_idx -> (...)
-                let mut to_move: Vec<(
-                    Intermediate2Trie3EdgeKey,
-                    Intermediate2PrecomputeNode3Index,
-                    LLMTokenBV,
-                )> = Vec::new();
-                if let Some(b_guard) = b_idx.read(&god2) {
-                    for (edge_key, dest_map) in b_guard.children() {
-                        if !matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
-                            for (&c_idx, val) in dest_map {
-                                to_move.push((edge_key.clone(), c_idx, val.clone()));
+                        god2.insert_edge_simple(a_idx, *c_idx, new_key.clone(), new_tokens.clone());
+                        update_reverse_adj_after_insert(a_idx, *c_idx, new_key.clone());
+                        match &new_key {
+                            Intermediate2Trie3EdgeKey::Push(_) => {
+                                if !existed_before {
+                                    let count = outgoing_push_count.entry(a_idx).or_insert(0);
+                                    *count += 1;
+                                    has_outgoing_push.insert(a_idx, true);
+                                    let cnt_in = incoming_push_count.entry(*c_idx).or_insert(0);
+                                    *cnt_in += 1;
+                                    if !is_end.contains(c_idx)
+                                        && !has_outgoing_push.get(c_idx).copied().unwrap_or(false)
+                                    {
+                                        queue.push_back(*c_idx);
+                                    }
+                                }
+                            }
+                            _ => {
+                                has_outgoing_nonpush.insert(a_idx, true);
                             }
                         }
                     }
                 }
-                for (k, c_idx, val) in &to_move {
-                    god2.insert_edge_simple(b_np_idx, *c_idx, k.clone(), val.clone());
-                }
-                for (k, c_idx, _) in &to_move {
-                    god2.remove_edge(b_idx, *c_idx, k);
-                }
+            }
+        }
 
-                // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable
-                    if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
-                    for (a_idx, k, val) in incoming {
-                            god2.insert_edge_simple(a_idx, b_np_idx, k.clone(), val.clone());
-                    }
-                }
-                }
+        if made_progress {
+            continue;
+        }
 
-                // Now that we've split, try again from the top to pick up a standard candidate.
+        // No more standard candidates. Try a split to create one.
+        let mut split_candidate: Option<Intermediate2PrecomputeNode3Index> = None;
+        for &b in &known_nodes {
+            if is_end.contains(&b) {
                 continue;
-            } else {
-                // No more nodes to process and no viable split candidate: stop.
-                println!("  No more candidates to process or split. Exiting loop.");
+            }
+            let has_push = has_outgoing_push.get(&b).copied().unwrap_or(false);
+            let has_non = has_outgoing_nonpush.get(&b).copied().unwrap_or(false);
+            let inc_p = incoming_push_count.get(&b).copied().unwrap_or(0);
+            if has_push && has_non && inc_p > 0 {
+                split_candidate = Some(b);
                 break;
             }
         }
+
+        if let Some(b_idx) = split_candidate {
+            // Clone the node for non-push outgoing edges.
+            let b_value = b_idx.read(&god2).unwrap().value.clone();
+            let b_np_idx =
+                Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(
+                    b_value,
+                )));
+            known_nodes.insert(b_np_idx);
+            if is_end.contains(&b_idx) {
+                is_end.insert(b_np_idx);
+            }
+
+            // Move all non-push outgoing edges from b_idx to b_np_idx.
+            let to_move: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> =
+                if let Some(b_guard) = b_idx.read(&god2) {
+                    let mut v = Vec::new();
+                    for (edge_key, dest_map) in b_guard.children() {
+                        if !matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
+                            for (&c_idx, val) in dest_map {
+                                v.push((edge_key.clone(), c_idx, val.clone()));
+                            }
+                        }
+                    }
+                    v
+                } else {
+                    Vec::new()
+                };
+            for (k, c_idx, val) in &to_move {
+                god2.insert_edge_simple(b_np_idx, *c_idx, k.clone(), val.clone());
+                update_reverse_adj_after_insert(b_np_idx, *cidx, k.clone());
+                god2.remove_edge(b_idx, *c_idx, k);
+                if let Some(vec) = reverse_adj.get_mut(&c_idx) {
+                    vec.retain(|(uu, kk, _)| !(*uu == b_idx && *kk == *k));
+                }
+            }
+            has_outgoing_nonpush.insert(b_idx, false);
+            has_outgoing_push.insert(b_np_idx, false);
+            has_outgoing_nonpush.insert(b_np_idx, !to_move.is_empty());
+
+            // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable.
+            if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
+                for (a_idx, k, val) in incoming {
+                    god2.insert_edge_simple(a_idx, b_np_idx, k.clone(), val.clone());
+                    update_reverse_adj_after_insert(a_idx, b_np_idx, k.clone());
+                    if matches!(k, Intermediate2Trie3EdgeKey::Push(_)) {
+                        *incoming_push_count.entry(b_np_idx).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            // After splitting, the new node is a standard candidate (no outgoing Push) if it has incoming pushes.
+            if !is_end.contains(&b_np_idx)
+                && !has_outgoing_push.get(&b_np_idx).copied().unwrap_or(false)
+                && incoming_push_count.get(&b_np_idx).copied().unwrap_or(0) > 0
+            {
+                queue.push_back(b_np_idx);
+            }
+            continue;
+        } else {
+            // Finished: no more candidates and no split possible.
+            break;
+        }
     }
 
-    // 3. Convert back to the original Trie format.
+    // Convert back to the original Trie format.
     let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
-    println!(
-        "Finished elimination loop. Final intermediate graph has {} nodes.",
-        IntermediatePrecomputeNode3::all_nodes(
+    if DEBUG {
+        let final_nodes = IntermediatePrecomputeNode3::all_nodes(
             &new_god1,
-            &new_roots1_map
-                .values()
-                .cloned()
-                .collect::<Vec<_>>()
+            &new_roots1_map.values().cloned().collect::<Vec<_>>(),
         )
-        .len()
-    );
+        .len();
+        println!("Finished elimination. Final intermediate nodes: {}", final_nodes);
+    }
 
-    // 4. The function signature requires modifying `god` in place.
-    // We clear the original `god` and deep-copy the new graph into it.
+    // Deep-copy the new graph into the provided `god` and update roots.
     let mut sids_in_order = Vec::new();
     let mut new_roots_vec = Vec::new();
     for (&sid, &root_idx) in &new_roots1_map {
@@ -495,11 +576,12 @@ pub fn eliminate_pushes_and_pops(
     for (sid, final_root_idx) in sids_in_order.iter().zip(final_roots_vec.iter()) {
         roots.insert(*sid, *final_root_idx);
     }
-    println!(
-        "Final graph node count: {}",
-        IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
-            .len()
-    );
+    if DEBUG {
+        let final_nodes =
+            IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
+                .len();
+        println!("Final graph node count: {}", final_nodes);
+    }
 }
 
 // --- Assertion and Test Helpers (Unchanged) ---
