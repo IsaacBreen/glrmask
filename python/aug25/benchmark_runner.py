@@ -210,25 +210,8 @@ def run_benchmark(args, run_index: int = 0):
     else:
         constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
 
-    constraint_json = json.loads(constraint_json_str)
-
-    if args.vocab_file:
-        print(f"Overriding vocabulary with strings from: {args.vocab_file}")
-        vocab_strings = json.loads(args.vocab_file.read_text(encoding='utf-8'))
-        if not isinstance(vocab_strings, list):
-            raise TypeError(f"Vocabulary file {args.vocab_file} must contain a JSON list of strings.")
-
-        new_llm_token_map = []
-        for i, s in enumerate(vocab_strings):
-            if not isinstance(s, str):
-                raise TypeError(f"Vocabulary file {args.vocab_file} must contain a JSON list of strings, but found item of type {type(s)}.")
-            new_llm_token_map.append([list(s.encode('utf-8')), i])
-
-        constraint_json['llm_token_map'] = new_llm_token_map
-        # Re-serialize for the model loader, which expects a string
-        constraint_json_str = json.dumps(constraint_json)
-
     # 2. Extract vocabulary for tokenizer
+    constraint_json = json.loads(constraint_json_str)
     # The vocabulary maps token strings to integer IDs. We need ID -> token bytes.
     llm_token_map: tuple[list[int], int] = constraint_json['llm_token_map']
     id_to_token: dict[int, bytes] = {}
@@ -371,17 +354,12 @@ def main():
     parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
     parser.add_argument("-m", "--model", type=Path, required=True, help="Path to the model .py file.")
     parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
-    parser.add_argument('--vocab-file', type=Path, help="Path to a .json file containing a list of vocab strings, to override the one in the constraint file.")
     parser.add_argument('--print-stats', action='store_true', help="Print detailed statistics about the loaded models before running the benchmark.")
     parser.add_argument('--repeat', type=int, default=1, help="Number of times to repeat the benchmark run.")
 
     args = parser.parse_args()
 
-    paths_to_check = [args.constraint_file, args.code, args.model]
-    if args.vocab_file:
-        paths_to_check.append(args.vocab_file)
-
-    for p in paths_to_check:
+    for p in [args.constraint_file, args.code, args.model]:
         if not p.exists():
             parser.error(f"File not found: {p}")
 
