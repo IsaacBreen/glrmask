@@ -2758,6 +2758,31 @@ impl<'r> Precomputer1<'r> {
                             if let Some(end_state_val) = exec_result.end_state {
                                 timeit!("dfs_continuation_state", {
                                     let final_tokenizer_state = TokenizerStateID(end_state_val);
+                                    let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
+
+                                    for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
+                                        let mut edge_bv = HybridBitset::zeros();
+                                        edge_bv.insert(child_token_id);
+                                        let edge_bv_for_inserter = timeit!("dfs_bitset_and", { &edge_bv & src_contextual_tokens });
+                                        if edge_bv_for_inserter.is_empty() { continue; }
+
+                                        let src_node_idx = src_node_wrapper.as_arc().clone();
+                                        let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
+                                        let final_edge_bv = timeit!("dfs_bitset_and_2", { &edge_bv_for_inserter & &src_live_tokens });
+
+                                        if !final_edge_bv.is_empty() {
+                                            let end_idx = self.get_leaf_node();
+                                            for terminal_id in &accessible_terminals {
+                                                let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+                                                pending_edges.entry(k)
+                                                    .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
+                                                    .or_insert(final_edge_bv.clone());
+                                                pending_live_token_updates.entry(end_idx)
+                                                    .or_insert_with(HybridBitset::zeros)
+                                                    .bitor_assign(&final_edge_bv);
+                                            }
+                                        }
+                                    }
 
                                     let entry = next_level_assoc.entry(final_tokenizer_state).or_default();
                                     for (node, tokens) in precompute_nodes_with_tokens {

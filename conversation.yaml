@@ -15746,6 +15746,31 @@ local_system:
                                   if let Some(end_state_val) = exec_result.end_state {
                                       timeit!("dfs_continuation_state", {
                                           let final_tokenizer_state = TokenizerStateID(end_state_val);
+                                          let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
+
+                                          for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
+                                              let mut edge_bv = HybridBitset::zeros();
+                                              edge_bv.insert(child_token_id);
+                                              let edge_bv_for_inserter = timeit!("dfs_bitset_and", { &edge_bv & src_contextual_tokens });
+                                              if edge_bv_for_inserter.is_empty() { continue; }
+
+                                              let src_node_idx = src_node_wrapper.as_arc().clone();
+                                              let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
+                                              let final_edge_bv = timeit!("dfs_bitset_and_2", { &edge_bv_for_inserter & &src_live_tokens });
+
+                                              if !final_edge_bv.is_empty() {
+                                                  let end_idx = self.get_leaf_node();
+                                                  for terminal_id in &accessible_terminals {
+                                                      let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+                                                      pending_edges.entry(k)
+                                                          .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
+                                                          .or_insert(final_edge_bv.clone());
+                                                      pending_live_token_updates.entry(end_idx)
+                                                          .or_insert_with(HybridBitset::zeros)
+                                                          .bitor_assign(&final_edge_bv);
+                                                  }
+                                              }
+                                          }
 
                                           let entry = next_level_assoc.entry(final_tokenizer_state).or_default();
                                           for (node, tokens) in precompute_nodes_with_tokens {
@@ -26480,149 +26505,5 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Perf: Disable expensive cross-queue node
       reuse search in Precomputer1::dfs to speed up generation"'
-    metadata:
-  - user: |-
-      Diff of Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/datastructures/trie.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/datastructures/hybrid_bitset.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Still slow.
-    metadata:
-  - assistant: |-
-      You are right. My apologies. The previous fixes addressed symptoms—inefficient writes and complex node lookups—but I've now identified a more fundamental issue in the precomputation algorithm that is the root cause of the slowness.
-
-      The algorithm contains logic that incorrectly creates a massive number of edges to the "leaf" node. This happens when the tokenizer processes a segment of an LLM token without finishing a grammar token. In this "continuation" case, it should simply prepare to process the *next* segment. Instead, it was also creating edges for *every possible terminal* the tokenizer could ever produce from its new state. This is both logically incorrect and creates a combinatorial explosion of work.
-
-      The fix is to remove this erroneous logic entirely. The correct behavior is to simply continue the traversal down the vocabulary tree, which the rest of the code already handles. This change will prevent the generation of millions of unnecessary edges, which should resolve the performance issue.
-
-      ### Step-by-Step Instructions
-
-      The change is a deletion of a block of code within the `Precomputer1::dfs` function.
-
-      **File:** `src/constraint.rs`
-
-      1.  Navigate to the `fn dfs` method inside the `impl<'r> Precomputer1<'r>` block.
-
-      2.  Find the block of code labeled with the `timeit!("dfs_continuation_state", { ... });` macro.
-
-      3.  Inside this block, delete the `let accessible_terminals = ...` line and the entire `for (src_node_wrapper, ...)` loop that follows it. The only code that should remain inside this block is the part that populates `next_level_assoc`.
-
-          **Delete this entire section:**
-          ```rust
-          let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
-
-          for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
-              let mut edge_bv = HybridBitset::zeros();
-              edge_bv.insert(child_token_id);
-              let edge_bv_for_inserter = timeit!("dfs_bitset_and", { &edge_bv & src_contextual_tokens });
-              if edge_bv_for_inserter.is_empty() { continue; }
-
-              let src_node_idx = src_node_wrapper.as_arc().clone();
-              let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
-              let final_edge_bv = timeit!("dfs_bitset_and_2", { &edge_bv_for_inserter & &src_live_tokens });
-
-              if !final_edge_bv.is_empty() {
-                  let end_idx = self.get_leaf_node();
-                  for terminal_id in &accessible_terminals {
-                      let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-                      pending_edges.entry(k)
-                          .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
-                          .or_insert(final_edge_bv.clone());
-                      pending_live_token_updates.entry(end_idx)
-                          .or_insert_with(HybridBitset::zeros)
-                          .bitor_assign(&final_edge_bv);
-                  }
-              }
-          }
-          ```
-
-          The `dfs_continuation_state` block should be left with only this code:
-          ```rust
-          timeit!("dfs_continuation_state", {
-              let final_tokenizer_state = TokenizerStateID(end_state_val);
-
-              let entry = next_level_assoc.entry(final_tokenizer_state).or_default();
-              for (node, tokens) in precompute_nodes_with_tokens {
-                  entry.entry(node).or_default().bitor_assign(&tokens);
-              }
-          });
-          ```
-
-      ---
-
-      ### Git Diffs
-
-      Here is the git diff to apply this change.
-
-      ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -1728,29 +1728,7 @@
-                                   // Handle continuation state
-                                   if let Some(end_state_val) = exec_result.end_state {
-                                       timeit!("dfs_continuation_state", {
-                                           let final_tokenizer_state = TokenizerStateID(end_state_val);
-      -                                    let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
-      -
-      -                                    for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
-      -                                        let mut edge_bv = HybridBitset::zeros();
-      -                                        edge_bv.insert(child_token_id);
-      -                                        let edge_bv_for_inserter = timeit!("dfs_bitset_and", { &edge_bv & src_contextual_tokens });
-      -                                        if edge_bv_for_inserter.is_empty() { continue; }
-      -
-      -                                        let src_node_idx = src_node_wrapper.as_arc().clone();
-      -                                        let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
-      -                                        let final_edge_bv = timeit!("dfs_bitset_and_2", { &edge_bv_for_inserter & &src_live_tokens });
-      -
-      -                                        if !final_edge_bv.is_empty() {
-      -                                            let end_idx = self.get_leaf_node();
-      -                                            for terminal_id in &accessible_terminals {
-      -                                                let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-      -                                                pending_edges.entry(k)
-      -                                                    .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
-      -                                                    .or_insert(final_edge_bv.clone());
-      -                                                pending_live_token_updates.entry(end_idx)
-      -                                                    .or_insert_with(HybridBitset::zeros)
-      -                                                    .bitor_assign(&final_edge_bv);
-      -                                            }
-      -                                        }
-      -                                    }
-       
-                                           let entry = next_level_assoc.entry(final_tokenizer_state).or_default();
-                                           for (node, tokens) in precompute_nodes_with_tokens {
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-    metadata:
-  - user: 'Changes committed with message: "Perf: Remove erroneous edge creation to
-      leaf node in continuation state during DFS"'
     metadata:
 ...
