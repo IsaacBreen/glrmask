@@ -1070,6 +1070,203 @@ where
             }
         }
     }
+    /// Performs a specialized breadth-first traversal for propagation/scheduling.
+    ///
+    /// Traverses all edges and allows callers to:
+
+    /// TEST UTILITY: Traverses the graph from the given roots and returns all
+    /// possible paths that end in a node satisfying the `is_end` predicate.
+    /// This version correctly handles cycles by allowing nodes to be revisited.
+    ///
+    /// A "path" is a tuple containing the value of the root node and a vector of
+    /// (edge key, edge value, destination node value) tuples representing the edges.
+    /// A path with zero edges (i.e., just the root node) is returned if the root
+    /// itself satisfies the `is_end` predicate.
+    ///
+    /// # Arguments
+    /// * `arena`: The arena containing the graph.
+    /// * `roots`: The starting nodes for path traversal.
+    /// * `is_end`: A predicate that returns true if a node is a valid end point for a path.
+    ///             A path is only returned if its final node satisfies this predicate.
+    /// * `is_path_edge`: A predicate that decides whether an edge should be included in a returned path.
+    ///             Edges for which this returns `false` are still traversed to find further path segments,
+    ///             but they are not included in the output path vector, nor do they count towards `max_path_length`.
+    ///             This allows for modeling "transient" or "zero-cost" edges.
+    ///             Cycle prevention uses an "active stamp" per node keyed by the path edge count.
+    ///             This blocks infinite loops made solely of non-path edges while allowing revisits
+    ///             after making progress on path edges.
+    /// * `max_path_length`: The maximum length of a path (number of edges) to explore.
+    pub fn get_all_paths_with_cycles<F, G>(
+        arena: &Arena<Self>,
+        roots: &[Trie2Index],
+        is_end: F,
+        is_path_edge: G,
+        max_path_length: usize,
+    ) -> Vec<(T, Vec<(EK, EV, T)>)>
+    where
+        F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
+        G: Fn(&EK, &EV, Trie2Index) -> bool,
+        T: Clone,
+        EV: Clone,
+    {
+        let mut all_paths = Vec::new();
+
+        for &root in roots {
+            if let Some(root_guard) = root.read(arena) {
+                let root_value = root_guard.value.clone();
+                Self::get_all_paths_with_cycles_recursive(
+                    arena,
+                    root,
+                    &mut vec![],
+                    &mut all_paths,
+                    &is_end,
+                    &is_path_edge,
+                    &root_value,
+                    max_path_length,
+                );
+            }
+        }
+        all_paths
+    }
+
+    fn get_all_paths_with_cycles_recursive<F, G>(
+        arena: &Arena<Self>,
+        node_idx: Trie2Index,
+        current_path: &mut Vec<(EK, EV, T)>,
+        all_paths: &mut Vec<(T, Vec<(EK, EV, T)>)>,
+        is_end: &F,
+        is_path_edge: &G,
+        root_value: &T,
+        max_path_length: usize,
+    ) where
+        F: Fn(Trie2Index, &Trie<EK, EV, T>) -> bool,
+        G: Fn(&EK, &EV, Trie2Index) -> bool,
+        T: Clone,
+        EV: Clone,
+    {
+        // Iterative DFS to avoid stack overflows on deep/large graphs.
+        // Semantics:
+        // - Record a path when is_end(current_node) is true (including the root with a zero-length path).
+        // - Enforce max_path_length AFTER recording the current node as an endpoint, based on counted edges.
+        // - Allow revisiting nodes (cycles are allowed) but stop expanding when the counted-edge path length reaches max_path_length.
+        // - Prevent infinite loops formed solely by uncounted edges using an "active stamps" map:
+        //   a node cannot be revisited at the same counted length (stamp), but can be revisited after progress.
+        // Work on a local copy of the path, so callers' mutable reference remains unchanged.
+        let mut path: Vec<(EK, EV, T)> = current_path.clone();
+        // Stack frame for iterative DFS.
+        struct Frame<EK2, EV2> {
+            node: Trie2Index,
+            // Snapshot of edges in deterministic order: (edge_key, edge_value, child_idx)
+            edges: Vec<(EK2, EV2, Trie2Index)>,
+            idx: usize,                 // Next edge index to process
+            started: bool,              // Whether we've done the "node entry" work (is_end + length check)
+            has_incoming_edge: bool,    // Whether entering this frame pushed an edge onto `path`
+            // "Stamp" equals counted-edge length (path.len()) at entry; used to manage active stamps.
+            stamp: usize,
+        }
+        // Helper to snapshot a node's outgoing edges in deterministic order (no locks held after).
+        let edges_for = |n: Trie2Index| -> Vec<(EK, EV, Trie2Index)> {
+            if let Some(g) = n.read(arena) {
+                g.children().iter()
+                    .flat_map(|(ek, dest_map)| {
+                        let ekc = ek.clone();
+                        dest_map.iter()
+                            .map(move |(child_idx, ev)| (ekc.clone(), ev.clone(), *child_idx))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+        let mut stack: Vec<Frame<EK, EV>> = Vec::new();
+        // Active stamps: for each node, which counted-length stamps are currently on the path.
+        let mut active: HashMap<Trie2Index, Vec<usize>> = HashMap::new();
+        stack.push(Frame {
+            node: node_idx,
+            edges: edges_for(node_idx),
+            idx: 0,
+            started: false,
+            has_incoming_edge: false, // root has no incoming edge
+            stamp: 0,                  // root is entered at counted length 0
+        });
+        active.entry(node_idx).or_default().push(0);
+        while let Some(frame) = stack.last_mut() {
+            // On first entry to this node: evaluate `is_end` and enforce max_path_length.
+            if !frame.started {
+                frame.started = true;
+                if let Some(g) = frame.node.read(arena) {
+                    if is_end(frame.node, &g) {
+                        all_paths.push((root_value.clone(), path.clone()));
+                    }
+                }
+                // If we've reached the max number of edges on this path, do not expand further.
+                if path.len() >= max_path_length {
+                    let popped = stack.pop().unwrap();
+                    if let Some(vec) = active.get_mut(&popped.node) {
+                        if let Some(last) = vec.pop() {
+                            debug_assert!(last == popped.stamp);
+                        }
+                        if vec.is_empty() {
+                            active.remove(&popped.node);
+                        }
+                    }
+                    if popped.has_incoming_edge {
+                        path.pop(); // backtrack edge added when entering this frame
+                    }
+                    continue;
+                }
+            }
+            // If we've exhausted edges for this node, backtrack.
+            if frame.idx >= frame.edges.len() {
+                let popped = stack.pop().unwrap();
+                if let Some(vec) = active.get_mut(&popped.node) {
+                    if let Some(last) = vec.pop() {
+                        debug_assert!(last == popped.stamp);
+                    }
+                    if vec.is_empty() {
+                        active.remove(&popped.node);
+                    }
+                }
+                if popped.has_incoming_edge {
+                    path.pop(); // backtrack the edge that led here
+                }
+                continue;
+            }
+            // Take the next outgoing edge and descend to the child.
+            let (ek, ev, child_idx) = frame.edges[frame.idx].clone();
+            frame.idx += 1;
+            // Determine whether this edge increases the counted length.
+            let include_edge = is_path_edge(&ek, &ev, child_idx);
+            let next_stamp = path.len() + if include_edge { 1 } else { 0 };
+
+            // Prevent infinite loops formed solely by uncounted edges:
+            // do not re-enter the same node at the same counted length.
+            if active.get(&child_idx).map_or(false, |v| v.contains(&next_stamp)) {
+                continue;
+            }
+            if let Some(child_guard) = child_idx.read(arena) {
+                let child_value = child_guard.value.clone();
+                if include_edge {
+                    // Add this edge to the current path before exploring the child.
+                    path.push((ek, ev, child_value));
+                }
+                // Snapshot child's edges now (no locks held across iterations).
+                let child_edges = edges_for(child_idx);
+                stack.push(Frame {
+                    node: child_idx,
+                    edges: child_edges,
+                    idx: 0,
+                    started: false,
+                    has_incoming_edge: include_edge,
+                    stamp: next_stamp,
+                });
+                active.entry(child_idx).or_default().push(next_stamp);
+            } else {
+                // If child is missing, skip it and proceed.
+                continue;
+            }
+        }
+    }
 }
 
 /// Options for customizing the output of `pretty_print_with_options`.
@@ -2818,6 +3015,188 @@ pub type God<EK, EV, T> = Arena<Trie<EK, EV, T>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_all_paths_with_cycles_long_path() {
+        type TestTrie = Trie<String, i32, String>;
+        let arena = Arena::<TestTrie>::new();
+
+        // Create a chain of nodes: root -> n1 -> ... -> n10
+        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+        let mut nodes = vec![root];
+        let mut prev_node_idx = root;
+
+        for i in 1..=10 {
+            let new_node_idx = Trie2Index::from(arena.insert(Trie::new(format!("n{}", i))));
+            let mut prev_node_w = prev_node_idx.write(&arena).unwrap();
+            prev_node_w.force_insert_to_node(format!("edge_{}", i), i as i32, new_node_idx);
+            drop(prev_node_w);
+            nodes.push(new_node_idx);
+            prev_node_idx = new_node_idx;
+        }
+
+        // Create a cycle: n10 -> n5
+        let n10_idx = nodes[10];
+        let n5_idx = nodes[5];
+        n10_idx
+            .write(&arena)
+            .unwrap()
+            .force_insert_to_node("cycle_edge".to_string(), 100, n5_idx);
+
+        // We expect to find paths ending at n8, with a max length of 20
+        let n8_idx = nodes[8];
+        let max_len = 20;
+
+        let paths = TestTrie::get_all_paths_with_cycles(
+            &arena,
+            &[root],
+            |idx, _| idx == n8_idx,
+            |_, _, _| true, // is_path_edge
+            max_len,
+        );
+
+        // Expected paths:
+        // 1. root -> ... -> n8 (length 8)
+        // 2. root -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 10 + 1 + 3 = 14)
+        // 3. root -> ... -> n10 -> n5 -> ... -> n10 -> n5 -> n6 -> n7 -> n8 (length 14 + 6 = 20)
+        //    The cycle is n5 -> ... -> n10 -> n5, which has 6 edges.
+        assert_eq!(paths.len(), 3, "Should find 3 paths ending at n8 within max length");
+
+        let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
+        path_lengths.sort_unstable();
+
+        assert_eq!(path_lengths, vec![8, 14, 20]);
+
+        // Verify path contents for the shortest one.
+        let shortest_path = paths.iter().find(|(_, p)| p.len() == 8).unwrap();
+        assert_eq!(shortest_path.0, "root");
+        for i in 0..8 {
+            let (ek, ev, t) = &shortest_path.1[i];
+            assert_eq!(*ek, format!("edge_{}", i + 1));
+            assert_eq!(*ev, (i + 1) as i32);
+            assert_eq!(*t, format!("n{}", i + 1));
+        }
+    }
+
+    #[test]
+    fn test_get_all_paths_with_cycles_uncounted_cycle() {
+        type TestTrie = Trie<String, (), String>;
+        let arena = Arena::<TestTrie>::new();
+
+        // Graph: root -> c1 -> target
+        //          ^    |
+        //          |    v
+        //          -- c2 -- (uncounted cycle)
+        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+        let c1 = Trie2Index::from(arena.insert(Trie::new("c1".to_string())));
+        let c2 = Trie2Index::from(arena.insert(Trie::new("c2".to_string())));
+        let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
+
+        // Edges
+        // Counted edge: root -> c1
+        root.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), c1);
+        // Uncounted cycle: c1 -> c2 -> c1
+        c1.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c2);
+        c2.write(&arena).unwrap().force_insert_to_node("uncounted".to_string(), (), c1);
+        // Counted edge: c1 -> target
+        c1.write(&arena).unwrap().force_insert_to_node("counted".to_string(), (), target);
+
+        let paths = TestTrie::get_all_paths_with_cycles(
+            &arena,
+            &[root],
+            |idx, _| idx == target,
+            |ek, _, _| ek == "counted", // is_path_edge
+            5, // max_path_length
+        );
+
+        // The traversal should be: root -> c1 -> (cycle c1-c2 is traversed but not infinitely) -> target
+        // The `visiting` set should prevent infinite loops.
+        // The returned path should only contain the "counted" edges.
+        assert_eq!(paths.len(), 1, "Should find exactly one path to the target");
+
+        let (root_val, path) = &paths[0];
+        assert_eq!(*root_val, "root");
+        assert_eq!(path.len(), 2, "Path should have 2 counted edges");
+
+        // Verify path contents
+        let (ek1, _ev1, t1) = &path[0];
+        assert_eq!(*ek1, "counted");
+        assert_eq!(*t1, "c1");
+
+        let (ek2, _ev2, t2) = &path[1];
+        assert_eq!(*ek2, "counted");
+        assert_eq!(*t2, "target");
+    }
+
+    #[test]
+    fn test_get_all_paths_with_cycles_mixed_cycle_produces_multiple_paths() {
+        type TestTrie = Trie<String, (), String>;
+        let arena = Arena::<TestTrie>::new();
+
+        // Graph:
+        // root -> A -> target
+        //   ^     |
+        //   |     v
+        //   C <- B
+        //
+        // Cycle: A -> B -> C -> A
+        // Edges:
+        // root -> A: counted
+        // A -> B: counted ("cycle_counted")
+        // B -> C: uncounted ("cycle_uncounted")
+        // C -> A: uncounted ("cycle_uncounted")
+        // A -> target: counted
+        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+        let node_a = Trie2Index::from(arena.insert(Trie::new("A".to_string())));
+        let node_b = Trie2Index::from(arena.insert(Trie::new("B".to_string())));
+        let node_c = Trie2Index::from(arena.insert(Trie::new("C".to_string())));
+        let target = Trie2Index::from(arena.insert(Trie::new("target".to_string())));
+
+        root.write(&arena).unwrap().force_insert_to_node("to_a".to_string(), (), node_a);
+        node_a.write(&arena).unwrap().force_insert_to_node("cycle_counted".to_string(), (), node_b);
+        node_b.write(&arena).unwrap().force_insert_to_node("cycle_uncounted".to_string(), (), node_c);
+        node_c.write(&arena).unwrap().force_insert_to_node("cycle_uncounted".to_string(), (), node_a);
+        node_a.write(&arena).unwrap().force_insert_to_node("to_target".to_string(), (), target);
+
+        let paths = TestTrie::get_all_paths_with_cycles(
+            &arena,
+            &[root],
+            |idx, _| idx == target,
+            |ek, _, _| ek != "cycle_uncounted", // is_path_edge: only "to_a", "cycle_counted", "to_target" are path edges
+            5, // max_path_length
+        );
+
+        // With the current implementation, the `visiting` set prevents re-entering `A` from `C`,
+        // so the cycle is never traversed more than once. Only one path is found:
+        // 1. root -> A -> target. (length 2)
+        //
+        // The desired behavior is to allow traversing the cycle as long as the path length limit
+        // is not exceeded, because the cycle contains a counted edge.
+        // Expected paths to `target`:
+        // - path 1: root -> A -> target.
+        //   Counted edges: (root,A), (A,target). Length 2.
+        // - path 2: root -> A -> B -> C -> A -> target.
+        //   Counted edges: (root,A), (A,B), (A,target). Length 3.
+        // - path 3: root -> A -> B -> C -> A -> B -> C -> A -> target.
+        //   Counted edges: (root,A), (A,B), (A,B), (A,target). Length 4.
+        // - path 4: root -> A -> B -> C -> A -> B -> C -> A -> B -> C -> A -> target.
+        //   Counted edges: (root,A), (A,B), (A,B), (A,B), (A,target). Length 5.
+        //
+        // The next path would have length 6, which is > max_path_length.
+        // So we expect 4 paths. The current implementation will fail this test.
+        // To make this test pass, the cycle detection in `get_all_paths_with_cycles_recursive`
+        // needs to be relaxed.
+        assert_eq!(paths.len(), 4, "Should find 4 paths to the target within max length by traversing the cycle");
+
+        let mut path_lengths: Vec<usize> = paths.iter().map(|(_, p)| p.len()).collect();
+        path_lengths.sort_unstable();
+        assert_eq!(path_lengths, vec![2, 3, 4, 5]);
+
+        // Verify the longest path to ensure the cycle was traversed.
+        let longest_path = paths.iter().find(|(_, p)| p.len() == 5).unwrap();
+        let counted_edges_in_longest_path: Vec<_> = longest_path.1.iter().map(|(ek, _, _)| ek.as_str()).collect();
+        assert_eq!(counted_edges_in_longest_path, vec!["to_a", "cycle_counted", "cycle_counted", "cycle_counted", "to_target"]);
+    }
 
     #[test]
     fn test_get_all_paths_with_cycles_long_path() {
