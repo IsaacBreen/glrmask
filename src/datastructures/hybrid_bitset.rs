@@ -222,7 +222,7 @@ impl HybridBitset {
     /// Extends the bitset with the contents of an iterator over indices.
     pub fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
         Arc::make_mut(&mut self.inner).extend(iter);
-        self.inner = cache::intern_l1((*self.inner).clone());
+        // self.inner = cache::intern_l1((*self.inner).clone());
     }
     /// Removes all elements from the set.
     pub fn clear(&mut self) {
