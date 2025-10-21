@@ -656,7 +656,7 @@ impl BitAndAssign for HybridBitset {
 }
 impl BitOrAssign for HybridBitset {
     fn bitor_assign(&mut self, rhs: Self) {
-        *self = &*self | &rhs;
+        self.bitor_assign(&rhs);
     }
 }
 impl BitXorAssign for HybridBitset {
@@ -677,7 +677,14 @@ impl BitAndAssign<&HybridBitset> for HybridBitset {
 }
 impl BitOrAssign<&HybridBitset> for HybridBitset {
     fn bitor_assign(&mut self, rhs: &HybridBitset) {
-        *self = &*self | rhs;
+        if Arc::ptr_eq(&self.inner, &rhs.inner) {
+            return;
+        }
+        // A clone-modify-reintern pattern is safest with interning.
+        // This avoids the overhead of the full caching logic in the `bitor` operator.
+        let mut new_inner = (*self.inner).clone();
+        new_inner.union_with(&rhs.inner);
+        self.inner = cache::intern_l1(new_inner);
     }
 }
 impl BitXorAssign<&HybridBitset> for HybridBitset {

@@ -2810,30 +2810,23 @@ impl<'r> Precomputer1<'r> {
 
             // === OPTIMIZATION 5: Batch write all edges and updates ===
             timeit!("dfs_batch_write", {
-                // Group by source node to minimize locks
-                let mut by_src: FxHashMap<PrecomputeNode1Index, FxHashMap<Option<GrammarTokenID>, Vec<(PrecomputeNode1Index, HybridBitset)>>> = FxHashMap::default();
-                for (EdgeKey { src, key, dst }, bv) in pending_edges.into_iter() {
-                    by_src.entry(src)
-                          .or_default()
-                          .entry(key)
-                          .or_default()
-                          .push((dst, bv));
-                }
+                let mut inner_guard = self.trie1_god.inner.write();
 
-                // One lock per src node, update all its edges
-                for (src, per_key) in by_src.into_iter() {
-                    timeit!("dfs_batch_write_insert_edge_simple", {
-                        self.trie1_god.insert_edges_bulk_per_src(src, per_key);
-                    });
-                }
-
-
+                // Apply live token updates
                 for (node_idx, live_tokens) in pending_live_token_updates {
-                    timeit!("dfs_batch_write_update_live_tokens", {
-                        if let Some(mut guard) = node_idx.write(&self.trie1_god) {
-                            guard.value.live_tokens |= &live_tokens;
+                    if let Some(Some(node)) = inner_guard.values.get_mut(node_idx.as_usize()) {
+                        node.value.live_tokens |= &live_tokens;
+                    }
+                }
+
+                // Apply edge insertions
+                for (EdgeKey { src, key, dst }, bv) in pending_edges {
+                    if let Some(Some(src_node)) = inner_guard.values.get_mut(src.as_usize()) {
+                        src_node.children.entry(key).or_default()
+                            .entry(dst)
+                            .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
+                            .or_insert(bv);
                         }
-                    });
                 }
             });
 

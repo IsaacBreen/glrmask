@@ -2707,12 +2707,14 @@ impl MergeableEdgeValue for () {
 }
 
 impl MergeableEdgeValue for HybridBitset {
+    #[time_it]
     fn merge(&mut self, other: Self) {
         *self |= &other;
     }
 }
 
 impl<T: Ord> MergeableEdgeValue for BTreeSet<T> {
+    #[time_it]
     fn merge(&mut self, mut other: Self) {
         self.append(&mut other);
     }
