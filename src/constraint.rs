@@ -68,6 +68,62 @@ use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
 
+#[derive(Default, Debug)]
+struct DfsStats {
+    num_pending_edges: usize,
+    src_counts: HashMap<PrecomputeNode1Index, usize>,
+    dst_counts: HashMap<PrecomputeNode1Index, usize>,
+    key_counts: HashMap<Option<GrammarTokenID>, usize>,
+    bitset_len_dist: BTreeMap<usize, usize>,
+    dsts_per_src_key_dist: BTreeMap<usize, usize>,
+}
+
+impl DfsStats {
+    fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, HybridBitset>) {
+        self.num_pending_edges += pending_edges.len();
+
+        let mut dsts_per_src_key: HashMap<(PrecomputeNode1Index, Option<GrammarTokenID>), usize> = HashMap::new();
+
+        for (edge_key, bitset) in pending_edges {
+            *self.src_counts.entry(edge_key.src).or_default() += 1;
+            *self.dst_counts.entry(edge_key.dst).or_default() += 1;
+            *self.key_counts.entry(edge_key.key).or_default() += 1;
+
+            let len = bitset.len();
+            *self.bitset_len_dist.entry(len).or_default() += 1;
+
+            *dsts_per_src_key.entry((edge_key.src, edge_key.key)).or_default() += 1;
+        }
+
+        for count in dsts_per_src_key.values() {
+            *self.dsts_per_src_key_dist.entry(*count).or_default() += 1;
+        }
+    }
+
+    fn print(&self) {
+        println!("\n--- Precomputer1 DFS Stats ---");
+        println!("Total pending edges processed: {}", self.num_pending_edges);
+        println!("Unique src nodes: {}", self.src_counts.len());
+        println!("Unique dst nodes: {}", self.dst_counts.len());
+        println!("Unique keys: {}", self.key_counts.len());
+
+        fn print_dist<T: std::fmt::Display + Ord>(name: &str, dist: &BTreeMap<T, usize>) {
+            if dist.is_empty() { return; }
+            println!("\nDistribution of {}:", name);
+            let mut sorted_dist: Vec<_> = dist.iter().collect();
+            sorted_dist.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+            for (val, count) in sorted_dist.iter().take(10) {
+                println!("  - {}: {} times", val, count);
+            }
+            if sorted_dist.len() > 10 { println!("  - ..."); }
+        }
+
+        print_dist("Bitset Cardinality", &self.bitset_len_dist);
+        print_dist("Destinations per (src, key)", &self.dsts_per_src_key_dist);
+        println!("--- End Precomputer1 DFS Stats ---\n");
+    }
+}
+
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;
 
@@ -2437,6 +2493,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) ignore_terminal_id: Option<TerminalID>,
     pub(crate) token_name_map:   &'r BiBTreeMap<Terminal, usize>,
     pub(crate) leaf_node:        PrecomputeNode1Index,
+    pub(crate) dfs_stats:        DfsStats,
     pub(crate) trie1_god:        Trie1GodWrapper,
 }
 
@@ -2504,6 +2561,7 @@ impl<'r> Precomputer1<'r> {
             ignore_terminal_id,
             token_name_map,
             leaf_node,
+            dfs_stats: DfsStats::default(),
             trie1_god,
         }
     }
@@ -2573,7 +2631,8 @@ impl<'r> Precomputer1<'r> {
             crate::debug!(6, "  {}: {}", sid.0, root);
         }
         crate::profiler::reset();
-        self.dfs(&self.vocab.root, assoc);
+        self.dfs(&self.vocab.root, assoc, &mut self.dfs_stats);
+        self.dfs_stats.print();
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish();
         crate::profiler::print_summary();
@@ -2581,9 +2640,10 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn dfs(
-        &self,
+        &mut self,
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
+        stats: &mut DfsStats,
     ) {
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
@@ -2834,8 +2894,10 @@ impl<'r> Precomputer1<'r> {
                 }
             });
 
+            stats.analyze_pending_edges(&pending_edges);
+
             if !next_level_assoc.is_empty() {
-                self.dfs(child_vocab_node, next_level_assoc);
+                self.dfs(child_vocab_node, next_level_assoc, stats);
             }
         }
     }
@@ -3860,7 +3922,7 @@ impl<'a> GrammarConstraintState<'a> {
             // step: for a given edge key, propagate only along children whose edge BV contains the token.
             |glr_s0: &GLRParserState<'a>,
              edge_key: &Option<(GrammarTokenID, Option<TokenizerStateID>)>,
-             dest_map: &OrderedHashMap<Trie2Index, LLMTokenBV>| {
+             dest_map: &BTreeMap<Trie2Index, LLMTokenBV>| {
                 let mut out = Vec::new();
 
                 for (child_idx, edge_bv) in dest_map.iter() {

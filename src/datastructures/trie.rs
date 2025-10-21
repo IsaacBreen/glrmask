@@ -1,6 +1,6 @@
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque, BTreeMap};
 use std::fmt::{Debug, Display};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::{Deref, DerefMut};
@@ -12,7 +12,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use deterministic_hash::DeterministicHasher;
 use kdam::{tqdm, BarExt};
-use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
+use ordered_hash_map::OrderedHashSet;
 use profiler_macro::time_it;
 
 /// Represents statistics about a Trie graph reachable from a set of roots.
@@ -44,7 +44,7 @@ pub struct TrieStats {
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to a map of destination node indices and edge values.
-    children: BTreeMap<EK, OrderedHashMap<Trie2Index, EV>>,
+    children: BTreeMap<EK, BTreeMap<Trie2Index, EV>>,
     /// The “longest distance” from some source node (as computed by recompute_all_max_depths).
     /// Defaults to usize::MAX and is only updated when the user calls recompute_all_max_depths.
     pub max_depth: usize,
@@ -251,7 +251,7 @@ where
                 _ => return Err("Destinations list must be an array".to_string()),
             };
 
-            let mut dest_map = OrderedHashMap::new();
+            let mut dest_map = BTreeMap::new();
             for dest_pair_node in dests_arr {
                 let mut dest_pair_arr = match dest_pair_node {
                     JSONNode::Array(arr) if arr.len() == 2 => arr,
@@ -371,7 +371,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get(
         &self,
         edge_key: &EK,
-    ) -> Option<&OrderedHashMap<Trie2Index, EV>>
+    ) -> Option<&BTreeMap<Trie2Index, EV>>
     {
         self.children.get(edge_key)
     }
@@ -379,16 +379,16 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get_mut(
         &mut self,
         edge_key: &EK,
-    ) -> Option<&mut OrderedHashMap<Trie2Index, EV>>
+    ) -> Option<&mut BTreeMap<Trie2Index, EV>>
     {
         self.children.get_mut(edge_key)
     }
 
-    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<Trie2Index, EV>> {
+    pub fn children(&self) -> &BTreeMap<EK, BTreeMap<Trie2Index, EV>> {
         &self.children
     }
 
-    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<Trie2Index, EV>> {
+    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, BTreeMap<Trie2Index, EV>> {
         &mut self.children
     }
 
@@ -1628,7 +1628,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         old_to_new_map.insert(old_idx, new_idx);
 
         // Now, collect children info to avoid holding the read guard during recursive calls.
-        let children_to_copy: Vec<(EK, OrderedHashMap<Trie2Index, EV>)> = old_node_guard
+        let children_to_copy: Vec<(EK, BTreeMap<Trie2Index, EV>)> = old_node_guard
             .children
             .iter()
             .map(|(ek, dest_map)| (ek.clone(), dest_map.clone()))
@@ -1640,7 +1640,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // Recurse for all children and build up the new children map.
         let mut new_children = BTreeMap::new();
         for (ek, dest_map) in children_to_copy {
-            let mut new_dest_map = OrderedHashMap::with_capacity(dest_map.len());
+            let mut new_dest_map = BTreeMap::new();
             for (old_child_idx, ev) in dest_map {
                 let new_child_idx =
                     Self::deep_copy_recursive(old_child_idx, source_arena, new_arena, old_to_new_map);
@@ -1813,7 +1813,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     where
         V: Clone,
         S: FnMut(
-            &V, &EK, &OrderedHashMap<Trie2Index, EV>
+            &V, &EK, &BTreeMap<Trie2Index, EV>
         ) -> I,
         I: IntoIterator<Item = (Trie2Index, V)>,
     {
@@ -1861,7 +1861,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 }
 
                 // ---------- propagate to children (grouped by edge key) -------------
-                let children_by_ek: Vec<(EK, OrderedHashMap<Trie2Index, EV>)> = {
+                let children_by_ek: Vec<(EK, BTreeMap<Trie2Index, EV>)> = {
                     let guard = node_idx.read(arena).expect("poison");
                     guard.children.iter()
                         .map(|(ek, dst_map)| (ek.clone(), dst_map.clone()))
