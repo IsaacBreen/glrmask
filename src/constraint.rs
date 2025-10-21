@@ -2885,30 +2885,28 @@ impl<'r> Precomputer1<'r> {
             // === OPTIMIZATION 5: Batch write all edges and updates ===
             stats.analyze_pending_edges(&pending_edges);
             timeit!("dfs_batch_write", {
-                // Aggregate all updates before locking
-                let mut aggregated_live_tokens: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
-                for (node_idx, mut acc) in pending_live_token_updates {
-                    let bv = acc.to_bitset();
-                    if !bv.is_empty() {
-                        aggregated_live_tokens.insert(node_idx, bv);
-                    }
-                }
-
-                let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
-                for (key, mut acc) in pending_edges {
-                    let bv = acc.to_bitset();
-                    if !bv.is_empty() {
-                        updates_by_src.entry(key.src).or_default().push((key.key, key.dst, bv));
+                let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, TokenAcc)>> = FxHashMap::default();
+                for (key, acc) in pending_edges {
+                    if !acc.small.is_empty() || !acc.big.is_empty() {
+                        updates_by_src.entry(key.src).or_default().push((key.key, key.dst, acc));
                     }
                 }
 
                 let mut inner_guard = self.trie1_god.inner.write();
 
                 // Apply live token updates
-                for (node_idx, live_tokens) in aggregated_live_tokens {
+                for (node_idx, mut acc) in pending_live_token_updates {
                     timeit!("dfs_batch_write_update_live_tokens", {
                         if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
-                            node.value.live_tokens |= &live_tokens;
+                            let TokenAcc { ref mut small, big } = acc;
+                            if !small.is_empty() {
+                                small.sort_unstable();
+                                small.dedup();
+                                node.value.live_tokens.extend(small.iter().copied());
+                            }
+                            for big_bv in big {
+                                node.value.live_tokens |= &big_bv;
+                            }
                         }
                     });
                 }
@@ -2917,11 +2915,35 @@ impl<'r> Precomputer1<'r> {
                 for (src, updates) in updates_by_src {
                     timeit!("dfs_batch_write_insert_edges_for_src", {
                         if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-                            for (key, dst, bv) in updates {
-                                src_node.children_mut().entry(key).or_default()
-                                    .entry(dst)
-                                    .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
-                                    .or_insert(bv);
+                            for (key, dst, mut acc) in updates {
+                                let TokenAcc { ref mut small, big } = acc;
+                                let dest_map = src_node.children_mut().entry(key).or_default();
+                                
+                                if !small.is_empty() {
+                                    small.sort_unstable();
+                                    small.dedup();
+                                }
+
+                                match dest_map.entry(dst) {
+                                    ordered_hash_map::Entry::Occupied(mut occupied) => {
+                                        let existing_bv = occupied.get_mut();
+                                        if !small.is_empty() {
+                                            existing_bv.extend(small.iter().copied());
+                                        }
+                                        for big_bv in big {
+                                            *existing_bv |= &big_bv;
+                                        }
+                                    }
+                                    ordered_hash_map::Entry::Vacant(vacant) => {
+                                        if !small.is_empty() || !big.is_empty() {
+                                            let mut new_bv = HybridBitset::from_iter(small.iter().copied());
+                                            for big_bv in big {
+                                                new_bv |= &big_bv;
+                                            }
+                                            vacant.insert(new_bv);
+                                        }
+                                    }
+                                }
                             }
                         }
                     });

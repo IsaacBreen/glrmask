@@ -4546,7 +4546,7 @@ local_system:
       }
 
       impl DfsStats {
-          fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, HybridBitset>) {
+          fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, TokenAcc>) {
               self.num_pending_edges += pending_edges.len();
 
               let mut dsts_per_src_key: HashMap<(PrecomputeNode1Index, Option<GrammarTokenID>), usize> = HashMap::new();
@@ -7138,8 +7138,8 @@ local_system:
                   };
 
                   // === OPTIMIZATION 2: Batch all edge insertions and updates ===
-                  let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
-                  let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
+                  let mut pending_edges: FxHashMap<EdgeKey, TokenAcc> = FxHashMap::default();
+                  let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, TokenAcc> = FxHashMap::default();
 
                   // === OPTIMIZATION 3: Pre-compute child_vocab reachable tokens (used frequently) ===
                   let child_reachable = child_vocab_node.reachable_token_ids();
@@ -7203,12 +7203,15 @@ local_system:
                                                           if !final_edge_bv.is_empty() {
                                                               let end_idx = self.get_leaf_node();
                                                               let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
-                                                              pending_edges.entry(k)
-                                                                  .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
-                                                                  .or_insert(final_edge_bv.clone());
-                                                              pending_live_token_updates.entry(end_idx)
-                                                                  .or_insert_with(HybridBitset::zeros)
-                                                                  .bitor_assign(&final_edge_bv);
+                                                              
+                                                              if final_edge_bv.len() == 1 {
+                                                                  let token = final_edge_bv.iter().next().unwrap();
+                                                                  pending_edges.entry(k).or_default().add_token(token);
+                                                                  pending_live_token_updates.entry(end_idx).or_default().add_token(token);
+                                                              } else {
+                                                                  pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
+                                                                  pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
+                                                              }
                                                           }
                                                       });
                                                   }
@@ -7273,13 +7276,14 @@ local_system:
                                                   });
 
                                                   let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
-                                                  pending_edges.entry(k)
-                                                      .and_modify(|bv| bv.bitor_assign(&edge_bv_for_inserter))
-                                                      .or_insert(edge_bv_for_inserter.clone());
-                                                  pending_live_token_updates.entry(result_node.clone())
-                                                      .or_insert_with(HybridBitset::zeros)
-                                                      .bitor_assign(&edge_bv_for_inserter);
-
+                                                  if edge_bv_for_inserter.len() == 1 {
+                                                      let token = edge_bv_for_inserter.iter().next().unwrap();
+                                                      pending_edges.entry(k).or_default().add_token(token);
+                                                      pending_live_token_updates.entry(result_node.clone()).or_default().add_token(token);
+                                                  } else {
+                                                      pending_edges.entry(k).or_default().add_bitset(edge_bv_for_inserter.clone());
+                                                      pending_live_token_updates.entry(result_node.clone()).or_default().add_bitset(edge_bv_for_inserter.clone());
+                                                  }
                                                   // Update cache
                                                   node_cache.entry(result_node.clone())
                                                       .and_modify(|(live, _)| *live |= &edge_bv_for_inserter);
@@ -7310,14 +7314,19 @@ local_system:
 
                                               if !final_edge_bv.is_empty() {
                                                   let end_idx = self.get_leaf_node();
-                                                  for terminal_id in &accessible_terminals {
-                                                      let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-                                                      pending_edges.entry(k)
-                                                          .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
-                                                          .or_insert(final_edge_bv.clone());
-                                                      pending_live_token_updates.entry(end_idx)
-                                                          .or_insert_with(HybridBitset::zeros)
-                                                          .bitor_assign(&final_edge_bv);
+                                                  if final_edge_bv.len() == 1 {
+                                                      let token = final_edge_bv.iter().next().unwrap();
+                                                      for terminal_id in &accessible_terminals {
+                                                          let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+                                                          pending_edges.entry(k).or_default().add_token(token);
+                                                      }
+                                                      pending_live_token_updates.entry(end_idx).or_default().add_token(token);
+                                                  } else {
+                                                      for terminal_id in &accessible_terminals {
+                                                          let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+                                                          pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
+                                                      }
+                                                      pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
                                                   }
                                               }
                                           }
@@ -7334,11 +7343,29 @@ local_system:
                   }
 
                   // === OPTIMIZATION 5: Batch write all edges and updates ===
+                  stats.analyze_pending_edges(&pending_edges);
                   timeit!("dfs_batch_write", {
+                      // Aggregate all updates before locking
+                      let mut aggregated_live_tokens: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
+                      for (node_idx, mut acc) in pending_live_token_updates {
+                          let bv = acc.to_bitset();
+                          if !bv.is_empty() {
+                              aggregated_live_tokens.insert(node_idx, bv);
+                          }
+                      }
+
+                      let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
+                      for (key, mut acc) in pending_edges {
+                          let bv = acc.to_bitset();
+                          if !bv.is_empty() {
+                              updates_by_src.entry(key.src).or_default().push((key.key, key.dst, bv));
+                          }
+                      }
+
                       let mut inner_guard = self.trie1_god.inner.write();
 
                       // Apply live token updates
-                      for (node_idx, live_tokens) in pending_live_token_updates {
+                      for (node_idx, live_tokens) in aggregated_live_tokens {
                           timeit!("dfs_batch_write_update_live_tokens", {
                               if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
                                   node.value.live_tokens |= &live_tokens;
@@ -7347,19 +7374,19 @@ local_system:
                       }
 
                       // Apply edge insertions
-                      for (&EdgeKey { src, key, dst }, bv) in &pending_edges {
-                          timeit!("dfs_batch_write_insert_edge_simple", {
+                      for (src, updates) in updates_by_src {
+                          timeit!("dfs_batch_write_insert_edges_for_src", {
                               if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-                                  src_node.children_mut().entry(key).or_default()
-                                      .entry(dst)
-                                      .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv)
-                                      .or_insert(bv.clone());
+                                  for (key, dst, bv) in updates {
+                                      src_node.children_mut().entry(key).or_default()
+                                          .entry(dst)
+                                          .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
+                                          .or_insert(bv);
+                                  }
                               }
                           });
                       }
                   });
-
-                  stats.analyze_pending_edges(&pending_edges);
 
                   if !next_level_assoc.is_empty() {
                       self.dfs(child_vocab_node, next_level_assoc, stats);
@@ -7413,6 +7440,44 @@ local_system:
       pub struct GrammarConstraintState<'a> {
           pub parent: &'a GrammarConstraint,
           pub state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+      }
+
+      #[derive(Default, Clone)]
+      struct TokenAcc {
+          small: Vec<usize>,
+          big: Vec<HybridBitset>,
+      }
+
+      impl TokenAcc {
+          fn add_token(&mut self, token: usize) {
+              self.small.push(token);
+          }
+
+          fn add_bitset(&mut self, bitset: HybridBitset) {
+              if bitset.is_empty() {
+                  return;
+              }
+              if bitset.len() == 1 {
+                  self.small.push(bitset.iter().next().unwrap());
+              } else {
+                  self.big.push(bitset);
+              }
+          }
+
+          fn to_bitset(&mut self) -> HybridBitset {
+              // Sort and dedup small tokens for efficiency before creating bitset
+              self.small.sort_unstable();
+              self.small.dedup();
+              let mut bv = HybridBitset::from_iter(self.small.iter().copied());
+              for big_bv in &self.big {
+                  bv |= big_bv;
+              }
+              bv
+          }
+
+          fn len(&self) -> usize {
+              self.small.len() + self.big.len()
+          }
       }
 
       pub type Trie0GodWrapper = GodWrapper<Option<(TerminalID, Option<TokenizerStateID>)>, HybridBitset, PrecomputedNodeContents0>;
@@ -13069,7 +13134,7 @@ local_system:
       }
 
       impl DfsStats {
-          fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, HybridBitset>) {
+          fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, TokenAcc>) {
               self.num_pending_edges += pending_edges.len();
 
               let mut dsts_per_src_key: HashMap<(PrecomputeNode1Index, Option<GrammarTokenID>), usize> = HashMap::new();
@@ -15805,7 +15870,7 @@ local_system:
                                                       pending_live_token_updates.entry(result_node.clone()).or_default().add_token(token);
                                                   } else {
                                                       pending_edges.entry(k).or_default().add_bitset(edge_bv_for_inserter.clone());
-                                                      pending_live_token_updates.entry(result_node.clone()).or_default().add_bitset(edge_bv_for_inserter);
+                                                      pending_live_token_updates.entry(result_node.clone()).or_default().add_bitset(edge_bv_for_inserter.clone());
                                                   }
                                                   // Update cache
                                                   node_cache.entry(result_node.clone())
@@ -15866,31 +15931,30 @@ local_system:
                   }
 
                   // === OPTIMIZATION 5: Batch write all edges and updates ===
+                  stats.analyze_pending_edges(&pending_edges);
                   timeit!("dfs_batch_write", {
-                      // Aggregate all updates before locking
-                      let mut aggregated_live_tokens: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
-                      for (node_idx, mut acc) in pending_live_token_updates {
-                          let bv = acc.to_bitset();
-                          if !bv.is_empty() {
-                              aggregated_live_tokens.insert(node_idx, bv);
-                          }
-                      }
-
-                      let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
-                      for (key, mut acc) in pending_edges {
-                          let bv = acc.to_bitset();
-                          if !bv.is_empty() {
-                              updates_by_src.entry(key.src).or_default().push((key.key, key.dst, bv));
+                      let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, TokenAcc)>> = FxHashMap::default();
+                      for (key, acc) in pending_edges {
+                          if !acc.small.is_empty() || !acc.big.is_empty() {
+                              updates_by_src.entry(key.src).or_default().push((key.key, key.dst, acc));
                           }
                       }
 
                       let mut inner_guard = self.trie1_god.inner.write();
 
                       // Apply live token updates
-                      for (node_idx, live_tokens) in aggregated_live_tokens {
+                      for (node_idx, mut acc) in pending_live_token_updates {
                           timeit!("dfs_batch_write_update_live_tokens", {
                               if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
-                                  node.value.live_tokens |= &live_tokens;
+                                  let TokenAcc { ref mut small, big } = acc;
+                                  if !small.is_empty() {
+                                      small.sort_unstable();
+                                      small.dedup();
+                                      node.value.live_tokens.extend(small.iter().copied());
+                                  }
+                                  for big_bv in big {
+                                      node.value.live_tokens |= &big_bv;
+                                  }
                               }
                           });
                       }
@@ -15899,18 +15963,40 @@ local_system:
                       for (src, updates) in updates_by_src {
                           timeit!("dfs_batch_write_insert_edges_for_src", {
                               if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-                                  for (key, dst, bv) in updates {
-                                      src_node.children_mut().entry(key).or_default()
-                                          .entry(dst)
-                                          .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
-                                          .or_insert(bv);
+                                  for (key, dst, mut acc) in updates {
+                                      let TokenAcc { ref mut small, big } = acc;
+                                      let dest_map = src_node.children_mut().entry(key).or_default();
+                                      
+                                      if !small.is_empty() {
+                                          small.sort_unstable();
+                                          small.dedup();
+                                      }
+
+                                      match dest_map.entry(dst) {
+                                          ordered_hash_map::Entry::Occupied(mut occupied) => {
+                                              let existing_bv = occupied.get_mut();
+                                              if !small.is_empty() {
+                                                  existing_bv.extend(small.iter().copied());
+                                              }
+                                              for big_bv in big {
+                                                  *existing_bv |= &big_bv;
+                                              }
+                                          }
+                                          ordered_hash_map::Entry::Vacant(vacant) => {
+                                              if !small.is_empty() || !big.is_empty() {
+                                                  let mut new_bv = HybridBitset::from_iter(small.iter().copied());
+                                                  for big_bv in big {
+                                                      new_bv |= &big_bv;
+                                                  }
+                                                  vacant.insert(new_bv);
+                                              }
+                                          }
+                                      }
                                   }
                               }
                           });
                       }
                   });
-
-                  stats.analyze_pending_edges(&pending_edges);
 
                   if !next_level_assoc.is_empty() {
                       self.dfs(child_vocab_node, next_level_assoc, stats);
@@ -15997,6 +16083,10 @@ local_system:
                   bv |= big_bv;
               }
               bv
+          }
+
+          fn len(&self) -> usize {
+              self.small.len() + self.big.len()
           }
       }
 
@@ -21711,7 +21801,7 @@ messages:
       }
 
       impl DfsStats {
-          fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, HybridBitset>) {
+          fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, TokenAcc>) {
               self.num_pending_edges += pending_edges.len();
 
               let mut dsts_per_src_key: HashMap<(PrecomputeNode1Index, Option<GrammarTokenID>), usize> = HashMap::new();
@@ -24303,8 +24393,8 @@ messages:
                   };
 
                   // === OPTIMIZATION 2: Batch all edge insertions and updates ===
-                  let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
-                  let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
+                  let mut pending_edges: FxHashMap<EdgeKey, TokenAcc> = FxHashMap::default();
+                  let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, TokenAcc> = FxHashMap::default();
 
                   // === OPTIMIZATION 3: Pre-compute child_vocab reachable tokens (used frequently) ===
                   let child_reachable = child_vocab_node.reachable_token_ids();
@@ -24368,12 +24458,15 @@ messages:
                                                           if !final_edge_bv.is_empty() {
                                                               let end_idx = self.get_leaf_node();
                                                               let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
-                                                              pending_edges.entry(k)
-                                                                  .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
-                                                                  .or_insert(final_edge_bv.clone());
-                                                              pending_live_token_updates.entry(end_idx)
-                                                                  .or_insert_with(HybridBitset::zeros)
-                                                                  .bitor_assign(&final_edge_bv);
+                                                              
+                                                              if final_edge_bv.len() == 1 {
+                                                                  let token = final_edge_bv.iter().next().unwrap();
+                                                                  pending_edges.entry(k).or_default().add_token(token);
+                                                                  pending_live_token_updates.entry(end_idx).or_default().add_token(token);
+                                                              } else {
+                                                                  pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
+                                                                  pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
+                                                              }
                                                           }
                                                       });
                                                   }
@@ -24438,13 +24531,14 @@ messages:
                                                   });
 
                                                   let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
-                                                  pending_edges.entry(k)
-                                                      .and_modify(|bv| bv.bitor_assign(&edge_bv_for_inserter))
-                                                      .or_insert(edge_bv_for_inserter.clone());
-                                                  pending_live_token_updates.entry(result_node.clone())
-                                                      .or_insert_with(HybridBitset::zeros)
-                                                      .bitor_assign(&edge_bv_for_inserter);
-
+                                                  if edge_bv_for_inserter.len() == 1 {
+                                                      let token = edge_bv_for_inserter.iter().next().unwrap();
+                                                      pending_edges.entry(k).or_default().add_token(token);
+                                                      pending_live_token_updates.entry(result_node.clone()).or_default().add_token(token);
+                                                  } else {
+                                                      pending_edges.entry(k).or_default().add_bitset(edge_bv_for_inserter.clone());
+                                                      pending_live_token_updates.entry(result_node.clone()).or_default().add_bitset(edge_bv_for_inserter.clone());
+                                                  }
                                                   // Update cache
                                                   node_cache.entry(result_node.clone())
                                                       .and_modify(|(live, _)| *live |= &edge_bv_for_inserter);
@@ -24475,14 +24569,19 @@ messages:
 
                                               if !final_edge_bv.is_empty() {
                                                   let end_idx = self.get_leaf_node();
-                                                  for terminal_id in &accessible_terminals {
-                                                      let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-                                                      pending_edges.entry(k)
-                                                          .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
-                                                          .or_insert(final_edge_bv.clone());
-                                                      pending_live_token_updates.entry(end_idx)
-                                                          .or_insert_with(HybridBitset::zeros)
-                                                          .bitor_assign(&final_edge_bv);
+                                                  if final_edge_bv.len() == 1 {
+                                                      let token = final_edge_bv.iter().next().unwrap();
+                                                      for terminal_id in &accessible_terminals {
+                                                          let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+                                                          pending_edges.entry(k).or_default().add_token(token);
+                                                      }
+                                                      pending_live_token_updates.entry(end_idx).or_default().add_token(token);
+                                                  } else {
+                                                      for terminal_id in &accessible_terminals {
+                                                          let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+                                                          pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
+                                                      }
+                                                      pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
                                                   }
                                               }
                                           }
@@ -24499,11 +24598,29 @@ messages:
                   }
 
                   // === OPTIMIZATION 5: Batch write all edges and updates ===
+                  stats.analyze_pending_edges(&pending_edges);
                   timeit!("dfs_batch_write", {
+                      // Aggregate all updates before locking
+                      let mut aggregated_live_tokens: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
+                      for (node_idx, mut acc) in pending_live_token_updates {
+                          let bv = acc.to_bitset();
+                          if !bv.is_empty() {
+                              aggregated_live_tokens.insert(node_idx, bv);
+                          }
+                      }
+
+                      let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
+                      for (key, mut acc) in pending_edges {
+                          let bv = acc.to_bitset();
+                          if !bv.is_empty() {
+                              updates_by_src.entry(key.src).or_default().push((key.key, key.dst, bv));
+                          }
+                      }
+
                       let mut inner_guard = self.trie1_god.inner.write();
 
                       // Apply live token updates
-                      for (node_idx, live_tokens) in pending_live_token_updates {
+                      for (node_idx, live_tokens) in aggregated_live_tokens {
                           timeit!("dfs_batch_write_update_live_tokens", {
                               if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
                                   node.value.live_tokens |= &live_tokens;
@@ -24512,19 +24629,19 @@ messages:
                       }
 
                       // Apply edge insertions
-                      for (&EdgeKey { src, key, dst }, bv) in &pending_edges {
-                          timeit!("dfs_batch_write_insert_edge_simple", {
+                      for (src, updates) in updates_by_src {
+                          timeit!("dfs_batch_write_insert_edges_for_src", {
                               if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-                                  src_node.children_mut().entry(key).or_default()
-                                      .entry(dst)
-                                      .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv)
-                                      .or_insert(bv.clone());
+                                  for (key, dst, bv) in updates {
+                                      src_node.children_mut().entry(key).or_default()
+                                          .entry(dst)
+                                          .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
+                                          .or_insert(bv);
+                                  }
                               }
                           });
                       }
                   });
-
-                  stats.analyze_pending_edges(&pending_edges);
 
                   if !next_level_assoc.is_empty() {
                       self.dfs(child_vocab_node, next_level_assoc, stats);
@@ -24578,6 +24695,44 @@ messages:
       pub struct GrammarConstraintState<'a> {
           pub parent: &'a GrammarConstraint,
           pub state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+      }
+
+      #[derive(Default, Clone)]
+      struct TokenAcc {
+          small: Vec<usize>,
+          big: Vec<HybridBitset>,
+      }
+
+      impl TokenAcc {
+          fn add_token(&mut self, token: usize) {
+              self.small.push(token);
+          }
+
+          fn add_bitset(&mut self, bitset: HybridBitset) {
+              if bitset.is_empty() {
+                  return;
+              }
+              if bitset.len() == 1 {
+                  self.small.push(bitset.iter().next().unwrap());
+              } else {
+                  self.big.push(bitset);
+              }
+          }
+
+          fn to_bitset(&mut self) -> HybridBitset {
+              // Sort and dedup small tokens for efficiency before creating bitset
+              self.small.sort_unstable();
+              self.small.dedup();
+              let mut bv = HybridBitset::from_iter(self.small.iter().copied());
+              for big_bv in &self.big {
+                  bv |= big_bv;
+              }
+              bv
+          }
+
+          fn len(&self) -> usize {
+              self.small.len() + self.big.len()
+          }
       }
 
       pub type Trie0GodWrapper = GodWrapper<Option<(TerminalID, Option<TokenizerStateID>)>, HybridBitset, PrecomputedNodeContents0>;
@@ -25698,91 +25853,41 @@ messages:
     metadata:
       filename: src/constraint.rs
   - user: |-
-      ```
-      Node Counts Breakdown:
-        There are:
-        - 423 unique nodes, of which
-          - 298 are roots
-          - 125 are non-roots, of which
-              - 124 are internal (non-root, non-leaf)
-              - 1 are leaves (non-root)
-
-      Final Graph Structure (after sharing and deduplication):
-        Unique Nodes: 423
-        Total Edges: 3426
-          Edges with None Key: 0
-          Edges with Some Key: 3426
-        Nodes with Clean End: 1
-        Average edge occupancy for Some-key edges:    1.79
-        Average edge occupancy for None-key edges:    0.00
-        Total ranges in all HybridBitsets: 110648
-
-
-      --- Precomputer1 DFS Stats ---
-      Total pending edges processed: 2343925
-      Unique src nodes: 405
-      Unique dst nodes: 111
-      Unique keys: 80
-
-      Distribution of Bitset Cardinality:
-        - 1: 2341772 times
-        - 2: 1198 times
-        - 3: 309 times
-        - 6: 298 times
-        - 4: 76 times
-        - 5: 49 times
-        - 8: 19 times
-        - 7: 17 times
-        - 29: 13 times
-        - 16: 11 times
-        - ...
-
-      Distribution of Destinations per (src, key):
-        - 1: 2331903 times
-        - 2: 6011 times
-      --- End Precomputer1 DFS Stats ---
-
-      [DEBUG] 2] src/constraint.rs:2648: Finished precompute DFS
-        [00:00:30] [██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████] 5502/5502 (100%, 0s)--- Profiler Summary ---
-
-      [Hierarchical Timings]
-            Hits      Total Time       Total/Hit        Own Time  Name
-            5501         20.266s         3.683ms       336.651ms  dfs_batch_write
-         2343925         19.873s         8.479µs         19.873s    dfs_batch_write_insert_edge_simple
-            6376        55.626ms         8.724µs        55.626ms    dfs_batch_write_update_live_tokens
-            6376         10.312s         1.617ms        28.074ms  dfs_while_loop_body
-             365       379.079µs         1.039µs       379.079µs    dfs_end_of_segment_propagate
-          186684         10.283s        55.084µs       175.355ms    dfs_for_states_at_pos
-          184866          2.551s        13.799µs          1.356s      dfs_continuation_state
-         1611974       601.990ms           373ns       601.990ms        dfs_bitset_and
-         1611781       592.608ms           368ns       592.608ms        dfs_bitset_and_2
-          186684       180.136ms           965ns       180.136ms      dfs_exec_tokenizer
-          231703          7.013s        30.267µs       549.694ms      dfs_for_matches
-         2145067          6.463s         3.013µs          2.295s        dfs_for_src_nodes
-         2145067       943.641ms           440ns       943.641ms          dfs_bitset_and_and_2
-          598142       184.688ms           309ns       184.688ms          dfs_bitset_sub
-             110       163.459µs         1.486µs       116.168µs          dfs_create_new_node
-             110        47.291µs           430ns        47.291µs            PrecomputedNodeContents::internal
-         2142562          3.026s         1.412µs          1.651s          dfs_end_of_segment_match
-         2142562          1.375s           642ns          1.375s            dfs_bitset_and_and
-            7884         9.194ms         1.166µs         5.088ms          dfs_find_dest_node
-            7009         4.106ms           586ns         4.106ms            dfs_bitset_sub_2
-             875         5.230ms         5.977µs         5.230ms          dfs_find_dest_node_in_children
-          184866       363.641ms         1.967µs       363.641ms      dfs_possible_matches_cache
-      ```
-
-      We need to make `Precomputer1::dfs` much faster. Like, on the order of 1000x. How? Right now it takes approimately 2 minutes to get through 5000 vocab nodes.
-    metadata:
-  - user: |-
-      Let's use something like this:
-
       ```rust
-      #[derive(Default)]
-      struct TokenAcc {
-          small: Vec<usize>,     // overwhelmingly common case
-          big: Vec<HybridBitset>,          // rare, we store bitsets and fold once
+      let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
+      for (key, mut acc) in pending_edges {
+          let bv = acc.to_bitset();
+          if !bv.is_empty() {
+              updates_by_src.entry(key.src).or_default().push((key.key, key.dst, bv));
+          }
+      }
+
+      let mut inner_guard = self.trie1_god.inner.write();
+
+      // Apply live token updates
+      for (node_idx, live_tokens) in aggregated_live_tokens {
+          timeit!("dfs_batch_write_update_live_tokens", {
+              if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
+                  node.value.live_tokens |= &live_tokens;
+              }
+          });
+      }
+
+      // Apply edge insertions
+      for (src, updates) in updates_by_src {
+          timeit!("dfs_batch_write_insert_edges_for_src", {
+              if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                  for (key, dst, bv) in updates {
+                      src_node.children_mut().entry(key).or_default()
+                          .entry(dst)
+                          .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
+                          .or_insert(bv);
+                  }
+              }
+          });
       }
       ```
+      Rewrite this part. Avoid using `to_bitset()` if possible. Kind of defeats the purpose. In `dfs_batch_write_insert_edges_for_src`, do a pattern match against `TokenAcc`. Then if it's small, just `insert` each index, don't even create a hybrid bitset (unless an empty one is needed for that entry).
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -25801,374 +25906,234 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with performance bottlenecks in complex data processing pipelines like this is crucial. The profiling data clearly indicates that the vast majority of time is spent in `HybridBitset` operations, especially when accumulating results for trie edges. The key insight from the data is that most of these operations involve bitsets containing just a single token.
+      Of course. Here are the step-by-step instructions to refactor the batch update logic, followed by the corresponding git diff.
 
-      Here is a step-by-step guide to optimize the `Precomputer1::dfs` function by deferring the expensive bitset operations, followed by the corresponding git diff.
+      ### Step-by-step Instructions
 
-      ### Step-by-Step Instructions
+      1.  **Open the file `src/constraint.rs`**.
 
-      #### 1. Introduce the `TokenAcc` Struct
+      2.  **Navigate to the `dfs` method** within the `impl<'r> Precomputer1<'r>` block. This method is quite large; you're looking for a section near the end.
 
-      In `src/constraint.rs`, we'll define a new helper struct called `TokenAcc`. This struct will accumulate token IDs efficiently, separating the overwhelmingly common case of single-token additions from rare cases involving larger bitsets. This defers the creation and merging of expensive `HybridBitset` objects.
+      3.  **Find the comment `// === OPTIMIZATION 5: Batch write all edges and updates ===`**.
 
-      Insert the following code right before the `pub(crate) struct Precomputer1<'r> {` line:
+      4.  **Replace the entire `timeit!("dfs_batch_write", { ... });` block** that follows this comment with the new, more efficient implementation below. The new version avoids creating intermediate `HybridBitset`s and instead processes the `TokenAcc` struct directly during the update phase.
 
-      ```rust
-      #[derive(Default, Clone)]
-      struct TokenAcc {
-          small: Vec<usize>,
-          big: Vec<HybridBitset>,
-      }
-
-      impl TokenAcc {
-          fn add_token(&mut self, token: usize) {
-              self.small.push(token);
-          }
-
-          fn add_bitset(&mut self, bitset: HybridBitset) {
-              if bitset.is_empty() {
-                  return;
-              }
-              if bitset.len() == 1 {
-                  self.small.push(bitset.iter().next().unwrap());
-              } else {
-                  self.big.push(bitset);
-              }
-          }
-
-          fn to_bitset(&mut self) -> HybridBitset {
-              // Sort and dedup small tokens for efficiency before creating bitset
-              self.small.sort_unstable();
-              self.small.dedup();
-              let mut bv = HybridBitset::from_iter(self.small.iter().copied());
-              for big_bv in &self.big {
-                  bv |= big_bv;
-              }
-              bv
-          }
-      }
-      ```
-
-      #### 2. Update `Precomputer1::dfs` to Use `TokenAcc`
-
-      Still in `src/constraint.rs`, inside the `Precomputer1::dfs` method, we need to change the types of the variables that hold pending updates.
-
-      -   Find this line:
+          **_Delete this entire block:_**
           ```rust
-          let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
-          ```
-      -   Change it to:
-          ```rust
-          let mut pending_edges: FxHashMap<EdgeKey, TokenAcc> = FxHashMap::default();
-          ```
-      -   Find this line:
-          ```rust
-          let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
-          ```
-      -   Change it to:
-          ```rust
-          let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, TokenAcc> = FxHashMap::default();
-          ```
-
-      #### 3. Modify the Update Logic in the `dfs` Loop
-
-      Next, we'll change how updates are recorded. Instead of merging bitsets in the loop, we'll just add tokens or bitsets to our new `TokenAcc` accumulators.
-
-      -   Locate the first update block inside `timeit!("dfs_end_of_segment_match", { ... });`. Replace the existing `if !final_edge_bv.is_empty() { ... }` block with this new version:
-          ```rust
-          if !final_edge_bv.is_empty() {
-              let end_idx = self.get_leaf_node();
-              let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
-              
-              if final_edge_bv.len() == 1 {
-                  let token = final_edge_bv.iter().next().unwrap();
-                  pending_edges.entry(k).or_default().add_token(token);
-                  pending_live_token_updates.entry(end_idx).or_default().add_token(token);
-              } else {
-                  pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
-                  pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
-              }
-          }
-          ```
-
-      -   Locate the second update block, which starts with `let k = EdgeKey { ... };`. Replace that block with this one:
-          ```rust
-          let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
-          if edge_bv_for_inserter.len() == 1 {
-              let token = edge_bv_for_inserter.iter().next().unwrap();
-              pending_edges.entry(k).or_default().add_token(token);
-              pending_live_token_updates.entry(result_node.clone()).or_default().add_token(token);
-          } else {
-              pending_edges.entry(k).or_default().add_bitset(edge_bv_for_inserter.clone());
-              pending_live_token_updates.entry(result_node.clone()).or_default().add_bitset(edge_bv_for_inserter);
-          }
-          ```
-
-      -   Locate the third update block inside `timeit!("dfs_continuation_state", { ... });`. Replace the existing `if !final_edge_bv.is_empty() { ... }` block with this new version:
-          ```rust
-          if !final_edge_bv.is_empty() {
-              let end_idx = self.get_leaf_node();
-              if final_edge_bv.len() == 1 {
-                  let token = final_edge_bv.iter().next().unwrap();
-                  for terminal_id in &accessible_terminals {
-                      let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-                      pending_edges.entry(k).or_default().add_token(token);
+          timeit!("dfs_batch_write", {
+              // Aggregate all updates before locking
+              let mut aggregated_live_tokens: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
+              for (node_idx, mut acc) in pending_live_token_updates {
+                  let bv = acc.to_bitset();
+                  if !bv.is_empty() {
+                      aggregated_live_tokens.insert(node_idx, bv);
                   }
-                  pending_live_token_updates.entry(end_idx).or_default().add_token(token);
-              } else {
-                  for terminal_id in &accessible_terminals {
-                      let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-                      pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
+              }
+
+              let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
+              for (key, mut acc) in pending_edges {
+                  let bv = acc.to_bitset();
+                  if !bv.is_empty() {
+                      updates_by_src.entry(key.src).or_default().push((key.key, key.dst, bv));
                   }
-                  pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
               }
-          }
-          ```
 
-      #### 4. Rewrite the Batch Write Logic
+              let mut inner_guard = self.trie1_god.inner.write();
 
-      Finally, replace the entire `timeit!("dfs_batch_write", { ... });` block at the end of the `dfs` method with the following code. This new implementation aggregates all pending changes before acquiring a write lock on the trie, and applies them in a much more efficient, batched manner.
-
-      ```rust
-      timeit!("dfs_batch_write", {
-          // Aggregate all updates before locking
-          let mut aggregated_live_tokens: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
-          for (node_idx, mut acc) in pending_live_token_updates {
-              let bv = acc.to_bitset();
-              if !bv.is_empty() {
-                  aggregated_live_tokens.insert(node_idx, bv);
-              }
-          }
-
-          let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
-          for (key, mut acc) in pending_edges {
-              let bv = acc.to_bitset();
-              if !bv.is_empty() {
-                  updates_by_src.entry(key.src).or_default().push((key.key, key.dst, bv));
-              }
-          }
-
-          let mut inner_guard = self.trie1_god.inner.write();
-
-          // Apply live token updates
-          for (node_idx, live_tokens) in aggregated_live_tokens {
-              timeit!("dfs_batch_write_update_live_tokens", {
-                  if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
-                      node.value.live_tokens |= &live_tokens;
-                  }
-              });
-          }
-
-          // Apply edge insertions
-          for (src, updates) in updates_by_src {
-              timeit!("dfs_batch_write_insert_edges_for_src", {
-                  if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-                      for (key, dst, bv) in updates {
-                          src_node.children_mut().entry(key).or_default()
-                              .entry(dst)
-                              .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
-                              .or_insert(bv);
+              // Apply live token updates
+              for (node_idx, live_tokens) in aggregated_live_tokens {
+                  timeit!("dfs_batch_write_update_live_tokens", {
+                      if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
+                          node.value.live_tokens |= &live_tokens;
                       }
+                  });
+              }
+
+              // Apply edge insertions
+              for (src, updates) in updates_by_src {
+                  timeit!("dfs_batch_write_insert_edges_for_src", {
+                      if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                          for (key, dst, bv) in updates {
+                              src_node.children_mut().entry(key).or_default()
+                                  .entry(dst)
+                                  .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
+                                  .or_insert(bv);
+                          }
+                      }
+                  });
+              }
+          });
+          ```
+
+          **_And replace it with this new block:_**
+          ```rust
+          timeit!("dfs_batch_write", {
+              let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, TokenAcc)>> = FxHashMap::default();
+              for (key, acc) in pending_edges {
+                  if !acc.small.is_empty() || !acc.big.is_empty() {
+                      updates_by_src.entry(key.src).or_default().push((key.key, key.dst, acc));
                   }
-              });
-          }
-      });
-      ```
+              }
 
-      ### Git Diffs
+              let mut inner_guard = self.trie1_god.inner.write();
 
-      Here are the git diffs corresponding to the changes described above.
+              // Apply live token updates
+              for (node_idx, mut acc) in pending_live_token_updates {
+                  timeit!("dfs_batch_write_update_live_tokens", {
+                      if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
+                          let TokenAcc { ref mut small, big } = acc;
+                          if !small.is_empty() {
+                              small.sort_unstable();
+                              small.dedup();
+                              node.value.live_tokens.extend(small.iter().copied());
+                          }
+                          for big_bv in big {
+                              node.value.live_tokens |= &big_bv;
+                          }
+                      }
+                  });
+              }
+
+              // Apply edge insertions
+              for (src, updates) in updates_by_src {
+                  timeit!("dfs_batch_write_insert_edges_for_src", {
+                      if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                          for (key, dst, mut acc) in updates {
+                              let TokenAcc { ref mut small, big } = acc;
+                              let dest_map = src_node.children_mut().entry(key).or_default();
+                              
+                              if !small.is_empty() {
+                                  small.sort_unstable();
+                                  small.dedup();
+                              }
+
+                              match dest_map.entry(dst) {
+                                  ordered_hash_map::Entry::Occupied(mut occupied) => {
+                                      let existing_bv = occupied.get_mut();
+                                      if !small.is_empty() {
+                                          existing_bv.extend(small.iter().copied());
+                                      }
+                                      for big_bv in big {
+                                          *existing_bv |= &big_bv;
+                                      }
+                                  }
+                                  ordered_hash_map::Entry::Vacant(vacant) => {
+                                      if !small.is_empty() || !big.is_empty() {
+                                          let mut new_bv = HybridBitset::from_iter(small.iter().copied());
+                                          for big_bv in big {
+                                              new_bv |= &big_bv;
+                                          }
+                                          vacant.insert(new_bv);
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  });
+              }
+          });
+          ```
+
+      ### Git Diff
+
+      Here is the git patch that corresponds to the changes described above.
 
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
+      index 2111111..2222222 100644
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1800,6 +1800,36 @@
-           pub state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-       }
-       
-      +#[derive(Default, Clone)]
-      +struct TokenAcc {
-      +    small: Vec<usize>,
-      +    big: Vec<HybridBitset>,
-      +}
-      +
-      +impl TokenAcc {
-      +    fn add_token(&mut self, token: usize) {
-      +        self.small.push(token);
-      +    }
-      +
-      +    fn add_bitset(&mut self, bitset: HybridBitset) {
-      +        if bitset.is_empty() {
-      +            return;
-      +        }
-      +        if bitset.len() == 1 {
-      +            self.small.push(bitset.iter().next().unwrap());
-      +        } else {
-      +            self.big.push(bitset);
-      +        }
-      +    }
-      +
-      +    fn to_bitset(&mut self) -> HybridBitset {
-      +        // Sort and dedup small tokens for efficiency before creating bitset
-      +        self.small.sort_unstable();
-      +        self.small.dedup();
-      +        let mut bv = HybridBitset::from_iter(self.small.iter().copied());
-      +        for big_bv in &self.big {
-      +            bv |= big_bv;
-      +        }
-      +        bv
-      +    }
-      +}
-      +
-       pub type Trie0GodWrapper = GodWrapper<Option<(TerminalID, Option<TokenizerStateID>)>, HybridBitset, PrecomputedNodeContents0>;
-       pub type Trie0God = God<Option<(TerminalID, Option<TokenizerStateID>)>, HybridBitset, PrecomputedNodeContents>;
-       pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
-      @@ -2410,8 +2440,8 @@
-                   };
-       
-                   // === OPTIMIZATION 2: Batch all edge insertions and updates ===
-      -            let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
-      -            let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
-      +            let mut pending_edges: FxHashMap<EdgeKey, TokenAcc> = FxHashMap::default();
-      +            let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, TokenAcc> = FxHashMap::default();
-       
-                   // === OPTIMIZATION 3: Pre-compute child_vocab reachable tokens (used frequently) ===
-                   let child_reachable = child_vocab_node.reachable_token_ids();
-      @@ -2461,16 +2491,17 @@
-                                                           let final_edge_bv = timeit!("dfs_bitset_and_and", { &(&edge_bv & src_contextual_tokens) & &src_live_tokens });
-       
-                                                           if !final_edge_bv.is_empty() {
-      -                                                        let end_idx = self.get_leaf_node();
-      -                                                        let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
-      -                                                        pending_edges.entry(k)
-      -                                                            .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
-      -                                                            .or_insert(final_edge_bv.clone());
-      -                                                        pending_live_token_updates.entry(end_idx)
-      -                                                            .or_insert_with(HybridBitset::zeros)
-      -                                                            .bitor_assign(&final_edge_bv);
-      +                                                        let end_idx = self.get_leaf_node();
-      +                                                        let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
-      +                                                        
-      +                                                        if final_edge_bv.len() == 1 {
-      +                                                            let token = final_edge_bv.iter().next().unwrap();
-      +                                                            pending_edges.entry(k).or_default().add_token(token);
-      +                                                            pending_live_token_updates.entry(end_idx).or_default().add_token(token);
-      +                                                        } else {
-      +                                                            pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
-      +                                                            pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
-      +                                                        }
-                                                           }
-                                                       });
-                                                   }
-      @@ -2523,14 +2554,15 @@
-                                                       })
-                                                   });
-       
-      -                                            let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
-      -                                            pending_edges.entry(k)
-      -                                                .and_modify(|bv| bv.bitor_assign(&edge_bv_for_inserter))
-      -                                                .or_insert(edge_bv_for_inserter.clone());
-      -                                            pending_live_token_updates.entry(result_node.clone())
-      -                                                .or_insert_with(HybridBitset::zeros)
-      -                                                .bitor_assign(&edge_bv_for_inserter);
-      -
-      +                                            let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
-      +                                            if edge_bv_for_inserter.len() == 1 {
-      +                                                let token = edge_bv_for_inserter.iter().next().unwrap();
-      +                                                pending_edges.entry(k).or_default().add_token(token);
-      +                                                pending_live_token_updates.entry(result_node.clone()).or_default().add_token(token);
-      +                                            } else {
-      +                                                pending_edges.entry(k).or_default().add_bitset(edge_bv_for_inserter.clone());
-      +                                                pending_live_token_updates.entry(result_node.clone()).or_default().add_bitset(edge_bv_for_inserter);
-      +                                            }
-                                                   // Update cache
-                                                   node_cache.entry(result_node.clone())
-                                                       .and_modify(|(live, _)| *live |= &edge_bv_for_inserter);
-      @@ -2554,16 +2586,21 @@
-                                               let final_edge_bv = timeit!("dfs_bitset_and_2", { &edge_bv_for_inserter & &src_live_tokens });
-       
-                                               if !final_edge_bv.is_empty() {
-      -                                            let end_idx = self.get_leaf_node();
-      -                                            for terminal_id in &accessible_terminals {
-      -                                                let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-      -                                                pending_edges.entry(k)
-      -                                                    .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
-      -                                                    .or_insert(final_edge_bv.clone());
-      -                                                pending_live_token_updates.entry(end_idx)
-      -                                                    .or_insert_with(HybridBitset::zeros)
-      -                                                    .bitor_assign(&final_edge_bv);
-      -                                            }
-      +                                            let end_idx = self.get_leaf_node();
-      +                                            if final_edge_bv.len() == 1 {
-      +                                                let token = final_edge_bv.iter().next().unwrap();
-      +                                                for terminal_id in &accessible_terminals {
-      +                                                    let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-      +                                                    pending_edges.entry(k).or_default().add_token(token);
-      +                                                }
-      +                                                pending_live_token_updates.entry(end_idx).or_default().add_token(token);
-      +                                            } else {
-      +                                                for terminal_id in &accessible_terminals {
-      +                                                    let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-      +                                                    pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
-      +                                                }
-      +                                                pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
-      +                                            }
-                                               }
-                                           }
-       
-      @@ -2579,30 +2616,41 @@
-       
+      @@ -2110,51 +2110,61 @@
                    // === OPTIMIZATION 5: Batch write all edges and updates ===
+                   stats.analyze_pending_edges(&pending_edges);
                    timeit!("dfs_batch_write", {
-      +                // Aggregate all updates before locking
-      +                let mut aggregated_live_tokens: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
-      +                for (node_idx, mut acc) in pending_live_token_updates {
-      +                    let bv = acc.to_bitset();
-      +                    if !bv.is_empty() {
-      +                        aggregated_live_tokens.insert(node_idx, bv);
+      -                // Aggregate all updates before locking
+      -                let mut aggregated_live_tokens: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
+      -                for (node_idx, mut acc) in pending_live_token_updates {
+      -                    let bv = acc.to_bitset();
+      -                    if !bv.is_empty() {
+      -                        aggregated_live_tokens.insert(node_idx, bv);
+      -                    }
+      -                }
+      -
+      -                let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
+      -                for (key, mut acc) in pending_edges {
+      -                    let bv = acc.to_bitset();
+      -                    if !bv.is_empty() {
+      -                        updates_by_src.entry(key.src).or_default().push((key.key, key.dst, bv));
+      -                    }
+      -                }
+      +                let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, TokenAcc)>> = FxHashMap::default();
+      +                for (key, acc) in pending_edges {
+      +                    if !acc.small.is_empty() || !acc.big.is_empty() {
+      +                        updates_by_src.entry(key.src).or_default().push((key.key, key.dst, acc));
       +                    }
       +                }
-      +
-      +                let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
-      +                for (key, mut acc) in pending_edges {
-      +                    let bv = acc.to_bitset();
-      +                    if !bv.is_empty() {
-      +                        updates_by_src.entry(key.src).or_default().push((key.key, key.dst, bv));
-      +                    }
-      +                }
-      +
+       
                        let mut inner_guard = self.trie1_god.inner.write();
        
                        // Apply live token updates
-      -                for (node_idx, live_tokens) in pending_live_token_updates {
-      +                for (node_idx, live_tokens) in aggregated_live_tokens {
+      -                for (node_idx, live_tokens) in aggregated_live_tokens {
+      +                for (node_idx, mut acc) in pending_live_token_updates {
                            timeit!("dfs_batch_write_update_live_tokens", {
                                if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
-                                   node.value.live_tokens |= &live_tokens;
+      -                            node.value.live_tokens |= &live_tokens;
+      +                            let TokenAcc { ref mut small, big } = acc;
+      +                            if !small.is_empty() {
+      +                                small.sort_unstable();
+      +                                small.dedup();
+      +                                node.value.live_tokens.extend(small.iter().copied());
+      +                            }
+      +                            for big_bv in big {
+      +                                node.value.live_tokens |= &big_bv;
+      +                            }
                                }
                            });
                        }
        
                        // Apply edge insertions
-      -                for (&EdgeKey { src, key, dst }, bv) in &pending_edges {
-      -                    timeit!("dfs_batch_write_insert_edge_simple", {
-      +                for (src, updates) in updates_by_src {
-      +                    timeit!("dfs_batch_write_insert_edges_for_src", {
+                       for (src, updates) in updates_by_src {
+                           timeit!("dfs_batch_write_insert_edges_for_src", {
                                if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-      -                            src_node.children_mut().entry(key).or_default()
-      -                                .entry(dst)
-      -                                .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv)
-      -                                .or_insert(bv.clone());
-      +                            for (key, dst, bv) in updates {
-      +                                src_node.children_mut().entry(key).or_default()
-      +                                    .entry(dst)
-      +                                    .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
-      +                                    .or_insert(bv);
-      +                            }
+      -                            for (key, dst, bv) in updates {
+      -                                src_node.children_mut().entry(key).or_default()
+      -                                    .entry(dst)
+      -                                    .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
+      -                                    .or_insert(bv);
+      +                            for (key, dst, mut acc) in updates {
+      +                                let TokenAcc { ref mut small, big } = acc;
+      +                                let dest_map = src_node.children_mut().entry(key).or_default();
+      +                                
+      +                                if !small.is_empty() {
+      +                                    small.sort_unstable();
+      +                                    small.dedup();
+      +                                }
+      +
+      +                                match dest_map.entry(dst) {
+      +                                    ordered_hash_map::Entry::Occupied(mut occupied) => {
+      +                                        let existing_bv = occupied.get_mut();
+      +                                        if !small.is_empty() {
+      +                                            existing_bv.extend(small.iter().copied());
+      +                                        }
+      +                                        for big_bv in big {
+      +                                            *existing_bv |= &big_bv;
+      +                                        }
+      +                                    }
+      +                                    ordered_hash_map::Entry::Vacant(vacant) => {
+      +                                        if !small.is_empty() || !big.is_empty() {
+      +                                            let mut new_bv = HybridBitset::from_iter(small.iter().copied());
+      +                                            for big_bv in big {
+      +                                                new_bv |= &big_bv;
+      +                                            }
+      +                                            vacant.insert(new_bv);
+      +                                        }
+      +                                    }
+      +                                }
+                                   }
                                }
                            });
                        }
+                   });
 
       ```
     metadata:
@@ -26181,7 +26146,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Perf: Optimize Precomputer1::dfs by batching
-      token accumulation with TokenAcc"'
+  - user: 'Changes committed with message: "Refactor dfs_batch_write to process TokenAcc
+      directly, avoiding intermediate HybridBitset creation"'
     metadata:
 ...
