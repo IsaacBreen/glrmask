@@ -2814,15 +2814,15 @@ impl<'r> Precomputer1<'r> {
 
                 // Apply live token updates
                 for (node_idx, live_tokens) in pending_live_token_updates {
-                    if let Some(Some(node)) = inner_guard.values.get_mut(node_idx.as_usize()) {
+                    if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
                         node.value.live_tokens |= &live_tokens;
                     }
                 }
 
                 // Apply edge insertions
                 for (EdgeKey { src, key, dst }, bv) in pending_edges {
-                    if let Some(Some(src_node)) = inner_guard.values.get_mut(src.as_usize()) {
-                        src_node.children.entry(key).or_default()
+                    if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                        src_node.children_mut().entry(key).or_default()
                             .entry(dst)
                             .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= &bv)
                             .or_insert(bv);

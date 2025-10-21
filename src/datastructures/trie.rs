@@ -2454,6 +2454,24 @@ impl<T: Ord> Ord for ArenaInner<T> {
     }
 }
 
+impl<T> ArenaInner<T> {
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if let Some(value) = self.values.get(index) {
+            value.as_ref()
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if let Some(value) = self.values.get_mut(index) {
+            value.as_mut()
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Arena<T> {
     pub(crate) inner: Arc<RwLock<ArenaInner<T>>>,
