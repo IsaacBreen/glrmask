@@ -7376,58 +7376,34 @@ local_system:
                           timeit!("dfs_batch_write_insert_edges_for_src", {
                               if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
                                   for (key, dst, mut acc) in updates {
-                                      timeit!("dfs_batch_write_insert_edges_for_src_inner_loop", {
-                                          let TokenAcc { ref mut small, big } = acc;
-                                          let dest_map = timeit!("dfs_batch_write_get_dest_map", {
-                                              src_node.children_mut().entry(key).or_default()
-                                          });
-                                          
-                                          if !small.is_empty() {
-                                              timeit!("dfs_batch_write_small_sort_dedup", {
-                                                  small.sort_unstable();
-                                                  small.dedup();
-                                              });
-                                          }
+                                      let TokenAcc { ref mut small, big } = acc;
+                                      let dest_map = src_node.children_mut().entry(key).or_default();
+                                      
+                                      if !small.is_empty() {
+                                          small.sort_unstable();
+                                          small.dedup();
+                                      }
 
-                                          match dest_map.entry(dst) {
-                                              crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
-                                                  timeit!("dfs_batch_write_occupied", {
-                                                      let existing_bv = occupied.get_mut();
-                                                      if !small.is_empty() {
-                                                          timeit!("dfs_batch_write_occupied_extend_small", {
-                                                              existing_bv.extend(small.iter().copied());
-                                                          });
-                                                      }
-                                                      if !big.is_empty() {
-                                                          timeit!("dfs_batch_write_occupied_merge_big", {
-                                                              for big_bv in big {
-                                                                  *existing_bv |= &big_bv;
-                                                              }
-                                                          });
-                                                      }
-                                                  });
+                                      match dest_map.entry(dst) {
+                                          crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
+                                              let existing_bv = occupied.get_mut();
+                                              if !small.is_empty() {
+                                                  existing_bv.extend(small.iter().copied());
                                               }
-                                              crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
-                                                  timeit!("dfs_batch_write_vacant", {
-                                                      if !small.is_empty() || !big.is_empty() {
-                                                          let mut new_bv = timeit!("dfs_batch_write_vacant_from_iter", {
-                                                              HybridBitset::from_iter(small.iter().copied())
-                                                          });
-                                                          if !big.is_empty() {
-                                                              timeit!("dfs_batch_write_vacant_merge_big", {
-                                                                  for big_bv in big {
-                                                                      new_bv |= &big_bv;
-                                                                  }
-                                                              });
-                                                          }
-                                                          timeit!("dfs_batch_write_vacant_insert", {
-                                                              vacant.insert(new_bv);
-                                                          });
-                                                      }
-                                                  });
+                                              for big_bv in big {
+                                                  *existing_bv |= &big_bv;
                                               }
                                           }
-                                      });
+                                          crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
+                                              if !small.is_empty() || !big.is_empty() {
+                                                  let mut new_bv = HybridBitset::from_iter(small.iter().copied());
+                                                  for big_bv in big {
+                                                      new_bv |= &big_bv;
+                                                  }
+                                                  vacant.insert(new_bv);
+                                              }
+                                          }
+                                      }
                                   }
                               }
                           });
@@ -8813,12 +8789,6 @@ local_system:
           pub fn zeros() -> Self {
               HybridBitset {
                   inner: cache::intern_l1(RangeSetBlaze::new()),
-              }
-          }
-
-          pub(crate) fn from_rangeset(rs: RangeSetBlaze<usize>) -> Self {
-              Self {
-                  inner: cache::intern_l1(rs),
               }
           }
 
@@ -16014,25 +15984,60 @@ local_system:
                       // Apply edge insertions
                       for (src, updates) in updates_by_src {
                           timeit!("dfs_batch_write_insert_edges_for_src", {
-                              let src_node = match inner_guard.get_mut(src.as_usize()) {
-                                  Some(node) => node,
-                                  None => continue,
-                              };
-                              for (key, dst, mut acc) in updates {
-                                  let new_tokens = acc.to_bitset();
-                                  if new_tokens.is_empty() {
-                                      continue;
-                                  }
+                              if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                                  for (key, dst, mut acc) in updates {
+                                      timeit!("dfs_batch_write_insert_edges_for_src_inner_loop", {
+                                          let TokenAcc { ref mut small, big } = acc;
+                                          let dest_map = timeit!("dfs_batch_write_get_dest_map", {
+                                              src_node.children_mut().entry(key).or_default()
+                                          });
+                                          
+                                          if !small.is_empty() {
+                                              timeit!("dfs_batch_write_small_sort_dedup", {
+                                                  small.sort_unstable();
+                                                  small.dedup();
+                                              });
+                                          }
 
-                                  let dest_map = src_node.children_mut().entry(key).or_default();
-
-                                  match dest_map.entry(dst) {
-                                      crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
-                                          *occupied.get_mut() |= &new_tokens;
-                                      }
-                                      crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
-                                          vacant.insert(new_tokens);
-                                      }
+                                          match dest_map.entry(dst) {
+                                              crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
+                                                  timeit!("dfs_batch_write_occupied", {
+                                                      let existing_bv = occupied.get_mut();
+                                                      if !small.is_empty() {
+                                                          timeit!("dfs_batch_write_occupied_extend_small", {
+                                                              existing_bv.extend(small.iter().copied());
+                                                          });
+                                                      }
+                                                      if !big.is_empty() {
+                                                          timeit!("dfs_batch_write_occupied_merge_big", {
+                                                              for big_bv in big {
+                                                                  *existing_bv |= &big_bv;
+                                                              }
+                                                          });
+                                                      }
+                                                  });
+                                              }
+                                              crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
+                                                  timeit!("dfs_batch_write_vacant", {
+                                                      if !small.is_empty() || !big.is_empty() {
+                                                          let mut new_bv = timeit!("dfs_batch_write_vacant_from_iter", {
+                                                              HybridBitset::from_iter(small.iter().copied())
+                                                          });
+                                                          if !big.is_empty() {
+                                                              timeit!("dfs_batch_write_vacant_merge_big", {
+                                                                  for big_bv in big {
+                                                                      new_bv |= &big_bv;
+                                                                  }
+                                                              });
+                                                          }
+                                                          timeit!("dfs_batch_write_vacant_insert", {
+                                                              vacant.insert(new_bv);
+                                                          });
+                                                      }
+                                                  });
+                                              }
+                                          }
+                                      });
                                   }
                               }
                           });
@@ -16116,21 +16121,14 @@ local_system:
           }
 
           fn to_bitset(&mut self) -> HybridBitset {
-              if self.small.is_empty() && self.big.is_empty() {
-                  return HybridBitset::zeros();
-              }
-              if self.small.is_empty() && self.big.len() == 1 {
-                  return self.big.pop().unwrap();
-              }
-
+              // Sort and dedup small tokens for efficiency before creating bitset
               self.small.sort_unstable();
               self.small.dedup();
-
-              let mut result_inner = range_set_blaze::RangeSetBlaze::from_iter(self.small.iter().copied());
+              let mut bv = HybridBitset::from_iter(self.small.iter().copied());
               for big_bv in &self.big {
-                  result_inner |= &*big_bv.inner;
+                  bv |= big_bv;
               }
-              crate::datastructures::hybrid_bitset::HybridBitset::from_rangeset(result_inner)
+              bv
           }
 
           fn len(&self) -> usize {
@@ -24679,58 +24677,34 @@ messages:
                           timeit!("dfs_batch_write_insert_edges_for_src", {
                               if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
                                   for (key, dst, mut acc) in updates {
-                                      timeit!("dfs_batch_write_insert_edges_for_src_inner_loop", {
-                                          let TokenAcc { ref mut small, big } = acc;
-                                          let dest_map = timeit!("dfs_batch_write_get_dest_map", {
-                                              src_node.children_mut().entry(key).or_default()
-                                          });
-                                          
-                                          if !small.is_empty() {
-                                              timeit!("dfs_batch_write_small_sort_dedup", {
-                                                  small.sort_unstable();
-                                                  small.dedup();
-                                              });
-                                          }
+                                      let TokenAcc { ref mut small, big } = acc;
+                                      let dest_map = src_node.children_mut().entry(key).or_default();
+                                      
+                                      if !small.is_empty() {
+                                          small.sort_unstable();
+                                          small.dedup();
+                                      }
 
-                                          match dest_map.entry(dst) {
-                                              crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
-                                                  timeit!("dfs_batch_write_occupied", {
-                                                      let existing_bv = occupied.get_mut();
-                                                      if !small.is_empty() {
-                                                          timeit!("dfs_batch_write_occupied_extend_small", {
-                                                              existing_bv.extend(small.iter().copied());
-                                                          });
-                                                      }
-                                                      if !big.is_empty() {
-                                                          timeit!("dfs_batch_write_occupied_merge_big", {
-                                                              for big_bv in big {
-                                                                  *existing_bv |= &big_bv;
-                                                              }
-                                                          });
-                                                      }
-                                                  });
+                                      match dest_map.entry(dst) {
+                                          crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
+                                              let existing_bv = occupied.get_mut();
+                                              if !small.is_empty() {
+                                                  existing_bv.extend(small.iter().copied());
                                               }
-                                              crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
-                                                  timeit!("dfs_batch_write_vacant", {
-                                                      if !small.is_empty() || !big.is_empty() {
-                                                          let mut new_bv = timeit!("dfs_batch_write_vacant_from_iter", {
-                                                              HybridBitset::from_iter(small.iter().copied())
-                                                          });
-                                                          if !big.is_empty() {
-                                                              timeit!("dfs_batch_write_vacant_merge_big", {
-                                                                  for big_bv in big {
-                                                                      new_bv |= &big_bv;
-                                                                  }
-                                                              });
-                                                          }
-                                                          timeit!("dfs_batch_write_vacant_insert", {
-                                                              vacant.insert(new_bv);
-                                                          });
-                                                      }
-                                                  });
+                                              for big_bv in big {
+                                                  *existing_bv |= &big_bv;
                                               }
                                           }
-                                      });
+                                          crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
+                                              if !small.is_empty() || !big.is_empty() {
+                                                  let mut new_bv = HybridBitset::from_iter(small.iter().copied());
+                                                  for big_bv in big {
+                                                      new_bv |= &big_bv;
+                                                  }
+                                                  vacant.insert(new_bv);
+                                              }
+                                          }
+                                      }
                                   }
                               }
                           });
@@ -25946,8 +25920,8 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: Make the `dfs_batch_write_insert_edges_for_src` section much faster. It's
-      what's eating up most of the compute time.
+  - user: Add more granular `timeit!`s to `dfs_batch_write_insert_edges_for_src`.
+      I really want to see everything that could be slowing that down.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -25966,220 +25940,225 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to optimize the precomputation logic, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to add more granular profiling to the edge insertion logic, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      #### 1. File: `src/datastructures/hybrid_bitset.rs`
+      In the file `src/constraint.rs`, I will add more detailed `timeit!` macros within the `Precomputer1::dfs` method. Specifically, I'll break down the profiling inside the loop that processes `updates_by_src` within the `dfs_batch_write` block.
 
-      I'll add a helper function to `HybridBitset` to allow more efficient creation from an existing `RangeSetBlaze`.
+      1.  **Open `src/constraint.rs`**.
+      2.  **Navigate to the `Precomputer1::dfs` method**.
+      3.  **Locate the edge insertion loop**: Find the `for (src, updates) in updates_by_src` loop inside the `timeit!("dfs_batch_write", ...)` block.
+      4.  **Replace the existing `timeit!` block** for `dfs_batch_write_insert_edges_for_src` with the more detailed version below.
 
-      *   In the `impl HybridBitset` block, right after the `zeros()` function, add the following `pub(crate)` function named `from_rangeset`:
+      This involves wrapping several distinct operations inside the loop with their own `timeit!` macros:
+      - The inner loop body.
+      - Getting the destination map for an edge key.
+      - Sorting and deduplicating small token lists.
+      - Handling both the `Occupied` and `Vacant` cases for edge insertion, including the sub-operations within each.
 
-          ```rust
-          pub(crate) fn from_rangeset(rs: RangeSetBlaze<usize>) -> Self {
-              Self {
-                  inner: cache::intern_l1(rs),
-              }
-          }
-          ```
-
-      #### 2. File: `src/constraint.rs`
-
-      Next, I'll update the `TokenAcc` helper struct and the main precomputation loop to use more efficient batching logic.
-
-      *   **Optimize `TokenAcc::to_bitset`:**
-          *   Find the `impl TokenAcc` block.
-          *   Replace the existing `to_bitset` method with the following more performant version. This new version avoids creating intermediate `HybridBitset`s and uses the `from_rangeset` helper we just added.
-
-          ```rust
-          fn to_bitset(&mut self) -> HybridBitset {
-              if self.small.is_empty() && self.big.is_empty() {
-                  return HybridBitset::zeros();
-              }
-              if self.small.is_empty() && self.big.len() == 1 {
-                  return self.big.pop().unwrap();
-              }
-
-              self.small.sort_unstable();
-              self.small.dedup();
-
-              let mut result_inner = range_set_blaze::RangeSetBlaze::from_iter(self.small.iter().copied());
-              for big_bv in &self.big {
-                  result_inner |= &*big_bv.inner;
-              }
-              crate::datastructures::hybrid_bitset::HybridBitset::from_rangeset(result_inner)
-          }
-          ```
-
-      *   **Optimize the Batch Write Loop in `Precomputer1::dfs`:**
-          *   Navigate to the `dfs` method within `impl<'r> Precomputer1<'r>`.
-          *   Find the loop that begins with `for (src, updates) in updates_by_src`. This loop is responsible for applying the batched edge updates to the trie.
-          *   Replace the entire body of this loop with the following simplified and optimized code. This change ensures that each set of updates is consolidated into a single `HybridBitset` before being merged into the trie, significantly reducing overhead.
-
-          ```rust
+      Here is the code block you will be replacing:
+      ```rust
+                      // Apply edge insertions
+                      for (src, updates) in updates_by_src {
                           timeit!("dfs_batch_write_insert_edges_for_src", {
-                              let src_node = match inner_guard.get_mut(src.as_usize()) {
-                                  Some(node) => node,
-                                  None => continue,
-                              };
-                              for (key, dst, mut acc) in updates {
-                                  let new_tokens = acc.to_bitset();
-                                  if new_tokens.is_empty() {
-                                      continue;
-                                  }
-
-                                  let dest_map = src_node.children_mut().entry(key).or_default();
-
-                                  match dest_map.entry(dst) {
-                                      crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
-                                          *occupied.get_mut() |= &new_tokens;
+                              if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                                  for (key, dst, mut acc) in updates {
+                                      let TokenAcc { ref mut small, big } = acc;
+                                      let dest_map = src_node.children_mut().entry(key).or_default();
+                                      
+                                      if !small.is_empty() {
+                                          small.sort_unstable();
+                                          small.dedup();
                                       }
-                                      crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
-                                          vacant.insert(new_tokens);
+
+                                      match dest_map.entry(dst) {
+                                          crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
+                                              let existing_bv = occupied.get_mut();
+                                              if !small.is_empty() {
+                                                  existing_bv.extend(small.iter().copied());
+                                              }
+                                              for big_bv in big {
+                                                  *existing_bv |= &big_bv;
+                                              }
+                                          }
+                                          crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
+                                              if !small.is_empty() || !big.is_empty() {
+                                                  let mut new_bv = HybridBitset::from_iter(small.iter().copied());
+                                                  for big_bv in big {
+                                                      new_bv |= &big_bv;
+                                                  }
+                                                  vacant.insert(new_bv);
+                                              }
+                                          }
                                       }
                                   }
                               }
                           });
-          ```
-
-      ### Git Diffs
-
-      Here are the git diffs corresponding to the changes described above.
-
-      ```diff
-      diff --git a/src/datastructures/hybrid_bitset.rs b/src/datastructures/hybrid_bitset.rs
-      --- a/src/datastructures/hybrid_bitset.rs
-      +++ b/src/datastructures/hybrid_bitset.rs
-      @@ -116,6 +116,12 @@
-               }
-           }
-       
-      +    pub(crate) fn from_rangeset(rs: RangeSetBlaze<usize>) -> Self {
-      +        Self {
-      +            inner: cache::intern_l1(rs),
-      +        }
-      +    }
-      +
-           /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
-           pub fn ones(len: usize) -> Self {
-               if len == 0 {
-
+                      }
       ```
+
+      Replace it with this new version:
+      ```rust
+                      // Apply edge insertions
+                      for (src, updates) in updates_by_src {
+                          timeit!("dfs_batch_write_insert_edges_for_src", {
+                              if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                                  for (key, dst, mut acc) in updates {
+                                      timeit!("dfs_batch_write_insert_edges_for_src_inner_loop", {
+                                          let TokenAcc { ref mut small, big } = acc;
+                                          let dest_map = timeit!("dfs_batch_write_get_dest_map", {
+                                              src_node.children_mut().entry(key).or_default()
+                                          });
+                                          
+                                          if !small.is_empty() {
+                                              timeit!("dfs_batch_write_small_sort_dedup", {
+                                                  small.sort_unstable();
+                                                  small.dedup();
+                                              });
+                                          }
+
+                                          match dest_map.entry(dst) {
+                                              crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
+                                                  timeit!("dfs_batch_write_occupied", {
+                                                      let existing_bv = occupied.get_mut();
+                                                      if !small.is_empty() {
+                                                          timeit!("dfs_batch_write_occupied_extend_small", {
+                                                              existing_bv.extend(small.iter().copied());
+                                                          });
+                                                      }
+                                                      if !big.is_empty() {
+                                                          timeit!("dfs_batch_write_occupied_merge_big", {
+                                                              for big_bv in big {
+                                                                  *existing_bv |= &big_bv;
+                                                              }
+                                                          });
+                                                      }
+                                                  });
+                                              }
+                                              crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
+                                                  timeit!("dfs_batch_write_vacant", {
+                                                      if !small.is_empty() || !big.is_empty() {
+                                                          let mut new_bv = timeit!("dfs_batch_write_vacant_from_iter", {
+                                                              HybridBitset::from_iter(small.iter().copied())
+                                                          });
+                                                          if !big.is_empty() {
+                                                              timeit!("dfs_batch_write_vacant_merge_big", {
+                                                                  for big_bv in big {
+                                                                      new_bv |= &big_bv;
+                                                                  }
+                                                              });
+                                                          }
+                                                          timeit!("dfs_batch_write_vacant_insert", {
+                                                              vacant.insert(new_bv);
+                                                          });
+                                                      }
+                                                  });
+                                              }
+                                          }
+                                      });
+                                  }
+                              }
+                          });
+                      }
+      ```
+
+      ### Git Diff
+
+      Here is the git patch that corresponds to the changes described above.
 
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
+      index 2311111..1111111 100644
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -2100,16 +2100,24 @@
-           }
-       
-           fn to_bitset(&mut self) -> HybridBitset {
-      -        // Sort and dedup small tokens for efficiency before creating bitset
-      +        if self.small.is_empty() && self.big.is_empty() {
-      +            return HybridBitset::zeros();
-      +        }
-      +        if self.small.is_empty() && self.big.len() == 1 {
-      +            return self.big.pop().unwrap();
-      +        }
-      +
-               self.small.sort_unstable();
-               self.small.dedup();
-      -        let mut bv = HybridBitset::from_iter(self.small.iter().copied());
-      +
-      +        let mut result_inner = range_set_blaze::RangeSetBlaze::from_iter(self.small.iter().copied());
-               for big_bv in &self.big {
-      -            bv |= big_bv;
-      -        }
-      -        bv
-      +            result_inner |= &*big_bv.inner;
-      +        }
-      +        crate::datastructures::hybrid_bitset::HybridBitset::from_rangeset(result_inner)
-           }
-       
-           fn len(&self) -> usize {
-               self.small.len() + self.big.len()
-      @@ -2318,56 +2326,28 @@
-                       // Apply edge insertions
+      @@ -2400,40 +2400,64 @@
                        for (src, updates) in updates_by_src {
                            timeit!("dfs_batch_write_insert_edges_for_src", {
-      -                        if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-      -                            for (key, dst, mut acc) in updates {
-      -                                timeit!("dfs_batch_write_insert_edges_for_src_inner_loop", {
-      -                                    let TokenAcc { ref mut small, big } = acc;
-      -                                    let dest_map = timeit!("dfs_batch_write_get_dest_map", {
-      -                                        src_node.children_mut().entry(key).or_default()
-      -                                    });
-      -                                    
-      -                                    if !small.is_empty() {
-      -                                        timeit!("dfs_batch_write_small_sort_dedup", {
-      -                                            small.sort_unstable();
-      -                                            small.dedup();
-      -                                        });
-      -                                    }
+                               if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                                   for (key, dst, mut acc) in updates {
+      -                                let TokenAcc { ref mut small, big } = acc;
+      -                                let dest_map = src_node.children_mut().entry(key).or_default();
+      -                                
+      -                                if !small.is_empty() {
+      -                                    small.sort_unstable();
+      -                                    small.dedup();
+      -                                }
       -
-      -                                    match dest_map.entry(dst) {
-      -                                        crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
-      -                                            timeit!("dfs_batch_write_occupied", {
-      -                                                let existing_bv = occupied.get_mut();
-      -                                                if !small.is_empty() {
-      -                                                    timeit!("dfs_batch_write_occupied_extend_small", {
-      -                                                        existing_bv.extend(small.iter().copied());
-      -                                                    });
-      -                                                }
-      -                                                if !big.is_empty() {
-      -                                                    timeit!("dfs_batch_write_occupied_merge_big", {
-      -                                                        for big_bv in big {
-      -                                                            *existing_bv |= &big_bv;
-      -                                                        }
-      -                                                    });
-      -                                                }
-      -                                            });
+      -                                match dest_map.entry(dst) {
+      -                                    crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
+      -                                        let existing_bv = occupied.get_mut();
+      -                                        if !small.is_empty() {
+      -                                            existing_bv.extend(small.iter().copied());
       -                                        }
-      -                                        crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
-      -                                            timeit!("dfs_batch_write_vacant", {
-      -                                                if !small.is_empty() || !big.is_empty() {
-      -                                                    let mut new_bv = timeit!("dfs_batch_write_vacant_from_iter", {
-      -                                                        HybridBitset::from_iter(small.iter().copied())
-      -                                                    });
-      -                                                    if !big.is_empty() {
-      -                                                        timeit!("dfs_batch_write_vacant_merge_big", {
-      -                                                            for big_bv in big {
-      -                                                                new_bv |= &big_bv;
-      -                                                            }
-      -                                                        });
-      -                                                    }
-      -                                                    timeit!("dfs_batch_write_vacant_insert", {
-      -                                                        vacant.insert(new_bv);
-      -                                                    });
-      -                                                }
-      -                                            });
+      -                                        for big_bv in big {
+      -                                            *existing_bv |= &big_bv;
       -                                        }
       -                                    }
-      -                                });
-      -                            }
-      -                        }
-      +                        let src_node = match inner_guard.get_mut(src.as_usize()) {
-      +                            Some(node) => node,
-      +                            None => continue,
-      +                        };
-      +                        for (key, dst, mut acc) in updates {
-      +                            let new_tokens = acc.to_bitset();
-      +                            if new_tokens.is_empty() {
-      +                                continue;
-      +                            }
+      -                                    crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
+      -                                        if !small.is_empty() || !big.is_empty() {
+      -                                            let mut new_bv = HybridBitset::from_iter(small.iter().copied());
+      -                                            for big_bv in big {
+      -                                                new_bv |= &big_bv;
+      -                                            }
+      -                                            vacant.insert(new_bv);
+      -                                        }
+      -                                    }
+      -                                }
+      +                                timeit!("dfs_batch_write_insert_edges_for_src_inner_loop", {
+      +                                    let TokenAcc { ref mut small, big } = acc;
+      +                                    let dest_map = timeit!("dfs_batch_write_get_dest_map", {
+      +                                        src_node.children_mut().entry(key).or_default()
+      +                                    });
+      +                                    
+      +                                    if !small.is_empty() {
+      +                                        timeit!("dfs_batch_write_small_sort_dedup", {
+      +                                            small.sort_unstable();
+      +                                            small.dedup();
+      +                                        });
+      +                                    }
       +
-      +                            let dest_map = src_node.children_mut().entry(key).or_default();
-      +
-      +                            match dest_map.entry(dst) {
-      +                                crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
-      +                                    *occupied.get_mut() |= &new_tokens;
-      +                                }
-      +                                crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
-      +                                    vacant.insert(new_tokens);
-      +                                }
-      +                            }
-      +                        }
+      +                                    match dest_map.entry(dst) {
+      +                                        crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
+      +                                            timeit!("dfs_batch_write_occupied", {
+      +                                                let existing_bv = occupied.get_mut();
+      +                                                if !small.is_empty() {
+      +                                                    timeit!("dfs_batch_write_occupied_extend_small", {
+      +                                                        existing_bv.extend(small.iter().copied());
+      +                                                    });
+      +                                                }
+      +                                                if !big.is_empty() {
+      +                                                    timeit!("dfs_batch_write_occupied_merge_big", {
+      +                                                        for big_bv in big {
+      +                                                            *existing_bv |= &big_bv;
+      +                                                        }
+      +                                                    });
+      +                                                }
+      +                                            });
+      +                                        }
+      +                                        crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
+      +                                            timeit!("dfs_batch_write_vacant", {
+      +                                                if !small.is_empty() || !big.is_empty() {
+      +                                                    let mut new_bv = timeit!("dfs_batch_write_vacant_from_iter", {
+      +                                                        HybridBitset::from_iter(small.iter().copied())
+      +                                                    });
+      +                                                    if !big.is_empty() {
+      +                                                        timeit!("dfs_batch_write_vacant_merge_big", {
+      +                                                            for big_bv in big {
+      +                                                                new_bv |= &big_bv;
+      +                                                            }
+      +                                                        });
+      +                                                    }
+      +                                                    timeit!("dfs_batch_write_vacant_insert", {
+      +                                                        vacant.insert(new_bv);
+      +                                                    });
+      +                                                }
+      +                                            });
+      +                                        }
+      +                                    }
+      +                                });
+                                   }
+                               }
                            });
                        }
                    });
@@ -26188,19 +26167,14 @@ messages:
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/hybrid_bitset.rs
-      Applying patch to 'src/datastructures/hybrid_bitset.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/hybrid_bitset.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Perf: Optimize batch edge insertion in
-      DFS by consolidating updates before trie merge and improving HybridBitset creation."'
+  - user: 'Changes committed with message: "Profiler: Add more granular timeit! profiling
+      to dfs_batch_write_insert_edges_for_src"'
     metadata:
 ...
