@@ -2795,13 +2795,17 @@ impl<'r> Precomputer1<'r> {
             // === OPTIMIZATION 5: Batch write all edges and updates ===
             timeit!("dfs_batch_write", {
                 for (src, dst, key, bv) in pending_edges {
-                    self.trie1_god.insert_edge_simple(src, dst, key, bv);
+                    timeit!("dfs_batch_write_insert_edge_simple", {
+                        self.trie1_god.insert_edge_simple(src, dst, key, bv);
+                    });
                 }
 
                 for (node_idx, live_tokens) in pending_live_token_updates {
-                    if let Some(mut guard) = node_idx.write(&self.trie1_god) {
-                        guard.value.live_tokens |= &live_tokens;
-                    }
+                    timeit!("dfs_batch_write_insert_edge_simple", {
+                        if let Some(mut guard) = node_idx.write(&self.trie1_god) {
+                            guard.value.live_tokens |= &live_tokens;
+                        }
+                    });
                 }
             });
 
