@@ -51,12 +51,8 @@ impl JSONConvertible for HybridBitset {
         Ok(HybridBitset {
             inner: cache::intern_l1(RangeSetBlaze::from_iter(ranges)),
         })
-        // If max is usize::MAX, checked_add returns None, and we do nothing,
-        // which is correct because all values are already <= usize::MAX.
     }
 }
-
-// --- Iterator ---
 
 // Helper struct for custom Debug formatting of the inner RangeSetBlaze's ranges.
 struct DebugRangesTruncated<'a> {
@@ -397,19 +393,6 @@ impl HybridBitset {
         }
         // If max is usize::MAX, checked_add returns None, and we do nothing,
         // which is correct because all values are already <= usize::MAX.
-    }
-
-    pub fn from_sorted_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
-        let rs = RangeSetBlaze::from_iter(iter);
-        HybridBitset {
-            inner: cache::intern_l1(rs),
-        }
-    }
-
-    // Enumerate indices. This is cheap when cardinality is small.
-    pub fn for_each_index<F: FnMut(usize)>(&self, f: F) {
-        // RangeSetBlaze exposes an efficient iterator over its elements.
-        self.inner.iter().for_each(f);
     }
 }
 
