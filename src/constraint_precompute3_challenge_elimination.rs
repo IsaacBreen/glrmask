@@ -220,6 +220,10 @@ fn convert_from_intermediate2(
     (roots1, god1)
 }
 
+fn is_push(k: &Intermediate2Trie3EdgeKey) -> bool {
+    matches!(k, Intermediate2Trie3EdgeKey::Push(_))
+}
+
 pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
@@ -252,8 +256,6 @@ pub fn eliminate_pushes_and_pops(
         &roots2.values().cloned().collect::<Vec<_>>(),
     );
 
-    let is_push = |k: &Key2| matches!(k, Intermediate2Trie3EdgeKey::Push(_));
-
     struct GraphState<'a> {
         god2: &'a Intermediate2Trie3GodWrapper,
         fwd: HashMap<Node, HashMap<Key2, HashMap<Node, LLMTokenBV>>>,
@@ -267,8 +269,10 @@ pub fn eliminate_pushes_and_pops(
 
     impl<'a> GraphState<'a> {
         fn new(god2: &'a Intermediate2Trie3GodWrapper, all_nodes2: &[Node]) -> Self {
-            let mut fwd = HashMap::new();
-            let mut rev = HashMap::new();
+            let mut fwd: HashMap<Node, HashMap<Key2, HashMap<Node, LLMTokenBV>>> =
+                HashMap::new();
+            let mut rev: HashMap<Node, HashMap<Key2, HashMap<Node, LLMTokenBV>>> =
+                HashMap::new();
             let mut out_push_count = HashMap::new();
             let mut out_nonpush_count = HashMap::new();
             let mut in_push_count = HashMap::new();
