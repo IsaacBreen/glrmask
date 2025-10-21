@@ -20,7 +20,7 @@ use std::sync::Arc;
 // --- The Hybrid Bitset Struct ---
 #[derive(Default, Clone, Eq)]
 pub struct HybridBitset {
-    pub(crate) inner: Acc<RangeSetBlaze<usize>>,
+    pub(crate) inner: Arc<RangeSetBlaze<usize>>,
 }
 
 impl JSONConvertible for HybridBitset {
