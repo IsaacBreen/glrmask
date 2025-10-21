@@ -78,6 +78,13 @@ struct DfsStats {
     dsts_per_src_key_dist: BTreeMap<usize, usize>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct EdgeKey {
+    src: PrecomputeNode1Index,
+    key: Option<GrammarTokenID>,
+    dst: PrecomputeNode1Index,
+}
+
 impl DfsStats {
     fn analyze_pending_edges(&mut self, pending_edges: &FxHashMap<EdgeKey, HybridBitset>) {
         self.num_pending_edges += pending_edges.len();
@@ -2666,13 +2673,6 @@ impl<'r> Precomputer1<'r> {
             };
 
             // === OPTIMIZATION 2: Batch all edge insertions and updates ===
-            #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-            struct EdgeKey {
-                src: PrecomputeNode1Index,
-                key: Option<GrammarTokenID>,
-                dst: PrecomputeNode1Index,
-            }
-
             let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
             let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
 
