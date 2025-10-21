@@ -116,6 +116,12 @@ impl HybridBitset {
         }
     }
 
+    pub(crate) fn from_rangeset(rs: RangeSetBlaze<usize>) -> Self {
+        Self {
+            inner: cache::intern_l1(rs),
+        }
+    }
+
     /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
     pub fn ones(len: usize) -> Self {
         if len == 0 {
