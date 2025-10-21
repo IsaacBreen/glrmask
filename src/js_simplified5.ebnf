@@ -1,19 +1,12 @@
-program ::= statement? EOF ;
+// Instruct the parser to ignore Whitespace and single-line Comments.
+#![ignore(IGNORE)]
+
+// --- Lexical Grammar (Minimal) ---
+IGNORE ::= ( WS | COMMENT )+ ;
+WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
+SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ;
+MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ;
+
+program ::= 'x' '=' 'x' EOF
 EOF ::= '<|EOF|>' ;
-
-statement ::=
-    if_statement
-  | block
-  | expression_statement
-  ;
-
-if_statement ::= 'if' '(' 'true' ')' statement ;
-
-block ::= '{' statement* '}'? ;               // allow prefix to keep parsing
-
-expression_statement ::= object_literal ';'? ;
-
-object_literal ::= '{' method_list? '}'? ;    // allow prefix to keep parsing
-
-method_list ::= method ( ',' method )* ;
-method ::= 'if' '(' 'true' ')' block ;        // lets "{ if (true) {" be valid inside an object

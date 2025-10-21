@@ -1,13 +1,3 @@
-// Instruct the parser to ignore Whitespace and single-line Comments.
-#![ignore(IGNORE)]
-
-// --- Lexical Grammar (Minimal) ---
-IGNORE ::= ( WS | COMMENT )+ ;
-WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
-SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ;
-MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ;
-
 program ::= statement? EOF ;
 EOF ::= '<|EOF|>' ;
 
