@@ -2597,7 +2597,7 @@ impl<'r> Precomputer1<'r> {
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
                     for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
-                        let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
+                        let entry: &mut HashMap<PrecomputeNode1Index, LLMTokenBV> = next_level_assoc.entry(tokenizer_state_id).or_default();
                         for (node, tokens) in nodes_with_tokens {
                             entry
                                 .entry(node.clone())
@@ -2623,7 +2623,7 @@ impl<'r> Precomputer1<'r> {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
 
-                        for (src_node_wrapper, src_contextual_tokens) in precompute_nodes_with_tokens {
+                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
                             if next_pos == segment_bytes.len() {
                                 // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
                                 let llm_token_id = child_vocab_node.token_id();
@@ -2634,7 +2634,7 @@ impl<'r> Precomputer1<'r> {
                                 let end_idx = self.get_leaf_node();
 
                                 let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
-                                let final_edge_bv = &(&edge_bv & src_contextual_tokens) & &src_live_tokens;
+                                let final_edge_bv = &(&edge_bv & &src_contextual_tokens) & &src_live_tokens;
 
                                 if !final_edge_bv.is_empty() {
                                     self.trie1_god.insert_edge_simple(src_node_idx, end_idx, edge_key, final_edge_bv.clone());
@@ -2652,7 +2652,7 @@ impl<'r> Precomputer1<'r> {
                                 edge_bv -= matches_for_terminal;
                             }
 
-                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
+                            let edge_bv_for_inserter = &edge_bv & &src_contextual_tokens;
                             if edge_bv_for_inserter.is_empty() { continue; }
 
                             let edge_key = Some(terminal_id);
@@ -2713,11 +2713,11 @@ impl<'r> Precomputer1<'r> {
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state = TokenizerStateID(end_state_val);
                         let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
-                        for (src_node_wrapper, src_contextual_tokens) in precompute_nodes_with_tokens {
+                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
                             let llm_token_id = child_vocab_node.token_id();
                             let mut edge_bv = HybridBitset::zeros();
                             edge_bv.insert(llm_token_id);
-                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
+                            let edge_bv_for_inserter = edge_bv & src_contextual_tokens;
                             if edge_bv_for_inserter.is_empty() { continue; }
 
                             for terminal_id in &accessible_terminals {
