@@ -738,6 +738,22 @@ impl From<BitVec<usize, Lsb0>> for HybridBitset {
     }
 }
 
+impl From<RangeSetBlaze<usize>> for HybridBitset {
+    fn from(range_set: RangeSetBlaze<usize>) -> Self {
+        HybridBitset {
+            inner: cache::intern_l1(range_set),
+        }
+    }
+}
+
+impl From<&RangeSetBlaze<usize>> for HybridBitset {
+    fn from(range_set: &RangeSetBlaze<usize>) -> Self {
+        HybridBitset {
+            inner: cache::intern_l1(range_set.clone()),
+        }
+    }
+}
+
 // --- Operations on owned values ---
 impl BitAnd<HybridBitset> for HybridBitset {
     type Output = HybridBitset;

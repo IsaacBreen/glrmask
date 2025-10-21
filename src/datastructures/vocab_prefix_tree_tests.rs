@@ -41,7 +41,7 @@ fn test_single_token() {
     assert_eq!(node.prefix_length, 5); // "hello" has length 5
     assert!(node.children.is_empty());
     // Node "hello" should only have its own ID reachable
-    let expected_node_bits = HybridBitset::from_iter(vec![1]);
+    let expected_node_bits = RangeSetBlaze::from_iter(vec![1]);
     assert_eq!(node.reachable_token_ids, expected_node_bits);
 
     assert_eq!(tree.find_token(&b("hello")), Some(1));
@@ -50,7 +50,7 @@ fn test_single_token() {
     assert_eq!(tree.find_token(b""), None); // Flag is false
 
     // Root's reachable IDs should contain only ID 1 (ID 0 is conventional)
-    let expected_root_bits = HybridBitset::from_iter(vec![1]);
+    let expected_root_bits = RangeSetBlaze::from_iter(vec![1]);
     assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
 }
 
@@ -70,14 +70,14 @@ fn test_empty_string_token() {
     let node_a = tree.root.children.get(&b("a")).unwrap();
     assert_eq!(node_a.token_id, 1);
     // Node "a" should only have its own ID reachable
-    let expected_node_a_bits = HybridBitset::from_iter(vec![1]);
+    let expected_node_a_bits = RangeSetBlaze::from_iter(vec![1]);
     assert_eq!(node_a.reachable_token_ids, expected_node_a_bits);
 
     assert_eq!(tree.find_token(&b("")), Some(99)); // Query for "" returns its ID (flag is true)
     assert_eq!(tree.find_token(&b("a")), Some(1));
 
     // Root's reachable IDs should contain 1 (from child) and 99 (itself)
-    let expected_root_bits = HybridBitset::from_iter(vec![1, 99]);
+    let expected_root_bits = RangeSetBlaze::from_iter(vec![1, 99]);
     assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
 }
 
@@ -97,14 +97,14 @@ fn test_empty_string_token_with_id_zero() {
     let node_a = tree.root.children.get(&b("a")).unwrap();
     assert_eq!(node_a.token_id, 1);
     // Node "a" should only have its own ID reachable
-    let expected_node_a_bits = HybridBitset::from_iter(vec![1]);
+    let expected_node_a_bits = RangeSetBlaze::from_iter(vec![1]);
     assert_eq!(node_a.reachable_token_ids, expected_node_a_bits);
 
     assert_eq!(tree.find_token(&b("")), Some(0)); // Query for "" returns its ID 0 (flag is true)
     assert_eq!(tree.find_token(&b("a")), Some(1));
 
     // Root's reachable IDs should contain 1 (from child) and 0 (itself, as it's explicit)
-    let expected_root_bits = HybridBitset::from_iter(vec![0, 1]);
+    let expected_root_bits = RangeSetBlaze::from_iter(vec![0, 1]);
     assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
 }
 
@@ -133,11 +133,11 @@ fn test_simple_prefix() {
     assert_eq!(node_ab.token_id, 2);
     assert!(node_ab.children.is_empty());
     // Node "ab" reachable IDs: {2}
-    let expected_ab_bits = HybridBitset::from_iter(vec![2]);
+    let expected_ab_bits = RangeSetBlaze::from_iter(vec![2]);
     assert_eq!(node_ab.reachable_token_ids, expected_ab_bits);
 
     // Node "a" reachable IDs: {1, 2}
-    let expected_a_bits = HybridBitset::from_iter(vec![1, 2]);
+    let expected_a_bits = RangeSetBlaze::from_iter(vec![1, 2]);
     assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
     assert_eq!(tree.find_token(&b("a")), Some(1));
@@ -176,15 +176,15 @@ fn test_multiple_prefixes() {
     assert_eq!(node_abc.token_id, 3);
     assert!(node_abc.children.is_empty());
     // Node "abc" reachable: {3}
-    let expected_abc_bits = HybridBitset::from_iter(vec![3]);
+    let expected_abc_bits = RangeSetBlaze::from_iter(vec![3]);
     assert_eq!(node_abc.reachable_token_ids, expected_abc_bits);
 
     // Node "ab" reachable: {2, 3}
-    let expected_ab_bits = HybridBitset::from_iter(vec![2, 3]);
+    let expected_ab_bits = RangeSetBlaze::from_iter(vec![2, 3]);
     assert_eq!(node_ab.reachable_token_ids, expected_ab_bits);
 
     // Node "a" reachable: {1, 2, 3}
-    let expected_a_bits = HybridBitset::from_iter(vec![1, 2, 3]);
+    let expected_a_bits = RangeSetBlaze::from_iter(vec![1, 2, 3]);
     assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
     assert_eq!(tree.find_token(&b("a")), Some(1));
@@ -221,7 +221,7 @@ fn test_shared_prefix_branching_where_prefix_is_token() {
     assert_eq!(node_apple.prefix_length, 5); // "apple" length 5
     assert!(node_apple.children.is_empty());
     // Node "apple" reachable: {10}
-    let expected_apple_bits = HybridBitset::from_iter(vec![10]);
+    let expected_apple_bits = RangeSetBlaze::from_iter(vec![10]);
     assert_eq!(node_apple.reachable_token_ids, expected_apple_bits);
 
     assert!(node_app.children.contains_key(&b("ly")));
@@ -230,11 +230,11 @@ fn test_shared_prefix_branching_where_prefix_is_token() {
     assert_eq!(node_apply.token_id, 20);
     assert!(node_apply.children.is_empty());
     // Node "apply" reachable: {20}
-    let expected_apply_bits = HybridBitset::from_iter(vec![20]);
+    let expected_apply_bits = RangeSetBlaze::from_iter(vec![20]);
     assert_eq!(node_apply.reachable_token_ids, expected_apply_bits);
 
     // Node "app" reachable: {5, 10, 20}
-    let expected_app_bits = HybridBitset::from_iter(vec![5, 10, 20]);
+    let expected_app_bits = RangeSetBlaze::from_iter(vec![5, 10, 20]);
     assert_eq!(node_app.reachable_token_ids, expected_app_bits);
 
     assert_eq!(tree_with_prefix.find_token(&b("app")), Some(5));
@@ -265,7 +265,7 @@ fn test_shared_prefix_branching_where_prefix_is_not_token() {
     assert_eq!(node_apple.token_id, 10);
     assert!(node_apple.children.is_empty());
     // Node "apple" reachable: {10}
-    let expected_apple_bits = HybridBitset::from_iter(vec![10]);
+    let expected_apple_bits = RangeSetBlaze::from_iter(vec![10]);
     assert_eq!(node_apple.reachable_token_ids, expected_apple_bits);
 
     let node_apply = tree.root.children.get(&b("apply")).unwrap();
@@ -273,7 +273,7 @@ fn test_shared_prefix_branching_where_prefix_is_not_token() {
     assert_eq!(node_apply.token_id, 20);
     assert!(node_apply.children.is_empty());
     // Node "apply" reachable: {20}
-    let expected_apply_bits = HybridBitset::from_iter(vec![20]);
+    let expected_apply_bits = RangeSetBlaze::from_iter(vec![20]);
     assert_eq!(node_apply.reachable_token_ids, expected_apply_bits);
 
     assert_eq!(tree.find_token(&b("apple")), Some(10));
@@ -282,7 +282,7 @@ fn test_shared_prefix_branching_where_prefix_is_not_token() {
     assert_eq!(tree.find_token(&b("appl")), None);
 
     // Root reachable: {10, 20}
-    let expected_root_bits = HybridBitset::from_iter(vec![10, 20]);
+    let expected_root_bits = RangeSetBlaze::from_iter(vec![10, 20]);
     assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
     assert_eq!(tree.find_token(b""), None); // Flag is false
 }
@@ -337,7 +337,7 @@ fn test_complex_case() {
 
 
     // Node "a" reachable: {1, 10, 11, 12}
-    let expected_a_bits = HybridBitset::from_iter(vec![1, 10, 11, 12]);
+    let expected_a_bits = RangeSetBlaze::from_iter(vec![1, 10, 11, 12]);
     assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
 
@@ -352,7 +352,7 @@ fn test_complex_case() {
     assert_eq!(node_banana.prefix_length, 6); // "banana"
 
     // Node "b" reachable: {2, 20}
-    let expected_b_bits = HybridBitset::from_iter(vec![2, 20]);
+    let expected_b_bits = RangeSetBlaze::from_iter(vec![2, 20]);
     assert_eq!(node_b.reachable_token_ids, expected_b_bits);
 
     // Test lookups
@@ -367,7 +367,7 @@ fn test_complex_case() {
     assert_eq!(tree.find_token(&b("c")), None);
 
     // Root reachable: {1, 2, 10, 11, 12, 20, 99}
-    let expected_root_bits = HybridBitset::from_iter(vec![1, 2, 10, 11, 12, 20, 99]);
+    let expected_root_bits = RangeSetBlaze::from_iter(vec![1, 2, 10, 11, 12, 20, 99]);
     assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
     assert_eq!(tree.find_token(b""), Some(99)); // Query for "" returns its ID (flag is true)
 }
@@ -395,11 +395,11 @@ fn test_duplicate_token_bytes() {
     assert_eq!(node_ab.token_id, 2);
     assert!(node_ab.children.is_empty());
     // Node "ab" reachable: {2}
-    let expected_ab_bits = HybridBitset::from_iter(vec![2]);
+    let expected_ab_bits = RangeSetBlaze::from_iter(vec![2]);
     assert_eq!(node_ab.reachable_token_ids, expected_ab_bits);
 
     // Node "a" reachable: {2, 3} (ID 1 was overwritten)
-    let expected_a_bits = HybridBitset::from_iter(vec![2, 3]);
+    let expected_a_bits = RangeSetBlaze::from_iter(vec![2, 3]);
     assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
     assert_eq!(tree.find_token(&b("a")), Some(3));

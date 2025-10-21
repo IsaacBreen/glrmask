@@ -2779,7 +2779,7 @@ impl<'r> Precomputer1<'r> {
             for token in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token.id);
                 let applicable_tokens = child_vocab_node.reachable_token_ids();
-                *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
+                *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= HybridBitset::from(applicable_tokens);
             }
             if let Some(final_state_val) = exec_result.end_state {
                 let matches_possible_from_tokenizer_state: BTreeSet<_> = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(final_state_val)).into_iter().collect();
