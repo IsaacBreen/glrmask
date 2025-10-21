@@ -2925,7 +2925,7 @@ impl<'r> Precomputer1<'r> {
                                 }
 
                                 match dest_map.entry(dst) {
-                                    ordered_hash_map::Entry::Occupied(mut occupied) => {
+                                    crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
                                         let existing_bv = occupied.get_mut();
                                         if !small.is_empty() {
                                             existing_bv.extend(small.iter().copied());
@@ -2934,7 +2934,7 @@ impl<'r> Precomputer1<'r> {
                                             *existing_bv |= &big_bv;
                                         }
                                     }
-                                    ordered_hash_map::Entry::Vacant(vacant) => {
+                                    crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
                                         if !small.is_empty() || !big.is_empty() {
                                             let mut new_bv = HybridBitset::from_iter(small.iter().copied());
                                             for big_bv in big {
