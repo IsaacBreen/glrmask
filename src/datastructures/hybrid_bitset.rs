@@ -683,7 +683,7 @@ impl BitOrAssign<&HybridBitset> for HybridBitset {
         // A clone-modify-reintern pattern is safest with interning.
         // This avoids the overhead of the full caching logic in the `bitor` operator.
         let mut new_inner = (*self.inner).clone();
-        new_inner.union_with(&rhs.inner);
+        new_inner.bitor_assign(&rhs.inner);
         self.inner = cache::intern_l1(new_inner);
     }
 }
