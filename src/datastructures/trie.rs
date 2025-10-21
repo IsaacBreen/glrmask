@@ -719,12 +719,12 @@ impl<EK: Ord + Clone, EV: Clone, T> Trie<EK, EV, T> {
 
         for (ek, dest_map) in children_snapshot {
             for (child_idx, _ev) in dest_map {
-                if visiting.contains(child_idx) {
+                if visiting.contains(&child_idx) {
                     // This is a back-edge to a node on the current recursion stack. Mark for removal.
-                    back_edges.push((ek.clone(), *child_idx));
-                } else if !visited.contains(child_idx) {
+                    back_edges.push((ek.clone(), child_idx));
+                } else if !visited.contains(&child_idx) {
                     // Visit child if it hasn't been fully explored yet.
-                    Self::break_cycles_recursive(*child_idx, arena, visiting, visited);
+                    Self::break_cycles_recursive(child_idx, arena, visiting, visited);
                 }
             }
         }
