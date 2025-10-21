@@ -7,7 +7,9 @@ EOF ::= '<|EOF|>';
 // --- Lexical Grammar (Unchanged) ---
 IGNORE ::= ( WS | COMMENT )+ ;
 WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
+COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
+SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ;
+MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ;
 
 // --- Statements (Simplified) ---
 statement_list ::= statement+ ;
