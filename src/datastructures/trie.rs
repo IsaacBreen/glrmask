@@ -716,7 +716,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
         let mut back_edges: Vec<(EK, Trie2Index)> = Vec::new();
 
-        for (ek, dest_map) in &children_snapshot {
+        for (ek, dest_map) in children_snapshot {
             for (child_idx, _ev) in dest_map {
                 if visiting.contains(child_idx) {
                     // This is a back-edge to a node on the current recursion stack. Mark for removal.
