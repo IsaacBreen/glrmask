@@ -220,6 +220,32 @@ fn convert_from_intermediate2(
     (roots1, god1)
 }
 
+fn sync_rev_entry_for(
+    rev: &mut HashMap<
+        Intermediate2PrecomputeNode3Index,
+        Vec<(
+            Intermediate2PrecomputeNode3Index,
+            Intermediate2Trie3EdgeKey,
+            LLMTokenBV,
+        )>,
+    >,
+    god2: &Intermediate2Trie3GodWrapper,
+    u: Intermediate2PrecomputeNode3Index,
+    v: Intermediate2PrecomputeNode3Index,
+    k: &Intermediate2Trie3EdgeKey,
+) {
+    if let Some(vec) = rev.get_mut(&v) {
+        vec.retain(|(uu, kk, _)| !(*uu == u && *kk == *k));
+    }
+    if let Some(guard) = u.read(god2) {
+        if let Some(dest_map) = guard.children().get(k) {
+            if let Some(val) = dest_map.get(&v) {
+                rev.entry(v).or_default().push((u, k.clone(), val.clone()));
+            }
+        }
+    }
+}
+
 pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
@@ -265,23 +291,6 @@ pub fn eliminate_pushes_and_pops(
     };
     let is_end = |node: Intermediate2PrecomputeNode3Index| -> bool {
         node.read(&god2).map_or(false, |g| g.value.end)
-    };
-    // Keep rev in sync for a single (u, v, k) after insert/remove.
-    let mut sync_rev_entry_for = |u: Intermediate2PrecomputeNode3Index,
-                                  v: Intermediate2PrecomputeNode3Index,
-                                  k: &Intermediate2Trie3EdgeKey| {
-        if let Some(vec) = rev.get_mut(&v) {
-            vec.retain(|(uu, kk, _)| !(*uu == u && *kk == *k));
-        }
-        if let Some(guard) = u.read(&god2) {
-            if let Some(dest_map) = guard.children().get(k) {
-                if let Some(val) = dest_map.get(&v) {
-                    rev.entry(v)
-                        .or_default()
-                        .push((u, k.clone(), val.clone()));
-                }
-            }
-        }
     };
 
     // 4) Prepare an initial work queue: nodes that are not end, have at least one incoming push, and no outgoing push.
@@ -352,7 +361,7 @@ pub fn eliminate_pushes_and_pops(
             // Remove all incoming push edges to b
             for (a, push_k, _) in &incoming_pushes {
                 god2.remove_edge(*a, b, push_k);
-                sync_rev_entry_for(*a, b, push_k);
+                sync_rev_entry_for(&mut rev, &god2, *a, b, push_k);
             }
 
             // Create shortcut edges from a to c
@@ -384,7 +393,7 @@ pub fn eliminate_pushes_and_pops(
                     if let Some(new_k) = new_key_opt {
                         god2.insert_edge_simple(a, *c, new_k.clone(), new_tokens.clone());
                         // Keep reverse adjacency accurate (dedupe existing entry).
-                        sync_rev_entry_for(a, *c, &new_k);
+                        sync_rev_entry_for(&mut rev, &god2, a, *c, &new_k);
                         if let Intermediate2Trie3EdgeKey::Push(_) = new_k {
                             // If c has no outgoing push, it's a candidate to process next.
                             if !is_end(*c) && !has_outgoing_push(*c) && in_queue.insert(*c) {
@@ -438,18 +447,18 @@ pub fn eliminate_pushes_and_pops(
             }
             for (k, c, val) in &to_move {
                 god2.insert_edge_simple(b_np, *c, k.clone(), val.clone());
-                sync_rev_entry_for(b_np, *c, &k);
+                sync_rev_entry_for(&mut rev, &god2, b_np, *c, &k);
             }
             for (k, c, _) in &to_move {
                 god2.remove_edge(b, *c, &k);
-                sync_rev_entry_for(b, *c, &k);
+                sync_rev_entry_for(&mut rev, &god2, b, *c, &k);
             }
 
             // Duplicate all incoming edges so both b (push-only) and b_np (non-push-only) are reachable
             if let Some(incoming) = rev.get(&b).cloned() {
                 for (a, k, val) in incoming {
                     god2.insert_edge_simple(a, b_np, k.clone(), val.clone());
-                    sync_rev_entry_for(a, b_np, &k);
+                    sync_rev_entry_for(&mut rev, &god2, a, b_np, &k);
                     if let Intermediate2Trie3EdgeKey::Push(_) = k {
                         if !is_end(b_np) && !has_outgoing_push(b_np) && in_queue.insert(b_np) {
                             queue.push_back(b_np);

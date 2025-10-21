@@ -11,7 +11,7 @@ local_system:
       };
       use crate::datastructures::trie::{GodWrapper, MergeableEdgeValue, Trie, Trie2Index};
       use crate::tokenizer::TokenizerStateID;
-      use std::collections::{BTreeMap, HashMap, HashSet};
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
       use std::fmt::{self, Display, Formatter};
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -231,262 +231,247 @@ local_system:
           roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
           god: &IntermediateTrie3GodWrapper,
       ) {
-          println!("Starting push/pop elimination...");
-          let initial_nodes =
-              IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
-                  .len();
-          println!("Initial graph node count: {}", initial_nodes);
-
-          // 1. Convert to Intermediate2 format, which moves token constraints to edge values.
+          // 1) Convert to Intermediate2 format, which moves token constraints to edge values.
           let (roots2, god2) = convert_to_intermediate2(roots, god);
-          let intermediate_nodes = Intermediate2PrecomputeNode3::all_nodes(
+
+          // 2) Build the set of reachable nodes once.
+          let all_nodes = Intermediate2PrecomputeNode3::all_nodes(
               &god2,
               &roots2.values().cloned().collect::<Vec<_>>(),
-          )
-          .len();
-          println!(
-              "Intermediate graph node count: {}",
-              intermediate_nodes
           );
 
-          let mut loop_count = 0;
-          // 2. Main loop: find and process nodes until no more candidates exist.
-          loop {
-              loop_count += 1;
-              let all_nodes = Intermediate2PrecomputeNode3::all_nodes(
-                  &god2,
-                  &roots2.values().cloned().collect::<Vec<_>>(),
-              );
-              println!(
-                  "\nLoop {}: starting with {} nodes.",
-                  loop_count,
-                  all_nodes.len()
-              );
-
-              // To efficiently find incoming edges, we build a reverse adjacency list.
-              let mut reverse_adj: HashMap<
+          // 3) Build reverse adjacency once and keep it incrementally updated.
+          let mut rev: HashMap<
+              Intermediate2PrecomputeNode3Index,
+              Vec<(
                   Intermediate2PrecomputeNode3Index,
-                  Vec<(
-                      Intermediate2PrecomputeNode3Index,
-                      Intermediate2Trie3EdgeKey,
-                      LLMTokenBV,
-                  )>,
-              > = HashMap::new();
-              for &u in &all_nodes {
-                  if let Some(u_guard) = u.read(&god2) {
-                      for (edge_key, dest_map) in u_guard.children() {
-                          for (&v, edge_val) in dest_map {
-                              reverse_adj
-                                  .entry(v)
-                                  .or_default()
-                                  .push((u, edge_key.clone(), edge_val.clone()));
-                          }
+                  Intermediate2Trie3EdgeKey,
+                  LLMTokenBV,
+              )>,
+          > = HashMap::new();
+          for &u in &all_nodes {
+              if let Some(u_guard) = u.read(&god2) {
+                  for (edge_key, dest_map) in u_guard.children() {
+                      for (&v, edge_val) in dest_map {
+                          rev.entry(v)
+                              .or_default()
+                              .push((u, edge_key.clone(), edge_val.clone()));
                       }
-                  }
-              }
-
-              // Find a candidate node 'B' to process:
-              // - Not an end state.
-              // - Has at least one incoming Push edge.
-              // - Has no outgoing Push edges.
-              let mut nodes_to_process = Vec::new();
-              for &b_idx in &all_nodes {
-                  let b_guard = b_idx.read(&god2).unwrap();
-                  if b_guard.value.end {
-                      continue;
-                  }
-
-                  let has_outgoing_push = b_guard
-                      .children()
-                      .keys()
-                      .any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
-                  if has_outgoing_push {
-                      continue;
-                  }
-
-                  if let Some(incoming_edges) = reverse_adj.get(&b_idx) {
-                      let has_incoming_push = incoming_edges
-                          .iter()
-                          .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
-                      if has_incoming_push {
-                          nodes_to_process.push(b_idx);
-                      }
-                  }
-              }
-
-              if !nodes_to_process.is_empty() {
-                  println!(
-                      "  Found {} standard candidate nodes to process.",
-                      nodes_to_process.len()
-                  );
-
-                  let mut edges_to_remove = Vec::new();
-                  let mut edges_to_add = Vec::new();
-
-                  for &b_idx in &nodes_to_process {
-                      // Gather information about B's incoming pushes and all outgoing edges.
-                      let incoming_pushes: Vec<_> = reverse_adj
-                          .get(&b_idx)
-                          .unwrap()
-                          .iter()
-                          .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-                          .cloned()
-                          .collect();
-
-                      let outgoing_edges: Vec<_> = b_idx
-                          .read(&god2)
-                          .unwrap()
-                          .children()
-                          .iter()
-                          .flat_map(|(k, dest_map)| {
-                              dest_map
-                                  .iter()
-                                  .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
-                          })
-                          .collect();
-
-                      // Remove all incoming push edges to B.
-                      for (a_idx, edge_key, _) in &incoming_pushes {
-                          edges_to_remove.push((*a_idx, b_idx, edge_key.clone()));
-                      }
-
-                      // Create new "shortcut" edges from A to C.
-                      for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
-                          let s = match push_key {
-                              Intermediate2Trie3EdgeKey::Push(s) => s,
-                              _ => unreachable!(),
-                          };
-
-                          for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
-                              let new_tokens = tokens_a_b & tokens_b_c;
-                              if new_tokens.is_empty() {
-                                  continue;
-                              }
-
-                              let new_key_opt = match op_key {
-                                  Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
-                                  Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
-                                  Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
-                                  Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
-                                  Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
-                              };
-
-                              if let Some(new_key) = new_key_opt {
-                                  edges_to_add.push((*a_idx, *c_idx, new_key, new_tokens));
-                              }
-                          }
-                      }
-                  }
-
-                  for (u, v, k) in edges_to_remove {
-                      god2.remove_edge(u, v, &k);
-                  }
-                  for (u, v, k, val) in edges_to_add {
-                      god2.insert_edge_simple(u, v, k, val);
-                  }
-              } else {
-                  // No candidate with "incoming Push" and "no outgoing Push".
-                  // Fallback: split a node that has both Push and non-Push outgoing edges
-                  // and at least one incoming Push. This creates exactly one new node,
-                  // moving all non-Push outgoing edges to it and duplicating all incoming
-                  // edges to preserve behavior. Then retry the main loop.
-                  let mut split_candidates = Vec::new();
-                  for &b_idx in &all_nodes {
-                      let b_guard = b_idx.read(&god2).unwrap();
-                      if b_guard.value.end {
-                          continue;
-                      }
-                      let mut has_outgoing_push = false;
-                      let mut has_outgoing_nonpush = false;
-                      for k in b_guard.children().keys() {
-                          match k {
-                              Intermediate2Trie3EdgeKey::Push(_) => has_outgoing_push = true,
-                              _ => has_outgoing_nonpush = true,
-                          }
-                      }
-                      if !(has_outgoing_push && has_outgoing_nonpush) {
-                          continue;
-                      }
-                      let has_incoming_push = reverse_adj
-                          .get(&b_idx)
-                          .map_or(false, |incoming| {
-                              incoming
-                                  .iter()
-                                  .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-                          });
-                      if has_incoming_push {
-                          split_candidates.push(b_idx);
-                      }
-                  }
-
-                  if !split_candidates.is_empty() {
-                      println!(
-                          "  No standard candidate. Found {} split candidates to process.",
-                          split_candidates.len()
-                      );
-                      for &b_idx in &split_candidates {
-                      // Create the new "non-push" clone node
-                      let b_value = b_idx.read(&god2).unwrap().value.clone();
-                      let b_np_idx = Intermediate2PrecomputeNode3Index::new(
-                          god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
-                      );
-
-                      // Move all non-push outgoing edges from b_idx -> (...) to b_np_idx -> (...)
-                      let mut to_move: Vec<(
-                          Intermediate2Trie3EdgeKey,
-                          Intermediate2PrecomputeNode3Index,
-                          LLMTokenBV,
-                      )> = Vec::new();
-                      if let Some(b_guard) = b_idx.read(&god2) {
-                          for (edge_key, dest_map) in b_guard.children() {
-                              if !matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
-                                  for (&c_idx, val) in dest_map {
-                                      to_move.push((edge_key.clone(), c_idx, val.clone()));
-                                  }
-                              }
-                          }
-                      }
-                      for (k, c_idx, val) in &to_move {
-                          god2.insert_edge_simple(b_np_idx, *c_idx, k.clone(), val.clone());
-                      }
-                      for (k, c_idx, _) in &to_move {
-                          god2.remove_edge(b_idx, *c_idx, k);
-                      }
-
-                      // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable
-                          if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
-                          for (a_idx, k, val) in incoming {
-                                  god2.insert_edge_simple(a_idx, b_np_idx, k.clone(), val.clone());
-                          }
-                      }
-                      }
-
-                      // Now that we've split, try again from the top to pick up a standard candidate.
-                      continue;
-                  } else {
-                      // No more nodes to process and no viable split candidate: stop.
-                      println!("  No more candidates to process or split. Exiting loop.");
-                      break;
                   }
               }
           }
 
-          // 3. Convert back to the original Trie format.
-          let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
-          println!(
-              "Finished elimination loop. Final intermediate graph has {} nodes.",
-              IntermediatePrecomputeNode3::all_nodes(
-                  &new_god1,
-                  &new_roots1_map
-                      .values()
-                      .cloned()
-                      .collect::<Vec<_>>()
-              )
-              .len()
-          );
+          // Helpers
+          let has_outgoing_push = |node: Intermediate2PrecomputeNode3Index| -> bool {
+              node.read(&god2)
+                  .map_or(false, |g| g.children().keys().any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_))))
+          };
+          let has_outgoing_nonpush = |node: Intermediate2PrecomputeNode3Index| -> bool {
+              node.read(&god2)
+                  .map_or(false, |g| g.children().keys().any(|k| !matches!(k, Intermediate2Trie3EdgeKey::Push(_))))
+          };
+          let is_end = |node: Intermediate2PrecomputeNode3Index| -> bool {
+              node.read(&god2).map_or(false, |g| g.value.end)
+          };
+          // Keep rev in sync for a single (u, v, k) after insert/remove.
+          let mut sync_rev_entry_for = |u: Intermediate2PrecomputeNode3Index,
+                                        v: Intermediate2PrecomputeNode3Index,
+                                        k: &Intermediate2Trie3EdgeKey| {
+              if let Some(vec) = rev.get_mut(&v) {
+                  vec.retain(|(uu, kk, _)| !(*uu == u && *kk == *k));
+              }
+              if let Some(guard) = u.read(&god2) {
+                  if let Some(dest_map) = guard.children().get(k) {
+                      if let Some(val) = dest_map.get(&v) {
+                          rev.entry(v)
+                              .or_default()
+                              .push((u, k.clone(), val.clone()));
+                      }
+                  }
+              }
+          };
 
-          // 4. The function signature requires modifying `god` in place.
-          // We clear the original `god` and deep-copy the new graph into it.
+          // 4) Prepare an initial work queue: nodes that are not end, have at least one incoming push, and no outgoing push.
+          let mut queue: VecDeque<Intermediate2PrecomputeNode3Index> = VecDeque::new();
+          let mut in_queue: HashSet<Intermediate2PrecomputeNode3Index> = HashSet::new();
+          for &b in &all_nodes {
+              if is_end(b) {
+                  continue;
+              }
+              let has_incoming_push = rev
+                  .get(&b)
+                  .map_or(false, |incoming| incoming.iter().any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_))));
+              if has_incoming_push && !has_outgoing_push(b) {
+                  queue.push_back(b);
+                  in_queue.insert(b);
+              }
+          }
+
+          // Maintain a set of potential split candidates incrementally.
+          let mut split_candidates: HashSet<Intermediate2PrecomputeNode3Index> = HashSet::new();
+          for &b in &all_nodes {
+              if is_end(b) {
+                  continue;
+              }
+              let has_incoming_push = rev
+                  .get(&b)
+                  .map_or(false, |incoming| incoming.iter().any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_))));
+              if has_incoming_push && has_outgoing_push(b) && has_outgoing_nonpush(b) {
+                  split_candidates.insert(b);
+              }
+          }
+
+          // 5) Event-driven elimination loop.
+          loop {
+              while let Some(b) = queue.pop_front() {
+                  in_queue.remove(&b);
+                  if is_end(b) {
+                      continue;
+                  }
+                  if has_outgoing_push(b) {
+                      // Not eligible anymore (maybe changed); skip.
+                      continue;
+                  }
+
+                  // Snapshot incoming pushes to b
+                  let incoming_list = rev.get(&b).cloned().unwrap_or_default();
+                  let incoming_pushes: Vec<_> = incoming_list
+                      .into_iter()
+                      .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+                      .collect();
+                  if incoming_pushes.is_empty() {
+                      continue;
+                  }
+
+                  // Gather outgoing non-push edges from b
+                  let mut outgoing_nonpush: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
+                  if let Some(b_guard) = b.read(&god2) {
+                      for (k, dest_map) in b_guard.children() {
+                          if matches!(k, Intermediate2Trie3EdgeKey::Push(_)) {
+                              continue;
+                          }
+                          for (&c, val) in dest_map {
+                              outgoing_nonpush.push((k.clone(), c, val.clone()));
+                          }
+                      }
+                  }
+
+                  // Remove all incoming push edges to b
+                  for (a, push_k, _) in &incoming_pushes {
+                      god2.remove_edge(*a, b, push_k);
+                      sync_rev_entry_for(*a, b, push_k);
+                  }
+
+                  // Create shortcut edges from a to c
+                  for (a, push_k, tokens_a_b) in incoming_pushes {
+                      let s = match &push_k {
+                          Intermediate2Trie3EdgeKey::Push(s) => s.clone(),
+                          _ => unreachable!(),
+                      };
+                      for (op_k, c, tokens_b_c) in &outgoing_nonpush {
+                          let new_tokens = tokens_a_b.clone() & tokens_b_c.clone();
+                          if new_tokens.is_empty() {
+                              continue;
+                          }
+                          let new_key_opt = match op_k {
+                              Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
+                                  (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s.clone() & s_prime.clone()))
+                              }
+                              Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
+                                  (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp)
+                              }
+                              Intermediate2Trie3EdgeKey::Pop(n, s_prime) => {
+                                  Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone()))
+                              }
+                              Intermediate2Trie3EdgeKey::NoOp => {
+                                  Some(Intermediate2Trie3EdgeKey::Push(s.clone()))
+                              }
+                              Intermediate2Trie3EdgeKey::Push(_) => unreachable!(),
+                          };
+                          if let Some(new_k) = new_key_opt {
+                              god2.insert_edge_simple(a, *c, new_k.clone(), new_tokens.clone());
+                              // Keep reverse adjacency accurate (dedupe existing entry).
+                              sync_rev_entry_for(a, *c, &new_k);
+                              if let Intermediate2Trie3EdgeKey::Push(_) = new_k {
+                                  // If c has no outgoing push, it's a candidate to process next.
+                                  if !is_end(*c) && !has_outgoing_push(*c) && in_queue.insert(*c) {
+                                      queue.push_back(*c);
+                                  }
+                                  // If c has both push and non-push outgoing edges, it's a split candidate.
+                                  if has_outgoing_push(*c) && has_outgoing_nonpush(*c) {
+                                      split_candidates.insert(*c);
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              // Queue is empty. If there are split candidates that still qualify, split them in batch.
+              let mut to_split: Vec<Intermediate2PrecomputeNode3Index> = Vec::new();
+              for &b in split_candidates.iter() {
+                  if is_end(b) {
+                      continue;
+                  }
+                  let has_incoming_push = rev
+                      .get(&b)
+                      .map_or(false, |incoming| incoming.iter().any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_))));
+                  if has_incoming_push && has_outgoing_push(b) && has_outgoing_nonpush(b) {
+                      to_split.push(b);
+                  }
+              }
+              if to_split.is_empty() {
+                  break;
+              }
+
+              for b in to_split {
+                  split_candidates.remove(&b);
+                  // Create the new "non-push" clone node
+                  let b_value = b.read(&god2).unwrap().value.clone();
+                  let b_np = Intermediate2PrecomputeNode3Index::new(
+                      god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
+                  );
+
+                  // Move all non-push outgoing edges from b -> (...) to b_np -> (...)
+                  let mut to_move: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
+                  if let Some(b_guard) = b.read(&god2) {
+                      for (edge_key, dest_map) in b_guard.children() {
+                          if !matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
+                              for (&c, val) in dest_map {
+                                  to_move.push((edge_key.clone(), c, val.clone()));
+                              }
+                          }
+                      }
+                  }
+                  for (k, c, val) in &to_move {
+                      god2.insert_edge_simple(b_np, *c, k.clone(), val.clone());
+                      sync_rev_entry_for(b_np, *c, &k);
+                  }
+                  for (k, c, _) in &to_move {
+                      god2.remove_edge(b, *c, &k);
+                      sync_rev_entry_for(b, *c, &k);
+                  }
+
+                  // Duplicate all incoming edges so both b (push-only) and b_np (non-push-only) are reachable
+                  if let Some(incoming) = rev.get(&b).cloned() {
+                      for (a, k, val) in incoming {
+                          god2.insert_edge_simple(a, b_np, k.clone(), val.clone());
+                          sync_rev_entry_for(a, b_np, &k);
+                          if let Intermediate2Trie3EdgeKey::Push(_) = k {
+                              if !is_end(b_np) && !has_outgoing_push(b_np) && in_queue.insert(b_np) {
+                                  queue.push_back(b_np);
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // 6) Convert back to the original Trie format.
+          let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
+
+          // 7) The function signature requires modifying `god` in place.
+          // Clear the original `god` and deep-copy the new graph into it.
           let mut sids_in_order = Vec::new();
           let mut new_roots_vec = Vec::new();
           for (&sid, &root_idx) in &new_roots1_map {
@@ -502,11 +487,6 @@ local_system:
           for (sid, final_root_idx) in sids_in_order.iter().zip(final_roots_vec.iter()) {
               roots.insert(*sid, *final_root_idx);
           }
-          println!(
-              "Final graph node count: {}",
-              IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
-                  .len()
-          );
       }
 
       // --- Assertion and Test Helpers (Unchanged) ---
@@ -717,6 +697,749 @@ local_system:
       }
   prev_file_contents:
     src/constraint_precompute3_challenge_elimination.rs: |-
+      use crate::constraint::{
+          IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediatePrecomputedNodeContents3,
+          IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV,
+      };
+      use crate::datastructures::trie::{GodWrapper, MergeableEdgeValue, Trie, Trie2Index};
+      use crate::tokenizer::TokenizerStateID;
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+      use std::fmt::{self, Display, Formatter};
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum Intermediate2Trie3EdgeKey {
+          Pop(usize, StateIDBV),
+          Push(StateIDBV),
+          NoOp,
+      }
+
+      impl Display for Intermediate2Trie3EdgeKey {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              fn format_bv(bv: &StateIDBV) -> String {
+                  if bv.is_empty() {
+                      return "[]".to_string();
+                  }
+                  if bv.is_all() {
+                      return "[ALL]".to_string();
+                  }
+
+                  const MAX_RANGES_TO_SHOW: usize = 10;
+                  let total_ranges = bv.inner().ranges_len();
+
+                  let mut parts: Vec<String> = bv
+                      .iter_ranges()
+                      .take(MAX_RANGES_TO_SHOW)
+                      .map(|(start, end)| {
+                          if start == end {
+                              format!("{}", start)
+                          } else if end == usize::MAX {
+                              format!("{}..", start)
+                          } else {
+                              format!("{}..={}", start, end)
+                          }
+                      })
+                      .collect();
+
+                  if total_ranges > MAX_RANGES_TO_SHOW {
+                      parts.push(format!("... ({} more ranges)", total_ranges - MAX_RANGES_TO_SHOW));
+                  }
+
+                  if total_ranges > 1 {
+                      format!("[{}]", parts.join(", "))
+                  } else {
+                      parts.join(", ")
+                  }
+              }
+
+              match self {
+                  Intermediate2Trie3EdgeKey::Pop(n, bv) => write!(f, "Pop({}, {})", n, format_bv(bv)),
+                  Intermediate2Trie3EdgeKey::Push(bv) => write!(f, "Push({})", format_bv(bv)),
+                  Intermediate2Trie3EdgeKey::NoOp => write!(f, "NoOp"),
+              }
+          }
+      }
+
+      pub type Intermediate2PrecomputeNode3 =
+          Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
+      pub type Intermediate2PrecomputeNode3Index = Trie2Index;
+      pub type Intermediate2Trie3GodWrapper =
+          GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
+
+      // This conversion function remains the same. It simplifies the graph by
+      // moving token constraints into edge values.
+      fn convert_to_intermediate2(
+          roots1: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+          god1: &IntermediateTrie3GodWrapper,
+      ) -> (
+          BTreeMap<TokenizerStateID, Intermediate2PrecomputeNode3Index>,
+          Intermediate2Trie3GodWrapper,
+      ) {
+          let god2 = Intermediate2Trie3GodWrapper::new();
+          let mut roots2 = BTreeMap::new();
+          let mut node_map: HashMap<IntermediatePrecomputeNode3Index, Intermediate2PrecomputeNode3Index> =
+              HashMap::new();
+          let mut q: std::collections::VecDeque<IntermediatePrecomputeNode3Index> =
+              std::collections::VecDeque::new();
+
+          for (sid, root1) in roots1 {
+              let root2 = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(
+                  root1.read(god1).unwrap().value.clone(),
+              )));
+              roots2.insert(*sid, root2);
+              node_map.insert(*root1, root2);
+              q.push_back(*root1);
+          }
+
+          let mut visited = HashSet::new();
+          while let Some(idx1) = q.pop_front() {
+              if !visited.insert(idx1) {
+                  continue;
+              }
+              let idx2 = *node_map.get(&idx1).unwrap();
+              let guard1 = idx1.read(god1).unwrap();
+
+              for (edge_key1, dest_map1) in guard1.children() {
+                  for (child1_idx, _) in dest_map1 {
+                      let child2_idx = *node_map.entry(*child1_idx).or_insert_with(|| {
+                          let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(
+                              Intermediate2PrecomputeNode3::new(child1_idx.read(god1).unwrap().value.clone()),
+                          ));
+                          q.push_back(*child1_idx);
+                          new_node
+                      });
+
+                      let (edge_key2, edge_value2) = match edge_key1 {
+                          IntermediateTrie3EdgeKey::Pop(n, s) => {
+                              (Intermediate2Trie3EdgeKey::Pop(*n, s.clone()), LLMTokenBV::max_ones())
+                          }
+                          IntermediateTrie3EdgeKey::Push(s) => {
+                              (Intermediate2Trie3EdgeKey::Push(s.clone()), LLMTokenBV::max_ones())
+                          }
+                          IntermediateTrie3EdgeKey::NoOp => {
+                              (Intermediate2Trie3EdgeKey::NoOp, LLMTokenBV::max_ones())
+                          }
+                          IntermediateTrie3EdgeKey::CheckLLM(bv) => {
+                              (Intermediate2Trie3EdgeKey::NoOp, bv.clone())
+                          }
+                      };
+
+                      god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
+                  }
+              }
+          }
+
+          (roots2, god2)
+      }
+
+      // This conversion function also remains the same.
+      fn convert_from_intermediate2(
+          roots2: &BTreeMap<TokenizerStateID, Intermediate2PrecomputeNode3Index>,
+          god2: &Intermediate2Trie3GodWrapper,
+      ) -> (
+          BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+          IntermediateTrie3GodWrapper,
+      ) {
+          let god1 = IntermediateTrie3GodWrapper::new();
+          let mut roots1 = BTreeMap::new();
+          let mut node_map: HashMap<Intermediate2PrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
+              HashMap::new();
+          let mut q: std::collections::VecDeque<Intermediate2PrecomputeNode3Index> =
+              std::collections::VecDeque::new();
+
+          for (sid, root2) in roots2 {
+              let root1 = IntermediatePrecomputeNode3Index::new(god1.insert(IntermediatePrecomputeNode3::new(
+                  root2.read(god2).unwrap().value.clone(),
+              )));
+              roots1.insert(*sid, root1);
+              node_map.insert(*root2, root1);
+              q.push_back(*root2);
+          }
+
+          let mut visited = HashSet::new();
+          while let Some(idx2) = q.pop_front() {
+              if !visited.insert(idx2) {
+                  continue;
+              }
+              let idx1 = *node_map.get(&idx2).unwrap();
+              let guard2 = idx2.read(god2).unwrap();
+
+              for (edge_key2, dest_map2) in guard2.children() {
+                  for (child2_idx, edge_value2) in dest_map2 {
+                      let child1_idx = *node_map.entry(*child2_idx).or_insert_with(|| {
+                          let new_node = IntermediatePrecomputeNode3Index::new(god1.insert(
+                              IntermediatePrecomputeNode3::new(child2_idx.read(god2).unwrap().value.clone()),
+                          ));
+                          q.push_back(*child2_idx);
+                          new_node
+                      });
+
+                      if edge_value2.is_all() {
+                          let edge_key1 = match edge_key2 {
+                              Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
+                              Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
+                              Intermediate2Trie3EdgeKey::NoOp => IntermediateTrie3EdgeKey::NoOp,
+                          };
+                          god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());
+                      } else {
+                          match edge_key2 {
+                              Intermediate2Trie3EdgeKey::NoOp => {
+                                  god1.insert_edge_simple(
+                                      idx1,
+                                      child1_idx,
+                                      IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()),
+                                      (),
+                                  );
+                              }
+                              _ => {
+                                  // Need an intermediate node to separate op and CheckLLM
+                                  let inter = IntermediatePrecomputeNode3Index::new(god1.insert(
+                                      IntermediatePrecomputeNode3::new(
+                                          IntermediatePrecomputedNodeContents3::internal(),
+                                      ),
+                                  ));
+                                  let edge_key1_op = match edge_key2 {
+                                      Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
+                                      Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
+                                      _ => unreachable!(),
+                                  };
+                                  god1.insert_edge_simple(idx1, inter, edge_key1_op, ());
+                                  god1.insert_edge_simple(
+                                      inter,
+                                      child1_idx,
+                                      IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()),
+                                      (),
+                                  );
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          (roots1, god1)
+      }
+
+      fn sync_rev_entry_for(
+          rev: &mut HashMap<
+              Intermediate2PrecomputeNode3Index,
+              Vec<(
+                  Intermediate2PrecomputeNode3Index,
+                  Intermediate2Trie3EdgeKey,
+                  LLMTokenBV,
+              )>,
+          >,
+          god2: &Intermediate2Trie3GodWrapper,
+          u: Intermediate2PrecomputeNode3Index,
+          v: Intermediate2PrecomputeNode3Index,
+          k: &Intermediate2Trie3EdgeKey,
+      ) {
+          if let Some(vec) = rev.get_mut(&v) {
+              vec.retain(|(uu, kk, _)| !(*uu == u && *kk == *k));
+          }
+          if let Some(guard) = u.read(god2) {
+              if let Some(dest_map) = guard.children().get(k) {
+                  if let Some(val) = dest_map.get(&v) {
+                      rev.entry(v).or_default().push((u, k.clone(), val.clone()));
+                  }
+              }
+          }
+      }
+
+      pub fn eliminate_pushes_and_pops(
+          roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+          god: &IntermediateTrie3GodWrapper,
+      ) {
+          // 1) Convert to Intermediate2 format, which moves token constraints to edge values.
+          let (roots2, god2) = convert_to_intermediate2(roots, god);
+
+          // 2) Build the set of reachable nodes once.
+          let all_nodes = Intermediate2PrecomputeNode3::all_nodes(
+              &god2,
+              &roots2.values().cloned().collect::<Vec<_>>(),
+          );
+
+          // 3) Build reverse adjacency once and keep it incrementally updated.
+          let mut rev: HashMap<
+              Intermediate2PrecomputeNode3Index,
+              Vec<(
+                  Intermediate2PrecomputeNode3Index,
+                  Intermediate2Trie3EdgeKey,
+                  LLMTokenBV,
+              )>,
+          > = HashMap::new();
+          for &u in &all_nodes {
+              if let Some(u_guard) = u.read(&god2) {
+                  for (edge_key, dest_map) in u_guard.children() {
+                      for (&v, edge_val) in dest_map {
+                          rev.entry(v)
+                              .or_default()
+                              .push((u, edge_key.clone(), edge_val.clone()));
+                      }
+                  }
+              }
+          }
+
+          // Helpers
+          let has_outgoing_push = |node: Intermediate2PrecomputeNode3Index| -> bool {
+              node.read(&god2)
+                  .map_or(false, |g| g.children().keys().any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_))))
+          };
+          let has_outgoing_nonpush = |node: Intermediate2PrecomputeNode3Index| -> bool {
+              node.read(&god2)
+                  .map_or(false, |g| g.children().keys().any(|k| !matches!(k, Intermediate2Trie3EdgeKey::Push(_))))
+          };
+          let is_end = |node: Intermediate2PrecomputeNode3Index| -> bool {
+              node.read(&god2).map_or(false, |g| g.value.end)
+          };
+
+          // 4) Prepare an initial work queue: nodes that are not end, have at least one incoming push, and no outgoing push.
+          let mut queue: VecDeque<Intermediate2PrecomputeNode3Index> = VecDeque::new();
+          let mut in_queue: HashSet<Intermediate2PrecomputeNode3Index> = HashSet::new();
+          for &b in &all_nodes {
+              if is_end(b) {
+                  continue;
+              }
+              let has_incoming_push = rev
+                  .get(&b)
+                  .map_or(false, |incoming| incoming.iter().any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_))));
+              if has_incoming_push && !has_outgoing_push(b) {
+                  queue.push_back(b);
+                  in_queue.insert(b);
+              }
+          }
+
+          // Maintain a set of potential split candidates incrementally.
+          let mut split_candidates: HashSet<Intermediate2PrecomputeNode3Index> = HashSet::new();
+          for &b in &all_nodes {
+              if is_end(b) {
+                  continue;
+              }
+              let has_incoming_push = rev
+                  .get(&b)
+                  .map_or(false, |incoming| incoming.iter().any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_))));
+              if has_incoming_push && has_outgoing_push(b) && has_outgoing_nonpush(b) {
+                  split_candidates.insert(b);
+              }
+          }
+
+          // 5) Event-driven elimination loop.
+          loop {
+              while let Some(b) = queue.pop_front() {
+                  in_queue.remove(&b);
+                  if is_end(b) {
+                      continue;
+                  }
+                  if has_outgoing_push(b) {
+                      // Not eligible anymore (maybe changed); skip.
+                      continue;
+                  }
+
+                  // Snapshot incoming pushes to b
+                  let incoming_list = rev.get(&b).cloned().unwrap_or_default();
+                  let incoming_pushes: Vec<_> = incoming_list
+                      .into_iter()
+                      .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
+                      .collect();
+                  if incoming_pushes.is_empty() {
+                      continue;
+                  }
+
+                  // Gather outgoing non-push edges from b
+                  let mut outgoing_nonpush: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
+                  if let Some(b_guard) = b.read(&god2) {
+                      for (k, dest_map) in b_guard.children() {
+                          if matches!(k, Intermediate2Trie3EdgeKey::Push(_)) {
+                              continue;
+                          }
+                          for (&c, val) in dest_map {
+                              outgoing_nonpush.push((k.clone(), c, val.clone()));
+                          }
+                      }
+                  }
+
+                  // Remove all incoming push edges to b
+                  for (a, push_k, _) in &incoming_pushes {
+                      god2.remove_edge(*a, b, push_k);
+                      sync_rev_entry_for(&mut rev, &god2, *a, b, push_k);
+                  }
+
+                  // Create shortcut edges from a to c
+                  for (a, push_k, tokens_a_b) in incoming_pushes {
+                      let s = match &push_k {
+                          Intermediate2Trie3EdgeKey::Push(s) => s.clone(),
+                          _ => unreachable!(),
+                      };
+                      for (op_k, c, tokens_b_c) in &outgoing_nonpush {
+                          let new_tokens = tokens_a_b.clone() & tokens_b_c.clone();
+                          if new_tokens.is_empty() {
+                              continue;
+                          }
+                          let new_key_opt = match op_k {
+                              Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
+                                  (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s.clone() & s_prime.clone()))
+                              }
+                              Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
+                                  (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp)
+                              }
+                              Intermediate2Trie3EdgeKey::Pop(n, s_prime) => {
+                                  Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone()))
+                              }
+                              Intermediate2Trie3EdgeKey::NoOp => {
+                                  Some(Intermediate2Trie3EdgeKey::Push(s.clone()))
+                              }
+                              Intermediate2Trie3EdgeKey::Push(_) => unreachable!(),
+                          };
+                          if let Some(new_k) = new_key_opt {
+                              god2.insert_edge_simple(a, *c, new_k.clone(), new_tokens.clone());
+                              // Keep reverse adjacency accurate (dedupe existing entry).
+                              sync_rev_entry_for(&mut rev, &god2, a, *c, &new_k);
+                              if let Intermediate2Trie3EdgeKey::Push(_) = new_k {
+                                  // If c has no outgoing push, it's a candidate to process next.
+                                  if !is_end(*c) && !has_outgoing_push(*c) && in_queue.insert(*c) {
+                                      queue.push_back(*c);
+                                  }
+                                  // If c has both push and non-push outgoing edges, it's a split candidate.
+                                  if has_outgoing_push(*c) && has_outgoing_nonpush(*c) {
+                                      split_candidates.insert(*c);
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              // Queue is empty. If there are split candidates that still qualify, split them in batch.
+              let mut to_split: Vec<Intermediate2PrecomputeNode3Index> = Vec::new();
+              for &b in split_candidates.iter() {
+                  if is_end(b) {
+                      continue;
+                  }
+                  let has_incoming_push = rev
+                      .get(&b)
+                      .map_or(false, |incoming| incoming.iter().any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_))));
+                  if has_incoming_push && has_outgoing_push(b) && has_outgoing_nonpush(b) {
+                      to_split.push(b);
+                  }
+              }
+              if to_split.is_empty() {
+                  break;
+              }
+
+              for b in to_split {
+                  split_candidates.remove(&b);
+                  // Create the new "non-push" clone node
+                  let b_value = b.read(&god2).unwrap().value.clone();
+                  let b_np = Intermediate2PrecomputeNode3Index::new(
+                      god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
+                  );
+
+                  // Move all non-push outgoing edges from b -> (...) to b_np -> (...)
+                  let mut to_move: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
+                  if let Some(b_guard) = b.read(&god2) {
+                      for (edge_key, dest_map) in b_guard.children() {
+                          if !matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
+                              for (&c, val) in dest_map {
+                                  to_move.push((edge_key.clone(), c, val.clone()));
+                              }
+                          }
+                      }
+                  }
+                  for (k, c, val) in &to_move {
+                      god2.insert_edge_simple(b_np, *c, k.clone(), val.clone());
+                      sync_rev_entry_for(&mut rev, &god2, b_np, *c, &k);
+                  }
+                  for (k, c, _) in &to_move {
+                      god2.remove_edge(b, *c, &k);
+                      sync_rev_entry_for(&mut rev, &god2, b, *c, &k);
+                  }
+
+                  // Duplicate all incoming edges so both b (push-only) and b_np (non-push-only) are reachable
+                  if let Some(incoming) = rev.get(&b).cloned() {
+                      for (a, k, val) in incoming {
+                          god2.insert_edge_simple(a, b_np, k.clone(), val.clone());
+                          sync_rev_entry_for(&mut rev, &god2, a, b_np, &k);
+                          if let Intermediate2Trie3EdgeKey::Push(_) = k {
+                              if !is_end(b_np) && !has_outgoing_push(b_np) && in_queue.insert(b_np) {
+                                  queue.push_back(b_np);
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          // 6) Convert back to the original Trie format.
+          let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
+
+          // 7) The function signature requires modifying `god` in place.
+          // Clear the original `god` and deep-copy the new graph into it.
+          let mut sids_in_order = Vec::new();
+          let mut new_roots_vec = Vec::new();
+          for (&sid, &root_idx) in &new_roots1_map {
+              sids_in_order.push(sid);
+              new_roots_vec.push(root_idx);
+          }
+
+          god.clear();
+          let (final_roots_vec, _map) =
+              IntermediatePrecomputeNode3::deep_copy_subtrees_into(&new_god1, god, &new_roots_vec);
+
+          roots.clear();
+          for (sid, final_root_idx) in sids_in_order.iter().zip(final_roots_vec.iter()) {
+              roots.insert(*sid, *final_root_idx);
+          }
+      }
+
+      // --- Assertion and Test Helpers (Unchanged) ---
+
+      pub fn assert_no_pops_reachable_from_pushes(
+          roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+          god: &IntermediateTrie3GodWrapper,
+      ) {
+          let all_nodes = Trie::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>());
+
+          let mut pop_reachable_memo: HashMap<IntermediatePrecomputeNode3Index, bool> = HashMap::new();
+          for &node_idx in &all_nodes {
+              is_pop_reachable_from(node_idx, god, &mut pop_reachable_memo, &mut HashSet::new());
+          }
+
+          for &node_idx in &all_nodes {
+              if let Some(guard) = node_idx.read(god) {
+                  for (edge_key, dest_map) in guard.children() {
+                      if let IntermediateTrie3EdgeKey::Push(_) = edge_key {
+                          for child_idx in dest_map.keys() {
+                              if *pop_reachable_memo.get(child_idx).unwrap_or(&false) {
+                                  let path = find_path_to_pop(*child_idx, god, &pop_reachable_memo);
+                                  let mut options =
+                                      crate::datastructures::trie::PrettyPrintOptions::default()
+                                          .display_edge_keys_only()
+                                          .omit_depth();
+                                  eprintln!("Full graph:");
+                                  eprintln!(
+                                      "{}",
+                                      Trie::pretty_print_with_options(
+                                          god,
+                                          roots.values().cloned().collect::<Vec<_>>().as_slice(),
+                                          &options
+                                      )
+                                  );
+                                  eprintln!("Segment:");
+                                  eprintln!("{}", Trie::pretty_print_with_options(god, &[node_idx], &options));
+                                  panic!(
+                                      "Assertion failed: Pop is reachable from a Push edge. Path: Node {} --Push--> Node {} --> ... --> Pop. Path to pop: {:?}",
+                                      node_idx, child_idx, path
+                                  );
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+      }
+
+      fn is_pop_reachable_from(
+          node: IntermediatePrecomputeNode3Index,
+          god: &IntermediateTrie3GodWrapper,
+          memo: &mut HashMap<IntermediatePrecomputeNode3Index, bool>,
+          visiting: &mut HashSet<IntermediatePrecomputeNode3Index>,
+      ) -> bool {
+          if let Some(&result) = memo.get(&node) {
+              return result;
+          }
+          if !visiting.insert(node) {
+              return false;
+          }
+
+          if let Some(guard) = node.read(god) {
+              for (edge_key, dest_map) in guard.children() {
+                  if let IntermediateTrie3EdgeKey::Pop(_, _) = edge_key {
+                      visiting.remove(&node);
+                      memo.insert(node, true);
+                      return true;
+                  }
+                  for child_idx in dest_map.keys() {
+                      if is_pop_reachable_from(*child_idx, god, memo, visiting) {
+                          visiting.remove(&node);
+                          memo.insert(node, true);
+                          return true;
+                      }
+                  }
+              }
+          }
+
+          visiting.remove(&node);
+          memo.insert(node, false);
+          false
+      }
+
+      fn find_path_to_pop(
+          start_node: IntermediatePrecomputeNode3Index,
+          god: &IntermediateTrie3GodWrapper,
+          pop_reachable_memo: &HashMap<IntermediatePrecomputeNode3Index, bool>,
+      ) -> Vec<(IntermediatePrecomputeNode3Index, String)> {
+          let mut path = vec![];
+          let mut current_node = start_node;
+          let mut visited = HashSet::new();
+
+          while visited.insert(current_node) {
+              if let Some(guard) = current_node.read(god) {
+                  let mut found_next = false;
+                  for (edge_key, dest_map) in guard.children() {
+                      if let IntermediateTrie3EdgeKey::Pop(_, _) = edge_key {
+                          path.push((current_node, format!("{}", edge_key)));
+                          return path;
+                      }
+                      for child_idx in dest_map.keys() {
+                          if *pop_reachable_memo.get(child_idx).unwrap_or(&false) {
+                              path.push((current_node, format!("{}", edge_key)));
+                              current_node = *child_idx;
+                              found_next = true;
+                              break;
+                          }
+                      }
+                      if found_next {
+                          break;
+                      }
+                  }
+                  if !found_next {
+                      break;
+                  }
+              } else {
+                  break;
+              }
+          }
+          path
+      }
+
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+          use crate::constraint::{
+              IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, StateIDBV,
+          };
+          use crate::datastructures::trie::Trie;
+          use crate::tokenizer::TokenizerStateID;
+          use std::collections::{BTreeMap, HashMap};
+
+          #[test]
+          fn test_eliminate_push_pop_failure_case() {
+              let god = IntermediateTrie3GodWrapper::new();
+
+              let mut node_map = HashMap::new();
+              let node_ids = vec![5, 6, 7, 8, 9, 13, 14, 15, 16];
+              for id in node_ids {
+                  node_map.insert(
+                      id,
+                      Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))),
+                  );
+              }
+
+              let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+
+              // Segment that previously failed:
+              // 13 --Push--> 14 --Pop--> 15
+              // 14 also has another outgoing Push to 16
+              god.insert_edge_simple(n(13), n(14), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+              god.insert_edge_simple(n(14), n(15), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
+              god.insert_edge_simple(n(14), n(16), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(4)), ());
+              god.insert_edge_simple(n(15), n(5), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+              god.insert_edge_simple(n(5), n(6), IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)), ());
+              god.insert_edge_simple(n(6), n(7), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+              god.insert_edge_simple(n(7), n(8), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
+              god.insert_edge_simple(n(8), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
+              god.insert_edge_simple(n(16), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(2)), ());
+
+              let mut roots = BTreeMap::new();
+              roots.insert(TokenizerStateID(0), n(13));
+
+              eliminate_pushes_and_pops(&mut roots, &god);
+
+              // This assertion should now pass.
+              assert_no_pops_reachable_from_pushes(&roots, &god);
+          }
+
+          #[test]
+          fn test_eliminate_push_noop_pop_failure_case() {
+              let god = IntermediateTrie3GodWrapper::new();
+
+              let mut node_map = HashMap::new();
+              // N101: Push source (Root)
+              // N102: Problematic node (Push in, Push out, NoOp out to Pop path)
+              // N103: NoOp target (Pop source)
+              // N104: Pop target
+              // N105: Push target / Cycle target
+              let node_ids = vec![101, 102, 103, 104, 105];
+              for id in node_ids {
+                  node_map.insert(
+                      id,
+                      Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))),
+                  );
+              }
+
+              let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+
+              // N101 --Push(1)--> N102
+              god.insert_edge_simple(n(101), n(102), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
+              // N102 --NoOp--> N103
+              god.insert_edge_simple(n(102), n(103), IntermediateTrie3EdgeKey::NoOp, ());
+              // N102 --Push(2)--> N105
+              god.insert_edge_simple(n(102), n(105), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
+              // N103 --Pop(1, ALL)--> N104
+              god.insert_edge_simple(n(103), n(104), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
+              // N105 --CheckLLM(1)--> N101 (cycle)
+              god.insert_edge_simple(n(105), n(101), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(1)), ());
+
+              let mut roots = BTreeMap::new();
+              roots.insert(TokenizerStateID(0), n(101));
+
+              eliminate_pushes_and_pops(&mut roots, &god);
+              assert_no_pops_reachable_from_pushes(&roots, &god);
+          }
+      }
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+  default_end_line:
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - gp
+  code_completion_model:
+    - cp
+  commit_message_model:
+    - gemini/gemini-flash-lite-latest
+  diff_correction_model:
+    - gf
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```rust "src/constraint_precompute3_challenge_elimination.rs"
       use crate::constraint::{
           IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediatePrecomputedNodeContents3,
           IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV,
@@ -1407,2320 +2130,100 @@ local_system:
               assert_no_pops_reachable_from_pushes(&roots, &god);
           }
       }
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-  default_end_line:
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - gpt-5
-  code_completion_model:
-    - cp
-  commit_message_model:
-    - gemini/gemini-flash-lite-latest
-  diff_correction_model:
-    - gf
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```rust "src/constraint_precompute3_challenge_elimination.rs"
-      use crate::constraint::{
-          IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediatePrecomputedNodeContents3,
-          IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV,
-      };
-      use crate::datastructures::trie::{GodWrapper, MergeableEdgeValue, Trie, Trie2Index};
-      use crate::tokenizer::TokenizerStateID;
-      use std::collections::{BTreeMap, HashMap, HashSet};
-      use std::fmt::{self, Display, Formatter};
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub enum Intermediate2Trie3EdgeKey {
-          Pop(usize, StateIDBV),
-          Push(StateIDBV),
-          NoOp,
-      }
-
-      impl Display for Intermediate2Trie3EdgeKey {
-          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-              fn format_bv(bv: &StateIDBV) -> String {
-                  if bv.is_empty() {
-                      return "[]".to_string();
-                  }
-                  if bv.is_all() {
-                      return "[ALL]".to_string();
-                  }
-
-                  const MAX_RANGES_TO_SHOW: usize = 10;
-                  let total_ranges = bv.inner().ranges_len();
-
-                  let mut parts: Vec<String> = bv
-                      .iter_ranges()
-                      .take(MAX_RANGES_TO_SHOW)
-                      .map(|(start, end)| {
-                          if start == end {
-                              format!("{}", start)
-                          } else if end == usize::MAX {
-                              format!("{}..", start)
-                          } else {
-                              format!("{}..={}", start, end)
-                          }
-                      })
-                      .collect();
-
-                  if total_ranges > MAX_RANGES_TO_SHOW {
-                      parts.push(format!("... ({} more ranges)", total_ranges - MAX_RANGES_TO_SHOW));
-                  }
-
-                  if total_ranges > 1 {
-                      format!("[{}]", parts.join(", "))
-                  } else {
-                      parts.join(", ")
-                  }
-              }
-
-              match self {
-                  Intermediate2Trie3EdgeKey::Pop(n, bv) => write!(f, "Pop({}, {})", n, format_bv(bv)),
-                  Intermediate2Trie3EdgeKey::Push(bv) => write!(f, "Push({})", format_bv(bv)),
-                  Intermediate2Trie3EdgeKey::NoOp => write!(f, "NoOp"),
-              }
-          }
-      }
-
-      pub type Intermediate2PrecomputeNode3 =
-          Trie<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
-      pub type Intermediate2PrecomputeNode3Index = Trie2Index;
-      pub type Intermediate2Trie3GodWrapper =
-          GodWrapper<Intermediate2Trie3EdgeKey, LLMTokenBV, IntermediatePrecomputedNodeContents3>;
-
-      // This conversion function remains the same. It simplifies the graph by
-      // moving token constraints into edge values.
-      fn convert_to_intermediate2(
-          roots1: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-          god1: &IntermediateTrie3GodWrapper,
-      ) -> (
-          BTreeMap<TokenizerStateID, Intermediate2PrecomputeNode3Index>,
-          Intermediate2Trie3GodWrapper,
-      ) {
-          let god2 = Intermediate2Trie3GodWrapper::new();
-          let mut roots2 = BTreeMap::new();
-          let mut node_map: HashMap<IntermediatePrecomputeNode3Index, Intermediate2PrecomputeNode3Index> =
-              HashMap::new();
-          let mut q: std::collections::VecDeque<IntermediatePrecomputeNode3Index> =
-              std::collections::VecDeque::new();
-
-          for (sid, root1) in roots1 {
-              let root2 = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(
-                  root1.read(god1).unwrap().value.clone(),
-              )));
-              roots2.insert(*sid, root2);
-              node_map.insert(*root1, root2);
-              q.push_back(*root1);
-          }
-
-          let mut visited = HashSet::new();
-          while let Some(idx1) = q.pop_front() {
-              if !visited.insert(idx1) {
-                  continue;
-              }
-              let idx2 = *node_map.get(&idx1).unwrap();
-              let guard1 = idx1.read(god1).unwrap();
-
-              for (edge_key1, dest_map1) in guard1.children() {
-                  for (child1_idx, _) in dest_map1 {
-                      let child2_idx = *node_map.entry(*child1_idx).or_insert_with(|| {
-                          let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(
-                              Intermediate2PrecomputeNode3::new(child1_idx.read(god1).unwrap().value.clone()),
-                          ));
-                          q.push_back(*child1_idx);
-                          new_node
-                      });
-
-                      let (edge_key2, edge_value2) = match edge_key1 {
-                          IntermediateTrie3EdgeKey::Pop(n, s) => {
-                              (Intermediate2Trie3EdgeKey::Pop(*n, s.clone()), LLMTokenBV::max_ones())
-                          }
-                          IntermediateTrie3EdgeKey::Push(s) => {
-                              (Intermediate2Trie3EdgeKey::Push(s.clone()), LLMTokenBV::max_ones())
-                          }
-                          IntermediateTrie3EdgeKey::NoOp => {
-                              (Intermediate2Trie3EdgeKey::NoOp, LLMTokenBV::max_ones())
-                          }
-                          IntermediateTrie3EdgeKey::CheckLLM(bv) => {
-                              (Intermediate2Trie3EdgeKey::NoOp, bv.clone())
-                          }
-                      };
-
-                      god2.insert_edge_simple(idx2, child2_idx, edge_key2, edge_value2);
-                  }
-              }
-          }
-
-          (roots2, god2)
-      }
-
-      // This conversion function also remains the same.
-      fn convert_from_intermediate2(
-          roots2: &BTreeMap<TokenizerStateID, Intermediate2PrecomputeNode3Index>,
-          god2: &Intermediate2Trie3GodWrapper,
-      ) -> (
-          BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-          IntermediateTrie3GodWrapper,
-      ) {
-          let god1 = IntermediateTrie3GodWrapper::new();
-          let mut roots1 = BTreeMap::new();
-          let mut node_map: HashMap<Intermediate2PrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
-              HashMap::new();
-          let mut q: std::collections::VecDeque<Intermediate2PrecomputeNode3Index> =
-              std::collections::VecDeque::new();
-
-          for (sid, root2) in roots2 {
-              let root1 = IntermediatePrecomputeNode3Index::new(god1.insert(IntermediatePrecomputeNode3::new(
-                  root2.read(god2).unwrap().value.clone(),
-              )));
-              roots1.insert(*sid, root1);
-              node_map.insert(*root2, root1);
-              q.push_back(*root2);
-          }
-
-          let mut visited = HashSet::new();
-          while let Some(idx2) = q.pop_front() {
-              if !visited.insert(idx2) {
-                  continue;
-              }
-              let idx1 = *node_map.get(&idx2).unwrap();
-              let guard2 = idx2.read(god2).unwrap();
-
-              for (edge_key2, dest_map2) in guard2.children() {
-                  for (child2_idx, edge_value2) in dest_map2 {
-                      let child1_idx = *node_map.entry(*child2_idx).or_insert_with(|| {
-                          let new_node = IntermediatePrecomputeNode3Index::new(god1.insert(
-                              IntermediatePrecomputeNode3::new(child2_idx.read(god2).unwrap().value.clone()),
-                          ));
-                          q.push_back(*child2_idx);
-                          new_node
-                      });
-
-                      if edge_value2.is_all() {
-                          let edge_key1 = match edge_key2 {
-                              Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
-                              Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
-                              Intermediate2Trie3EdgeKey::NoOp => IntermediateTrie3EdgeKey::NoOp,
-                          };
-                          god1.insert_edge_simple(idx1, child1_idx, edge_key1, ());
-                      } else {
-                          match edge_key2 {
-                              Intermediate2Trie3EdgeKey::NoOp => {
-                                  god1.insert_edge_simple(
-                                      idx1,
-                                      child1_idx,
-                                      IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()),
-                                      (),
-                                  );
-                              }
-                              _ => {
-                                  // Need an intermediate node to separate op and CheckLLM
-                                  let inter = IntermediatePrecomputeNode3Index::new(god1.insert(
-                                      IntermediatePrecomputeNode3::new(
-                                          IntermediatePrecomputedNodeContents3::internal(),
-                                      ),
-                                  ));
-                                  let edge_key1_op = match edge_key2 {
-                                      Intermediate2Trie3EdgeKey::Pop(n, s) => IntermediateTrie3EdgeKey::Pop(*n, s.clone()),
-                                      Intermediate2Trie3EdgeKey::Push(s) => IntermediateTrie3EdgeKey::Push(s.clone()),
-                                      _ => unreachable!(),
-                                  };
-                                  god1.insert_edge_simple(idx1, inter, edge_key1_op, ());
-                                  god1.insert_edge_simple(
-                                      inter,
-                                      child1_idx,
-                                      IntermediateTrie3EdgeKey::CheckLLM(edge_value2.clone()),
-                                      (),
-                                  );
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
-          (roots1, god1)
-      }
-
-      pub fn eliminate_pushes_and_pops(
-          roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-          god: &IntermediateTrie3GodWrapper,
-      ) {
-          println!("Starting push/pop elimination...");
-          let initial_nodes =
-              IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
-                  .len();
-          println!("Initial graph node count: {}", initial_nodes);
-
-          // 1. Convert to Intermediate2 format, which moves token constraints to edge values.
-          let (roots2, god2) = convert_to_intermediate2(roots, god);
-          let intermediate_nodes = Intermediate2PrecomputeNode3::all_nodes(
-              &god2,
-              &roots2.values().cloned().collect::<Vec<_>>(),
-          )
-          .len();
-          println!(
-              "Intermediate graph node count: {}",
-              intermediate_nodes
-          );
-
-          let mut loop_count = 0;
-          // 2. Main loop: find and process nodes until no more candidates exist.
-          loop {
-              loop_count += 1;
-              let all_nodes = Intermediate2PrecomputeNode3::all_nodes(
-                  &god2,
-                  &roots2.values().cloned().collect::<Vec<_>>(),
-              );
-              println!(
-                  "\nLoop {}: starting with {} nodes.",
-                  loop_count,
-                  all_nodes.len()
-              );
-
-              // To efficiently find incoming edges, we build a reverse adjacency list.
-              let mut reverse_adj: HashMap<
-                  Intermediate2PrecomputeNode3Index,
-                  Vec<(
-                      Intermediate2PrecomputeNode3Index,
-                      Intermediate2Trie3EdgeKey,
-                      LLMTokenBV,
-                  )>,
-              > = HashMap::new();
-              for &u in &all_nodes {
-                  if let Some(u_guard) = u.read(&god2) {
-                      for (edge_key, dest_map) in u_guard.children() {
-                          for (&v, edge_val) in dest_map {
-                              reverse_adj
-                                  .entry(v)
-                                  .or_default()
-                                  .push((u, edge_key.clone(), edge_val.clone()));
-                          }
-                      }
-                  }
-              }
-
-              // Find a candidate node 'B' to process:
-              // - Not an end state.
-              // - Has at least one incoming Push edge.
-              // - Has no outgoing Push edges.
-              let mut nodes_to_process = Vec::new();
-              for &b_idx in &all_nodes {
-                  let b_guard = b_idx.read(&god2).unwrap();
-                  if b_guard.value.end {
-                      continue;
-                  }
-
-                  let has_outgoing_push = b_guard
-                      .children()
-                      .keys()
-                      .any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
-                  if has_outgoing_push {
-                      continue;
-                  }
-
-                  if let Some(incoming_edges) = reverse_adj.get(&b_idx) {
-                      let has_incoming_push = incoming_edges
-                          .iter()
-                          .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
-                      if has_incoming_push {
-                          nodes_to_process.push(b_idx);
-                      }
-                  }
-              }
-
-              if !nodes_to_process.is_empty() {
-                  println!(
-                      "  Found {} standard candidate nodes to process.",
-                      nodes_to_process.len()
-                  );
-
-                  let mut edges_to_remove = Vec::new();
-                  let mut edges_to_add = Vec::new();
-
-                  for &b_idx in &nodes_to_process {
-                      // Gather information about B's incoming pushes and all outgoing edges.
-                      let incoming_pushes: Vec<_> = reverse_adj
-                          .get(&b_idx)
-                          .unwrap()
-                          .iter()
-                          .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-                          .cloned()
-                          .collect();
-
-                      let outgoing_edges: Vec<_> = b_idx
-                          .read(&god2)
-                          .unwrap()
-                          .children()
-                          .iter()
-                          .flat_map(|(k, dest_map)| {
-                              dest_map
-                                  .iter()
-                                  .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
-                          })
-                          .collect();
-
-                      // Remove all incoming push edges to B.
-                      for (a_idx, edge_key, _) in &incoming_pushes {
-                          edges_to_remove.push((*a_idx, b_idx, edge_key.clone()));
-                      }
-
-                      // Create new "shortcut" edges from A to C.
-                      for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
-                          let s = match push_key {
-                              Intermediate2Trie3EdgeKey::Push(s) => s,
-                              _ => unreachable!(),
-                          };
-
-                          for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
-                              let new_tokens = tokens_a_b & tokens_b_c;
-                              if new_tokens.is_empty() {
-                                  continue;
-                              }
-
-                              let new_key_opt = match op_key {
-                                  Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
-                                  Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
-                                  Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
-                                  Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
-                                  Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
-                              };
-
-                              if let Some(new_key) = new_key_opt {
-                                  edges_to_add.push((*a_idx, *c_idx, new_key, new_tokens));
-                              }
-                          }
-                      }
-                  }
-
-                  for (u, v, k) in edges_to_remove {
-                      god2.remove_edge(u, v, &k);
-                  }
-                  for (u, v, k, val) in edges_to_add {
-                      god2.insert_edge_simple(u, v, k, val);
-                  }
-              } else {
-                  // No candidate with "incoming Push" and "no outgoing Push".
-                  // Fallback: split a node that has both Push and non-Push outgoing edges
-                  // and at least one incoming Push. This creates exactly one new node,
-                  // moving all non-Push outgoing edges to it and duplicating all incoming
-                  // edges to preserve behavior. Then retry the main loop.
-                  let mut split_candidates = Vec::new();
-                  for &b_idx in &all_nodes {
-                      let b_guard = b_idx.read(&god2).unwrap();
-                      if b_guard.value.end {
-                          continue;
-                      }
-                      let mut has_outgoing_push = false;
-                      let mut has_outgoing_nonpush = false;
-                      for k in b_guard.children().keys() {
-                          match k {
-                              Intermediate2Trie3EdgeKey::Push(_) => has_outgoing_push = true,
-                              _ => has_outgoing_nonpush = true,
-                          }
-                      }
-                      if !(has_outgoing_push && has_outgoing_nonpush) {
-                          continue;
-                      }
-                      let has_incoming_push = reverse_adj
-                          .get(&b_idx)
-                          .map_or(false, |incoming| {
-                              incoming
-                                  .iter()
-                                  .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-                          });
-                      if has_incoming_push {
-                          split_candidates.push(b_idx);
-                      }
-                  }
-
-                  if !split_candidates.is_empty() {
-                      println!(
-                          "  No standard candidate. Found {} split candidates to process.",
-                          split_candidates.len()
-                      );
-                      for &b_idx in &split_candidates {
-                      // Create the new "non-push" clone node
-                      let b_value = b_idx.read(&god2).unwrap().value.clone();
-                      let b_np_idx = Intermediate2PrecomputeNode3Index::new(
-                          god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
-                      );
-
-                      // Move all non-push outgoing edges from b_idx -> (...) to b_np_idx -> (...)
-                      let mut to_move: Vec<(
-                          Intermediate2Trie3EdgeKey,
-                          Intermediate2PrecomputeNode3Index,
-                          LLMTokenBV,
-                      )> = Vec::new();
-                      if let Some(b_guard) = b_idx.read(&god2) {
-                          for (edge_key, dest_map) in b_guard.children() {
-                              if !matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
-                                  for (&c_idx, val) in dest_map {
-                                      to_move.push((edge_key.clone(), c_idx, val.clone()));
-                                  }
-                              }
-                          }
-                      }
-                      for (k, c_idx, val) in &to_move {
-                          god2.insert_edge_simple(b_np_idx, *c_idx, k.clone(), val.clone());
-                      }
-                      for (k, c_idx, _) in &to_move {
-                          god2.remove_edge(b_idx, *c_idx, k);
-                      }
-
-                      // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable
-                          if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
-                          for (a_idx, k, val) in incoming {
-                                  god2.insert_edge_simple(a_idx, b_np_idx, k.clone(), val.clone());
-                          }
-                      }
-                      }
-
-                      // Now that we've split, try again from the top to pick up a standard candidate.
-                      continue;
-                  } else {
-                      // No more nodes to process and no viable split candidate: stop.
-                      println!("  No more candidates to process or split. Exiting loop.");
-                      break;
-                  }
-              }
-          }
-
-          // 3. Convert back to the original Trie format.
-          let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
-          println!(
-              "Finished elimination loop. Final intermediate graph has {} nodes.",
-              IntermediatePrecomputeNode3::all_nodes(
-                  &new_god1,
-                  &new_roots1_map
-                      .values()
-                      .cloned()
-                      .collect::<Vec<_>>()
-              )
-              .len()
-          );
-
-          // 4. The function signature requires modifying `god` in place.
-          // We clear the original `god` and deep-copy the new graph into it.
-          let mut sids_in_order = Vec::new();
-          let mut new_roots_vec = Vec::new();
-          for (&sid, &root_idx) in &new_roots1_map {
-              sids_in_order.push(sid);
-              new_roots_vec.push(root_idx);
-          }
-
-          god.clear();
-          let (final_roots_vec, _map) =
-              IntermediatePrecomputeNode3::deep_copy_subtrees_into(&new_god1, god, &new_roots_vec);
-
-          roots.clear();
-          for (sid, final_root_idx) in sids_in_order.iter().zip(final_roots_vec.iter()) {
-              roots.insert(*sid, *final_root_idx);
-          }
-          println!(
-              "Final graph node count: {}",
-              IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
-                  .len()
-          );
-      }
-
-      // --- Assertion and Test Helpers (Unchanged) ---
-
-      pub fn assert_no_pops_reachable_from_pushes(
-          roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-          god: &IntermediateTrie3GodWrapper,
-      ) {
-          let all_nodes = Trie::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>());
-
-          let mut pop_reachable_memo: HashMap<IntermediatePrecomputeNode3Index, bool> = HashMap::new();
-          for &node_idx in &all_nodes {
-              is_pop_reachable_from(node_idx, god, &mut pop_reachable_memo, &mut HashSet::new());
-          }
-
-          for &node_idx in &all_nodes {
-              if let Some(guard) = node_idx.read(god) {
-                  for (edge_key, dest_map) in guard.children() {
-                      if let IntermediateTrie3EdgeKey::Push(_) = edge_key {
-                          for child_idx in dest_map.keys() {
-                              if *pop_reachable_memo.get(child_idx).unwrap_or(&false) {
-                                  let path = find_path_to_pop(*child_idx, god, &pop_reachable_memo);
-                                  let mut options =
-                                      crate::datastructures::trie::PrettyPrintOptions::default()
-                                          .display_edge_keys_only()
-                                          .omit_depth();
-                                  eprintln!("Full graph:");
-                                  eprintln!(
-                                      "{}",
-                                      Trie::pretty_print_with_options(
-                                          god,
-                                          roots.values().cloned().collect::<Vec<_>>().as_slice(),
-                                          &options
-                                      )
-                                  );
-                                  eprintln!("Segment:");
-                                  eprintln!("{}", Trie::pretty_print_with_options(god, &[node_idx], &options));
-                                  panic!(
-                                      "Assertion failed: Pop is reachable from a Push edge. Path: Node {} --Push--> Node {} --> ... --> Pop. Path to pop: {:?}",
-                                      node_idx, child_idx, path
-                                  );
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-      }
-
-      fn is_pop_reachable_from(
-          node: IntermediatePrecomputeNode3Index,
-          god: &IntermediateTrie3GodWrapper,
-          memo: &mut HashMap<IntermediatePrecomputeNode3Index, bool>,
-          visiting: &mut HashSet<IntermediatePrecomputeNode3Index>,
-      ) -> bool {
-          if let Some(&result) = memo.get(&node) {
-              return result;
-          }
-          if !visiting.insert(node) {
-              return false;
-          }
-
-          if let Some(guard) = node.read(god) {
-              for (edge_key, dest_map) in guard.children() {
-                  if let IntermediateTrie3EdgeKey::Pop(_, _) = edge_key {
-                      visiting.remove(&node);
-                      memo.insert(node, true);
-                      return true;
-                  }
-                  for child_idx in dest_map.keys() {
-                      if is_pop_reachable_from(*child_idx, god, memo, visiting) {
-                          visiting.remove(&node);
-                          memo.insert(node, true);
-                          return true;
-                      }
-                  }
-              }
-          }
-
-          visiting.remove(&node);
-          memo.insert(node, false);
-          false
-      }
-
-      fn find_path_to_pop(
-          start_node: IntermediatePrecomputeNode3Index,
-          god: &IntermediateTrie3GodWrapper,
-          pop_reachable_memo: &HashMap<IntermediatePrecomputeNode3Index, bool>,
-      ) -> Vec<(IntermediatePrecomputeNode3Index, String)> {
-          let mut path = vec![];
-          let mut current_node = start_node;
-          let mut visited = HashSet::new();
-
-          while visited.insert(current_node) {
-              if let Some(guard) = current_node.read(god) {
-                  let mut found_next = false;
-                  for (edge_key, dest_map) in guard.children() {
-                      if let IntermediateTrie3EdgeKey::Pop(_, _) = edge_key {
-                          path.push((current_node, format!("{}", edge_key)));
-                          return path;
-                      }
-                      for child_idx in dest_map.keys() {
-                          if *pop_reachable_memo.get(child_idx).unwrap_or(&false) {
-                              path.push((current_node, format!("{}", edge_key)));
-                              current_node = *child_idx;
-                              found_next = true;
-                              break;
-                          }
-                      }
-                      if found_next {
-                          break;
-                      }
-                  }
-                  if !found_next {
-                      break;
-                  }
-              } else {
-                  break;
-              }
-          }
-          path
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use super::*;
-          use crate::constraint::{
-              IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, StateIDBV,
-          };
-          use crate::datastructures::trie::Trie;
-          use crate::tokenizer::TokenizerStateID;
-          use std::collections::{BTreeMap, HashMap};
-
-          #[test]
-          fn test_eliminate_push_pop_failure_case() {
-              let god = IntermediateTrie3GodWrapper::new();
-
-              let mut node_map = HashMap::new();
-              let node_ids = vec![5, 6, 7, 8, 9, 13, 14, 15, 16];
-              for id in node_ids {
-                  node_map.insert(
-                      id,
-                      Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))),
-                  );
-              }
-
-              let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
-
-              // Segment that previously failed:
-              // 13 --Push--> 14 --Pop--> 15
-              // 14 also has another outgoing Push to 16
-              god.insert_edge_simple(n(13), n(14), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
-              god.insert_edge_simple(n(14), n(15), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
-              god.insert_edge_simple(n(14), n(16), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(4)), ());
-              god.insert_edge_simple(n(15), n(5), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
-              god.insert_edge_simple(n(5), n(6), IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)), ());
-              god.insert_edge_simple(n(6), n(7), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
-              god.insert_edge_simple(n(7), n(8), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
-              god.insert_edge_simple(n(8), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)), ());
-              god.insert_edge_simple(n(16), n(9), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(2)), ());
-
-              let mut roots = BTreeMap::new();
-              roots.insert(TokenizerStateID(0), n(13));
-
-              eliminate_pushes_and_pops(&mut roots, &god);
-
-              // This assertion should now pass.
-              assert_no_pops_reachable_from_pushes(&roots, &god);
-          }
-
-          #[test]
-          fn test_eliminate_push_noop_pop_failure_case() {
-              let god = IntermediateTrie3GodWrapper::new();
-
-              let mut node_map = HashMap::new();
-              // N101: Push source (Root)
-              // N102: Problematic node (Push in, Push out, NoOp out to Pop path)
-              // N103: NoOp target (Pop source)
-              // N104: Pop target
-              // N105: Push target / Cycle target
-              let node_ids = vec![101, 102, 103, 104, 105];
-              for id in node_ids {
-                  node_map.insert(
-                      id,
-                      Trie2Index::from(god.insert(Trie::new(IntermediatePrecomputedNodeContents3::internal()))),
-                  );
-              }
-
-              let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
-
-              // N101 --Push(1)--> N102
-              god.insert_edge_simple(n(101), n(102), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(1)), ());
-              // N102 --NoOp--> N103
-              god.insert_edge_simple(n(102), n(103), IntermediateTrie3EdgeKey::NoOp, ());
-              // N102 --Push(2)--> N105
-              god.insert_edge_simple(n(102), n(105), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(2)), ());
-              // N103 --Pop(1, ALL)--> N104
-              god.insert_edge_simple(n(103), n(104), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
-              // N105 --CheckLLM(1)--> N101 (cycle)
-              god.insert_edge_simple(n(105), n(101), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(1)), ());
-
-              let mut roots = BTreeMap::new();
-              roots.insert(TokenizerStateID(0), n(101));
-
-              eliminate_pushes_and_pops(&mut roots, &god);
-              assert_no_pops_reachable_from_pushes(&roots, &god);
-          }
-      }
       ```
     metadata:
       filename: src/constraint_precompute3_challenge_elimination.rs
-  - user: |-
-      Starting push/pop elimination...
-      Initial graph node count: 444770
-      Intermediate graph node count: 444899
-
-      Loop 1: starting with 444899 nodes.
-        Found 5183 standard candidate nodes to process.
-
-      Loop 2: starting with 439718 nodes.
-        Found 1990 standard candidate nodes to process.
-
-      Loop 3: starting with 437730 nodes.
-        Found 6478 standard candidate nodes to process.
-
-      Loop 4: starting with 84439 nodes.
-        Found 7684 standard candidate nodes to process.
-
-      Loop 5: starting with 80370 nodes.
-        Found 576 standard candidate nodes to process.
-
-      Loop 6: starting with 79784 nodes.
-        Found 735 standard candidate nodes to process.
-
-      Loop 7: starting with 79334 nodes.
-        Found 662 standard candidate nodes to process.
-
-      Loop 8: starting with 78906 nodes.
-        Found 31 standard candidate nodes to process.
-
-      Loop 9: starting with 78906 nodes.
-        Found 68 standard candidate nodes to process.
-
-      Loop 10: starting with 78906 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 11: starting with 78906 nodes.
-        Found 46 standard candidate nodes to process.
-
-      Loop 12: starting with 78906 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 13: starting with 78906 nodes.
-        Found 27 standard candidate nodes to process.
-
-      Loop 14: starting with 78906 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 15: starting with 78906 nodes.
-        Found 16 standard candidate nodes to process.
-
-      Loop 16: starting with 78906 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 17: starting with 78906 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 18: starting with 78906 nodes.
-        Found 1 standard candidate nodes to process.
-
-      Loop 19: starting with 78906 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 20: starting with 78906 nodes.
-        No standard candidate. Found 799 split candidates to process.
-
-      Loop 21: starting with 79705 nodes.
-        Found 799 standard candidate nodes to process.
-
-      Loop 22: starting with 79206 nodes.
-        Found 2535 standard candidate nodes to process.
-
-      Loop 23: starting with 78386 nodes.
-        Found 3681 standard candidate nodes to process.
-
-      Loop 24: starting with 77848 nodes.
-        Found 383 standard candidate nodes to process.
-
-      Loop 25: starting with 77848 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 26: starting with 77848 nodes.
-        Found 59 standard candidate nodes to process.
-
-      Loop 27: starting with 77848 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 28: starting with 77848 nodes.
-        Found 41 standard candidate nodes to process.
-
-      Loop 29: starting with 77848 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 30: starting with 77848 nodes.
-        Found 27 standard candidate nodes to process.
-
-      Loop 31: starting with 77848 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 32: starting with 77848 nodes.
-        Found 16 standard candidate nodes to process.
-
-      Loop 33: starting with 77848 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 34: starting with 77848 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 35: starting with 77848 nodes.
-        Found 1 standard candidate nodes to process.
-
-      Loop 36: starting with 77848 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 37: starting with 77848 nodes.
-        No standard candidate. Found 290 split candidates to process.
-
-      Loop 38: starting with 78138 nodes.
-        Found 290 standard candidate nodes to process.
-
-      Loop 39: starting with 78138 nodes.
-        Found 569 standard candidate nodes to process.
-
-      Loop 40: starting with 78138 nodes.
-        Found 1695 standard candidate nodes to process.
-
-      Loop 41: starting with 78138 nodes.
-        Found 396 standard candidate nodes to process.
-
-      Loop 42: starting with 78138 nodes.
-        Found 172 standard candidate nodes to process.
-
-      Loop 43: starting with 78138 nodes.
-        Found 208 standard candidate nodes to process.
-
-      Loop 44: starting with 78138 nodes.
-        Found 157 standard candidate nodes to process.
-
-      Loop 45: starting with 78138 nodes.
-        Found 191 standard candidate nodes to process.
-
-      Loop 46: starting with 78138 nodes.
-        Found 145 standard candidate nodes to process.
-
-      Loop 47: starting with 78138 nodes.
-        Found 172 standard candidate nodes to process.
-
-      Loop 48: starting with 78138 nodes.
-        Found 132 standard candidate nodes to process.
-
-      Loop 49: starting with 78138 nodes.
-        Found 155 standard candidate nodes to process.
-
-      Loop 50: starting with 78138 nodes.
-        Found 118 standard candidate nodes to process.
-
-      Loop 51: starting with 78138 nodes.
-        Found 141 standard candidate nodes to process.
-
-      Loop 52: starting with 78138 nodes.
-        Found 106 standard candidate nodes to process.
-
-      Loop 53: starting with 78138 nodes.
-        Found 128 standard candidate nodes to process.
-
-      Loop 54: starting with 78138 nodes.
-        Found 93 standard candidate nodes to process.
-
-      Loop 55: starting with 78138 nodes.
-        Found 106 standard candidate nodes to process.
-
-      Loop 56: starting with 78138 nodes.
-        Found 74 standard candidate nodes to process.
-
-      Loop 57: starting with 78138 nodes.
-        Found 91 standard candidate nodes to process.
-
-      Loop 58: starting with 78138 nodes.
-        Found 59 standard candidate nodes to process.
-
-      Loop 59: starting with 78138 nodes.
-        Found 77 standard candidate nodes to process.
-
-      Loop 60: starting with 78138 nodes.
-        Found 47 standard candidate nodes to process.
-
-      Loop 61: starting with 78138 nodes.
-        Found 59 standard candidate nodes to process.
-
-      Loop 62: starting with 78138 nodes.
-        Found 31 standard candidate nodes to process.
-
-      Loop 63: starting with 78138 nodes.
-        Found 38 standard candidate nodes to process.
-
-      Loop 64: starting with 78138 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 65: starting with 78138 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 66: starting with 78138 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 67: starting with 78138 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 68: starting with 78138 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 69: starting with 78138 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 70: starting with 78138 nodes.
-        Found 1 standard candidate nodes to process.
-
-      Loop 71: starting with 78138 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 72: starting with 78138 nodes.
-        No standard candidate. Found 66 split candidates to process.
-
-      Loop 73: starting with 78204 nodes.
-        Found 66 standard candidate nodes to process.
-
-      Loop 74: starting with 78204 nodes.
-        Found 61 standard candidate nodes to process.
-
-      Loop 75: starting with 78204 nodes.
-        Found 53 standard candidate nodes to process.
-
-      Loop 76: starting with 78204 nodes.
-        Found 73 standard candidate nodes to process.
-
-      Loop 77: starting with 78204 nodes.
-        Found 61 standard candidate nodes to process.
-
-      Loop 78: starting with 78204 nodes.
-        Found 79 standard candidate nodes to process.
-
-      Loop 79: starting with 78204 nodes.
-        Found 66 standard candidate nodes to process.
-
-      Loop 80: starting with 78204 nodes.
-        Found 87 standard candidate nodes to process.
-
-      Loop 81: starting with 78204 nodes.
-        Found 71 standard candidate nodes to process.
-
-      Loop 82: starting with 78204 nodes.
-        Found 86 standard candidate nodes to process.
-
-      Loop 83: starting with 78204 nodes.
-        Found 73 standard candidate nodes to process.
-
-      Loop 84: starting with 78204 nodes.
-        Found 89 standard candidate nodes to process.
-
-      Loop 85: starting with 78204 nodes.
-        Found 78 standard candidate nodes to process.
-
-      Loop 86: starting with 78204 nodes.
-        Found 90 standard candidate nodes to process.
-
-      Loop 87: starting with 78204 nodes.
-        Found 78 standard candidate nodes to process.
-
-      Loop 88: starting with 78204 nodes.
-        Found 91 standard candidate nodes to process.
-
-      Loop 89: starting with 78204 nodes.
-        Found 78 standard candidate nodes to process.
-
-      Loop 90: starting with 78204 nodes.
-        Found 91 standard candidate nodes to process.
-
-      Loop 91: starting with 78204 nodes.
-        Found 76 standard candidate nodes to process.
-
-      Loop 92: starting with 78204 nodes.
-        Found 87 standard candidate nodes to process.
-
-      Loop 93: starting with 78204 nodes.
-        Found 72 standard candidate nodes to process.
-
-      Loop 94: starting with 78204 nodes.
-        Found 80 standard candidate nodes to process.
-
-      Loop 95: starting with 78204 nodes.
-        Found 65 standard candidate nodes to process.
-
-      Loop 96: starting with 78204 nodes.
-        Found 74 standard candidate nodes to process.
-
-      Loop 97: starting with 78204 nodes.
-        Found 57 standard candidate nodes to process.
-
-      Loop 98: starting with 78204 nodes.
-        Found 66 standard candidate nodes to process.
-
-      Loop 99: starting with 78204 nodes.
-        Found 49 standard candidate nodes to process.
-
-      Loop 100: starting with 78204 nodes.
-        Found 57 standard candidate nodes to process.
-
-      Loop 101: starting with 78204 nodes.
-        Found 40 standard candidate nodes to process.
-
-      Loop 102: starting with 78204 nodes.
-        Found 49 standard candidate nodes to process.
-
-      Loop 103: starting with 78204 nodes.
-        Found 32 standard candidate nodes to process.
-
-      Loop 104: starting with 78204 nodes.
-        Found 40 standard candidate nodes to process.
-
-      Loop 105: starting with 78204 nodes.
-        Found 26 standard candidate nodes to process.
-
-      Loop 106: starting with 78204 nodes.
-        Found 30 standard candidate nodes to process.
-
-      Loop 107: starting with 78204 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 108: starting with 78204 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 109: starting with 78204 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 110: starting with 78204 nodes.
-        Found 17 standard candidate nodes to process.
-
-      Loop 111: starting with 78204 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 112: starting with 78204 nodes.
-        Found 13 standard candidate nodes to process.
-
-      Loop 113: starting with 78204 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 114: starting with 78204 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 115: starting with 78204 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 116: starting with 78204 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 117: starting with 78204 nodes.
-        Found 1 standard candidate nodes to process.
-
-      Loop 118: starting with 78204 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 119: starting with 78204 nodes.
-        No standard candidate. Found 35 split candidates to process.
-
-      Loop 120: starting with 78239 nodes.
-        Found 35 standard candidate nodes to process.
-
-      Loop 121: starting with 78239 nodes.
-        Found 55 standard candidate nodes to process.
-
-      Loop 122: starting with 78239 nodes.
-        Found 48 standard candidate nodes to process.
-
-      Loop 123: starting with 78239 nodes.
-        Found 71 standard candidate nodes to process.
-
-      Loop 124: starting with 78239 nodes.
-        Found 67 standard candidate nodes to process.
-
-      Loop 125: starting with 78239 nodes.
-        Found 91 standard candidate nodes to process.
-
-      Loop 126: starting with 78239 nodes.
-        Found 83 standard candidate nodes to process.
-
-      Loop 127: starting with 78239 nodes.
-        Found 103 standard candidate nodes to process.
-
-      Loop 128: starting with 78239 nodes.
-        Found 97 standard candidate nodes to process.
-
-      Loop 129: starting with 78239 nodes.
-        Found 111 standard candidate nodes to process.
-
-      Loop 130: starting with 78239 nodes.
-        Found 110 standard candidate nodes to process.
-
-      Loop 131: starting with 78239 nodes.
-        Found 119 standard candidate nodes to process.
-
-      Loop 132: starting with 78239 nodes.
-        Found 116 standard candidate nodes to process.
-
-      Loop 133: starting with 78239 nodes.
-        Found 121 standard candidate nodes to process.
-
-      Loop 134: starting with 78239 nodes.
-        Found 117 standard candidate nodes to process.
-
-      Loop 135: starting with 78239 nodes.
-        Found 127 standard candidate nodes to process.
-
-      Loop 136: starting with 78239 nodes.
-        Found 120 standard candidate nodes to process.
-
-      Loop 137: starting with 78239 nodes.
-        Found 128 standard candidate nodes to process.
-
-      Loop 138: starting with 78239 nodes.
-        Found 119 standard candidate nodes to process.
-
-      Loop 139: starting with 78239 nodes.
-        Found 128 standard candidate nodes to process.
-
-      Loop 140: starting with 78239 nodes.
-        Found 119 standard candidate nodes to process.
-
-      Loop 141: starting with 78239 nodes.
-        Found 122 standard candidate nodes to process.
-
-      Loop 142: starting with 78239 nodes.
-        Found 113 standard candidate nodes to process.
-
-      Loop 143: starting with 78239 nodes.
-        Found 121 standard candidate nodes to process.
-
-      Loop 144: starting with 78239 nodes.
-        Found 112 standard candidate nodes to process.
-
-      Loop 145: starting with 78239 nodes.
-        Found 119 standard candidate nodes to process.
-
-      Loop 146: starting with 78239 nodes.
-        Found 110 standard candidate nodes to process.
-
-      Loop 147: starting with 78239 nodes.
-        Found 120 standard candidate nodes to process.
-
-      Loop 148: starting with 78239 nodes.
-        Found 111 standard candidate nodes to process.
-
-      Loop 149: starting with 78239 nodes.
-        Found 121 standard candidate nodes to process.
-
-      Loop 150: starting with 78239 nodes.
-        Found 112 standard candidate nodes to process.
-
-      Loop 151: starting with 78239 nodes.
-        Found 120 standard candidate nodes to process.
-
-      Loop 152: starting with 78239 nodes.
-        Found 109 standard candidate nodes to process.
-
-      Loop 153: starting with 78239 nodes.
-        Found 111 standard candidate nodes to process.
-
-      Loop 154: starting with 78239 nodes.
-        Found 100 standard candidate nodes to process.
-
-      Loop 155: starting with 78239 nodes.
-        Found 104 standard candidate nodes to process.
-
-      Loop 156: starting with 78239 nodes.
-        Found 95 standard candidate nodes to process.
-
-      Loop 157: starting with 78239 nodes.
-        Found 98 standard candidate nodes to process.
-
-      Loop 158: starting with 78239 nodes.
-        Found 87 standard candidate nodes to process.
-
-      Loop 159: starting with 78239 nodes.
-        Found 87 standard candidate nodes to process.
-
-      Loop 160: starting with 78239 nodes.
-        Found 76 standard candidate nodes to process.
-
-      Loop 161: starting with 78239 nodes.
-        Found 77 standard candidate nodes to process.
-
-      Loop 162: starting with 78239 nodes.
-        Found 66 standard candidate nodes to process.
-
-      Loop 163: starting with 78239 nodes.
-        Found 67 standard candidate nodes to process.
-
-      Loop 164: starting with 78239 nodes.
-        Found 56 standard candidate nodes to process.
-
-      Loop 165: starting with 78239 nodes.
-        Found 56 standard candidate nodes to process.
-
-      Loop 166: starting with 78239 nodes.
-        Found 45 standard candidate nodes to process.
-
-      Loop 167: starting with 78239 nodes.
-        Found 50 standard candidate nodes to process.
-
-      Loop 168: starting with 78239 nodes.
-        Found 40 standard candidate nodes to process.
-
-      Loop 169: starting with 78239 nodes.
-        Found 44 standard candidate nodes to process.
-
-      Loop 170: starting with 78239 nodes.
-        Found 36 standard candidate nodes to process.
-
-      Loop 171: starting with 78239 nodes.
-        Found 38 standard candidate nodes to process.
-
-      Loop 172: starting with 78239 nodes.
-        Found 32 standard candidate nodes to process.
-
-      Loop 173: starting with 78239 nodes.
-        Found 33 standard candidate nodes to process.
-
-      Loop 174: starting with 78239 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 175: starting with 78239 nodes.
-        Found 29 standard candidate nodes to process.
-
-      Loop 176: starting with 78239 nodes.
-        Found 25 standard candidate nodes to process.
-
-      Loop 177: starting with 78239 nodes.
-        Found 25 standard candidate nodes to process.
-
-      Loop 178: starting with 78239 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 179: starting with 78239 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 180: starting with 78239 nodes.
-        Found 21 standard candidate nodes to process.
-
-      Loop 181: starting with 78239 nodes.
-        Found 21 standard candidate nodes to process.
-
-      Loop 182: starting with 78239 nodes.
-        Found 19 standard candidate nodes to process.
-
-      Loop 183: starting with 78239 nodes.
-        Found 19 standard candidate nodes to process.
-
-      Loop 184: starting with 78239 nodes.
-        Found 17 standard candidate nodes to process.
-
-      Loop 185: starting with 78239 nodes.
-        Found 17 standard candidate nodes to process.
-
-      Loop 186: starting with 78239 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 187: starting with 78239 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 188: starting with 78239 nodes.
-        Found 13 standard candidate nodes to process.
-
-      Loop 189: starting with 78239 nodes.
-        Found 13 standard candidate nodes to process.
-
-      Loop 190: starting with 78239 nodes.
-        Found 11 standard candidate nodes to process.
-
-      Loop 191: starting with 78239 nodes.
-        Found 11 standard candidate nodes to process.
-
-      Loop 192: starting with 78239 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 193: starting with 78239 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 194: starting with 78239 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 195: starting with 78239 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 196: starting with 78239 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 197: starting with 78239 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 198: starting with 78239 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 199: starting with 78239 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 200: starting with 78239 nodes.
-        Found 1 standard candidate nodes to process.
-
-      Loop 201: starting with 78239 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 202: starting with 78239 nodes.
-        No standard candidate. Found 22 split candidates to process.
-
-      Loop 203: starting with 78261 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 204: starting with 78261 nodes.
-        Found 36 standard candidate nodes to process.
-
-      Loop 205: starting with 78261 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 206: starting with 78261 nodes.
-        Found 44 standard candidate nodes to process.
-
-      Loop 207: starting with 78261 nodes.
-        Found 42 standard candidate nodes to process.
-
-      Loop 208: starting with 78261 nodes.
-        Found 53 standard candidate nodes to process.
-
-      Loop 209: starting with 78261 nodes.
-        Found 49 standard candidate nodes to process.
-
-      Loop 210: starting with 78261 nodes.
-        Found 54 standard candidate nodes to process.
-
-      Loop 211: starting with 78261 nodes.
-        Found 54 standard candidate nodes to process.
-
-      Loop 212: starting with 78261 nodes.
-        Found 61 standard candidate nodes to process.
-
-      Loop 213: starting with 78261 nodes.
-        Found 61 standard candidate nodes to process.
-
-      Loop 214: starting with 78261 nodes.
-        Found 64 standard candidate nodes to process.
-
-      Loop 215: starting with 78261 nodes.
-        Found 64 standard candidate nodes to process.
-
-      Loop 216: starting with 78261 nodes.
-        Found 68 standard candidate nodes to process.
-
-      Loop 217: starting with 78261 nodes.
-        Found 67 standard candidate nodes to process.
-
-      Loop 218: starting with 78261 nodes.
-        Found 73 standard candidate nodes to process.
-
-      Loop 219: starting with 78261 nodes.
-        Found 69 standard candidate nodes to process.
-
-      Loop 220: starting with 78261 nodes.
-        Found 72 standard candidate nodes to process.
-
-      Loop 221: starting with 78261 nodes.
-        Found 69 standard candidate nodes to process.
-
-      Loop 222: starting with 78261 nodes.
-        Found 72 standard candidate nodes to process.
-
-      Loop 223: starting with 78261 nodes.
-        Found 69 standard candidate nodes to process.
-
-      Loop 224: starting with 78261 nodes.
-        Found 72 standard candidate nodes to process.
-
-      Loop 225: starting with 78261 nodes.
-        Found 69 standard candidate nodes to process.
-
-      Loop 226: starting with 78261 nodes.
-        Found 71 standard candidate nodes to process.
-
-      Loop 227: starting with 78261 nodes.
-        Found 68 standard candidate nodes to process.
-
-      Loop 228: starting with 78261 nodes.
-        Found 68 standard candidate nodes to process.
-
-      Loop 229: starting with 78261 nodes.
-        Found 65 standard candidate nodes to process.
-
-      Loop 230: starting with 78261 nodes.
-        Found 66 standard candidate nodes to process.
-
-      Loop 231: starting with 78261 nodes.
-        Found 63 standard candidate nodes to process.
-
-      Loop 232: starting with 78261 nodes.
-        Found 64 standard candidate nodes to process.
-
-      Loop 233: starting with 78261 nodes.
-        Found 61 standard candidate nodes to process.
-
-      Loop 234: starting with 78261 nodes.
-        Found 62 standard candidate nodes to process.
-
-      Loop 235: starting with 78261 nodes.
-        Found 60 standard candidate nodes to process.
-
-      Loop 236: starting with 78261 nodes.
-        Found 59 standard candidate nodes to process.
-
-      Loop 237: starting with 78261 nodes.
-        Found 57 standard candidate nodes to process.
-
-      Loop 238: starting with 78261 nodes.
-        Found 59 standard candidate nodes to process.
-
-      Loop 239: starting with 78261 nodes.
-        Found 57 standard candidate nodes to process.
-
-      Loop 240: starting with 78261 nodes.
-        Found 58 standard candidate nodes to process.
-
-      Loop 241: starting with 78261 nodes.
-        Found 56 standard candidate nodes to process.
-
-      Loop 242: starting with 78261 nodes.
-        Found 58 standard candidate nodes to process.
-
-      Loop 243: starting with 78261 nodes.
-        Found 55 standard candidate nodes to process.
-
-      Loop 244: starting with 78261 nodes.
-        Found 54 standard candidate nodes to process.
-
-      Loop 245: starting with 78261 nodes.
-        Found 51 standard candidate nodes to process.
-
-      Loop 246: starting with 78261 nodes.
-        Found 50 standard candidate nodes to process.
-
-      Loop 247: starting with 78261 nodes.
-        Found 47 standard candidate nodes to process.
-
-      Loop 248: starting with 78261 nodes.
-        Found 45 standard candidate nodes to process.
-
-      Loop 249: starting with 78261 nodes.
-        Found 42 standard candidate nodes to process.
-
-      Loop 250: starting with 78261 nodes.
-        Found 41 standard candidate nodes to process.
-
-      Loop 251: starting with 78261 nodes.
-        Found 38 standard candidate nodes to process.
-
-      Loop 252: starting with 78261 nodes.
-        Found 37 standard candidate nodes to process.
-
-      Loop 253: starting with 78261 nodes.
-        Found 34 standard candidate nodes to process.
-
-      Loop 254: starting with 78261 nodes.
-        Found 33 standard candidate nodes to process.
-
-      Loop 255: starting with 78261 nodes.
-        Found 30 standard candidate nodes to process.
-
-      Loop 256: starting with 78261 nodes.
-        Found 30 standard candidate nodes to process.
-
-      Loop 257: starting with 78261 nodes.
-        Found 27 standard candidate nodes to process.
-
-      Loop 258: starting with 78261 nodes.
-        Found 26 standard candidate nodes to process.
-
-      Loop 259: starting with 78261 nodes.
-        Found 25 standard candidate nodes to process.
-
-      Loop 260: starting with 78261 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 261: starting with 78261 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 262: starting with 78261 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 263: starting with 78261 nodes.
-        Found 21 standard candidate nodes to process.
-
-      Loop 264: starting with 78261 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 265: starting with 78261 nodes.
-        Found 19 standard candidate nodes to process.
-
-      Loop 266: starting with 78261 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 267: starting with 78261 nodes.
-        Found 17 standard candidate nodes to process.
-
-      Loop 268: starting with 78261 nodes.
-        Found 16 standard candidate nodes to process.
-
-      Loop 269: starting with 78261 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 270: starting with 78261 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 271: starting with 78261 nodes.
-        Found 13 standard candidate nodes to process.
-
-      Loop 272: starting with 78261 nodes.
-        Found 12 standard candidate nodes to process.
-
-      Loop 273: starting with 78261 nodes.
-        Found 11 standard candidate nodes to process.
-
-      Loop 274: starting with 78261 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 275: starting with 78261 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 276: starting with 78261 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 277: starting with 78261 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 278: starting with 78261 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 279: starting with 78261 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 280: starting with 78261 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 281: starting with 78261 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 282: starting with 78261 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 283: starting with 78261 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 284: starting with 78261 nodes.
-        No standard candidate. Found 11 split candidates to process.
-
-      Loop 285: starting with 78272 nodes.
-        Found 11 standard candidate nodes to process.
-
-      Loop 286: starting with 78272 nodes.
-        Found 19 standard candidate nodes to process.
-
-      Loop 287: starting with 78272 nodes.
-        Found 13 standard candidate nodes to process.
-
-      Loop 288: starting with 78272 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 289: starting with 78272 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 290: starting with 78272 nodes.
-        Found 21 standard candidate nodes to process.
-
-      Loop 291: starting with 78272 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 292: starting with 78272 nodes.
-        Found 17 standard candidate nodes to process.
-
-      Loop 293: starting with 78272 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 294: starting with 78272 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 295: starting with 78272 nodes.
-        Found 16 standard candidate nodes to process.
-
-      Loop 296: starting with 78272 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 297: starting with 78272 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 298: starting with 78272 nodes.
-        Found 21 standard candidate nodes to process.
-
-      Loop 299: starting with 78272 nodes.
-        Found 21 standard candidate nodes to process.
-
-      Loop 300: starting with 78272 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 301: starting with 78272 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 302: starting with 78272 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 303: starting with 78272 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 304: starting with 78272 nodes.
-        Found 26 standard candidate nodes to process.
-
-      Loop 305: starting with 78272 nodes.
-        Found 26 standard candidate nodes to process.
-
-      Loop 306: starting with 78272 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 307: starting with 78272 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 308: starting with 78272 nodes.
-        Found 29 standard candidate nodes to process.
-
-      Loop 309: starting with 78272 nodes.
-        Found 29 standard candidate nodes to process.
-
-      Loop 310: starting with 78272 nodes.
-        Found 32 standard candidate nodes to process.
-
-      Loop 311: starting with 78272 nodes.
-        Found 32 standard candidate nodes to process.
-
-      Loop 312: starting with 78272 nodes.
-        Found 33 standard candidate nodes to process.
-
-      Loop 313: starting with 78272 nodes.
-        Found 33 standard candidate nodes to process.
-
-      Loop 314: starting with 78272 nodes.
-        Found 35 standard candidate nodes to process.
-
-      Loop 315: starting with 78272 nodes.
-        Found 33 standard candidate nodes to process.
-
-      Loop 316: starting with 78272 nodes.
-        Found 36 standard candidate nodes to process.
-
-      Loop 317: starting with 78272 nodes.
-        Found 33 standard candidate nodes to process.
-
-      Loop 318: starting with 78272 nodes.
-        Found 32 standard candidate nodes to process.
-
-      Loop 319: starting with 78272 nodes.
-        Found 31 standard candidate nodes to process.
-
-      Loop 320: starting with 78272 nodes.
-        Found 30 standard candidate nodes to process.
-
-      Loop 321: starting with 78272 nodes.
-        Found 29 standard candidate nodes to process.
-
-      Loop 322: starting with 78272 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 323: starting with 78272 nodes.
-        Found 27 standard candidate nodes to process.
-
-      Loop 324: starting with 78272 nodes.
-        Found 26 standard candidate nodes to process.
-
-      Loop 325: starting with 78272 nodes.
-        Found 25 standard candidate nodes to process.
-
-      Loop 326: starting with 78272 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 327: starting with 78272 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 328: starting with 78272 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 329: starting with 78272 nodes.
-        Found 21 standard candidate nodes to process.
-
-      Loop 330: starting with 78272 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 331: starting with 78272 nodes.
-        Found 19 standard candidate nodes to process.
-
-      Loop 332: starting with 78272 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 333: starting with 78272 nodes.
-        Found 17 standard candidate nodes to process.
-
-      Loop 334: starting with 78272 nodes.
-        Found 16 standard candidate nodes to process.
-
-      Loop 335: starting with 78272 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 336: starting with 78272 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 337: starting with 78272 nodes.
-        Found 13 standard candidate nodes to process.
-
-      Loop 338: starting with 78272 nodes.
-        Found 12 standard candidate nodes to process.
-
-      Loop 339: starting with 78272 nodes.
-        Found 11 standard candidate nodes to process.
-
-      Loop 340: starting with 78272 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 341: starting with 78272 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 342: starting with 78272 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 343: starting with 78272 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 344: starting with 78272 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 345: starting with 78272 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 346: starting with 78272 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 347: starting with 78272 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 348: starting with 78272 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 349: starting with 78272 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 350: starting with 78272 nodes.
-        No standard candidate. Found 13 split candidates to process.
-
-      Loop 351: starting with 78285 nodes.
-        Found 13 standard candidate nodes to process.
-
-      Loop 352: starting with 78285 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 353: starting with 78285 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 354: starting with 78285 nodes.
-        Found 29 standard candidate nodes to process.
-
-      Loop 355: starting with 78285 nodes.
-        Found 25 standard candidate nodes to process.
-
-      Loop 356: starting with 78285 nodes.
-        Found 30 standard candidate nodes to process.
-
-      Loop 357: starting with 78285 nodes.
-        Found 26 standard candidate nodes to process.
-
-      Loop 358: starting with 78285 nodes.
-        Found 29 standard candidate nodes to process.
-
-      Loop 359: starting with 78285 nodes.
-        Found 25 standard candidate nodes to process.
-
-      Loop 360: starting with 78285 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 361: starting with 78285 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 362: starting with 78285 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 363: starting with 78285 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 364: starting with 78285 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 365: starting with 78285 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 366: starting with 78285 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 367: starting with 78285 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 368: starting with 78285 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 369: starting with 78285 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 370: starting with 78285 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 371: starting with 78285 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 372: starting with 78285 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 373: starting with 78285 nodes.
-        Found 11 standard candidate nodes to process.
-
-      Loop 374: starting with 78285 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 375: starting with 78285 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 376: starting with 78285 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 377: starting with 78285 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 378: starting with 78285 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 379: starting with 78285 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 380: starting with 78285 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 381: starting with 78285 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 382: starting with 78285 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 383: starting with 78285 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 384: starting with 78285 nodes.
-        No standard candidate. Found 4 split candidates to process.
-
-      Loop 385: starting with 78289 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 386: starting with 78289 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 387: starting with 78289 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 388: starting with 78289 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 389: starting with 78289 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 390: starting with 78289 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 391: starting with 78289 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 392: starting with 78289 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 393: starting with 78289 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 394: starting with 78289 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 395: starting with 78289 nodes.
-        Found 11 standard candidate nodes to process.
-
-      Loop 396: starting with 78289 nodes.
-        Found 12 standard candidate nodes to process.
-
-      Loop 397: starting with 78289 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 398: starting with 78289 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 399: starting with 78289 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 400: starting with 78289 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 401: starting with 78289 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 402: starting with 78289 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 403: starting with 78289 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 404: starting with 78289 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 405: starting with 78289 nodes.
-        Found 1 standard candidate nodes to process.
-
-      Loop 406: starting with 78289 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 407: starting with 78289 nodes.
-        No standard candidate. Found 4 split candidates to process.
-
-      Loop 408: starting with 78293 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 409: starting with 78293 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 410: starting with 78293 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 411: starting with 78293 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 412: starting with 78293 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 413: starting with 78293 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 414: starting with 78293 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 415: starting with 78293 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 416: starting with 78293 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 417: starting with 78293 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 418: starting with 78293 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 419: starting with 78293 nodes.
-        Found 26 standard candidate nodes to process.
-
-      Loop 420: starting with 78293 nodes.
-        Found 26 standard candidate nodes to process.
-
-      Loop 421: starting with 78293 nodes.
-        Found 30 standard candidate nodes to process.
-
-      Loop 422: starting with 78293 nodes.
-        Found 30 standard candidate nodes to process.
-
-      Loop 423: starting with 78293 nodes.
-        Found 34 standard candidate nodes to process.
-
-      Loop 424: starting with 78293 nodes.
-        Found 30 standard candidate nodes to process.
-
-      Loop 425: starting with 78293 nodes.
-        Found 30 standard candidate nodes to process.
-
-      Loop 426: starting with 78293 nodes.
-        Found 27 standard candidate nodes to process.
-
-      Loop 427: starting with 78293 nodes.
-        Found 28 standard candidate nodes to process.
-
-      Loop 428: starting with 78293 nodes.
-        Found 25 standard candidate nodes to process.
-
-      Loop 429: starting with 78293 nodes.
-        Found 26 standard candidate nodes to process.
-
-      Loop 430: starting with 78293 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 431: starting with 78293 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 432: starting with 78293 nodes.
-        Found 21 standard candidate nodes to process.
-
-      Loop 433: starting with 78293 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 434: starting with 78293 nodes.
-        Found 19 standard candidate nodes to process.
-
-      Loop 435: starting with 78293 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 436: starting with 78293 nodes.
-        Found 17 standard candidate nodes to process.
-
-      Loop 437: starting with 78293 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 438: starting with 78293 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 439: starting with 78293 nodes.
-        Found 16 standard candidate nodes to process.
-
-      Loop 440: starting with 78293 nodes.
-        Found 13 standard candidate nodes to process.
-
-      Loop 441: starting with 78293 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 442: starting with 78293 nodes.
-        Found 11 standard candidate nodes to process.
-
-      Loop 443: starting with 78293 nodes.
-        Found 12 standard candidate nodes to process.
-
-      Loop 444: starting with 78293 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 445: starting with 78293 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 446: starting with 78293 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 447: starting with 78293 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 448: starting with 78293 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 449: starting with 78293 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 450: starting with 78293 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 451: starting with 78293 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 452: starting with 78293 nodes.
-        Found 1 standard candidate nodes to process.
-
-      Loop 453: starting with 78293 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 454: starting with 78293 nodes.
-        No standard candidate. Found 4 split candidates to process.
-
-      Loop 455: starting with 78297 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 456: starting with 78297 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 457: starting with 78297 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 458: starting with 78297 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 459: starting with 78297 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 460: starting with 78297 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 461: starting with 78297 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 462: starting with 78297 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 463: starting with 78297 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 464: starting with 78297 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 465: starting with 78297 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 466: starting with 78297 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 467: starting with 78297 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 468: starting with 78297 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 469: starting with 78297 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 470: starting with 78297 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 471: starting with 78297 nodes.
-        Found 16 standard candidate nodes to process.
-
-      Loop 472: starting with 78297 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 473: starting with 78297 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 474: starting with 78297 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 475: starting with 78297 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 476: starting with 78297 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 477: starting with 78297 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 478: starting with 78297 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 479: starting with 78297 nodes.
-        Found 23 standard candidate nodes to process.
-
-      Loop 480: starting with 78297 nodes.
-        Found 24 standard candidate nodes to process.
-
-      Loop 481: starting with 78297 nodes.
-        Found 21 standard candidate nodes to process.
-
-      Loop 482: starting with 78297 nodes.
-        Found 22 standard candidate nodes to process.
-
-      Loop 483: starting with 78297 nodes.
-        Found 19 standard candidate nodes to process.
-
-      Loop 484: starting with 78297 nodes.
-        Found 20 standard candidate nodes to process.
-
-      Loop 485: starting with 78297 nodes.
-        Found 17 standard candidate nodes to process.
-
-      Loop 486: starting with 78297 nodes.
-        Found 18 standard candidate nodes to process.
-
-      Loop 487: starting with 78297 nodes.
-        Found 15 standard candidate nodes to process.
-
-      Loop 488: starting with 78297 nodes.
-        Found 16 standard candidate nodes to process.
-
-      Loop 489: starting with 78297 nodes.
-        Found 13 standard candidate nodes to process.
-
-      Loop 490: starting with 78297 nodes.
-        Found 14 standard candidate nodes to process.
-
-      Loop 491: starting with 78297 nodes.
-        Found 11 standard candidate nodes to process.
-
-      Loop 492: starting with 78297 nodes.
-        Found 12 standard candidate nodes to process.
-
-      Loop 493: starting with 78297 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 494: starting with 78297 nodes.
-        Found 10 standard candidate nodes to process.
-
-      Loop 495: starting with 78297 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 496: starting with 78297 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 497: starting with 78297 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 498: starting with 78297 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 499: starting with 78297 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 500: starting with 78297 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 501: starting with 78297 nodes.
-        Found 1 standard candidate nodes to process.
-
-      Loop 502: starting with 78297 nodes.
-        Found 2 standard candidate nodes to process.
-
-      Loop 503: starting with 78297 nodes.
-        No standard candidate. Found 3 split candidates to process.
-
-      Loop 504: starting with 78300 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 505: starting with 78300 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 506: starting with 78300 nodes.
-        Found 4 standard candidate nodes to process.
-
-      Loop 507: starting with 78300 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 508: starting with 78300 nodes.
-        Found 6 standard candidate nodes to process.
-
-      Loop 509: starting with 78300 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 510: starting with 78300 nodes.
-        Found 8 standard candidate nodes to process.
-
-      Loop 511: starting with 78300 nodes.
-        Found 9 standard candidate nodes to process.
-
-      Loop 512: starting with 78300 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 513: starting with 78300 nodes.
-        Found 7 standard candidate nodes to process.
-
-      Loop 514: starting with 78300 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 515: starting with 78300 nodes.
-        Found 5 standard candidate nodes to process.
-
-      Loop 516: starting with 78300 nodes.
-        Found 3 standard candidate nodes to process.
-
-      Loop 517: starting with 78300 nodes.
-    metadata:
-  - user: This takes way too long. Like 60 seconds. We need it to be fast -- under
-      like 100 ms.
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --package sep1 --lib test_constraint_basic --profile test
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0502]: cannot borrow `rev` as immutable because it is also borrowed as mutable
+         --> src/constraint_precompute3_challenge_elimination.rs:294:33
+          |
+      270 |       let mut sync_rev_entry_for = |u: Intermediate2PrecomputeNode3Index,
+          |  __________________________________-
+      271 | |                                   v: Intermediate2PrecomputeNode3Index,
+      272 | |                                   k: &Intermediate2Trie3EdgeKey| {
+          | |________________________________________________________________- mutable borrow occurs here
+      273 |           if let Some(vec) = rev.get_mut(&v) {
+          |                              --- first borrow occurs due to use of `rev` in closure
+      ...
+      294 |           let has_incoming_push = rev
+          |                                   ^^^ immutable borrow occurs here
+      ...
+      355 |                   sync_rev_entry_for(*a, b, push_k);
+          |                   ------------------ mutable borrow later used here
+
+      error[E0502]: cannot borrow `rev` as immutable because it is also borrowed as mutable
+         --> src/constraint_precompute3_challenge_elimination.rs:309:33
+          |
+      270 |       let mut sync_rev_entry_for = |u: Intermediate2PrecomputeNode3Index,
+          |  __________________________________-
+      271 | |                                   v: Intermediate2PrecomputeNode3Index,
+      272 | |                                   k: &Intermediate2Trie3EdgeKey| {
+          | |________________________________________________________________- mutable borrow occurs here
+      273 |           if let Some(vec) = rev.get_mut(&v) {
+          |                              --- first borrow occurs due to use of `rev` in closure
+      ...
+      309 |           let has_incoming_push = rev
+          |                                   ^^^ immutable borrow occurs here
+      ...
+      355 |                   sync_rev_entry_for(*a, b, push_k);
+          |                   ------------------ mutable borrow later used here
+
+      error[E0502]: cannot borrow `rev` as immutable because it is also borrowed as mutable
+         --> src/constraint_precompute3_challenge_elimination.rs:330:33
+          |
+      270 |       let mut sync_rev_entry_for = |u: Intermediate2PrecomputeNode3Index,
+          |  __________________________________-
+      271 | |                                   v: Intermediate2PrecomputeNode3Index,
+      272 | |                                   k: &Intermediate2Trie3EdgeKey| {
+          | |________________________________________________________________- mutable borrow occurs here
+      273 |           if let Some(vec) = rev.get_mut(&v) {
+          |                              --- first borrow occurs due to use of `rev` in closure
+      ...
+      330 |               let incoming_list = rev.get(&b).cloned().unwrap_or_default();
+          |                                   ^^^ immutable borrow occurs here
+      ...
+      355 |                   sync_rev_entry_for(*a, b, push_k);
+          |                   ------------------ mutable borrow later used here
+
+      error[E0502]: cannot borrow `rev` as immutable because it is also borrowed as mutable
+         --> src/constraint_precompute3_challenge_elimination.rs:409:37
+          |
+      270 |       let mut sync_rev_entry_for = |u: Intermediate2PrecomputeNode3Index,
+          |  __________________________________-
+      271 | |                                   v: Intermediate2PrecomputeNode3Index,
+      272 | |                                   k: &Intermediate2Trie3EdgeKey| {
+          | |________________________________________________________________- mutable borrow occurs here
+      273 |           if let Some(vec) = rev.get_mut(&v) {
+          |                              --- first borrow occurs due to use of `rev` in closure
+      ...
+      409 |               let has_incoming_push = rev
+          |                                       ^^^ immutable borrow occurs here
+      ...
+      441 |                   sync_rev_entry_for(b_np, *c, &k);
+          |                   ------------------ mutable borrow later used here
+
+      error[E0502]: cannot borrow `rev` as immutable because it is also borrowed as mutable
+         --> src/constraint_precompute3_challenge_elimination.rs:449:37
+          |
+      270 |       let mut sync_rev_entry_for = |u: Intermediate2PrecomputeNode3Index,
+          |  __________________________________-
+      271 | |                                   v: Intermediate2PrecomputeNode3Index,
+      272 | |                                   k: &Intermediate2Trie3EdgeKey| {
+          | |________________________________________________________________- mutable borrow occurs here
+      273 |           if let Some(vec) = rev.get_mut(&v) {
+          |                              --- first borrow occurs due to use of `rev` in closure
+      ...
+      449 |               if let Some(incoming) = rev.get(&b).cloned() {
+          |                                       ^^^ immutable borrow occurs here
+      ...
+      452 |                       sync_rev_entry_for(a, b_np, &k);
+          |                       ------------------ mutable borrow later used here
+
+      For more information about this error, try `rustc --explain E0502`.
+      error: could not compile `sep1` (lib test) due to 5 previous errors
+      Process finished with exit code 101
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3739,601 +2242,203 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s a surgical, performance-focused refactor that eliminates repeated full-graph scans and rebuilds, avoids heavy logging, and makes the push/pop elimination event-driven. This should cut the runtime from tens of seconds to well under a second, and typically close to the target 100 ms depending on graph size.
+      Hello! As an AI assistant, I can help you with your Rust code. The borrow checker errors you're seeing are a classic case of a closure capturing a mutable reference (`rev`) that outlives other immutable borrows of the same variable.
 
-      Step-by-step instructions
+      The simplest way to fix this is to convert the closure `sync_rev_entry_for` into a regular function. This ensures that the mutable borrow of `rev` is only active for the duration of the function call, resolving the conflict.
 
-      1) Edit imports in src/constraint_precompute3_challenge_elimination.rs
-      - Add VecDeque to the std::collections import list so we can use a work queue without qualifying the path each time.
+      Here are the step-by-step instructions to fix the code:
 
-      2) Replace the implementation of eliminate_pushes_and_pops
-      - Remove all println! calls and the multiple full-graph passes.
-      - Implement an event-driven algorithm:
-        - Convert to the intermediate2 graph (same as before).
-        - Build reverse adjacency once (rev).
-        - Initialize a queue with all nodes that:
-          - are not end nodes;
-          - have at least one incoming Push;
-          - have no outgoing Push.
-        - Process nodes from the queue:
-          - Remove all incoming Push edges into the node.
-          - For each such Push and each outgoing non-Push edge, create a shortcut edge as in the original logic.
-          - If a new Push is added into a node that has no outgoing push, queue it.
-        - If the queue becomes empty but there are nodes with incoming Push and both Push and non-Push outgoing edges, split them in a single batch:
-          - Clone the node into a “non-push” twin.
-          - Move non-Push outgoing edges to the twin.
-          - Duplicate all incoming edges to the twin.
-          - Queue the twin if it now satisfies the candidate condition.
-        - Repeat queue processing until no more splits are needed.
-      - After processing, convert back to the original graph and deep-copy back into god, as before.
-      - This preserves semantics and the previous tests while dramatically cutting the number of global scans.
+      ### Step 1: Create a Helper Function
 
-      3) Do not change any of the conversion helpers or test helpers
-      - Those remain as-is. The tests should continue passing.
+      In `src/constraint_precompute3_challenge_elimination.rs`, add the following function definition right before `pub fn eliminate_pushes_and_pops(...)`. This new function will contain the logic from your old closure.
 
-      Git diffs
+      ```rust
+      fn sync_rev_entry_for(
+          rev: &mut HashMap<
+              Intermediate2PrecomputeNode3Index,
+              Vec<(
+                  Intermediate2PrecomputeNode3Index,
+                  Intermediate2Trie3EdgeKey,
+                  LLMTokenBV,
+              )>,
+          >,
+          god2: &Intermediate2Trie3GodWrapper,
+          u: Intermediate2PrecomputeNode3Index,
+          v: Intermediate2PrecomputeNode3Index,
+          k: &Intermediate2Trie3EdgeKey,
+      ) {
+          if let Some(vec) = rev.get_mut(&v) {
+              vec.retain(|(uu, kk, _)| !(*uu == u && *kk == *k));
+          }
+          if let Some(guard) = u.read(god2) {
+              if let Some(dest_map) = guard.children().get(k) {
+                  if let Some(val) = dest_map.get(&v) {
+                      rev.entry(v).or_default().push((u, k.clone(), val.clone()));
+                  }
+              }
+          }
+      }
+      ```
+
+      ### Step 2: Remove the Closure
+
+      Inside the `eliminate_pushes_and_pops` function, delete the entire definition of the `sync_rev_entry_for` closure (lines 270-288).
+
+      ### Step 3: Update Call Sites
+
+      Now, find all the places where `sync_rev_entry_for` was called and update them to call the new helper function, passing `rev` and `god2` as arguments.
+
+      1.  Around line 355, change this:
+          ```rust
+          sync_rev_entry_for(*a, b, push_k);
+          ```
+          to this:
+          ```rust
+          sync_rev_entry_for(&mut rev, &god2, *a, b, push_k);
+          ```
+
+      2.  Around line 386, change this:
+          ```rust
+          sync_rev_entry_for(a, *c, &new_k);
+          ```
+          to this:
+          ```rust
+          sync_rev_entry_for(&mut rev, &god2, a, *c, &new_k);
+          ```
+
+      3.  Around line 441, change this:
+          ```rust
+          sync_rev_entry_for(b_np, *c, &k);
+          ```
+          to this:
+          ```rust
+          sync_rev_entry_for(&mut rev, &god2, b_np, *c, &k);
+          ```
+
+      4.  Around line 445, change this:
+          ```rust
+          sync_rev_entry_for(b, *c, &k);
+          ```
+          to this:
+          ```rust
+          sync_rev_entry_for(&mut rev, &god2, b, *c, &k);
+          ```
+
+      5.  Around line 452, change this:
+          ```rust
+          sync_rev_entry_for(a, b_np, &k);
+          ```
+          to this:
+          ```rust
+          sync_rev_entry_for(&mut rev, &god2, a, b_np, &k);
+          ```
+
+      ---
+
+      Here is the git diff with all the changes applied:
 
       ```diff
       diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
       --- a/src/constraint_precompute3_challenge_elimination.rs
       +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -3,7 +3,7 @@
-           IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, LLMTokenBV, StateIDBV,
-       };
-       use crate::datastructures::trie::{GodWrapper, MergeableEdgeValue, Trie, Trie2Index};
-       use crate::tokenizer::TokenizerStateID;
-      -use std::collections::{BTreeMap, HashMap, HashSet};
-      +use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-       use std::fmt::{self, Display, Formatter};
-       
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      @@ -199,166 +199,227 @@
+      @@ -223,6 +223,32 @@
            (roots1, god1)
        }
        
-       pub fn eliminate_pushes_and_pops(
-           roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
-           god: &IntermediateTrie3GodWrapper,
-       ) {
-      -    println!("Starting push/pop elimination...");
-      -    let initial_nodes =
-      -        IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
-      -            .len();
-      -    println!("Initial graph node count: {}", initial_nodes);
-      -
-      -    // 1. Convert to Intermediate2 format, which moves token constraints to edge values.
-      -    let (roots2, god2) = convert_to_intermediate2(roots, god);
-      -    let intermediate_nodes = Intermediate2PrecomputeNode3::all_nodes(
-      -        &god2,
-      -        &roots2.values().cloned().collect::<Vec<_>>(),
-      -    )
-      -    .len();
-      -    println!(
-      -        "Intermediate graph node count: {}",
-      -        intermediate_nodes
-      -    );
-      -
-      -    let mut loop_count = 0;
-      -    // 2. Main loop: find and process nodes until no more candidates exist.
-      -    loop {
-      -        loop_count += 1;
-      -        let all_nodes = Intermediate2PrecomputeNode3::all_nodes(
-      -            &god2,
-      -            &roots2.values().cloned().collect::<Vec<_>>(),
-      -        );
-      -        println!(
-      -            "\nLoop {}: starting with {} nodes.",
-      -            loop_count,
-      -            all_nodes.len()
-      -        );
-      -
-      -        // To efficiently find incoming edges, we build a reverse adjacency list.
-      -        let mut reverse_adj: HashMap<
-      -            Intermediate2PrecomputeNode3Index,
-      -            Vec<(
-      -                Intermediate2PrecomputeNode3Index,
-      -                Intermediate2Trie3EdgeKey,
-      -                LLMTokenBV,
-      -            )>,
-      -        > = HashMap::new();
-      -        for &u in &all_nodes {
-      -            if let Some(u_guard) = u.read(&god2) {
-      -                for (edge_key, dest_map) in u_guard.children() {
-      -                    for (&v, edge_val) in dest_map {
-      -                        reverse_adj
-      -                            .entry(v)
-      -                            .or_default()
-      -                            .push((u, edge_key.clone(), edge_val.clone()));
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        // Find a candidate node 'B' to process:
-      -        // - Not an end state.
-      -        // - Has at least one incoming Push edge.
-      -        // - Has no outgoing Push edges.
-      -        let mut nodes_to_process = Vec::new();
-      -        for &b_idx in &all_nodes {
-      -            let b_guard = b_idx.read(&god2).unwrap();
-      -            if b_guard.value.end {
-      -                continue;
-      -            }
-      -
-      -            let has_outgoing_push = b_guard
-      -                .children()
-      -                .keys()
-      -                .any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
-      -            if has_outgoing_push {
-      -                continue;
-      -            }
-      -
-      -            if let Some(incoming_edges) = reverse_adj.get(&b_idx) {
-      -                let has_incoming_push = incoming_edges
-      -                    .iter()
-      -                    .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)));
-      -                if has_incoming_push {
-      -                    nodes_to_process.push(b_idx);
-      -                }
-      -            }
-      -        }
-      -
-      -        if !nodes_to_process.is_empty() {
-      -            println!(
-      -                "  Found {} standard candidate nodes to process.",
-      -                nodes_to_process.len()
-      -            );
-      -
-      -            let mut edges_to_remove = Vec::new();
-      -            let mut edges_to_add = Vec::new();
-      -
-      -            for &b_idx in &nodes_to_process {
-      -                // Gather information about B's incoming pushes and all outgoing edges.
-      -                let incoming_pushes: Vec<_> = reverse_adj
-      -                    .get(&b_idx)
-      -                    .unwrap()
-      -                    .iter()
-      -                    .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-      -                    .cloned()
-      -                    .collect();
-      -
-      -                let outgoing_edges: Vec<_> = b_idx
-      -                    .read(&god2)
-      -                    .unwrap()
-      -                    .children()
-      -                    .iter()
-      -                    .flat_map(|(k, dest_map)| {
-      -                        dest_map
-      -                            .iter()
-      -                            .map(move |(&c_idx, val)| (k.clone(), c_idx, val.clone()))
-      -                    })
-      -                    .collect();
-      -
-      -                // Remove all incoming push edges to B.
-      -                for (a_idx, edge_key, _) in &incoming_pushes {
-      -                    edges_to_remove.push((*a_idx, b_idx, edge_key.clone()));
-      -                }
-      -
-      -                // Create new "shortcut" edges from A to C.
-      -                for (a_idx, push_key, tokens_a_b) in &incoming_pushes {
-      -                    let s = match push_key {
-      -                        Intermediate2Trie3EdgeKey::Push(s) => s,
-      -                        _ => unreachable!(),
-      -                    };
-      -
-      -                    for (op_key, c_idx, tokens_b_c) in &outgoing_edges {
-      -                        let new_tokens = tokens_a_b & tokens_b_c;
-      -                        if new_tokens.is_empty() {
-      -                            continue;
-      -                        }
-      -
-      -                        let new_key_opt = match op_key {
-      -                            Intermediate2Trie3EdgeKey::Pop(0, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s & s_prime)),
-      -                            Intermediate2Trie3EdgeKey::Pop(1, s_prime) => (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp),
-      -                            Intermediate2Trie3EdgeKey::Pop(n, s_prime) => Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone())),
-      -                            Intermediate2Trie3EdgeKey::NoOp => Some(Intermediate2Trie3EdgeKey::Push(s.clone())),
-      -                            Intermediate2Trie3EdgeKey::Push(_) => unreachable!("Node to process should not have outgoing pushes"),
-      -                        };
-      -
-      -                        if let Some(new_key) = new_key_opt {
-      -                            edges_to_add.push((*a_idx, *c_idx, new_key, new_tokens));
-      -                        }
-      -                    }
-      -                }
-      -            }
-      -
-      -            for (u, v, k) in edges_to_remove {
-      -                god2.remove_edge(u, v, &k);
-      -            }
-      -            for (u, v, k, val) in edges_to_add {
-      -                god2.insert_edge_simple(u, v, k, val);
-      -            }
-      -        } else {
-      -            // No candidate with "incoming Push" and "no outgoing Push".
-      -            // Fallback: split a node that has both Push and non-Push outgoing edges
-      -            // and at least one incoming Push. This creates exactly one new node,
-      -            // moving all non-Push outgoing edges to it and duplicating all incoming
-      -            // edges to preserve behavior. Then retry the main loop.
-      -            let mut split_candidates = Vec::new();
-      -            for &b_idx in &all_nodes {
-      -                let b_guard = b_idx.read(&god2).unwrap();
-      -                if b_guard.value.end {
-      -                    continue;
-      -                }
-      -                let mut has_outgoing_push = false;
-      -                let mut has_outgoing_nonpush = false;
-      -                for k in b_guard.children().keys() {
-      -                    match k {
-      -                        Intermediate2Trie3EdgeKey::Push(_) => has_outgoing_push = true,
-      -                        _ => has_outgoing_nonpush = true,
-      -                    }
-      -                }
-      -                if !(has_outgoing_push && has_outgoing_nonpush) {
-      -                    continue;
-      -                }
-      -                let has_incoming_push = reverse_adj
-      -                    .get(&b_idx)
-      -                    .map_or(false, |incoming| {
-      -                        incoming
-      -                            .iter()
-      -                            .any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-      -                    });
-      -                if has_incoming_push {
-      -                    split_candidates.push(b_idx);
-      -                }
-      -            }
-      -
-      -            if !split_candidates.is_empty() {
-      -                println!(
-      -                    "  No standard candidate. Found {} split candidates to process.",
-      -                    split_candidates.len()
-      -                );
-      -                for &b_idx in &split_candidates {
-      -                // Create the new "non-push" clone node
-      -                let b_value = b_idx.read(&god2).unwrap().value.clone();
-      -                let b_np_idx = Intermediate2PrecomputeNode3Index::new(
-      -                    god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
-      -                );
-      -
-      -                // Move all non-push outgoing edges from b_idx -> (...) to b_np_idx -> (...)
-      -                let mut to_move: Vec<(
-      -                    Intermediate2Trie3EdgeKey,
-      -                    Intermediate2PrecomputeNode3Index,
-      -                    LLMTokenBV,
-      -                )> = Vec::new();
-      -                if let Some(b_guard) = b_idx.read(&god2) {
-      -                    for (edge_key, dest_map) in b_guard.children() {
-      -                        if !matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
-      -                            for (&c_idx, val) in dest_map {
-      -                                to_move.push((edge_key.clone(), c_idx, val.clone()));
-      -                            }
-      -                        }
-      -                    }
-      -                }
-      -                for (k, c_idx, val) in &to_move {
-      -                    god2.insert_edge_simple(b_np_idx, *c_idx, k.clone(), val.clone());
-      -                }
-      -                for (k, c_idx, _) in &to_move {
-      -                    god2.remove_edge(b_idx, *c_idx, k);
-      -                }
-      -
-      -                // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable
-      -                    if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
-      -                    for (a_idx, k, val) in incoming {
-      -                            god2.insert_edge_simple(a_idx, b_np_idx, k.clone(), val.clone());
-      -                    }
-      -                }
-      -                }
-      -
-      -                // Now that we've split, try again from the top to pick up a standard candidate.
-      -                continue;
-      -            } else {
-      -                // No more nodes to process and no viable split candidate: stop.
-      -                println!("  No more candidates to process or split. Exiting loop.");
-      -                break;
-      -            }
-      -        }
-      -    }
-      -
-      -    // 3. Convert back to the original Trie format.
-      -    let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
-      -    println!(
-      -        "Finished elimination loop. Final intermediate graph has {} nodes.",
-      -        IntermediatePrecomputeNode3::all_nodes(
-      -            &new_god1,
-      -            &new_roots1_map
-      -                .values()
-      -                .cloned()
-      -                .collect::<Vec<_>>()
-      -        )
-      -        .len()
-      -    );
-      -
-      -    // 4. The function signature requires modifying `god` in place.
-      -    // We clear the original `god` and deep-copy the new graph into it.
-      -    let mut sids_in_order = Vec::new();
-      -    let mut new_roots_vec = Vec::new();
-      -    for (&sid, &root_idx) in &new_roots1_map {
-      -        sids_in_order.push(sid);
-      -        new_roots_vec.push(root_idx);
-      -    }
-      -
-      -    god.clear();
-      -    let (final_roots_vec, _map) =
-      -        IntermediatePrecomputeNode3::deep_copy_subtrees_into(&new_god1, god, &new_roots_vec);
-      -
-      -    roots.clear();
-      -    for (sid, final_root_idx) in sids_in_order.iter().zip(final_roots_vec.iter()) {
-      -        roots.insert(*sid, *final_root_idx);
-      -    }
-      -    println!(
-      -        "Final graph node count: {}",
-      -        IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
-      -            .len()
-      -    );
-      +    // 1) Convert to Intermediate2 format, which moves token constraints to edge values.
-      +    let (roots2, god2) = convert_to_intermediate2(roots, god);
-      +
-      +    // 2) Build the set of reachable nodes once.
-      +    let all_nodes = Intermediate2PrecomputeNode3::all_nodes(
-      +        &god2,
-      +        &roots2.values().cloned().collect::<Vec<_>>(),
-      +    );
-      +
-      +    // 3) Build reverse adjacency once and keep it incrementally updated.
-      +    let mut rev: HashMap<
+      +fn sync_rev_entry_for(
+      +    rev: &mut HashMap<
       +        Intermediate2PrecomputeNode3Index,
       +        Vec<(
       +            Intermediate2PrecomputeNode3Index,
       +            Intermediate2Trie3EdgeKey,
       +            LLMTokenBV,
       +        )>,
-      +    > = HashMap::new();
-      +    for &u in &all_nodes {
-      +        if let Some(u_guard) = u.read(&god2) {
-      +            for (edge_key, dest_map) in u_guard.children() {
-      +                for (&v, edge_val) in dest_map {
-      +                    rev.entry(v)
-      +                        .or_default()
-      +                        .push((u, edge_key.clone(), edge_val.clone()));
-      +                }
+      +    >,
+      +    god2: &Intermediate2Trie3GodWrapper,
+      +    u: Intermediate2PrecomputeNode3Index,
+      +    v: Intermediate2PrecomputeNode3Index,
+      +    k: &Intermediate2Trie3EdgeKey,
+      +) {
+      +    if let Some(vec) = rev.get_mut(&v) {
+      +        vec.retain(|(uu, kk, _)| !(*uu == u && *kk == *k));
+      +    }
+      +    if let Some(guard) = u.read(god2) {
+      +        if let Some(dest_map) = guard.children().get(k) {
+      +            if let Some(val) = dest_map.get(&v) {
+      +                rev.entry(v).or_default().push((u, k.clone(), val.clone()));
       +            }
       +        }
       +    }
+      +}
       +
-      +    // Helpers
-      +    let has_outgoing_push = |node: Intermediate2PrecomputeNode3Index| -> bool {
-      +        node.read(&god2)
-      +            .map_or(false, |g| g.children().keys().any(|k| matches!(k, Intermediate2Trie3EdgeKey::Push(_))))
-      +    };
-      +    let has_outgoing_nonpush = |node: Intermediate2PrecomputeNode3Index| -> bool {
-      +        node.read(&god2)
-      +            .map_or(false, |g| g.children().keys().any(|k| !matches!(k, Intermediate2Trie3EdgeKey::Push(_))))
-      +    };
-      +    let is_end = |node: Intermediate2PrecomputeNode3Index| -> bool {
-      +        node.read(&god2).map_or(false, |g| g.value.end)
-      +    };
-      +    // Keep rev in sync for a single (u, v, k) after insert/remove.
-      +    let mut sync_rev_entry_for = |u: Intermediate2PrecomputeNode3Index,
-      +                                  v: Intermediate2PrecomputeNode3Index,
-      +                                  k: &Intermediate2Trie3EdgeKey| {
-      +        if let Some(vec) = rev.get_mut(&v) {
-      +            vec.retain(|(uu, kk, _)| !(*uu == u && *kk == *k));
-      +        }
-      +        if let Some(guard) = u.read(&god2) {
-      +            if let Some(dest_map) = guard.children().get(k) {
-      +                if let Some(val) = dest_map.get(&v) {
-      +                    rev.entry(v)
-      +                        .or_default()
-      +                        .push((u, k.clone(), val.clone()));
-      +                }
-      +            }
-      +        }
-      +    };
-      +
-      +    // 4) Prepare an initial work queue: nodes that are not end, have at least one incoming push, and no outgoing push.
-      +    let mut queue: VecDeque<Intermediate2PrecomputeNode3Index> = VecDeque::new();
-      +    let mut in_queue: HashSet<Intermediate2PrecomputeNode3Index> = HashSet::new();
-      +    for &b in &all_nodes {
-      +        if is_end(b) {
-      +            continue;
-      +        }
-      +        let has_incoming_push = rev
-      +            .get(&b)
-      +            .map_or(false, |incoming| incoming.iter().any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_))));
-      +        if has_incoming_push && !has_outgoing_push(b) {
-      +            queue.push_back(b);
-      +            in_queue.insert(b);
-      +        }
-      +    }
-      +
-      +    // Maintain a set of potential split candidates incrementally.
-      +    let mut split_candidates: HashSet<Intermediate2PrecomputeNode3Index> = HashSet::new();
-      +    for &b in &all_nodes {
-      +        if is_end(b) {
-      +            continue;
-      +        }
-      +        let has_incoming_push = rev
-      +            .get(&b)
-      +            .map_or(false, |incoming| incoming.iter().any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_))));
-      +        if has_incoming_push && has_outgoing_push(b) && has_outgoing_nonpush(b) {
-      +            split_candidates.insert(b);
-      +        }
-      +    }
-      +
-      +    // 5) Event-driven elimination loop.
-      +    loop {
-      +        while let Some(b) = queue.pop_front() {
-      +            in_queue.remove(&b);
-      +            if is_end(b) {
-      +                continue;
-      +            }
-      +            if has_outgoing_push(b) {
-      +                // Not eligible anymore (maybe changed); skip.
-      +                continue;
-      +            }
-      +
-      +            // Snapshot incoming pushes to b
-      +            let incoming_list = rev.get(&b).cloned().unwrap_or_default();
-      +            let incoming_pushes: Vec<_> = incoming_list
-      +                .into_iter()
-      +                .filter(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_)))
-      +                .collect();
-      +            if incoming_pushes.is_empty() {
-      +                continue;
-      +            }
-      +
-      +            // Gather outgoing non-push edges from b
-      +            let mut outgoing_nonpush: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
-      +            if let Some(b_guard) = b.read(&god2) {
-      +                for (k, dest_map) in b_guard.children() {
-      +                    if matches!(k, Intermediate2Trie3EdgeKey::Push(_)) {
-      +                        continue;
-      +                    }
-      +                    for (&c, val) in dest_map {
-      +                        outgoing_nonpush.push((k.clone(), c, val.clone()));
-      +                    }
-      +                }
-      +            }
-      +
-      +            // Remove all incoming push edges to b
-      +            for (a, push_k, _) in &incoming_pushes {
-      +                god2.remove_edge(*a, b, push_k);
-      +                sync_rev_entry_for(*a, b, push_k);
-      +            }
-      +
-      +            // Create shortcut edges from a to c
-      +            for (a, push_k, tokens_a_b) in incoming_pushes {
-      +                let s = match &push_k {
-      +                    Intermediate2Trie3EdgeKey::Push(s) => s.clone(),
-      +                    _ => unreachable!(),
-      +                };
-      +                for (op_k, c, tokens_b_c) in &outgoing_nonpush {
-      +                    let new_tokens = tokens_a_b.clone() & tokens_b_c.clone();
-      +                    if new_tokens.is_empty() {
-      +                        continue;
-      +                    }
-      +                    let new_key_opt = match op_k {
-      +                        Intermediate2Trie3EdgeKey::Pop(0, s_prime) => {
-      +                            (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::Push(s.clone() & s_prime.clone()))
-      +                        }
-      +                        Intermediate2Trie3EdgeKey::Pop(1, s_prime) => {
-      +                            (!s.is_disjoint(s_prime)).then_some(Intermediate2Trie3EdgeKey::NoOp)
-      +                        }
-      +                        Intermediate2Trie3EdgeKey::Pop(n, s_prime) => {
-      +                            Some(Intermediate2Trie3EdgeKey::Pop(n - 1, s_prime.clone()))
-      +                        }
-      +                        Intermediate2Trie3EdgeKey::NoOp => {
-      +                            Some(Intermediate2Trie3EdgeKey::Push(s.clone()))
-      +                        }
-      +                        Intermediate2Trie3EdgeKey::Push(_) => unreachable!(),
-      +                    };
-      +                    if let Some(new_k) = new_key_opt {
-      +                        god2.insert_edge_simple(a, *c, new_k.clone(), new_tokens.clone());
-      +                        // Keep reverse adjacency accurate (dedupe existing entry).
-      +                        sync_rev_entry_for(a, *c, &new_k);
-      +                        if let Intermediate2Trie3EdgeKey::Push(_) = new_k {
-      +                            // If c has no outgoing push, it's a candidate to process next.
-      +                            if !is_end(*c) && !has_outgoing_push(*c) && in_queue.insert(*c) {
-      +                                queue.push_back(*c);
-      +                            }
-      +                            // If c has both push and non-push outgoing edges, it's a split candidate.
-      +                            if has_outgoing_push(*c) && has_outgoing_nonpush(*c) {
-      +                                split_candidates.insert(*c);
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        // Queue is empty. If there are split candidates that still qualify, split them in batch.
-      +        let mut to_split: Vec<Intermediate2PrecomputeNode3Index> = Vec::new();
-      +        for &b in split_candidates.iter() {
-      +            if is_end(b) {
-      +                continue;
-      +            }
-      +            let has_incoming_push = rev
-      +                .get(&b)
-      +                .map_or(false, |incoming| incoming.iter().any(|(_, k, _)| matches!(k, Intermediate2Trie3EdgeKey::Push(_))));
-      +            if has_incoming_push && has_outgoing_push(b) && has_outgoing_nonpush(b) {
-      +                to_split.push(b);
-      +            }
-      +        }
-      +        if to_split.is_empty() {
-      +            break;
-      +        }
-      +
-      +        for b in to_split {
-      +            split_candidates.remove(&b);
-      +            // Create the new "non-push" clone node
-      +            let b_value = b.read(&god2).unwrap().value.clone();
-      +            let b_np = Intermediate2PrecomputeNode3Index::new(
-      +                god2.insert(Intermediate2PrecomputeNode3::new(b_value)),
-      +            );
-      +
-      +            // Move all non-push outgoing edges from b -> (...) to b_np -> (...)
-      +            let mut to_move: Vec<(Intermediate2Trie3EdgeKey, Intermediate2PrecomputeNode3Index, LLMTokenBV)> = Vec::new();
-      +            if let Some(b_guard) = b.read(&god2) {
-      +                for (edge_key, dest_map) in b_guard.children() {
-      +                    if !matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
-      +                        for (&c, val) in dest_map {
-      +                            to_move.push((edge_key.clone(), c, val.clone()));
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +            for (k, c, val) in &to_move {
-      +                god2.insert_edge_simple(b_np, *c, k.clone(), val.clone());
-      +                sync_rev_entry_for(b_np, *c, &k);
-      +            }
-      +            for (k, c, _) in &to_move {
-      +                god2.remove_edge(b, *c, &k);
-      +                sync_rev_entry_for(b, *c, &k);
-      +            }
-      +
-      +            // Duplicate all incoming edges so both b (push-only) and b_np (non-push-only) are reachable
-      +            if let Some(incoming) = rev.get(&b).cloned() {
-      +                for (a, k, val) in incoming {
-      +                    god2.insert_edge_simple(a, b_np, k.clone(), val.clone());
-      +                    sync_rev_entry_for(a, b_np, &k);
-      +                    if let Intermediate2Trie3EdgeKey::Push(_) = k {
-      +                        if !is_end(b_np) && !has_outgoing_push(b_np) && in_queue.insert(b_np) {
-      +                            queue.push_back(b_np);
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +        }
-      +    }
-      +
-      +    // 6) Convert back to the original Trie format.
-      +    let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
-      +
-      +    // 7) The function signature requires modifying `god` in place.
-      +    // Clear the original `god` and deep-copy the new graph into it.
-      +    let mut sids_in_order = Vec::new();
-      +    let mut new_roots_vec = Vec::new();
-      +    for (&sid, &root_idx) in &new_roots1_map {
-      +        sids_in_order.push(sid);
-      +        new_roots_vec.push(root_idx);
-      +    }
-      +
-      +    god.clear();
-      +    let (final_roots_vec, _map) =
-      +        IntermediatePrecomputeNode3::deep_copy_subtrees_into(&new_god1, god, &new_roots_vec);
-      +
-      +    roots.clear();
-      +    for (sid, final_root_idx) in sids_in_order.iter().zip(final_roots_vec.iter()) {
-      +        roots.insert(*sid, *final_root_idx);
-      +    }
-       }
-       
-       // --- Assertion and Test Helpers (Unchanged) ---
-       
-       pub fn assert_no_pops_reachable_from_pushes(
-           roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+       pub fn eliminate_pushes_and_pops(
+           roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
            god: &IntermediateTrie3GodWrapper,
+      @@ -263,25 +289,6 @@
+           let is_end = |node: Intermediate2PrecomputeNode3Index| -> bool {
+               node.read(&god2).map_or(false, |g| g.value.end)
+           };
+      -    // Keep rev in sync for a single (u, v, k) after insert/remove.
+      -    let mut sync_rev_entry_for = |u: Intermediate2PrecomputeNode3Index,
+      -                                  v: Intermediate2PrecomputeNode3Index,
+      -                                  k: &Intermediate2Trie3EdgeKey| {
+      -        if let Some(vec) = rev.get_mut(&v) {
+      -            vec.retain(|(uu, kk, _)| !(*uu == u && *kk == *k));
+      -        }
+      -        if let Some(guard) = u.read(&god2) {
+      -            if let Some(dest_map) = guard.children().get(k) {
+      -                if let Some(val) = dest_map.get(&v) {
+      -                    rev.entry(v)
+      -                        .or_default()
+      -                        .push((u, k.clone(), val.clone()));
+      -                }
+      -            }
+      -        }
+      -    };
+       
+           // 4) Prepare an initial work queue: nodes that are not end, have at least one incoming push, and no outgoing push.
+           let mut queue: VecDeque<Intermediate2PrecomputeNode3Index> = VecDeque::new();
+      @@ -348,7 +355,7 @@
+                   // Remove all incoming push edges to b
+                   for (a, push_k, _) in &incoming_pushes {
+                       god2.remove_edge(*a, b, push_k);
+      -                sync_rev_entry_for(*a, b, push_k);
+      +                sync_rev_entry_for(&mut rev, &god2, *a, b, push_k);
+                   }
+       
+                   // Create shortcut edges from a to c
+      @@ -379,7 +386,7 @@
+                           if let Some(new_k) = new_key_opt {
+                               god2.insert_edge_simple(a, *c, new_k.clone(), new_tokens.clone());
+                               // Keep reverse adjacency accurate (dedupe existing entry).
+      -                        sync_rev_entry_for(a, *c, &new_k);
+      +                        sync_rev_entry_for(&mut rev, &god2, a, *c, &new_k);
+                               if let Intermediate2Trie3EdgeKey::Push(_) = new_k {
+                                   // If c has no outgoing push, it's a candidate to process next.
+                                   if !is_end(*c) && !has_outgoing_push(*c) && in_queue.insert(*c) {
+      @@ -432,18 +439,18 @@
+                   }
+                   for (k, c, val) in &to_move {
+                       god2.insert_edge_simple(b_np, *c, k.clone(), val.clone());
+      -                sync_rev_entry_for(b_np, *c, &k);
+      +                sync_rev_entry_for(&mut rev, &god2, b_np, *c, &k);
+                   }
+                   for (k, c, _) in &to_move {
+                       god2.remove_edge(b, *c, &k);
+      -                sync_rev_entry_for(b, *c, &k);
+      +                sync_rev_entry_for(&mut rev, &god2, b, *c, &k);
+                   }
+       
+                   // Duplicate all incoming edges so both b (push-only) and b_np (non-push-only) are reachable
+                   if let Some(incoming) = rev.get(&b).cloned() {
+                       for (a, k, val) in incoming {
+                           god2.insert_edge_simple(a, b_np, k.clone(), val.clone());
+      -                    sync_rev_entry_for(a, b_np, &k);
+      +                    sync_rev_entry_for(&mut rev, &god2, a, b_np, &k);
+                           if let Intermediate2Trie3EdgeKey::Push(_) = k {
+                               if !is_end(b_np) && !has_outgoing_push(b_np) && in_queue.insert(b_np) {
+                                   queue.push_back(b_np);
+
       ```
     metadata:
   - user: |
@@ -4345,7 +2450,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor push/pop elimination to use an
-      event-driven, queue-based approach for significant performance improvement"'
+  - user: 'Changes committed with message: "Refactor: Convert sync_rev_entry_for closure
+      to a standalone function to fix borrow checker errors"'
     metadata:
 ...
