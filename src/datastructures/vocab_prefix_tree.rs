@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::collections::BTreeMap as StdMap;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -8,8 +9,6 @@ use range_set_blaze::RangeSetBlaze;
 // Keep for macros or other uses if needed
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::json_serialization::{JSONConvertible, JSONNode};
-// Added
-use std::collections::BTreeMap as StdMap;
 // Added for derive macro pattern
 
 
@@ -288,31 +287,54 @@ impl VocabPrefixTree {
     // -------------- New, faster reachable IDs computation --------------
 
     /// Recomputes reachable_token_ids for all nodes using a fast, path-based propagation:
-    /// For every token node in the tree, insert its token_id into the reachable bitset of
-    /// every ancestor along the path from the root (including itself).
+    /// Single-pass DFS that inserts each node's token_id into itself and all
+    /// ancestors currently on the stack. This avoids repeated BTreeMap lookups,
+    /// edge key cloning, and per-token path recomputation.
     fn recompute_reachable_ids_via_paths(&mut self) {
         // 1) Clear all reachable sets
         Self::clear_reachable_ids_recursive(&mut self.root);
 
-        // 2) Collect all tokens present in the final, merged tree.
-        //    If the empty string wasn't provided, skip the root (its token_id is conventional).
-        let mut tokens_in_tree: Vec<(usize, Vec<u8>)> = Vec::new();
-        Self::collect_tokens_recursive(
-            &self.root,
-            &mut tokens_in_tree,
-            self.has_empty_string_token, // include root iff empty string token exists
-        );
-
-        // 3) For each token, find the sequence of edge labels (keys) along the path from
-        //    the root to the token node, then insert that token_id into the reachable
-        //    sets along that path in a single mutable pass.
-        for (token_id, full_prefix) in tokens_in_tree {
-            // Determine the path as a sequence of edge labels (Vec<u8>) from root to target.
-            let path_keys = Self::compute_path_keys(&self.root, &full_prefix);
-
-            // Mutably walk the path and insert the token_id into all visited nodes.
-            Self::insert_token_along_path(&mut self.root, token_id, &path_keys);
+        // 2) Single DFS: propagate each node's token_id into itself and all ancestors.
+        let mut ancestor_stack: Vec<*mut VocabPrefixTreeNode> = Vec::new();
+        let root_ptr: *mut VocabPrefixTreeNode = &mut self.root;
+        unsafe {
+            Self::propagate_reachable_ids_dfs(root_ptr, &mut ancestor_stack);
         }
+    }
+
+    /// Unsafe, pointer-based DFS to propagate token IDs upward to all ancestors in a single pass.
+    /// Safety rationale:
+    /// - We never mutate the shape of BTreeMap (no insert/remove), so raw pointers to children remain valid.
+    /// - We only mutate disjoint nodes' reachable_token_ids via raw pointers to avoid borrow checker overhead.
+    /// - We collect child pointers first (ending the temporary &mut borrow) before recursing.
+    unsafe fn propagate_reachable_ids_dfs(
+        node_ptr: *mut VocabPrefixTreeNode,
+        ancestors: &mut Vec<*mut VocabPrefixTreeNode>,
+    ) {
+        // Insert this node's token into itself.
+        (*node_ptr).reachable_token_ids.insert((*node_ptr).token_id);
+
+        // Insert this node's token into all ancestors.
+        let token_id = (*node_ptr).token_id;
+        for &ancestor_ptr in ancestors.iter() {
+            (*ancestor_ptr).reachable_token_ids.insert(token_id);
+        }
+
+        // Collect child raw pointers first so the &mut borrow does not live across recursion.
+        let mut child_ptrs: Vec<*mut VocabPrefixTreeNode> = Vec::new();
+        {
+            let current: &mut VocabPrefixTreeNode = &mut *node_ptr;
+            for child in current.children.values_mut() {
+                child_ptrs.push(child as *mut VocabPrefixTreeNode);
+            }
+        }
+
+        // Recurse into children, with this node on the ancestor stack.
+        ancestors.push(node_ptr);
+        for child_ptr in child_ptrs {
+            Self::propagate_reachable_ids_dfs(child_ptr, ancestors);
+        }
+        ancestors.pop();
     }
 
     /// Clears reachable_token_ids for the entire subtree rooted at `node`.
@@ -326,6 +348,7 @@ impl VocabPrefixTree {
     /// Collects (token_id, full_prefix) pairs for all nodes in the subtree.
     /// If `include_this` is false, the current node is skipped (used to exclude root
     /// when no empty string token was provided).
+    #[allow(dead_code)]
     fn collect_tokens_recursive(
         node: &VocabPrefixTreeNode,
         out: &mut Vec<(usize, Vec<u8>)>,
@@ -337,63 +360,6 @@ impl VocabPrefixTree {
         for child in node.children.values() {
             // Children are always included
             Self::collect_tokens_recursive(child, out, true);
-        }
-    }
-
-    /// Given the root and a token's full prefix (node.prefix), compute the ordered list
-    /// of edge labels (keys) from the root down to that node.
-    fn compute_path_keys<'a>(
-        mut current: &'a VocabPrefixTreeNode,
-        target_prefix: &[u8],
-    ) -> Vec<Vec<u8>> {
-        let mut keys = Vec::new();
-        if target_prefix.is_empty() {
-            // Empty string token: no edges to traverse
-            return keys;
-        }
-
-        let mut remaining = target_prefix;
-        'outer: loop {
-            // Find the child edge that matches the current remaining bytes prefix
-            for (edge_label, child) in current.children.iter() {
-                if remaining.starts_with(edge_label.as_slice()) {
-                    keys.push(edge_label.clone());
-                    if remaining.len() == edge_label.len() {
-                        // Reached the node exactly
-                        break 'outer;
-                    }
-                    // Descend
-                    current = child;
-                    remaining = &remaining[edge_label.len()..];
-                    // Continue searching at the new level
-                    continue 'outer;
-                }
-            }
-            // If we get here, something is inconsistent in the tree construction.
-            // For robustness, break (no keys returned).
-            break;
-        }
-
-        keys
-    }
-
-    /// Mutably traverses the tree following `path_keys` and inserts `token_id` into
-    /// the reachable bitset of every node on the path (root and all descendants visited).
-    fn insert_token_along_path(
-        mut current: &mut VocabPrefixTreeNode,
-        token_id: usize,
-        path_keys: &[Vec<u8>],
-    ) {
-        // Root always accumulates all tokens
-        current.reachable_token_ids.insert(token_id);
-
-        for key in path_keys {
-            // Temporarily descend into the child
-            let child = current.children.get_mut(key).expect("Path key not found during reachable propagation.");
-            // Insert for the child
-            child.reachable_token_ids.insert(token_id);
-            // Move down for the next iteration
-            current = child;
         }
     }
 
