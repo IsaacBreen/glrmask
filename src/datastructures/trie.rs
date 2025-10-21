@@ -1,6 +1,6 @@
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Display};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::{Deref, DerefMut};
@@ -2709,6 +2709,12 @@ impl MergeableEdgeValue for () {
 impl MergeableEdgeValue for HybridBitset {
     fn merge(&mut self, other: Self) {
         *self |= &other;
+    }
+}
+
+impl<T: Ord> MergeableEdgeValue for BTreeSet<T> {
+    fn merge(&mut self, mut other: Self) {
+        self.append(&mut other);
     }
 }
 
