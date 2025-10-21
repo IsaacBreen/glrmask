@@ -2597,18 +2597,16 @@ impl<'r> Precomputer1<'r> {
     fn flush_globals(&mut self) {
         timeit!("flush_globals", {
             let mut inner_guard = self.trie1_god.inner.write();
-            let global_live = self.global_live.borrow_mut().drain().collect::<FxHashMap<_, _>>();
-            let global_edges = self.global_edges.borrow_mut().drain().collect::<FxHashMap<_, _>>();
 
             // Apply live token updates
-            for (node_idx, live_tokens) in &global_live {
+            for (node_idx, live_tokens) in self.global_live.get_mut() {
                 if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
                     node.value.live_tokens |= live_tokens;
                 }
             }
 
             // Apply edge insertions
-            for (EdgeKey { src, key, dst }, bv) in &global_edges {
+            for (EdgeKey { src, key, dst }, bv) in self.global_edges.get_mut() {
                 if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
                     src_node.children_mut().entry(*key).or_default()
                         .entry(dst.clone())
