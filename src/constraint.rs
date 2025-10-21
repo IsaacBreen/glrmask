@@ -1,7 +1,6 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::cache;
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::r#macro::is_debug_level_enabled;
 use std::cell::RefCell;
@@ -55,7 +54,6 @@ use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use deterministic_hash::DeterministicHasher;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use range_set_blaze::RangeSetBlaze;
 use kdam::{tqdm, BarBuilder, BarExt};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use profiler_macro::{time_it, timeit};
@@ -2887,26 +2885,30 @@ impl<'r> Precomputer1<'r> {
             // === OPTIMIZATION 5: Batch write all edges and updates ===
             stats.analyze_pending_edges(&pending_edges);
             timeit!("dfs_batch_write", {
+                let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, TokenAcc)>> = FxHashMap::default();
+                for (key, acc) in pending_edges {
+                    if !acc.small.is_empty() || !acc.big.is_empty() {
+                        updates_by_src.entry(key.src).or_default().push((key.key, key.dst, acc));
+                    }
+                }
+
                 let mut inner_guard = self.trie1_god.inner.write();
 
                 // Apply live token updates
                 for (node_idx, mut acc) in pending_live_token_updates {
                     timeit!("dfs_batch_write_update_live_tokens", {
                         if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
-                            let update_bv = acc.to_bitset();
-                            if !update_bv.is_empty() {
-                                node.value.live_tokens |= &update_bv;
+                            let TokenAcc { ref mut small, big } = acc;
+                            if !small.is_empty() {
+                                small.sort_unstable();
+                                small.dedup();
+                                node.value.live_tokens.extend(small.iter().copied());
+                            }
+                            for big_bv in big {
+                                node.value.live_tokens |= &big_bv;
                             }
                         }
                     });
-                }
-
-                // Group updates by src node to minimize locking
-                let mut updates_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, TokenAcc)>> = FxHashMap::default();
-                for (key, acc) in pending_edges {
-                    if !acc.is_empty() {
-                        updates_by_src.entry(key.src).or_default().push((key.key, key.dst, acc));
-                    }
                 }
 
                 // Apply edge insertions
@@ -2914,16 +2916,58 @@ impl<'r> Precomputer1<'r> {
                     timeit!("dfs_batch_write_insert_edges_for_src", {
                         if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
                             for (key, dst, mut acc) in updates {
-                                let update_bv = acc.to_bitset();
-                                if update_bv.is_empty() {
-                                    continue;
-                                }
-                                src_node.children_mut()
-                                    .entry(key)
-                                    .or_default()
-                                    .entry(dst)
-                                    .and_modify(|existing| *existing |= &update_bv)
-                                    .or_insert(update_bv);
+                                timeit!("dfs_batch_write_insert_edges_for_src_inner_loop", {
+                                    let TokenAcc { ref mut small, big } = acc;
+                                    let dest_map = timeit!("dfs_batch_write_get_dest_map", {
+                                        src_node.children_mut().entry(key).or_default()
+                                    });
+                                    
+                                    if !small.is_empty() {
+                                        timeit!("dfs_batch_write_small_sort_dedup", {
+                                            small.sort_unstable();
+                                            small.dedup();
+                                        });
+                                    }
+
+                                    match dest_map.entry(dst) {
+                                        crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
+                                            timeit!("dfs_batch_write_occupied", {
+                                                let existing_bv = occupied.get_mut();
+                                                if !small.is_empty() {
+                                                    timeit!("dfs_batch_write_occupied_extend_small", {
+                                                        existing_bv.extend(small.iter().copied());
+                                                    });
+                                                }
+                                                if !big.is_empty() {
+                                                    timeit!("dfs_batch_write_occupied_merge_big", {
+                                                        for big_bv in big {
+                                                            *existing_bv |= &big_bv;
+                                                        }
+                                                    });
+                                                }
+                                            });
+                                        }
+                                        crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
+                                            timeit!("dfs_batch_write_vacant", {
+                                                if !small.is_empty() || !big.is_empty() {
+                                                    let mut new_bv = timeit!("dfs_batch_write_vacant_from_iter", {
+                                                        HybridBitset::from_iter(small.iter().copied())
+                                                    });
+                                                    if !big.is_empty() {
+                                                        timeit!("dfs_batch_write_vacant_merge_big", {
+                                                            for big_bv in big {
+                                                                new_bv |= &big_bv;
+                                                            }
+                                                        });
+                                                    }
+                                                    timeit!("dfs_batch_write_vacant_insert", {
+                                                        vacant.insert(new_bv);
+                                                    });
+                                                }
+                                            });
+                                        }
+                                    }
+                                });
                             }
                         }
                     });
@@ -3004,15 +3048,6 @@ impl TokenAcc {
         } else {
             self.big.push(bitset);
         }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.small.is_empty() && self.big.is_empty()
-    }
-
-    fn merge(&mut self, other: TokenAcc) {
-        self.small.extend(other.small);
-        self.big.extend(other.big);
     }
 
     fn to_bitset(&mut self) -> HybridBitset {
