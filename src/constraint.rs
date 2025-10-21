@@ -70,25 +70,6 @@ use std::ops::{BitAnd, Sub};
 const MERGE_THRESHOLD: usize = 20;
 const DEDUP_START_ID: usize = 0;
 
-use crate::tokenizer::ExecuteResult;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExecKey {
-    ptr: usize,   // base pointer of the edge label Vec<u8>
-    len: usize,   // length of the edge label
-    pos: usize,   // starting position in the edge label
-    state: usize, // tokenizer state
-}
-
-impl Hash for ExecKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state);
-        self.len.hash(state);
-        self.pos.hash(state);
-        self.state.hash(state);
-    }
-}
-
 pub type StateIDBV = HybridBitset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2456,10 +2437,6 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) token_name_map:   &'r BiBTreeMap<Terminal, usize>,
     pub(crate) leaf_node:        PrecomputeNode1Index,
     pub(crate) trie1_god:        Trie1GodWrapper,
-    // Global caches to avoid recomputing DFA runs and sets
-    exec_cache: RefCell<HashMap<ExecKey, Arc<ExecuteResult>>>,
-    accessible_terminals_cache: Vec<BTreeSet<GrammarTokenID>>,
-    tokenizer_start_state: TokenizerStateID,
 }
 
 impl<'r> Precomputer0<'r> {}
@@ -2483,15 +2460,6 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(2, "Building vocab prefix tree");
         let vocab = VocabPrefixTree::build(&tokens);
         crate::debug!(2, "Done building vocab prefix tree");
-
-        // Precompute accessible terminals once for every tokenizer state
-        let mut accessible_terminals_cache = Vec::with_capacity(tokenizer.dfa.states.len());
-        for s in tokenizer.iter_states() {
-            accessible_terminals_cache.push(tokenizer.tokens_accessible_from_state(s));
-        }
-
-        // Use DFA start as "initial" state (avoid calling a helper repeatedly)
-        let tokenizer_start_state = tokenizer.initial_state_id();
 
         let mut roots = BTreeMap::new();
         let trie1_god = Trie1GodWrapper::new();
@@ -2536,9 +2504,6 @@ impl<'r> Precomputer1<'r> {
             token_name_map,
             leaf_node,
             trie1_god,
-            exec_cache: RefCell::new(HashMap::new()),
-            accessible_terminals_cache,
-            tokenizer_start_state,
         }
     }
 
@@ -2550,34 +2515,6 @@ impl<'r> Precomputer1<'r> {
         self,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
         (self.roots, self.trie1_god)
-    }
-
-    #[inline(always)]
-    fn fast_execute(
-        &self,
-        label: &[u8],
-        base_ptr: *const u8,
-        pos: usize,
-        state: TokenizerStateID,
-    ) -> Arc<ExecuteResult> {
-        let key = ExecKey {
-            ptr: base_ptr as usize,
-            len: label.len(),
-            pos,
-            state: state.0,
-        };
-        if let Some(res) = self.exec_cache.borrow().get(&key) {
-            return res.clone();
-        }
-        let arc = Arc::new(self.tokenizer.execute_from_state(&label[pos..], state));
-        self.exec_cache.borrow_mut().insert(key, arc.clone());
-        arc
-    }
-
-    #[inline(always)]
-    fn accessible_terminals(&self, state: TokenizerStateID) -> &BTreeSet<GrammarTokenID> {
-        // safe because we precomputed for [0..max_state)
-        &self.accessible_terminals_cache[state.0]
     }
 
     fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
@@ -2648,171 +2585,195 @@ impl<'r> Precomputer1<'r> {
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let base_ptr = segment_bytes.as_ptr();
-            let seg_len = segment_bytes.len();
-
+            let mut exec_memo = HashMap::new();
             let mut work_queue: BTreeMap<
                 usize,
                 HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
-            let mut next_level_assoc: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>> = HashMap::new();
+            let mut next_level_assoc: HashMap<_, HashMap<_, _>> = HashMap::new();
 
-            type EdgeKeyTuple = (PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>);
-            let mut edge_buffer: HashMap<EdgeKeyTuple, LLMTokenBV> = HashMap::new();
+            // === OPTIMIZATION 1: Cache node data to avoid repeated lock acquisitions ===
+            let mut node_cache: HashMap<PrecomputeNode1Index, (HybridBitset, bool)> = HashMap::new();
+            let get_node_data = |cache: &mut HashMap<_, _>, idx: &PrecomputeNode1Index| {
+                cache.entry(idx.clone()).or_insert_with(|| {
+                    let guard = idx.read(&self.trie1_god).unwrap();
+                    (guard.value.live_tokens.clone(), guard.value.end)
+                }).clone()
+            };
 
-            let mut pending_live_updates: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
-            let mut src_live_cache: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
+            // === OPTIMIZATION 2: Batch all edge insertions and updates ===
+            let mut pending_edges: Vec<(PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>, HybridBitset)> = Vec::new();
+            let mut pending_live_token_updates: HashMap<PrecomputeNode1Index, HybridBitset> = HashMap::new();
 
-            type DestCacheKey = (PrecomputeNode1Index, usize, TokenizerStateID);
-            let mut dest_node_cache: HashMap<DestCacheKey, PrecomputeNode1Index> = HashMap::new();
-
-            let child_token_id = child_vocab_node.token_id();
+            // === OPTIMIZATION 3: Pre-compute child_vocab reachable tokens (used frequently) ===
             let child_reachable = child_vocab_node.reachable_token_ids();
-            let mut child_singleton_bv = HybridBitset::zeros();
-            child_singleton_bv.insert(child_token_id);
-            let empty_matches_at_end: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
+            let child_token_id = child_vocab_node.token_id();
+
+            // === OPTIMIZATION 4: Pre-compute possible_matches_at_end for all states we might need ===
+            let mut possible_matches_cache: HashMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> = HashMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
-                if pos == seg_len {
-                    for (tok_state, nodes_with_tokens) in states_at_pos {
-                        let entry = next_level_assoc.entry(tok_state).or_default();
+                if pos == segment_bytes.len() {
+                    for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
+                        let entry: &mut HashMap<PrecomputeNode1Index, LLMTokenBV> = next_level_assoc.entry(tokenizer_state_id).or_default();
                         for (node, tokens) in nodes_with_tokens {
-                            entry.entry(node).or_insert_with(HybridBitset::zeros).bitor_assign(&tokens);
+                            entry.entry(node).or_default().bitor_assign(&tokens);
                         }
                     }
                     continue;
                 }
 
-                for (tok_state, precompute_nodes_with_tokens) in states_at_pos {
-                    let exec = self.fast_execute(segment_bytes, base_ptr, pos, tok_state);
-                    let exec_ref: &ExecuteResult = &exec;
+                for (tokenizer_state_id, precompute_nodes_with_tokens) in states_at_pos {
+                    let exec_result = exec_memo
+                        .entry((pos, tokenizer_state_id))
+                        .or_insert_with(|| self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id));
 
-                    let possible_matches_at_end = if let Some(end_state_val) = exec_ref.end_state {
-                        self.possible_matches(child_vocab_node, TokenizerStateID(end_state_val))
+                    let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
+                        let ts = TokenizerStateID(end_state_val);
+                        possible_matches_cache.entry(ts).or_insert_with(|| {
+                            self.possible_matches(child_vocab_node, ts)
+                        })
                     } else {
-                        empty_matches_at_end.clone()
+                        &BTreeMap::new()
                     };
 
-                    for m in &exec_ref.matches {
-                        let terminal_id = GrammarTokenID(m.id);
-                        let next_pos = pos + m.width;
-                        let at_segment_end = next_pos == seg_len;
+                    for match_info in &exec_result.matches {
+                        let terminal_id = GrammarTokenID(match_info.id);
+                        let next_pos = pos + match_info.width;
 
-                        let mut edge_bv_common = child_reachable.clone();
-                        if at_segment_end {
-                            edge_bv_common.set(child_token_id, false);
-                        }
-                        if let Some(deny) = possible_matches_at_end.get(&terminal_id) {
-                            edge_bv_common -= deny;
-                        }
+                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
+                            let src_node_idx = src_node_wrapper.as_arc().clone();
 
-                        for (src_node_idx, src_contextual_tokens) in &precompute_nodes_with_tokens {
-                            if at_segment_end {
-                                let mut final_leaf = child_singleton_bv.clone();
-                                final_leaf &= src_contextual_tokens;
-                                if !final_leaf.is_empty() {
-                                    let src_live = src_live_cache.entry(*src_node_idx).or_insert_with(|| {
-                                        src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone()
-                                    });
-                                    final_leaf &= &*src_live;
-                                    if !final_leaf.is_empty() {
-                                        let leaf_idx = self.get_leaf_node();
-                                        let key = (*src_node_idx, leaf_idx, Some(terminal_id));
-                                        edge_buffer.entry(key).or_insert_with(HybridBitset::zeros).bitor_assign(&final_leaf);
-                                        pending_live_updates.entry(leaf_idx).or_insert_with(HybridBitset::zeros).bitor_assign(&final_leaf);
-                                    }
+                            // Use cache instead of repeated reads
+                            let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
+
+                            // Handle exact end-of-segment match
+                            if next_pos == segment_bytes.len() {
+                                let mut edge_bv = HybridBitset::zeros();
+                                edge_bv.insert(child_token_id);
+                                let final_edge_bv = &(&edge_bv & src_contextual_tokens) & &src_live_tokens;
+
+                                if !final_edge_bv.is_empty() {
+                                    let end_idx = self.get_leaf_node();
+                                    pending_edges.push((src_node_idx.clone(), end_idx, Some(terminal_id), final_edge_bv.clone()));
+                                    pending_live_token_updates.entry(end_idx)
+                                        .or_insert_with(HybridBitset::zeros)
+                                        .bitor_assign(&final_edge_bv);
                                 }
                             }
 
-                            // *** THE FIX IS HERE ***
-                            // We must distinguish between the tokens for the edge vs. for the next context.
-
-                            // 1. This is the context for the rest of the segment traversal.
-                            //    It is NOT filtered by src_live_tokens.
-                            let mut contextual_tokens_for_dest = edge_bv_common.clone();
-                            contextual_tokens_for_dest &= src_contextual_tokens;
-                            if contextual_tokens_for_dest.is_empty() { continue; }
-
-                            // 2. This is the bitset for the edge itself and the live_tokens update.
-                            //    It IS filtered by src_live_tokens.
-                            let src_live = src_live_cache.entry(*src_node_idx).or_insert_with(|| {
-                                src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone()
-                            });
-                            let mut final_edge_bv = contextual_tokens_for_dest.clone();
-                            final_edge_bv &= &*src_live;
-                            if final_edge_bv.is_empty() { continue; }
-
-                            let dest_node_idx = *dest_node_cache
-                                .entry((*src_node_idx, next_pos, self.tokenizer_start_state))
-                                .or_insert_with(|| {
-                                    let new_node = PrecomputeNode1::new(PrecomputedNodeContents::internal());
-                                    Trie2Index::new(self.trie1_god.insert(new_node))
-                                });
-
-                            // Use final_edge_bv for the edge and live update
-                            let key = (*src_node_idx, dest_node_idx, Some(terminal_id));
-                            edge_buffer.entry(key).or_insert_with(HybridBitset::zeros).bitor_assign(&final_edge_bv);
-                            pending_live_updates
-                                .entry(dest_node_idx)
-                                .or_insert_with(HybridBitset::zeros)
-                                .bitor_assign(&final_edge_bv);
-
-                            // Use contextual_tokens_for_dest to populate the work queue
-                            let entry = work_queue
-                                .entry(next_pos)
-                                .or_default()
-                                .entry(self.tokenizer_start_state)
-                                .or_default();
-                            entry
-                                .entry(dest_node_idx)
-                                .or_insert_with(HybridBitset::zeros)
-                                .bitor_assign(&contextual_tokens_for_dest);
-                        }
-                    }
-
-                    if let Some(end_state_val) = exec_ref.end_state {
-                        let final_tok_state = TokenizerStateID(end_state_val);
-                        let accessible_terminals = self.accessible_terminals(final_tok_state);
-                        let leaf_idx = self.get_leaf_node();
-
-                        for (src_node_idx, src_contextual_tokens) in &precompute_nodes_with_tokens {
-                            let mut final_leaf = child_singleton_bv.clone();
-                            final_leaf &= src_contextual_tokens;
-                            if final_leaf.is_empty() { continue; }
-
-                            let src_live = src_live_cache.entry(*src_node_idx).or_insert_with(|| {
-                                src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone()
-                            });
-                            final_leaf &= &*src_live;
-                            if final_leaf.is_empty() { continue; }
-
-                            for terminal_id in accessible_terminals {
-                                let key = (*src_node_idx, leaf_idx, Some(*terminal_id));
-                                edge_buffer.entry(key).or_insert_with(HybridBitset::zeros).bitor_assign(&final_leaf);
+                            // Compute edge_bv once
+                            let mut edge_bv = child_reachable.clone();
+                            if next_pos == segment_bytes.len() {
+                                edge_bv.set(child_token_id, false);
                             }
-                            pending_live_updates.entry(leaf_idx).or_insert_with(HybridBitset::zeros).bitor_assign(&final_leaf);
+                            if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
+                                edge_bv -= matches_for_terminal;
+                            }
+
+                            let edge_bv_for_inserter = &(&edge_bv & src_contextual_tokens) & &src_live_tokens;
+                            if edge_bv_for_inserter.is_empty() { continue; }
+
+                            let next_tokenizer_state = self.tokenizer.initial_state_id();
+                            let dest_nodes_in_queue = work_queue.entry(next_pos)
+                                .or_default()
+                                .entry(next_tokenizer_state)
+                                .or_default();
+
+                            // Find or create destination node
+                            let mut dest_node_opt = dest_nodes_in_queue.iter()
+                                .filter_map(|(dest_node, dest_contextual_tokens)| {
+                                    let (dest_live_tokens, is_end) = get_node_data(&mut node_cache, dest_node);
+                                    if is_end { return None; }
+
+                                    let risky_tokens = &edge_bv_for_inserter - dest_contextual_tokens;
+                                    if risky_tokens.is_empty() || (&risky_tokens & &dest_live_tokens).is_empty() {
+                                        Some(dest_node.clone())
+                                    } else {
+                                        None
+                                    }
+                                }).next();
+
+                            if dest_node_opt.is_none() {
+                                // Check existing children - read once and cache
+                                let children_of_src: Vec<PrecomputeNode1Index> = {
+                                    let guard = src_node_wrapper.as_arc().read(&self.trie1_god).unwrap();
+                                    guard.children().values().flat_map(|m| m.keys().cloned()).collect()
+                                };
+
+                                dest_node_opt = children_of_src.iter()
+                                    .filter(|child_arc| {
+                                        let (child_live_tokens, is_end) = get_node_data(&mut node_cache, child_arc);
+                                        !is_end && (&child_live_tokens & &edge_bv_for_inserter).is_empty()
+                                    }).cloned().next();
+                            }
+
+                            let result_node = dest_node_opt.unwrap_or_else(|| {
+                                let new_node = PrecomputeNode1::new(PrecomputedNodeContents::internal());
+                                let idx = Trie2Index::new(self.trie1_god.insert(new_node));
+                                node_cache.insert(idx.clone(), (HybridBitset::zeros(), false));
+                                idx
+                            });
+
+                            pending_edges.push((src_node_idx, result_node.clone(), Some(terminal_id), edge_bv_for_inserter.clone()));
+                            pending_live_token_updates.entry(result_node.clone())
+                                .or_insert_with(HybridBitset::zeros)
+                                .bitor_assign(&edge_bv_for_inserter);
+
+                            // Update cache
+                            node_cache.entry(result_node.clone())
+                                .and_modify(|(live, _)| *live |= &edge_bv_for_inserter);
+
+                            dest_nodes_in_queue.entry(result_node)
+                                .or_insert_with(LLMTokenBV::zeros)
+                                .bitor_assign(&edge_bv_for_inserter);
+                        }
+                    }
+
+                    // Handle continuation state
+                    if let Some(end_state_val) = exec_result.end_state {
+                        let final_tokenizer_state = TokenizerStateID(end_state_val);
+                        let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
+
+                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
+                            let mut edge_bv = HybridBitset::zeros();
+                            edge_bv.insert(child_token_id);
+                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
+                            if edge_bv_for_inserter.is_empty() { continue; }
+
+                            let src_node_idx = src_node_wrapper.as_arc().clone();
+                            let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
+                            let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
+
+                            if !final_edge_bv.is_empty() {
+                                let end_idx = self.get_leaf_node();
+                                for terminal_id in &accessible_terminals {
+                                    pending_edges.push((src_node_idx.clone(), end_idx, Some(*terminal_id), final_edge_bv.clone()));
+                                    pending_live_token_updates.entry(end_idx)
+                                        .or_insert_with(HybridBitset::zeros)
+                                        .bitor_assign(&final_edge_bv);
+                                }
+                            }
                         }
 
-                        let entry = next_level_assoc.entry(final_tok_state).or_default();
+                        let entry = next_level_assoc.entry(final_tokenizer_state).or_default();
                         for (node, tokens) in precompute_nodes_with_tokens {
-                            entry.entry(node).or_insert_with(HybridBitset::zeros).bitor_assign(tokens);
+                            entry.entry(node).or_default().bitor_assign(&tokens);
                         }
                     }
                 }
             }
 
-            for ((src_idx, dst_idx, edge_key), bv) in edge_buffer.drain() {
-                if !bv.is_empty() {
-                    self.trie1_god.insert_edge_simple(src_idx, dst_idx, edge_key, bv);
-                }
+            // === OPTIMIZATION 5: Batch write all edges and updates ===
+            for (src, dst, key, bv) in pending_edges {
+                self.trie1_god.insert_edge_simple(src, dst, key, bv);
             }
 
-            for (dst_idx, bv) in pending_live_updates.drain() {
-                if bv.is_empty() { continue; }
-                if let Some(mut guard) = dst_idx.write(&self.trie1_god) {
-                    guard.value.live_tokens |= &bv;
+            for (node_idx, live_tokens) in pending_live_token_updates {
+                if let Some(mut guard) = node_idx.write(&self.trie1_god) {
+                    guard.value.live_tokens |= &live_tokens;
                 }
             }
 
