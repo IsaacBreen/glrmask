@@ -914,7 +914,7 @@ impl GrammarConstraint {
             original_ids.push(*id);
         }
 
-        return original_ids.iter().map(|id| (id.0, id.0)).collect();
+        // return original_ids.iter().map(|id| (id.0, id.0)).collect();
 
         let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
 
