@@ -3016,20 +3016,6 @@ impl TokenAcc {
     }
 
     fn to_bitset(&mut self) -> HybridBitset {
-        if self.is_empty() {
-            return HybridBitset::zeros();
-        }
-        // Sort and dedup small tokens for efficiency before creating bitset
-        self.small.sort_unstable();
-        self.small.dedup();
-        let mut rs = RangeSetBlaze::from_iter(self.small.iter().copied());
-        for big_bv in &self.big {
-            rs |= &*big_bv.inner;
-        }
-        HybridBitset { inner: cache::intern_l1(rs) }
-    }
-
-    fn to_bitset(&mut self) -> HybridBitset {
         // Sort and dedup small tokens for efficiency before creating bitset
         self.small.sort_unstable();
         self.small.dedup();
