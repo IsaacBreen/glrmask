@@ -9,6 +9,13 @@ use crate::{
 use ordered_hash_map::OrderedHashMap;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+// Thresholds to keep the optimizer fast on large graphs:
+// - If the reachable node count exceeds WL_NODE_THRESHOLD, skip WL-based structural
+//   deduplication and canonicalization (these are the dominant time sinks).
+// - If the reachable node count exceeds CYCLE_NODE_THRESHOLD, skip expensive cycle checks.
+const WL_NODE_THRESHOLD: usize = 20_000;
+const CYCLE_NODE_THRESHOLD: usize = 20_000;
+
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.
 /// - Collects all CheckLLM bitvectors, intersects them, and prepends a single CheckLLM.
@@ -117,6 +124,13 @@ fn compute_in_degrees(
     indeg
 }
 
+/// Returns the number of nodes reachable from the given roots.
+fn reachable_node_count(
+    roots: &[IntermediatePrecomputeNode3Index],
+    god: &IntermediateTrie3GodWrapper,
+) -> usize {
+    Trie::all_nodes(god, roots).len()
+}
 /// Normalize CheckLLM edges on a single node:
 /// 1) Aggregate the union of bitvectors per destination (merges duplicate/subsumed edges).
 /// 2) Regroup by the aggregated bitvector so that a single CheckLLM(BV) key maps to a set of destinations.
@@ -696,8 +710,6 @@ pub fn optimize_intermediate_trie3(
     let original_god = god.deep_clone();
     let original_roots = roots.to_vec();
 
-    has_true_cycle_intermediate_trie3(god, roots);
-
     prune_unproductive_paths_intermediate_trie3(roots, god);
 
     // Pass A: aggressively remove simple NoOp chains (epsilon-like edges).
@@ -717,7 +729,15 @@ pub fn optimize_intermediate_trie3(
     } else {
         println!("[optimize_intermediate_trie3] NoOp chains contracted.");
     }
-    has_true_cycle_intermediate_trie3(god, roots);
+    {
+        // Gate cycle check by size to avoid heavy traversals on huge graphs.
+        let n = reachable_node_count(roots, god);
+        if n <= CYCLE_NODE_THRESHOLD {
+            has_true_cycle_intermediate_trie3(god, roots);
+        } else {
+            println!("[optimize_intermediate_trie3] Skipping cycle check after NoOp pass (graph too large: nodes={}).", n);
+        }
+    }
 
     // Pass B: normalize CheckLLM partitions, then contract linear CheckLLM chains.
     println!("[optimize_intermediate_trie3] Normalizing CheckLLM edges...");
@@ -736,48 +756,71 @@ pub fn optimize_intermediate_trie3(
         println!("[optimize_intermediate_trie3] CheckLLM normalization/chain contraction made changes. Running GC.");
         gc_preserving_ends(god, roots);
     }
-    has_true_cycle_intermediate_trie3(god, roots);
+    {
+        let n = reachable_node_count(roots, god);
+        if n <= CYCLE_NODE_THRESHOLD {
+            has_true_cycle_intermediate_trie3(god, roots);
+        } else {
+            println!("[optimize_intermediate_trie3] Skipping cycle check after CheckLLM pass (graph too large: nodes={}).", n);
+        }
+    }
 
     let node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
         BTreeMap::default();
 
-    // Pass 1: color-refinement-based structural deduplication with progress reporting.
-    println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
-    let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
-    println!(
-        "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
-        iters, classes, total_nodes
-    );
-
-    // Normalize again before canonical rewiring to maximize equality exposure.
-    if normalize_checkllm_edges_for_all(roots, god) {
-        println!("[optimize_intermediate_trie3] Normalization revealed new opportunities pre-canonicalization.");
-    }
-
+    // Decide whether to run WL-based structural dedup at all.
     let mut node_map = node_map; // make mutable for update
-    let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
-    println!(
-        "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
-        merges, edges_rewired
-    );
+    let wl_allowed = {
+        let n = reachable_node_count(roots, god);
+        if n > WL_NODE_THRESHOLD {
+            println!(
+                "[optimize_intermediate_trie3] Skipping structural deduplication (WL) due to graph size: nodes={} > threshold {}.",
+                n, WL_NODE_THRESHOLD
+            );
+            false
+        } else {
+            true
+        }
+    };
 
-    // Quick polish pass: normalization + WL + canonicalization can sometimes collapse further.
-    let mut polish_changed = false;
-    if normalize_checkllm_edges_for_all(roots, god) {
-        polish_changed = true;
-    }
-    if polish_changed {
-        println!("[optimize_intermediate_trie3] Polishing: rerunning WL refinement after normalization...");
-        let (colors2, iters2, classes2, total_nodes2) = wl_color_refine(roots, god);
+    if wl_allowed {
+        // Pass 1: color-refinement-based structural deduplication with progress reporting.
+        println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)...");
+        let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
         println!(
-            "[optimize_intermediate_trie3] Polish refinement complete: iterations={}, classes={}, nodes={}",
-            iters2, classes2, total_nodes2
+            "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
+            iters, classes, total_nodes
         );
-        let (merges2, edges_rewired2) = rewire_to_canonical(&colors2, roots, god, &mut node_map);
+
+        // Normalize again before canonical rewiring to maximize equality exposure.
+        if normalize_checkllm_edges_for_all(roots, god) {
+            println!("[optimize_intermediate_trie3] Normalization revealed new opportunities pre-canonicalization.");
+        }
+
+        let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
         println!(
-            "[optimize_intermediate_trie3] Polish rewiring done: merges={}, edges_rewired={}",
-            merges2, edges_rewired2
+            "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
+            merges, edges_rewired
         );
+
+        // Quick polish pass: normalization + WL + canonicalization can sometimes collapse further.
+        let mut polish_changed = false;
+        if normalize_checkllm_edges_for_all(roots, god) {
+            polish_changed = true;
+        }
+        if polish_changed {
+            println!("[optimize_intermediate_trie3] Polishing: rerunning WL refinement after normalization...");
+            let (colors2, iters2, classes2, total_nodes2) = wl_color_refine(roots, god);
+            println!(
+                "[optimize_intermediate_trie3] Polish refinement complete: iterations={}, classes={}, nodes={}",
+                iters2, classes2, total_nodes2
+            );
+            let (merges2, edges_rewired2) = rewire_to_canonical(&colors2, roots, god, &mut node_map);
+            println!(
+                "[optimize_intermediate_trie3] Polish rewiring done: merges={}, edges_rewired={}",
+                merges2, edges_rewired2
+            );
+        }
     }
     // Check equivalence after optimization (currently no-op)
     let new_roots: Vec<_> = original_roots
@@ -793,7 +836,14 @@ pub fn optimize_intermediate_trie3(
     //     "Optimization failed to preserve graph equivalence for all roots"
     // );
 
-    has_true_cycle_intermediate_trie3(god, &new_roots);
+    {
+        let n = reachable_node_count(&new_roots, god);
+        if n <= CYCLE_NODE_THRESHOLD {
+            has_true_cycle_intermediate_trie3(god, &new_roots);
+        } else {
+            println!("[optimize_intermediate_trie3] Skipping final cycle check (graph too large: nodes={}).", n);
+        }
+    }
 
     node_map
 }
