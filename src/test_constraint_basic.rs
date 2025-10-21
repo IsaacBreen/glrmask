@@ -1,39 +1,33 @@
-use crate::glr::parser::{BelowBottomReductionMode, GLRParserState, ParseState, ProcessTokenAdvancedConfig};
-use rand::rngs::StdRng;
-use std::collections::{BTreeMap, BTreeSet};
+use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::finite_automata::{eat_u8, rep1};
+use crate::glr::grammar::{nt, prod, regex_name, t, Terminal};
+use crate::glr::parser::{BelowBottomReductionMode, GLRParserState, ParseState, ProcessTokenAdvancedConfig};
+use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_terminal_map};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
-use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
-use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
-use std::hash::{Hash, Hasher};
-use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition, display_productions, opt_fast}; // Added eat_any_fast, CompiledGrammar, repeat01_fast
-use crate::glr::analyze; // Import the analyze module
+use std::collections::BTreeSet;
+use crate::interface::{eat_any_fast, eat_string_fast, eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, opt_fast, repeat0_fast, repeat1_fast, CompiledGrammar, GrammarDefinition};
+// Explicitly import HybridBitset
+use std::hash::Hash;
+// Import the analyze module
 
-use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use bimap::BiBTreeMap;
-use reqwest::blocking;
-use serde_json;
-use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, Trie3God, IntermediateTrie3GodWrapper, IntermediatePrecomputeNode3, IntermediatePrecomputedNodeContents3};
-use crate::datastructures::trie::Trie;
-use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, IntermediatePrecomputeNode3, IntermediatePrecomputedNodeContents3, PrecomputeNode3Index};
+use crate::json_serialization::JSONConvertible;
 // Already a main dependency, but good to be explicit if used directly
 // reqwest will be used if the file isn't cached, ensure it's in dev-dependencies
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use crate::types::TerminalID;
-use crate::datastructures::vocab_prefix_tree::VocabPrefixTree; // Added for tokenization
-use std::time::Instant;
+use bimap::BiBTreeMap;
+use serde_json;
+use std::fs::{self};
+use std::io::Read;
+use std::sync::Arc;
 use rand::prelude::IndexedRandom;
-use rand::{Rng, SeedableRng};
-use rand::seq::SliceRandom;
-use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
-use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
-use std::collections::HashMap;
-use indoc::indoc;
+// Added for tokenization
+use std::time::Instant;
 use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc, Acc};
+use indoc::indoc;
+// Added for panic catching
+use std::collections::HashMap;
 // For the symbol removal helper
 
 #[test]
@@ -1662,8 +1656,8 @@ fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>
 
     // 2. Replicate the GSS setup from `precompute3` to test a single token step.
     //    We are interested in the terminal for 'if', which is TerminalID(1) in this compiled grammar.
-    use crate::datastructures::gss_leveled_adapter::{Acc, GSSNode};
-    use crate::glr::parser::{BelowBottomReductionMode, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
+    use crate::datastructures::gss_leveled_adapter::Acc;
+    use crate::glr::parser::{BelowBottomReductionMode, ProcessTokenAdvancedConfig};
 
     let tid = 1; // Terminal ID for 'if'
     let terminal = TerminalID(tid);
@@ -1732,8 +1726,8 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
 
     // 2. Replicate the GSS setup from `precompute3` to test a single token step.
     //    We are interested in the terminal for 'if', which is TerminalID(1) in this compiled grammar.
-    use crate::datastructures::gss_leveled_adapter::{Acc, GSSNode};
-    use crate::glr::parser::{BelowBottomReductionMode, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
+    use crate::datastructures::gss_leveled_adapter::Acc;
+    use crate::glr::parser::{BelowBottomReductionMode, ProcessTokenAdvancedConfig};
 
 
     let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new(); // Dummy 'god' object
@@ -1841,8 +1835,8 @@ fn test_gss_structural_sharing_factor3() -> Result<(), Box<dyn std::error::Error
 
     // 2. Replicate the GSS setup from `precompute3` to test a single token step.
     //    We are interested in the terminal for 'if', which is TerminalID(1) in this compiled grammar.
-    use crate::datastructures::gss_leveled_adapter::{Acc, GSSNode};
-    use crate::glr::parser::{BelowBottomReductionMode, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
+    use crate::datastructures::gss_leveled_adapter::Acc;
+    use crate::glr::parser::{BelowBottomReductionMode, ProcessTokenAdvancedConfig};
 
 
     let trie3_god = crate::constraint::IntermediateTrie3GodWrapper::new(); // Dummy 'god' object

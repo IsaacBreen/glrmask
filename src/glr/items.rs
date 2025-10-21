@@ -1,4 +1,4 @@
-use crate::glr::grammar::{NonTerminal, Production, Symbol};
+use crate::glr::grammar::{Production, Symbol};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};

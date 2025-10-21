@@ -1,19 +1,19 @@
-use std::collections::HashMap;
-use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode1, PrecomputeNode1Index, PrecomputeNode2Index, Trie1GodWrapper, Trie2GodWrapper, PrecomputeNode2, PrecomputeNode3Index, Trie3GodWrapper, PrecomputeNode0Index, Trie0GodWrapper, IntermediatePrecomputeNode3Index, IntermediateTrie3GodWrapper, IntermediateTrie3EdgeKey};
-use crate::types::{TerminalID as GrammarTokenID};
-use crate::datastructures::trie::{Trie, Trie2Index};
-use crate::tokenizer::{TokenizerStateID, LLMTokenID};
-use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
-use std::sync::{Arc, RwLock};
-use bitvec::prelude::BitVec;
-use crate::datastructures::hybrid_bitset::HybridBitset;
-use bimap::BiBTreeMap;
-use crate::datastructures::ArcPtrWrapper;
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap as StdMap;
 use crate::constraint::LLMTokenBV;
+use crate::constraint::{GrammarConstraint, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, PrecomputeNode0Index, PrecomputeNode1, PrecomputeNode1Index, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3Index, Precomputed, Trie0GodWrapper, Trie1GodWrapper, Trie2GodWrapper, Trie3GodWrapper};
+use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::trie::{Trie, Trie2Index};
+use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::Terminal;
 use crate::glr::table::StateID;
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+use crate::types::TerminalID as GrammarTokenID;
+use bimap::BiBTreeMap;
+use bitvec::prelude::BitVec;
+use std::collections::BTreeMap as StdMap;
+use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::sync::{Arc, RwLock};
 
 /// Creates a neat string representation of a HybridBitset, showing values as ranges.
 fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
@@ -1451,18 +1451,17 @@ pub fn print_intermediate_stats3(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use crate::finite_automata::{eat_u8, Regex};
-    use crate::glr::grammar::{nt, prod, t, regex_name, Terminal};
-    use crate::glr::parser::GLRParser;
+    use super::*;
+    use crate::datastructures::hybrid_bitset::HybridBitset;
+    use crate::finite_automata::eat_u8;
+    use crate::glr::grammar::{nt, prod, regex_name, t, Terminal};
     use crate::glr::table::generate_glr_parser_with_terminal_map;
+    use crate::seq;
     use crate::tokenizer::{LLMTokenID, LLMTokenMap};
     use crate::types::TerminalID;
     use bimap::BiBTreeMap;
-    use super::*;
     use bitvec::prelude::*;
-    use crate::seq;
-    use crate::datastructures::hybrid_bitset::HybridBitset;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_format_bv_with_tokens_no_maps() {

@@ -1,7 +1,7 @@
 use crate::finite_automata::{ExecutionResult, GroupID, Match, Regex};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 // For debugging: verify equivalence classes using a brute-force method.
 const VERIFY_EQUIVALENCE_CLASSES: bool = false;

@@ -1,14 +1,12 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::constraint::{PrecomputeNode3Index, StateIDBV, IntermediateTrie3GodWrapper, LLMTokenBV, PrecomputedNodeContents};
-use crate::datastructures::gss_leveled_adapter::{GSSNode, map_trie3_node_ids};
+use crate::constraint::{IntermediateTrie3GodWrapper, PrecomputeNode3Index};
+use crate::datastructures::gss_leveled_adapter::{map_trie3_node_ids, GSSNode};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::table::{NonTerminalID, TerminalID};
 use ordered_hash_map::OrderedHashMap;
-use crate::profiler::PROGRESS_BAR_ENABLED;
-use kdam::tqdm;
 
 // Key for the stored cache
 pub type StoredCacheKey = (NonTerminalID, TerminalID);
@@ -119,7 +117,7 @@ fn merge_trie3_nodes_and_get_map_internal(
         let mut changes = 0;
 
         #[cfg(not(rustrover))]
-        let its = tqdm!(0..n, desc = format!("Stored Cache Merge Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+        let its = kdam::tqdm!(0..n, desc = format!("Stored Cache Merge Iter {}", it + 1), total = n, disable = !crate::profiler::PROGRESS_BAR_ENABLED, leave = true);
         #[cfg(rustrover)]
         let its = 0..n;
         for u in its {

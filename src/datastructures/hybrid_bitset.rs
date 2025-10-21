@@ -1,15 +1,19 @@
 #![allow(dead_code)] // Allow unused code for the example
 
 use crate::datastructures::cache::{self, Acc};
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use range_set_blaze::RangeSetBlaze; // Import RangeSetBlaze
+use crate::json_serialization::{JSONConvertible, JSONNode};
+// Added
+use range_set_blaze::RangeSetBlaze;
+// Import RangeSetBlaze
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
-use std::hash::{Hash, Hasher}; // Added
-use std::iter::FromIterator; // Needed for collect into BTreeSet in tests
+use std::hash::{Hash, Hasher};
+// Added
+use std::iter::FromIterator;
+// Needed for collect into BTreeSet in tests
 use std::ops::{
-    BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, RangeInclusive, Sub, SubAssign,
+    BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, SubAssign,
 };
 use std::sync::Arc;
 
@@ -717,7 +721,6 @@ impl Hash for HybridBitset {
 
 // --- Conversions ---
 use bitvec::prelude::*;
-use profiler_macro::time_it;
 
 impl Into<BitVec<usize, Lsb0>> for HybridBitset {
     fn into(self) -> BitVec<usize, Lsb0> {

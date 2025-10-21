@@ -1,30 +1,28 @@
 #![recursion_limit = "256"]
 
-use sep1::tokenizer::LLMTokenID;
-use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
-use sep1::finite_automata::Regex;
+use bimap::BiBTreeMap;
+use numpy::{IntoPyArray, PyArray1};
+use ouroboros::self_referencing;
+use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
-use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use sep1::glr::parser::{GLRParser, GLRParserState};
-use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
-use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast, GrammarDefinition};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-use std::collections::{BTreeMap, BTreeSet};
-use bimap::BiBTreeMap;
-use pyo3::basic::CompareOp;
+use sep1::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_and_prune as rust_allow_only, gather_gss_stats, popn_collect_isolated_parents as rust_popn_collect, GSSNode as RustGSSNode};
+use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
+use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
+use sep1::datastructures::u8set::U8Set;
+use sep1::finite_automata::Regex;
+use sep1::finite_automata::{_choice as regex_choice, _seq as regex_seq, eat_u8, eat_u8_negation, eat_u8_seq, eat_u8_set, eat_u8_set_negation, eps, greedy_group, groups as regex_groups, non_greedy_group, opt, prec, rep, rep1, Expr as RegexExpr, ExprGroups as RegexGroups};
+use sep1::glr::parser::GLRParser;
+use sep1::interface::IncrementalParser;
+use sep1::interface::{choice as grammar_choice, eat_any_fast, literal as grammar_literal, optional as grammar_optional, r#ref as grammar_ref, repeat as grammar_repeat, sequence as grammar_sequence, CompiledGrammar, GrammarDefinition, GrammarExpr};
+use sep1::json_serialization::{JSONConvertible, JSONNode};
+use sep1::tokenizer::LLMTokenID;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
-use ouroboros::self_referencing;
-use numpy::{IntoPyArray, PyArray1};
-use sep1::datastructures::u8set::U8Set;
-use sep1::interface::IncrementalParser;
-use sep1::json_serialization::{JSONConvertible, JSONNode};
-use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
-use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
-use sep1::datastructures::gss_leveled_adapter::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, gather_gss_stats, print_gss_forest};
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]

@@ -1,9 +1,10 @@
-use std::sync::Arc;
-use std::ops::Deref;
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::cmp::Ordering;
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::ops::Deref;
+use std::sync::Arc;
+// Added
 
 /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
 /// and `Hash` based on the pointer value of the `Arc`.

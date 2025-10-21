@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use bimap::BiBTreeMap;
-use kdam::{tqdm, BarExt};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nonterminal_nullability, compute_null_nonterminals, compute_nullable_nonterminals, Nullability};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
+use crate::glr::table::{Goto, NonTerminalID, StateID, Table};
+use bimap::BiBTreeMap;
+use kdam::{tqdm, BarExt};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.

@@ -1,5 +1,5 @@
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
 #[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct U8Set {
@@ -512,8 +512,8 @@ impl std::fmt::Display for U8Set {
 
 #[cfg(test)]
 mod tests {
-    use crate::json_serialization::JSONConvertible;
     use super::*;
+    use crate::json_serialization::JSONConvertible;
 
     #[test]
     fn test_u8set_basic_ops() {

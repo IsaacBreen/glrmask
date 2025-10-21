@@ -1,12 +1,15 @@
-use std::collections::BTreeMap;
-use std::fmt;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::fmt;
 
-use bitvec::prelude::*; // Keep for macros or other uses if needed
+use bitvec::prelude::*;
+// Keep for macros or other uses if needed
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use crate::json_serialization::{JSONConvertible, JSONNode};
+// Added
+use std::collections::BTreeMap as StdMap;
+// Added for derive macro pattern
 
 
 // Represents a node in the VocabPrefixTree

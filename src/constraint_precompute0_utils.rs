@@ -1,15 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use ordered_hash_map::OrderedHashMap;
-use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, PrecomputedNodeContents0, Precomputer0, Trie0GodWrapper};
 use crate::constraint::LLMTokenBV;
-use crate::datastructures::trie::Trie;
-use crate::tokenizer::TokenizerStateID;
-use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, PrecomputedNodeContents0, Precomputer0, Trie0GodWrapper};
 use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
 use crate::datastructures::ordered_hash_map::Retain;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use crate::datastructures::trie::Trie;
 use crate::profiler::PROGRESS_BAR_ENABLED;
+use crate::tokenizer::TokenizerStateID;
+use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use kdam::tqdm;
+use ordered_hash_map::OrderedHashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct Trie0Config {

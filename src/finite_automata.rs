@@ -1,10 +1,12 @@
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
+// Added
+use std::collections::BTreeMap as StdMap;
+// Added for derive macro pattern, aliased
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -2492,7 +2494,8 @@ mod tests_nov_24 {
 #[cfg(test)]
 mod test_python {
     use super::*;
-    use crate::datastructures::u8set::U8Set; // Added for U8Set usage in new test
+    use crate::datastructures::u8set::U8Set;
+    // Added for U8Set usage in new test
     use crate::{choice, seq};
 
     #[ignore]

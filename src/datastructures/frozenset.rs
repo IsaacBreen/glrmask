@@ -1,6 +1,8 @@
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeSet;
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::hash::Hash; // Added for T bound in JSONConvertible for HashSet
+// Added
+use std::hash::Hash;
+// Added for T bound in JSONConvertible for HashSet
 
 /// A frozen set implementation in Rust, similar to Python's frozenset.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

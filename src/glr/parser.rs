@@ -1,24 +1,28 @@
-use crate::constraint::{PrecomputeNode3Index, IntermediateTrie3EdgeKey, LLMTokenBV, LLMVocab, StateIDBV, Trie3God, IntermediateTrie3GodWrapper, IntermediatePrecomputedNodeContents3, IntermediatePrecomputeNode3};
+use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, LLMTokenBV, LLMVocab, PrecomputeNode3Index, StateIDBV, Trie3God};
+use crate::constraint_stored_cache_utils::optimize_stored_cache;
+use crate::datastructures::gss_leveled_adapter::map_trie3_node_ids;
+use crate::datastructures::gss_leveled_adapter::{deep_add_precompute_trie_edges, print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
 use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
-use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::datastructures::gss_leveled_adapter::map_trie3_node_ids;
 use crate::glr::table::{CombinedRow, Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
 use crate::tokenizer::LLMTokenID;
 use std::any::Any;
-use crate::constraint_stored_cache_utils::optimize_stored_cache;
 use std::cmp::Ordering;
 use std::sync::{Mutex, RwLock};
 // Import LLMTokenInfo
 
+use crate::datastructures::gss_leveled_adapter::{is_simple_gss, PruneAndTransformRecursiveMemo};
+use crate::datastructures::leveled_gss::Merge;
 use crate::datastructures::trie::EdgeInserter;
-use crate::{debug, hit};
+use crate::datastructures::trie::{God, GodWrapper};
+use crate::datastructures::trie::{Trie2Index, TrieStats};
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{stage_9, DefaultReduce, Reduce, ShiftsAndReducesFull, ShiftsAndReducesWithoutDefaultReduce};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::GSS_LOGGING_ENABLED;
+use crate::{debug, hit};
 use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use profiler_macro::{time_it, timeit};
@@ -28,10 +32,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
-use crate::datastructures::trie::{God, GodWrapper};
-use crate::datastructures::gss_leveled_adapter::{is_simple_gss, PruneAndTransformRecursiveMemo};
-use crate::datastructures::leveled_gss::Merge;
-use crate::datastructures::trie::{Trie2Index, TrieStats};
 
 
 // const MAX_MERGE_DEPTH: usize = usize::MAX;

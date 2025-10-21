@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use crate::datastructures::gss::{process_predecessors, DestKey, GSSNode, NodeMap, NodeSet};
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::tokenizer::TokenizerStateID;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 pub fn fuse_predecessors_recursive(
     node_arc: &Arc<GSSNode>,

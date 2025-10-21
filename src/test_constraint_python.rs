@@ -1,40 +1,45 @@
+use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::finite_automata::{eat_u8, Match};
+use crate::glr::grammar::{nt, prod, regex_name, t, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::ParseState;
+use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, StateID};
+use crate::{choice, choice_fast, groups, seq, seq_fast};
 use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
-use crate::finite_automata::{eat_u8, Match};
-use crate::{choice, choice_fast, groups, seq, seq_fast};
-use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, StateID};
-use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
+use crate::interface::{choice_fast, display_productions, eat_any_fast, eat_bytestring_fast, eat_string_fast, eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, opt_fast, repeat0_fast, repeat1_fast, CompiledGrammar, GrammarDefinition};
+// Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
-use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition, display_productions, opt_fast}; // Added eat_any_fast, CompiledGrammar, repeat01_fast
-use crate::glr::analyze; // Import the analyze module
+// Added eat_any_fast, CompiledGrammar, repeat01_fast
+use crate::glr::analyze;
+// Import the analyze module
 
-use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use bimap::BiBTreeMap;
-use reqwest::blocking;
-use serde_json;
-use similar::TextDiff;
-use crate::constraint::{GrammarConstraint};
+use crate::constraint::GrammarConstraint;
 use crate::datastructures::trie2::Trie;
+use crate::datastructures::vocab_prefix_tree::VocabPrefixTree;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
 // reqwest will be used if the file isn't cached, ensure it's in dev-dependencies
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
 use crate::types::TerminalID;
-use crate::datastructures::vocab_prefix_tree::VocabPrefixTree; // Added for tokenization
-use std::time::Instant;
-use rand::prelude::IndexedRandom;
-use rand::{Rng, SeedableRng};
-use rand::seq::SliceRandom;
+use bimap::BiBTreeMap;
+use reqwest::blocking;
+use serde_json;
+use similar::TextDiff;
+use std::fs::{self, File};
+use std::io::{BufReader, Read, Write};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
-use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
-use std::collections::HashMap;
+use rand::prelude::IndexedRandom;
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
+use std::panic::{self, AssertUnwindSafe};
+// Added for tokenization
+use std::time::Instant;
+use crate::datastructures::gss::{gather_gss_stats, reset_llm_tokens, sample_path, GSSNode};
 use serde::__private::ser::constrain;
-use crate::datastructures::gss::{gather_gss_stats, GSSNode, reset_llm_tokens, sample_path};
+// Added for panic catching
+use std::collections::HashMap;
 // For the symbol removal helper
 
 

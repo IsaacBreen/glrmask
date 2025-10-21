@@ -1,13 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use crate::constraint::{GrammarConstraint, GrammarConstraintState};
-    use crate::finite_automata::{eat_u8, rep, Expr as RegexExpr, QuantifierType, Expr, eat_u8_seq};
-    use crate::interface::{choice, sequence, literal, CompiledGrammar, IncrementalParser, GrammarExpr, GrammarDefinition, repeat};
-    use crate::tokenizer::{LLMTokenID};
+    use crate::constraint::GrammarConstraint;
     use crate::datastructures::hybrid_bitset::HybridBitset;
-    use bimap::BiBTreeMap; // Add this line
-    use crate::glr::grammar::{NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal as Term, Terminal};
-    use std::collections::{BTreeSet, HashSet};
+    use crate::finite_automata::{eat_u8, eat_u8_seq, Expr as RegexExpr, QuantifierType};
+    use crate::interface::{choice, repeat, sequence, CompiledGrammar, GrammarDefinition, IncrementalParser};
+    use crate::tokenizer::LLMTokenID;
+    use bimap::BiBTreeMap;
+    // Add this line
+    use crate::glr::grammar::{NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal};
+    use std::collections::BTreeSet;
 
     #[test]
     fn test_incremental_parser_simple() {

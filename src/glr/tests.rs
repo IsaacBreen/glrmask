@@ -1,11 +1,10 @@
-use crate::glr::grammar::{nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::analyze::{self, filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
+use crate::glr::grammar::{nt, prod, regex_name, t, Production, Symbol};
 use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ProcessTokenAdvancedConfig};
-use crate::glr::table::{generate_glr_parser, TerminalID, StateID};
-use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+use crate::glr::table::{generate_glr_parser, TerminalID};
+// Import the analyze module
 use crate::glr::stats;
-use bimap::BiBTreeMap;
 use std::collections::BTreeSet;
-use crate::interface::display_productions;
 // --- Helper Functions for Tests ---
 
 fn create_simple_parser() -> GLRParser {

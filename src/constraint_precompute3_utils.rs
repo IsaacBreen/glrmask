@@ -1,18 +1,18 @@
-use std::collections::BTreeSet;
-use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
-use std::sync::Arc;
-use std::hash::{Hash, Hasher};
-use std::time::Instant;
-use range_set_blaze::RangeSetBlaze;
+use crate::constraint::LLMTokenBV;
+use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, PrecomputeNode3Index, PrecomputedNodeContents, StageVocab, StateIDBV, Trie3GodWrapper};
+use crate::constraint_extra::{calculate_final_stats3, print_precompute_stats3, PrecomputeStats};
+use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
+use crate::datastructures::EntryApi;
+use crate::tokenizer::TokenizerStateID;
 use indicatif::{ProgressBar, ProgressStyle};
 use kdam::{tqdm, BarExt};
 use ordered_hash_map::OrderedHashMap;
-use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, PrecomputeNode3Index, PrecomputedNodeContents, StageVocab, StateIDBV, Trie3GodWrapper};
-use crate::constraint_extra::{calculate_final_stats3, print_precompute_stats3, PrecomputeStats};
-use crate::datastructures::EntryApi;
-use crate::constraint::LLMTokenBV;
-use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
-use crate::tokenizer::TokenizerStateID;
+use range_set_blaze::RangeSetBlaze;
+use std::collections::BTreeSet;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::profiler::PROGRESS_BAR_ENABLED;
 

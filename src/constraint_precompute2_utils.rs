@@ -1,4 +1,4 @@
-use crate::constraint::{LLMTokenBV, PrecomputeNode2, PrecomputeNode2Index, PrecomputedNodeContents, Trie2GodWrapper};
+use crate::constraint::{LLMTokenBV, PrecomputeNode2, PrecomputeNode2Index, Trie2GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::table::StateID;
 use crate::tokenizer::TokenizerStateID;

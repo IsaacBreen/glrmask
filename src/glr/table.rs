@@ -1,18 +1,18 @@
 use super::items::{Item, LRMode, LR_MODE};
-use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
-use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
 use crate::constraint::StateIDBV;
+use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
+use crate::glr::analyze::{create_unique_name_generator, inline_null_productions, inline_unit_productions, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::interface::display_productions;
+use crate::json_serialization::{JSONConvertible, JSONNode};
+pub use crate::types::TerminalID;
 use bimap::BiBTreeMap;
+use profiler_macro::time_it;
+use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
-use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
-pub use crate::types::TerminalID;
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap as StdMap;
-use profiler_macro::time_it;
 use std::sync::Arc;
-use crate::interface::display_productions;
 // Added for derive macro pattern
 
 
@@ -1556,6 +1556,6 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     }
     non_terminal_map
 }
-use crate::glr::parser::{GLRParser, ActionFn, ExpectElse};
+use crate::glr::parser::{ActionFn, ExpectElse, GLRParser};
 use crate::profiler::{print_summary, print_summary_flat};
 

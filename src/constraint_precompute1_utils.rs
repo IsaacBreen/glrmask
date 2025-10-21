@@ -1,24 +1,24 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::hash::{Hash, Hasher, DefaultHasher};
-use std::cmp::Reverse;
-use std::ops::BitOrAssign;
-use std::sync::Arc;
-use bitvec::macros::internal::funty::Fundamental;
-use range_set_blaze::RangeSetBlaze;
-use ordered_hash_map::OrderedHashMap;
-use kdam::{tqdm};
-use crate::constraint::{PrecomputeNode0Index, PrecomputeNode1, PrecomputedNodeContents, Trie0GodWrapper};
-use crate::profiler::PROGRESS_BAR_ENABLED;
-use crate::constraint::{StageVocab, PrecomputeNode1Index, Trie1GodWrapper};
-use crate::constraint_extra::PrecomputeStats;
-use deterministic_hash::DeterministicHasher;
-use crate::datastructures::EntryApi;
 use crate::constraint::LLMTokenBV;
-use crate::datastructures::trie::Trie;
-use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-use crate::tokenizer::TokenizerStateID;
+use crate::constraint::{PrecomputeNode0Index, PrecomputeNode1, PrecomputedNodeContents, Trie0GodWrapper};
+use crate::constraint::{PrecomputeNode1Index, StageVocab, Trie1GodWrapper};
+use crate::constraint_extra::PrecomputeStats;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::ordered_hash_map::Retain;
+use crate::datastructures::trie::Trie;
+use crate::datastructures::EntryApi;
+use crate::profiler::PROGRESS_BAR_ENABLED;
+use crate::tokenizer::TokenizerStateID;
+use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+use bitvec::macros::internal::funty::Fundamental;
+use deterministic_hash::DeterministicHasher;
+use kdam::tqdm;
+use ordered_hash_map::OrderedHashMap;
+use range_set_blaze::RangeSetBlaze;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::BitOrAssign;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 

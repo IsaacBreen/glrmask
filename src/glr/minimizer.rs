@@ -1,7 +1,7 @@
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 use crate::glr::analyze::remove_productions_with_undefined_nonterminals;
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::interface::display_productions;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Removes productions that contain terminals not in the `interesting_terminals` set.
 pub fn remove_productions_with_uninteresting_terminals(

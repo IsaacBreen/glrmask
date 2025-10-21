@@ -6,11 +6,8 @@ use crate::{
     },
     datastructures::trie::Trie,
 };
-use kdam::tqdm;
 use ordered_hash_map::OrderedHashMap;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use crate::{profiler::PROGRESS_BAR_ENABLED};
-use std::cmp::Ordering;
 
 /// Normalizes a path for comparison purposes.
 /// - Removes NoOp edges.

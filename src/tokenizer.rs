@@ -1,8 +1,10 @@
 use crate::finite_automata::{GroupID, Regex};
-use crate::types::{TerminalID as GrammarTokenID};
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::types::TerminalID as GrammarTokenID;
 use bimap::BiBTreeMap;
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::{BTreeMap as StdMap, BTreeSet}; // Added for derive macro pattern, aliased to avoid conflict
+// Added
+use std::collections::{BTreeMap as StdMap, BTreeSet};
+// Added for derive macro pattern, aliased to avoid conflict
 
 pub type LLMToken = Vec<u8>;
 pub type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;

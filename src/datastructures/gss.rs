@@ -18,13 +18,13 @@ pub use crate::datastructures::gss_pruning::*;
 pub use crate::datastructures::gss_simplification::*;
 pub use crate::datastructures::gss_trie_utils::*;
 
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap as StdMap;
 use crate::constraint::{LLMTokenBV, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, TerminalBV, TerminalInfo, Trie3God, Trie3GodWrapper};
-use crate::datastructures::{gss_analysis, gss_simplification};
 use crate::datastructures::trie::{EdgeInserter, God};
+use crate::datastructures::{gss_analysis, gss_simplification};
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::tokenizer::TokenizerStateID;
 use crate::types::TerminalID;
+use std::collections::BTreeMap as StdMap;
 // --- Type Aliases ---
 
 pub(crate) type MaxDepth = usize;

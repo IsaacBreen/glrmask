@@ -16,10 +16,10 @@
 //! All logic here is pure Rust and contains no Python bindings.
 
 use im::{HashMap as IHashMap, OrdMap};
+use profiler_macro::time_it;
 use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
-use profiler_macro::time_it;
 
 /// Trait for accumulator types that can be merged.
 pub trait Merge: Clone {

@@ -1,17 +1,18 @@
+use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::marker::Sized;
-use bimap::BiBTreeMap;
 
 // Import the derive macro
 use json_convertible_derive::JSONConvertible;
 
+use serde_json::Map as SerdeMap;
 // Add these lines for serde_json
 use serde_json::Value as SerdeValue;
-use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
+use kdam::BarExt;
+// BTreeMap<String, SerdeValue> is SerdeMap
 use std::convert::TryInto;
 use std::io::{Read, Write};
-use kdam::BarExt;
 // Added for streaming
 
 // --- JSONNode Enum ---
@@ -749,8 +750,9 @@ where
 // --- Tests (optional, but good for verifying) ---
 #[cfg(test)]
 mod tests {
-    use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
-    use std::io::Cursor;
+    use super::*;
+    // Imports JSONNode, JSONConvertible, MyStruct, etc.
+        use std::io::Cursor;
     // Example struct using the derive
     #[derive(Debug, Clone, PartialEq, JSONConvertible)]
     struct MyStruct {

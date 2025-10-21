@@ -1,7 +1,6 @@
 use super::*;
-use bitvec::prelude::*; // Still needed for macro use perhaps?
-use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
-use std::collections::HashSet;
+// Still needed for macro use perhaps?
+use crate::datastructures::hybrid_bitset::HybridBitset;
 use std::iter::FromIterator;
 
 

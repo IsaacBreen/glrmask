@@ -1,22 +1,23 @@
 use crate::constraint::GrammarConstraint;
 use crate::debug;
-use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
+use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::types::TerminalID as GrammarTokenID; // May not be used directly here anymore
+use crate::types::TerminalID as GrammarTokenID;
+use crate::datastructures::u8set::U8Set;
+use crate::glr::analyze::simplify_grammar;
+use crate::glr::grammar::regex_name;
+// May not be used directly here anymore
 use bimap::BiBTreeMap;
 use kdam::tqdm;
+use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::{env, fs};
-use std::collections::BTreeMap as StdMap;
-use crate::glr::analyze::{simplify_grammar};
-use crate::glr::grammar::regex_name;
-use crate::datastructures::u8set::U8Set;
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -1228,16 +1229,16 @@ impl<'a> IncrementalParser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*; // Imports GrammarDefinition, CompiledGrammar, etc.
-    use crate::finite_automata::{eat_u8, eat_u8_seq};
+    use super::*;
+    use crate::datastructures::hybrid_bitset::HybridBitset;
+    // Imports GrammarDefinition, CompiledGrammar, etc.
+        use crate::finite_automata::{eat_u8, eat_u8_seq};
     use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
     use crate::{choice_fast, groups, seq_fast};
     use bitvec::prelude::*;
-    use std::sync::{Arc, Mutex};
-    use crate::datastructures::hybrid_bitset::HybridBitset;
 
+    use crate::finite_automata::Expr as RegexExpr;
     use crate::glr::grammar::{NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal};
-    use crate::finite_automata::{Expr as RegexExpr};
 
     fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> HybridBitset {
         let mut bitvec = BitVec::new();

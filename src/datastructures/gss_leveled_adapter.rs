@@ -4,8 +4,6 @@ use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use bimap::BiBTreeMap;
-use profiler_macro::time_it;
 use crate::constraint::StateIDBV;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
@@ -17,6 +15,8 @@ use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
 use crate::glr::table::{StateID, TerminalID};
 use crate::hit;
 use crate::tokenizer::LLMTokenID;
+use bimap::BiBTreeMap;
+use profiler_macro::time_it;
 
 // Adapter aliases for precompute-trie types (referencing constraint.rs)
 pub type StoredPrecomputeNodeIndex = crate::constraint::IntermediatePrecomputeNode3Index;

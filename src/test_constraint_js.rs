@@ -9,33 +9,26 @@
 // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
 
 use crate::constraint::{GrammarConstraint, GrammarConstraintConfig};
-use crate::glr::grammar::{literal, nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
-use crate::glr::parser::GLRParserState;
-use crate::glr::stats::get_stats;
-use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser_with_maps, StateID};
-use crate::interface::{CompiledGrammar, GrammarDefinition};
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
-use crate::types::TerminalID;
 use crate::datastructures::vocab_prefix_tree::VocabPrefixTree;
-use bimap::BiBTreeMap;
+use crate::glr::grammar::{literal, regex_name, Terminal};
+use crate::glr::parser::GLRParserState;
+use crate::interface::{CompiledGrammar, GrammarDefinition};
+use crate::json_serialization::JSONConvertible;
+use crate::profiler::{self, print_summary, print_summary_flat, reset};
+use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+use crate::types::TerminalID;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use rand::prelude::IndexedRandom;
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use reqwest::blocking;
-use similar::TextDiff;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
-use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-use flate2::Compression;
-use flate2::write::GzEncoder;
-use rand::prelude::IndexedRandom;
-use crate::constraint_extra::dump_precompute_trie_recursive;
-use crate::profiler::{self, print_summary, print_summary_flat, reset};
 // --- Helper Functions ---
 
 /// Loads a vocabulary from a JSON file, downloading it if not present in the cache.

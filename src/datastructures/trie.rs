@@ -5,14 +5,14 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::EntryApi;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use deterministic_hash::DeterministicHasher;
 use kdam::{tqdm, BarExt};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use profiler_macro::time_it;
-use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::EntryApi;
 
 /// Represents statistics about a Trie graph reachable from a set of roots.
 #[derive(Debug, Clone, PartialEq)]

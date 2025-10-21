@@ -14,7 +14,7 @@ macro_rules! choice_fast {
     };
 }
 
-use chrono::Local; // Import the Local timezone functionality
+// Import the Local timezone functionality
 
 /// The compile-time debug level. Messages with a level greater than this will be ignored.
 pub const MACRO_DEBUG_LEVEL: usize = 2;

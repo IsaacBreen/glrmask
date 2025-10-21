@@ -1,5 +1,4 @@
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;

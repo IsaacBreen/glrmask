@@ -1,5 +1,5 @@
-use crate::finite_automata::{Expr, QuantifierType};
 use crate::datastructures::u8set::U8Set;
+use crate::finite_automata::{Expr, QuantifierType};
 
 /// Creates a sequence of parsers
 pub fn seq_fast(parsers: Vec<Expr>) -> Expr {

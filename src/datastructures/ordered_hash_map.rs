@@ -1,5 +1,5 @@
-use std::hash::Hash;
 use ordered_hash_map::OrderedHashMap;
+use std::hash::Hash;
 
 pub trait Retain<K, V> {
     fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, f: F);

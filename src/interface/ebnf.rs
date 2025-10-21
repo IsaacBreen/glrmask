@@ -1,11 +1,10 @@
+use crate::interface::GrammarExpr::CharClass;
 use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
 use regex::Regex;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::iter::Peekable;
 use std::sync::OnceLock;
 use std::vec::IntoIter;
-use crate::finite_automata::{Expr, QuantifierType};
-use crate::interface::GrammarExpr::{CharClass, AnyChar};
 
 #[derive(Debug, Clone, PartialEq)]
 enum EbnfToken {
@@ -261,7 +260,7 @@ impl EbnfParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarDefinition, GrammarExpr};
+    use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarDefinition};
 
     #[test]
     fn test_ebnf_parser_simple() {

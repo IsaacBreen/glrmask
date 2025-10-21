@@ -1,16 +1,16 @@
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
-use std::path::PathBuf;
-use std::sync::Arc;
-use flate2::read::GzDecoder;
 use clap::Parser;
+use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig, Precompute0Cache};
 use sep1::interface::{CompiledGrammar, GrammarDefinition};
 use sep1::json_serialization::JSONConvertible;
 use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Compiles a grammar and vocabulary into a GrammarConstraint object.
 #[derive(Parser, Debug)]

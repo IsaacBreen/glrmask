@@ -4,7 +4,8 @@
 mod tests_apr25 {
     use crate::datastructures::u8set::U8Set;
     use crate::finite_automata::*;
-    use crate::{choice, groups, seq}; // Import macros
+    use crate::{choice, seq};
+    // Import macros
     use std::collections::BTreeMap;
 
     // Helper function to create Expr::U8Seq from string literal
@@ -341,8 +342,8 @@ pub fn build_dfa_from_tokenizer_json(
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::Path;
     use std::io::Write;
+    use std::path::Path;
 
     // Helper to create a dummy tokenizer file
     fn create_dummy_tokenizer_file(path: &str, content: &str) -> Result<(), Box<dyn Error>> {

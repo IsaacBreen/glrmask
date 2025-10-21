@@ -3,10 +3,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Write};
 use std::sync::Arc;
 
-use bimap::BiBTreeMap;
-use profiler_macro::time_it;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use crate::datastructures::gss::{Acc, DestKey, GSSNode, MaxDepth};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
@@ -15,6 +11,10 @@ use crate::glr::parser::ParseStateEdgeContent;
 use crate::glr::table::StateID;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
+use bimap::BiBTreeMap;
+use profiler_macro::time_it;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 // --- Analysis and Debugging ---
 #[derive(Debug, Clone, Eq, Hash)]
