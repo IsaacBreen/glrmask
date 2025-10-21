@@ -356,7 +356,7 @@ fn verify_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
     initial_states: &[usize],
-    computed_classes: &BTreeMap<Vec<SignatureId>, Vec<usize>>,
+    computed_classes: &HashMap<Vec<SignatureId>, Vec<usize>>,
 ) {
     println!("Verifying equivalence classes (this may be slow)...");
  
