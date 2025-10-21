@@ -1819,34 +1819,166 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         I: IntoIterator<Item = (Trie2Index, V)>,
     {
         // ------------------------------------------------------------------
-        //  Simple depth-driven scheduler. (Same as special_map)
+        //  SCC-aware scheduler:
+        //  - Build SCCs of the reachable subgraph from the initial nodes.
+        //  - Process SCCs in topological order.
+        //  - Inside each SCC, run a local worklist until stabilization.
         // ------------------------------------------------------------------
-        let mut values: HashMap<usize, V> = HashMap::new();
-        let mut stopped_nodes: HashSet<usize> = HashSet::new();
-        let mut todo: BTreeMap<usize, OrderedHashSet<Trie2Index>> = BTreeMap::new();
+        use std::collections::VecDeque;
 
+        // Pending values to be processed per node (by usize index).
+        let mut values: HashMap<usize, V> = HashMap::new();
+        // Nodes that should never be scheduled again (process returned false).
+        let mut stopped_nodes: HashSet<usize> = HashSet::new();
+
+        // Seed pending values with the user-supplied starting set.
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| *n).collect();
         let total_edges = Self::count_all_edges(arena, &initial_nodes);
         let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
-
-        // Seed with the user-supplied starting set
         for (node_idx, v0) in initial_nodes_and_values {
             let ptr = node_idx.as_usize();
             values
                 .entry(ptr)
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
-            let depth = node_idx.read(arena).expect("poison").max_depth;
-            todo.entry(depth).or_default().insert(node_idx);
         }
 
-        // Main loop ---------------------------------------------------------
-        while let Some((_depth, node_indices)) = todo.pop_first() {
-            for node_idx in &node_indices {
-                let ptr = node_idx.as_usize();
-                if stopped_nodes.contains(&ptr) { continue; }
+        // Build reachable set and adjacency for SCC computation.
+        let nodes: Vec<Trie2Index> = Self::all_nodes(arena, &initial_nodes);
+        if nodes.is_empty() {
+            return;
+        }
+        let n = nodes.len();
+        let mut pos_of_u: HashMap<usize, usize> = HashMap::with_capacity(n);
+        for (i, idx) in nodes.iter().enumerate() {
+            pos_of_u.insert(idx.as_usize(), i);
+        }
 
-                let mut agg_v = match values.remove(&ptr) {
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut radj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut has_self_loop = false;
+        for (i, idx) in nodes.iter().enumerate() {
+            if let Some(g) = idx.read(arena) {
+                for dest_map in g.children.values() {
+                    for (child_idx, _) in dest_map.iter() {
+                        if let Some(&j) = pos_of_u.get(&child_idx.as_usize()) {
+                            adj[i].push(j);
+                            radj[j].push(i);
+                            if i == j {
+                                has_self_loop = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Kosaraju (iterative) to compute SCCs.
+        let mut visited = vec![false; n];
+        let mut order: Vec<usize> = Vec::with_capacity(n);
+        for u in 0..n {
+            if !visited[u] {
+                let mut stack: Vec<(usize, usize)> = vec![(u, 0)];
+                visited[u] = true;
+                while let Some((node, next_i)) = stack.last_mut() {
+                    if *next_i < adj[*node].len() {
+                        let v = adj[*node][*next_i];
+                        *next_i += 1;
+                        if !visited[v] {
+                            visited[v] = true;
+                            stack.push((v, 0));
+                        }
+                    } else {
+                        order.push(*node);
+                        stack.pop();
+                    }
+                }
+            }
+        }
+
+        let mut comp_id = vec![usize::MAX; n];
+        let mut cid = 0;
+        for &u in order.iter().rev() {
+            if comp_id[u] == usize::MAX {
+                let mut stack: Vec<usize> = vec![u];
+                comp_id[u] = cid;
+                while let Some(x) = stack.pop() {
+                    for &v in &radj[x] {
+                        if comp_id[v] == usize::MAX {
+                            comp_id[v] = cid;
+                            stack.push(v);
+                        }
+                    }
+                }
+                cid += 1;
+            }
+        }
+
+        let scc_count = cid;
+        let mut sccs: Vec<Vec<usize>> = vec![Vec::new(); scc_count];
+        for i in 0..n {
+            sccs[comp_id[i]].push(i);
+        }
+        let _has_cycles = has_self_loop || sccs.iter().any(|c| c.len() > 1);
+
+        // Build condensation DAG of SCCs and topologically sort it.
+        let mut scc_adj: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); scc_count];
+        let mut indeg: Vec<usize> = vec![0; scc_count];
+        for u in 0..n {
+            let cu = comp_id[u];
+            for &v in &adj[u] {
+                let cv = comp_id[v];
+                if cu != cv {
+                    if scc_adj[cu].insert(cv) {
+                        indeg[cv] += 1;
+                    }
+                }
+            }
+        }
+        let mut topo: Vec<usize> = Vec::with_capacity(scc_count);
+        let mut q_scc: VecDeque<usize> = VecDeque::new();
+        for s in 0..scc_count {
+            if indeg[s] == 0 {
+                q_scc.push_back(s);
+            }
+        }
+        while let Some(s) = q_scc.pop_front() {
+            topo.push(s);
+            for &t in &scc_adj[s] {
+                indeg[t] -= 1;
+                if indeg[t] == 0 {
+                    q_scc.push_back(t);
+                }
+            }
+        }
+
+        // Worklist inside each SCC until stabilization; process SCCs in topological order.
+        let mut in_queue: HashSet<usize> = HashSet::new(); // node.usize currently in the local SCC queue
+        for s in topo {
+            // Seed local queue with nodes in this SCC that currently have pending values.
+            let mut local_queue: VecDeque<usize> = VecDeque::new(); // holds positions (indices into `nodes`)
+            for &pos in &sccs[s] {
+                let u = nodes[pos].as_usize();
+                if values.contains_key(&u) && !stopped_nodes.contains(&u) {
+                    if in_queue.insert(u) {
+                        local_queue.push_back(pos);
+                    }
+                }
+            }
+            if local_queue.is_empty() {
+                continue; // nothing pending in this SCC yet
+            }
+
+            while let Some(pos) = local_queue.pop_front() {
+                let node_idx = nodes[pos];
+                let u = node_idx.as_usize();
+                // We are about to process u; mark as not in queue until we decide to requeue.
+                in_queue.remove(&u);
+
+                if stopped_nodes.contains(&u) {
+                    continue;
+                }
+                let mut agg_v = match values.remove(&u) {
                     Some(v) => v,
                     None => continue,
                 };
@@ -1855,13 +1987,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     let guard = node_idx.read(arena).expect("poison");
                     process(&guard, &mut agg_v)
                 };
-
                 if !proceed {
-                    stopped_nodes.insert(ptr);
+                    stopped_nodes.insert(u);
                     continue;
                 }
 
-                // ---------- propagate to children (grouped by edge key) -------------
+                // Propagate to children grouped by edge key.
                 let children_by_ek: Vec<(EK, OrderedHashMap<Trie2Index, EV>)> = {
                     let guard = node_idx.read(arena).expect("poison");
                     guard.children.iter()
@@ -1876,20 +2007,32 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     }
 
                     let new_values_for_children = step(&agg_v, &ek, &dest_map);
-
                     for (child_idx, new_v) in new_values_for_children {
-                        let child_ptr = child_idx.as_usize();
-
-                        if stopped_nodes.contains(&child_ptr) {
+                        let child_u = child_idx.as_usize();
+                        if stopped_nodes.contains(&child_u) {
                             continue;
                         }
-
-                        values.entry(child_ptr)
+                        values
+                            .entry(child_u)
                             .and_modify(|old| merge(old, new_v.clone()))
                             .or_insert(new_v);
 
-                        let child_depth = child_idx.read(arena).expect("poison").max_depth;
-                        todo.entry(child_depth).or_default().insert(child_idx);
+                        // If the child is in the same SCC, schedule immediately in local queue.
+                        if let Some(&child_pos) = pos_of_u.get(&child_u) {
+                            if comp_id[child_pos] == s {
+                                if in_queue.insert(child_u) {
+                                    local_queue.push_back(child_pos);
+                                }
+                            }
+                            // If in a different SCC, it will be picked up when that SCC is reached in topo order.
+                        }
+                    }
+                }
+
+                // If new inputs accumulated for this node while it was processing, re-queue it to continue local fixpoint.
+                if values.contains_key(&u) && !stopped_nodes.contains(&u) {
+                    if in_queue.insert(u) {
+                        local_queue.push_back(pos);
                     }
                 }
             }
