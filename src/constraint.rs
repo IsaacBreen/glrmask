@@ -2694,14 +2694,14 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn dfs(
-        &mut self,
+        &self,
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: FxHashMap<TokenizerStateID, FxHashMap<PrecomputeNode1Index, LLMTokenBV>>,
         stats: &mut DfsStats,
     ) {
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut exec_memo: FxHashMap<(usize, TokenizerStateID), Arc<crate::finite_automata::ExecutionResult>> = FxHashMap::default();
+            let mut exec_memo: FxHashMap<(usize, TokenizerStateID), Arc<crate::tokenizer::ExecuteResult>> = FxHashMap::default();
             let mut work_queue: Vec<FxHashMap<TokenizerStateID, FxHashMap<PrecomputeNode1Index, LLMTokenBV>>> = vec![FxHashMap::default(); segment_bytes.len() + 1];
             work_queue[0] = assoc_by_state.clone();
 
