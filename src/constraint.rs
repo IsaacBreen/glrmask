@@ -914,6 +914,8 @@ impl GrammarConstraint {
             original_ids.push(*id);
         }
 
+        return original_ids.iter().map(|id| (id.0, id.0)).collect();
+
         let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
 
         // 2. Find equivalence classes.
@@ -2546,8 +2548,9 @@ impl GrammarConstraint {
             for token_match in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token_match.id);
                 // LLM tokens reachable under child_vocab_node_ref are those that start with segment_bytes
-                let applicable_tokens = child_vocab_node_ref.reachable_token_ids();
-                *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
+                let applicable_tokens_rangeset = child_vocab_node_ref.reachable_token_ids();
+                result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros)
+                    .extend(applicable_tokens_rangeset.iter());
             }
 
             if let Some(final_state_val) = exec_result.end_state {
@@ -2934,7 +2937,7 @@ impl<'r> Precomputer1<'r> {
                                             }
 
                                             // Compute edge_bv once
-                                            let mut edge_bv = (*child_reachable.clone().inner).clone();
+                                            let mut edge_bv = child_reachable.clone();
                                             if next_pos == segment_bytes.len() {
                                                 edge_bv.remove(child_token_id);
                                             }

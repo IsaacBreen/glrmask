@@ -219,11 +219,6 @@ impl HybridBitset {
         result
     }
 
-    /// Extends the bitset with the contents of an iterator over indices.
-    pub fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
-        Arc::make_mut(&mut self.inner).extend(iter);
-        self.inner = cache::intern_l1((*self.inner).clone());
-    }
     /// Removes all elements from the set.
     pub fn clear(&mut self) {
         self.inner = cache::intern_l1(RangeSetBlaze::new());
@@ -505,8 +500,11 @@ impl FromIterator<usize> for HybridBitset {
 }
 
 impl Extend<usize> for HybridBitset {
-    fn extend<T: IntoIterator<Item = usize>>(&mut self, iter: T) {
-        self.extend(iter);
+    fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
+        // Avoids clone if Arc is unique
+        Arc::make_mut(&mut self.inner).extend(iter);
+        // Re-intern the potentially modified RangeSetBlaze
+        self.inner = cache::intern_l1((*self.inner).clone());
     }
 }
 

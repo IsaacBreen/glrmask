@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use bitvec::prelude::*;
+use range_set_blaze::RangeSetBlaze;
 // Keep for macros or other uses if needed
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -27,7 +28,7 @@ pub struct VocabPrefixTreeNode {
     children: BTreeMap<Vec<u8>, VocabPrefixTreeNode>,
     /// Bit vector indicating all token IDs reachable from or including this node.
     /// The length is max_token_id + 1.
-    reachable_token_ids: HybridBitset,
+    reachable_token_ids: RangeSetBlaze<usize>,
 }
 
 impl JSONConvertible for VocabPrefixTreeNode {
@@ -54,7 +55,7 @@ impl VocabPrefixTreeNode {
             prefix_length,
             children: BTreeMap::new(),
             // Initialize empty; will be computed after tree structure is built.
-            reachable_token_ids: HybridBitset::zeros(),
+            reachable_token_ids: RangeSetBlaze::new(),
         }
     }
 
@@ -84,7 +85,7 @@ impl VocabPrefixTreeNode {
     }
 
     /// Returns a bitset representing the set of token IDs reachable from this node (including the token this node itself represents).
-    pub fn reachable_token_ids(&self) -> &HybridBitset {
+    pub fn reachable_token_ids(&self) -> &RangeSetBlaze<usize> {
         &self.reachable_token_ids
     }
 }
@@ -109,7 +110,7 @@ impl fmt::Debug for VocabPrefixTreeNode {
 
         // Summarize reachable_token_ids for brevity
         let reachable_summary = format!(
-            "{} set bits",
+            "{} items",
             self.reachable_token_ids.len() // Use len() for count
         );
         debug_struct.field("reachable_token_ids", &reachable_summary);
@@ -316,7 +317,7 @@ impl VocabPrefixTree {
 
     /// Clears reachable_token_ids for the entire subtree rooted at `node`.
     fn clear_reachable_ids_recursive(node: &mut VocabPrefixTreeNode) {
-        node.reachable_token_ids = HybridBitset::zeros();
+        node.reachable_token_ids = RangeSetBlaze::new();
         for child in node.children.values_mut() {
             Self::clear_reachable_ids_recursive(child);
         }
@@ -537,7 +538,7 @@ impl VocabPrefixTree {
             let child_ids_set = Self::compute_reachable_ids_recursive(child_node, _max_token_id);
             current_node_ids_set.extend(child_ids_set);
         }
-        let mut final_bitvec = HybridBitset::zeros();
+        let mut final_bitvec = RangeSetBlaze::new();
         for token_id_val in &current_node_ids_set {
             final_bitvec.insert(*token_id_val);
         }
