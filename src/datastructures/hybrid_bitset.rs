@@ -214,9 +214,8 @@ impl HybridBitset {
         if !self.inner.contains(index) {
             return false;
         }
-        let mut new_inner = (*self.inner).clone();
-        let result = new_inner.remove(index);
-        self.inner = cache::intern_l1(new_inner);
+        let result = Arc::make_mut(&mut self.inner).remove(index);
+        self.inner = cache::intern_l1(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
         result
     }
 
