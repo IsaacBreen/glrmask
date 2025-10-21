@@ -5,7 +5,11 @@ program ::= statement_list? EOF;
 EOF ::= '<|EOF|>';
 
 // --- Lexical Grammar (Minimal) ---
-IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+IGNORE ::= ( WS | COMMENT )+ ;
+WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
+SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ;
+MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ;
 
 // --- Statements (Core Imperative Set) ---
 statement_list ::= statement+ ;
