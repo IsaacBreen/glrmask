@@ -2886,17 +2886,24 @@ impl<'r> Precomputer1<'r> {
                     });
                 }
 
-                // Apply edge insertions
-                for (&EdgeKey { src, key, dst }, bv) in &pending_edges {
-                    timeit!("dfs_batch_write_insert_edge_simple", {
-                        if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-                            src_node.children_mut().entry(key).or_default()
-                                .entry(dst)
-                                .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv)
-                                .or_insert(bv.clone());
-                        }
-                    });
+                // Group edges by source node to minimize locking/lookups
+                let mut edges_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, &HybridBitset)>> = FxHashMap::default();
+                for (edge_key, bv) in &pending_edges {
+                    edges_by_src.entry(edge_key.src).or_default().push((edge_key.key, edge_key.dst, bv));
                 }
+
+                timeit!("dfs_batch_write_insert_edges_grouped", {
+                    for (src, edges) in edges_by_src {
+                        if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                            for (key, dst, bv) in edges {
+                                src_node.children_mut().entry(key).or_default()
+                                    .entry(dst)
+                                    .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv)
+                                    .or_insert(bv.clone());
+                            }
+                        }
+                    }
+                });
             });
 
             stats.analyze_pending_edges(&pending_edges);
