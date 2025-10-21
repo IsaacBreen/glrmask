@@ -514,7 +514,7 @@ pub fn eliminate_pushes_and_pops(
                 };
             for (k, c_idx, val) in &to_move {
                 god2.insert_edge_simple(b_np_idx, *c_idx, k.clone(), val.clone());
-                update_reverse_adj_after_insert(b_np_idx, *cidx, k.clone());
+                update_reverse_adj_after_insert(b_np_idx, *c_idx, k.clone());
                 god2.remove_edge(b_idx, *c_idx, k);
                 if let Some(vec) = reverse_adj.get_mut(&c_idx) {
                     vec.retain(|(uu, kk, _)| !(*uu == b_idx && *kk == *k));
