@@ -1,7 +1,7 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 import sys
 import warnings
 
@@ -225,6 +225,59 @@ def _print_mismatch_context(code_bytes: bytes, start_byte: int, end_byte: int):
     print(f"         | {pointer}")
     if next_line:
         print(f"    {line_num+1: >4} | {next_line}")
+
+def _print_mask_diff(
+    baseline_mask: Tuple[Tuple[int, int], ...],
+    current_mask: Tuple[Tuple[int, int], ...],
+    baseline_vocab: Dict[int, bytes],
+    current_vocab: Dict[int, bytes]
+):
+    """Calculates and prints the symmetric difference between two token masks."""
+    def ranges_to_set(ranges: Tuple[Tuple[int, int], ...]) -> Set[int]:
+        s = set()
+        for start, end in ranges:
+            s.update(range(start, end + 1))
+        return s
+
+    def set_to_ranges(s: Set[int]) -> Tuple[Tuple[int, int], ...]:
+        if not s:
+            return tuple()
+        
+        sorted_tokens = sorted(list(s))
+        
+        ranges: List[Tuple[int, int]] = []
+        start = sorted_tokens[0]
+        end = sorted_tokens[0]
+        
+        for i in range(1, len(sorted_tokens)):
+            if sorted_tokens[i] == end + 1:
+                end = sorted_tokens[i]
+            else:
+                ranges.append((start, end))
+                start = sorted_tokens[i]
+                end = sorted_tokens[i]
+        
+        ranges.append((start, end))
+        return tuple(ranges)
+
+    baseline_set = ranges_to_set(baseline_mask)
+    current_set = ranges_to_set(current_mask)
+
+    baseline_only_set = baseline_set - current_set
+    if baseline_only_set:
+        baseline_only_ranges = set_to_ranges(baseline_only_set)
+        numeric_str = _format_numeric_ranges(baseline_only_ranges)
+        token_str = _format_ranges_as_tokens(baseline_only_ranges, baseline_vocab)
+        print(f"  - Baseline ONLY (numeric): {numeric_str}")
+        print(f"  - Baseline ONLY (tokens):  {token_str}")
+
+    current_only_set = current_set - baseline_set
+    if current_only_set:
+        current_only_ranges = set_to_ranges(current_only_set)
+        numeric_str = _format_numeric_ranges(current_only_ranges)
+        token_str = _format_ranges_as_tokens(current_only_ranges, current_vocab)
+        print(f"  - Current ONLY (numeric):  {numeric_str}")
+        print(f"  - Current ONLY (tokens):   {token_str}")
 
 def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: Optional[Dict[str, bool]] = None, mismatch_counts: Optional[Dict[str, List[int]]] = None):
     """Calculates, formats, and prints a summary statistics table for a given DataFrame."""
@@ -500,6 +553,8 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                 print(f"  Current (numeric):  {_format_numeric_ranges(masks[i])}")
                 print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
                 print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
+
+                _print_mask_diff(baseline_masks[i], masks[i], baseline_vocab, current_vocab)
 
                 code_bytes = code_content_by_model.get(model_name)
                 token_positions = token_positions_by_model.get(model_name, [])
