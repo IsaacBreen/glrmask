@@ -1762,6 +1762,8 @@ impl GrammarConstraint {
         let roots_after: Vec<_> = precomputed1.values().cloned().collect();
         Self::has_llm_compatible_cycle(&trie1_god, &roots_after, stage_vocab.internal_max_llm_token);
 
+        Trie::break_structural_cycles(&trie1_god, &roots_after);
+
         let mut stats = PrecomputeStats::default();
         crate::constraint_extra::calculate_final_stats1(&precomputed1, &mut stats, &trie1_god);
         crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, &trie1_god);
