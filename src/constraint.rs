@@ -2670,6 +2670,12 @@ impl<'r> Precomputer1<'r> {
 
             // === OPTIMIZATION 1: Cache node data to avoid repeated lock acquisitions ===
             let mut node_cache: HashMap<PrecomputeNode1Index, (HybridBitset, bool)> = HashMap::new();
+            let get_node_data = |cache: &mut HashMap<_, _>, idx: &PrecomputeNode1Index| {
+                cache.entry(idx.clone()).or_insert_with(|| {
+                    let guard = idx.read(&self.trie1_god).unwrap();
+                    (guard.value.live_tokens.clone(), guard.value.end)
+                }).clone()
+            };
 
             // === OPTIMIZATION 2: Batch all edge insertions and updates ===
             let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
@@ -2801,7 +2807,7 @@ impl<'r> Precomputer1<'r> {
                                                         .filter(|child_arc| {
                                                             if !node_cache.contains_key(child_arc) {
                                                                 let guard = child_arc.read(&self.trie1_god).unwrap();
-                                                                node_cache.insert(child_arc.clone(), (guard.value.live_tokens.clone(), guard.value.end));
+                                                                node_cache.insert(**child_arc, (guard.value.live_tokens.clone(), guard.value.end));
                                                             }
                                                             let (child_live_tokens, is_end) = node_cache.get(child_arc).unwrap();
                                                             !*is_end && (child_live_tokens & &edge_bv_for_inserter).is_empty()
@@ -2880,6 +2886,7 @@ impl<'r> Precomputer1<'r> {
             }
 
             // === OPTIMIZATION 5: Batch write all edges and updates ===
+            stats.analyze_pending_edges(&pending_edges);
             timeit!("dfs_batch_write", {
                 // Group edges by source node to minimize locking/lookups
                 let mut edges_by_src: FxHashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, HybridBitset)>> = FxHashMap::default();
@@ -2909,8 +2916,6 @@ impl<'r> Precomputer1<'r> {
                     }
                 }
             });
-
-            stats.analyze_pending_edges(&pending_edges);
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc, stats);
