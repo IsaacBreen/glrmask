@@ -2801,7 +2801,7 @@ impl<'r> Precomputer1<'r> {
                 }
 
                 for (node_idx, live_tokens) in pending_live_token_updates {
-                    timeit!("dfs_batch_write_insert_edge_simple", {
+                    timeit!("dfs_batch_write_update_live_tokens", {
                         if let Some(mut guard) = node_idx.write(&self.trie1_god) {
                             guard.value.live_tokens |= &live_tokens;
                         }
