@@ -2601,7 +2601,7 @@ impl<'r> Precomputer1<'r> {
             // Apply live token updates
             for (node_idx, live_tokens) in self.global_live.get_mut() {
                 if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
-                    node.value.live_tokens |= live_tokens;
+                    node.value.live_tokens |= live_tokens.clone();
                 }
             }
 
@@ -2610,7 +2610,7 @@ impl<'r> Precomputer1<'r> {
                 if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
                     src_node.children_mut().entry(*key).or_default()
                         .entry(dst.clone())
-                        .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv)
+                        .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv.clone())
                         .or_insert(bv.clone());
                 }
             }
