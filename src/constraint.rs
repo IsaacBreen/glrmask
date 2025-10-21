@@ -2692,7 +2692,7 @@ impl<'r> Precomputer1<'r> {
     ) {
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut exec_memo: FxHashMap<(usize, TokenizerStateID), Arc<crate::finite_automata::ExecResult>> = FxHashMap::default();
+            let mut exec_memo: FxHashMap<(usize, TokenizerStateID), Arc<_>> = FxHashMap::default();
             let mut work_queue: Vec<FxHashMap<TokenizerStateID, FxHashMap<PrecomputeNode1Index, LLMTokenBV>>> =
                 vec![FxHashMap::default(); segment_bytes.len() + 1];
             work_queue[0] = assoc_by_state.clone();
@@ -2706,7 +2706,7 @@ impl<'r> Precomputer1<'r> {
             // OPTIMIZATIONS
             // === OPTIMIZATION 1: Cache node data to avoid repeated lock acquisitions ===
             let mut node_cache: FxHashMap<PrecomputeNode1Index, (HybridBitset, bool)> = FxHashMap::default();
-            let get_node_data = |cache: &mut HashMap<_, _>, idx: &PrecomputeNode1Index| {
+            let get_node_data = |cache: &mut FxHashMap<_, _>, idx: &PrecomputeNode1Index| {
                 cache.entry(idx.clone()).or_insert_with(|| {
                     let guard = idx.read(&self.trie1_god).unwrap();
                     (guard.value.live_tokens.clone(), guard.value.end)
@@ -2728,7 +2728,7 @@ impl<'r> Precomputer1<'r> {
                             let exec_result = timeit!("dfs_exec_tokenizer", {
                                 exec_memo
                                     .entry((pos, tokenizer_state_id))
-                                    .or_insert_with(|| self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id))
+                                    .or_insert_with(|| Arc::new(self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id)))
                             });
 
                             let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
@@ -2758,7 +2758,7 @@ impl<'r> Precomputer1<'r> {
                                             if next_pos == segment_bytes.len() {
                                                 timeit!("dfs_end_of_segment_match", {
                                                     let edge_bv = &self.singletons[child_token_id];
-                                                    let final_edge_bv = timeit!("dfs_bitset_and_and", { &(&edge_bv & src_contextual_tokens) & &src_live_tokens });
+                                                    let final_edge_bv = timeit!("dfs_bitset_and_and", { &(&*edge_bv & src_contextual_tokens) & &src_live_tokens });
 
                                                     if !final_edge_bv.is_empty() {
                                                         let end_idx = self.get_leaf_node();
