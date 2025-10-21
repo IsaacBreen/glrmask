@@ -2803,10 +2803,10 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn run_dfs(&mut self) {
-        let mut assoc: HashMap<
+        let mut assoc: BTreeMap<
             TokenizerStateID,
-            HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
-        > = HashMap::new();
+            OrderedHashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
+        > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
             assoc
@@ -2821,12 +2821,10 @@ impl<'r> Precomputer1<'r> {
             crate::debug!(6, "  {}: {}", sid.0, root);
         }
         crate::profiler::reset();
-        let mut stats = std::mem::take(&mut self.dfs_stats);
         // Temporarily move vocab out of self to satisfy the borrow checker.
         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
-        self.dfs(&vocab.root, assoc, &mut stats);
+        self.dfs(&vocab.root, assoc);
         self.vocab = vocab; // Move it back.
-        self.dfs_stats = stats;
         self.dfs_stats.print();
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish();
@@ -2834,504 +2832,174 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(2, "Precomputation complete");
     }
 
-    // fn dfs(
-    //     &self,
-    //     vocab_node: &VocabPrefixTreeNode,
-    //     assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>>,
-    // ) {
-    //     self.pb.inc(1);
-    //
-    //     for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-    //         let mut work_queue: BTreeMap<
-    //             usize,
-    //             BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>>,
-    //         > = BTreeMap::new();
-    //         work_queue.insert(0, assoc_by_state.clone());
-    //
-    //         let mut next_level_assoc: BTreeMap<_, OrderedHashMap<_, _>> = BTreeMap::new();
-    //
-    //         while let Some((pos, states_at_pos)) = work_queue.pop_first() {
-    //             if pos == segment_bytes.len() {
-    //                 for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
-    //                     let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
-    //                     for (node, tokens) in nodes_with_tokens {
-    //                         entry
-    //                             .entry(node)
-    //                             .or_insert_with(LLMTokenBV::zeros)
-    //                             .bitor_assign(&tokens);
-    //                     }
-    //                 }
-    //                 continue;
-    //             }
-    //
-    //             for (tokenizer_state_id, precompute_nodes_with_tokens) in states_at_pos {
-    //                 let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
-    //
-    //                 let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
-    //                     self.possible_matches(child_vocab_node, TokenizerStateID(end_state_val))
-    //                 } else {
-    //                     BTreeMap::new()
-    //                 };
-    //
-    //                 for match_info in &exec_result.matches {
-    //                     let terminal_id = GrammarTokenID(match_info.id);
-    //                     let next_pos = pos + match_info.width;
-    //
-    //                     for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
-    //                         if next_pos == segment_bytes.len() {
-    //                             // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
-    //                             let llm_token_id = child_vocab_node.token_id();
-    //                             let mut edge_bv = HybridBitset::zeros();
-    //                             edge_bv.insert(llm_token_id);
-    //                             let edge_key = Some(terminal_id);
-    //                             let src_node_idx = src_node_wrapper.as_arc().clone();
-    //                             let end_idx = self.get_leaf_node();
-    //
-    //                             let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
-    //                             let final_edge_bv = &(&edge_bv & src_contextual_tokens) & &src_live_tokens;
-    //
-    //                             if !final_edge_bv.is_empty() {
-    //                                 self.trie1_god.insert_edge_simple(src_node_idx, end_idx, edge_key, final_edge_bv.clone());
-    //                                 if let Some(mut end_guard) = end_idx.write(&self.trie1_god) {
-    //                                     end_guard.value.live_tokens |= &final_edge_bv;
-    //                                 }
-    //                             }
-    //                         }
-    //
-    //                         let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
-    //                         if next_pos == segment_bytes.len() {
-    //                             edge_bv.set(child_vocab_node.token_id(), false);
-    //                         }
-    //                         if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
-    //                             edge_bv -= matches_for_terminal;
-    //                         }
-    //
-    //                         let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
-    //                         if edge_bv_for_inserter.is_empty() { continue; }
-    //
-    //                         let edge_key = Some(terminal_id);
-    //                         let src_node_idx = src_node_wrapper.as_arc().clone();
-    //
-    //                         let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
-    //                         let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
-    //
-    //                         if final_edge_bv.is_empty() { continue; }
-    //
-    //                         let next_tokenizer_state = self.tokenizer.initial_state_id();
-    //                         let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
-    //
-    //                         let mut dest_node_opt = dest_nodes_in_queue.iter().filter_map(|(dest_node, dest_contextual_tokens)| {
-    //                             if dest_node.read(&self.trie1_god).unwrap().value.end {
-    //                                 return None;
-    //                             }
-    //                             let risky_tokens = &edge_bv_for_inserter - dest_contextual_tokens; // Note: using edge_bv_for_inserter for filtering to match original logic
-    //                             if risky_tokens.is_empty() {
-    //                                 return Some(dest_node.clone());
-    //                             }
-    //                             let dest_live_tokens = &dest_node.read(&self.trie1_god).unwrap().value.live_tokens;
-    //                             if (&risky_tokens & dest_live_tokens).is_empty() {
-    //                                 Some(dest_node.clone())
-    //                             } else {
-    //                                 None
-    //                             }
-    //                         }).next();
-    //
-    //                         if dest_node_opt.is_none() {
-    //                             let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie1_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-    //                             dest_node_opt = children_of_src.iter().filter(|child_arc| {
-    //                                 let guard = child_arc.read(&self.trie1_god).unwrap();
-    //                                 if guard.value.end {
-    //                                     return false;
-    //                                 }
-    //                                 (&guard.value.live_tokens & &edge_bv_for_inserter).is_empty()
-    //                             }).cloned().next();
-    //                         }
-    //
-    //                         let result_node = if let Some(dest_idx) = dest_node_opt {
-    //                             dest_idx
-    //                         } else {
-    //                             let new_node = PrecomputeNode1::new(PrecomputedNodeContents::internal());
-    //                             Trie2Index::new(self.trie1_god.insert(new_node))
-    //                         };
-    //
-    //                         self.trie1_god.insert_edge_simple(src_node_idx, result_node, edge_key, final_edge_bv.clone());
-    //                         if let Some(mut dest_guard) = result_node.write(&self.trie1_god) {
-    //                             dest_guard.value.live_tokens |= &final_edge_bv;
-    //                         }
-    //
-    //                         assert_ne!(&result_node, src_node_wrapper);
-    //                         dest_nodes_in_queue.entry(result_node.clone()).or_insert_with(LLMTokenBV::zeros).bitor_assign(&edge_bv_for_inserter);
-    //                     }
-    //                 }
-    //
-    //                 if let Some(end_state_val) = exec_result.end_state {
-    //                     let final_tokenizer_state = TokenizerStateID(end_state_val);
-    //                     let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
-    //                     for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
-    //                         let llm_token_id = child_vocab_node.token_id();
-    //                         let mut edge_bv = HybridBitset::zeros();
-    //                         edge_bv.insert(llm_token_id);
-    //                         let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
-    //                         if edge_bv_for_inserter.is_empty() { continue; }
-    //
-    //                         for terminal_id in &accessible_terminals {
-    //                             let edge_key = Some(terminal_id);
-    //                             let src_node_idx = src_node_wrapper.as_arc().clone();
-    //                             let end_idx = self.get_leaf_node();
-    //
-    //                             let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
-    //                             let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
-    //
-    //                             if !final_edge_bv.is_empty() {
-    //                                 self.trie1_god.insert_edge_simple(src_node_idx, end_idx, edge_key.copied(), final_edge_bv.clone());
-    //                                 if let Some(mut end_guard) = end_idx.write(&self.trie1_god) {
-    //                                     end_guard.value.live_tokens |= &final_edge_bv;
-    //                                 }
-    //                             }
-    //                         }
-    //                     }
-    //                     let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
-    //                     for (node, tokens) in precompute_nodes_with_tokens {
-    //                         entry
-    //                             .entry(node.clone())
-    //                             .or_insert_with(LLMTokenBV::zeros)
-    //                             .bitor_assign(&tokens);
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //
-    //         if !next_level_assoc.is_empty() {
-    //             self.dfs(child_vocab_node, next_level_assoc);
-    //         }
-    //     }
-    // }
-
     fn dfs(
         &mut self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: HashMap<TokenizerStateID, HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>>,
-        stats: &mut DfsStats,
+        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>>,
     ) {
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut exec_memo = HashMap::new();
             let mut work_queue: BTreeMap<
                 usize,
-                HashMap<TokenizerStateID, HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>>,
+                BTreeMap<TokenizerStateID, OrderedHashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>>,
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
-            let mut next_level_assoc: HashMap<_, HashMap<_, _>> = HashMap::new();
-
-            // === OPTIMIZATION 1: Cache node data to avoid repeated lock acquisitions ===
-            let mut node_cache: HashMap<TempPrecomputeNode1Index, (RangeSetBlaze<usize>, bool)> = HashMap::new();
-            let get_node_data = |cache: &mut HashMap<_, _>, idx: &PrecomputeNode1Index| {
-                cache.entry(idx.clone()).or_insert_with(|| {
-                    let guard = idx.read(&self.trie1_god).unwrap();
-                    (guard.value.live_tokens.clone(), guard.value.end)
-                }).clone()
-            };
-
-            // === OPTIMIZATION 2: Batch all edge insertions and updates ===
-            let mut pending_edges: FxHashMap<EdgeKey, TokenAcc> = FxHashMap::default();
-            let mut pending_live_token_updates: FxHashMap<TempPrecomputeNode1Index, TokenAcc> = FxHashMap::default();
-
-            // === OPTIMIZATION 3: Pre-compute child_vocab reachable tokens (used frequently) ===
-            let child_reachable = child_vocab_node.reachable_token_ids();
-            let child_token_id = child_vocab_node.token_id();
-
-            // === OPTIMIZATION 4: Pre-compute possible_matches_at_end for all states we might need ===
-            let mut possible_matches_cache: HashMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> = HashMap::new();
+            let mut next_level_assoc: BTreeMap<_, OrderedHashMap<_, _>> = BTreeMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
-                timeit!("dfs_while_loop_body", {
-                    if pos == segment_bytes.len() {
-                        timeit!("dfs_end_of_segment_propagate", {
-                            for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
-                                let entry: &mut HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>> = next_level_assoc.entry(tokenizer_state_id).or_default();
-                                for (node, tokens) in nodes_with_tokens {
-                                    entry.entry(node).or_default().bitor_assign(&tokens);
+                if pos == segment_bytes.len() {
+                    for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
+                        let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
+                        for (node, tokens) in nodes_with_tokens {
+                            entry
+                                .entry(node)
+                                .or_insert_with(RangeSetBlaze::new)
+                                .bitor_assign(&tokens);
+                        }
+                    }
+                    continue;
+                }
+
+                for (tokenizer_state_id, precompute_nodes_with_tokens) in states_at_pos {
+                    let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
+
+                    let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
+                        self.possible_matches(child_vocab_node, TokenizerStateID(end_state_val))
+                    } else {
+                        BTreeMap::new()
+                    };
+
+                    for match_info in &exec_result.matches {
+                        let terminal_id = GrammarTokenID(match_info.id);
+                        let next_pos = pos + match_info.width;
+
+                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
+                            if next_pos == segment_bytes.len() {
+                                // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
+                                let llm_token_id = child_vocab_node.token_id();
+                                let mut edge_bv = RangeSetBlaze::new();
+                                edge_bv.insert(llm_token_id);
+                                let edge_key = Some(terminal_id);
+                                let src_node_idx = *src_node_wrapper;
+                                let end_idx = self.get_leaf_node();
+
+                                let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
+                                let final_edge_bv = &(&edge_bv & src_contextual_tokens) & &src_live_tokens;
+
+                                if !final_edge_bv.is_empty() {
+                                    self.trie1_god.insert_edge_simple(src_node_idx, end_idx, edge_key, final_edge_bv.clone());
+                                    if let Some(mut end_guard) = end_idx.write(&self.trie1_god) {
+                                        end_guard.value.live_tokens |= &final_edge_bv;
+                                    }
                                 }
                             }
-                        });
-                        continue;
-                    }
 
-                    for (tokenizer_state_id, precompute_nodes_with_tokens) in states_at_pos {
-                        timeit!("dfs_for_states_at_pos", {
-                            let exec_result = timeit!("dfs_exec_tokenizer", {
-                                exec_memo
-                                    .entry((pos, tokenizer_state_id))
-                                    .or_insert_with(|| self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id))
-                            });
+                            let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
+                            if next_pos == segment_bytes.len() {
+                                edge_bv.remove(child_vocab_node.token_id());
+                            }
+                            if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
+                                edge_bv = &edge_bv - matches_for_terminal.inner.as_ref();
+                            }
 
-                            let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
-                                timeit!("dfs_possible_matches_cache", {
-                                    let ts = TokenizerStateID(end_state_val);
-                                    possible_matches_cache.entry(ts).or_insert_with(|| {
-                                        self.possible_matches(child_vocab_node, ts)
-                                    })
-                                })
+                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
+                            if edge_bv_for_inserter.is_empty() { continue; }
+
+                            let edge_key = Some(terminal_id);
+                            let src_node_idx = *src_node_wrapper;
+
+                            let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
+                            let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
+
+                            if final_edge_bv.is_empty() { continue; }
+
+                            let next_tokenizer_state = self.tokenizer.initial_state_id();
+                            let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
+
+                            let mut dest_node_opt = dest_nodes_in_queue.iter().filter_map(|(dest_node, dest_contextual_tokens)| {
+                                if dest_node.read(&self.trie1_god).unwrap().value.end {
+                                    return None;
+                                }
+                                let risky_tokens = &edge_bv_for_inserter - dest_contextual_tokens; // Note: using edge_bv_for_inserter for filtering to match original logic
+                                if risky_tokens.is_empty() {
+                                    return Some(*dest_node);
+                                }
+                                let dest_live_tokens = &dest_node.read(&self.trie1_god).unwrap().value.live_tokens;
+                                if (&risky_tokens & dest_live_tokens).is_empty() {
+                                    Some(*dest_node)
+                                } else {
+                                    None
+                                }
+                            }).next();
+
+                            if dest_node_opt.is_none() {
+                                let children_of_src: Vec<_> = src_node_idx.read(&self.trie1_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
+                                dest_node_opt = children_of_src.iter().filter(|child_arc| {
+                                    let guard = child_arc.read(&self.trie1_god).unwrap();
+                                    if guard.value.end {
+                                        return false;
+                                    }
+                                    (&guard.value.live_tokens & &edge_bv_for_inserter).is_empty()
+                                }).copied().next();
+                            }
+
+                            let result_node = if let Some(dest_idx) = dest_node_opt {
+                                dest_idx
                             } else {
-                                &BTreeMap::new()
+                                let new_node = TempPrecomputeNode1::new(TempPrecomputedNodeContents::internal());
+                                TempPrecomputeNode1Index::new(self.trie1_god.insert(new_node))
                             };
 
-                            for match_info in &exec_result.matches {
-                                timeit!("dfs_for_matches", {
-                                    let terminal_id = GrammarTokenID(match_info.id);
-                                    let next_pos = pos + match_info.width;
-
-                                    for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
-                                        timeit!("dfs_for_src_nodes", {
-                                            let src_node_idx = src_node_wrapper.as_arc().clone();
-
-                                            // Use cache instead of repeated reads
-                                            let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
-
-                                            // Handle exact end-of-segment match
-                                            if next_pos == segment_bytes.len() {
-                                                timeit!("dfs_end_of_segment_match", {
-                                                    let mut edge_bv = RangeSetBlaze::new();
-                                                    edge_bv.insert(child_token_id);
-                                                    let final_edge_bv = timeit!("dfs_bitset_and_and", { &(&edge_bv & src_contextual_tokens) & &src_live_tokens });
-
-                                                    if !final_edge_bv.is_empty() {
-                                                        let end_idx = self.get_leaf_node();
-                                                        let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
-                                                        
-                                                        if final_edge_bv.len() == 1 {
-                                                            let token = final_edge_bv.iter().next().unwrap();
-                                                            pending_edges.entry(k).or_default().add_token(token);
-                                                            pending_live_token_updates.entry(end_idx).or_default().add_token(token);
-                                                        } else {
-                                                            pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
-                                                            pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
-                                                        }
-                                                    }
-                                                });
-                                            }
-
-                                            // Compute edge_bv once
-                                            let mut edge_bv = child_reachable.clone();
-                                            if next_pos == segment_bytes.len() {
-                                                edge_bv.remove(child_token_id);
-                                            }
-                                            if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
-                                                edge_bv = &edge_bv - matches_for_terminal.inner.as_ref();
-                                            }
-
-                                            let edge_bv_for_inserter = timeit!("dfs_bitset_and_and_2", { &(&edge_bv & src_contextual_tokens) & &src_live_tokens });
-                                            if edge_bv_for_inserter.is_empty() { continue; }
-
-                                            let next_tokenizer_state = self.tokenizer.initial_state_id();
-                                            let dest_nodes_in_queue = work_queue.entry(next_pos)
-                                                .or_default()
-                                                .entry(next_tokenizer_state)
-                                                .or_default();
-
-                                            // Find or create destination node
-                                            let mut dest_node_opt = timeit!("dfs_find_dest_node", {
-                                                dest_nodes_in_queue.iter()
-                                                    .filter_map(|(dest_node, dest_contextual_tokens)| {
-                                                        let (dest_live_tokens, is_end) = get_node_data(&mut node_cache, dest_node);
-                                                        if is_end { return None; }
-
-                                                        let risky_tokens = timeit!("dfs_bitset_sub_2", { &edge_bv_for_inserter - dest_contextual_tokens });
-                                                        if risky_tokens.is_empty() || (&risky_tokens & &dest_live_tokens).is_empty() {
-                                                            Some(dest_node.clone())
-                                                        } else {
-                                                            None
-                                                        }
-                                                    }).next()
-                                            });
-
-                                            if dest_node_opt.is_none() {
-                                                timeit!("dfs_find_dest_node_in_children", {
-                                                    // Check existing children - read once and cache
-                                                    let children_of_src: Vec<PrecomputeNode1Index> = {
-                                                        let guard = src_node_wrapper.as_arc().read(&self.trie1_god).unwrap();
-                                                        guard.children().values().flat_map(|m| m.keys().cloned()).collect()
-                                                    };
-
-                                                    dest_node_opt = children_of_src.iter()
-                                                        .filter(|child_arc| {
-                                                            let (child_live_tokens, is_end) = get_node_data(&mut node_cache, child_arc);
-                                                            !is_end && (&child_live_tokens & &edge_bv_for_inserter).is_empty()
-                                                        }).cloned().next();
-                                                });
-                                            }
-
-                                            let result_node = dest_node_opt.unwrap_or_else(|| {
-                                                timeit!("dfs_create_new_node", {
-                                                    let new_node = TempPrecomputeNode1::new(TempPrecomputedNodeContents::internal());
-                                                    let idx = Trie2Index::new(self.trie1_god.insert(new_node));
-                                                    node_cache.insert(idx.clone(), (RangeSetBlaze::new(), false));
-                                                    idx
-                                                })
-                                            });
-
-                                            let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
-                                            if edge_bv_for_inserter.len() == 1 {
-                                                let token = edge_bv_for_inserter.iter().next().unwrap();
-                                                pending_edges.entry(k).or_default().add_token(token);
-                                                pending_live_token_updates.entry(result_node.clone()).or_default().add_token(token);
-                                            } else {
-                                                pending_edges.entry(k).or_default().add_bitset(edge_bv_for_inserter.clone());
-                                                pending_live_token_updates.entry(result_node.clone()).or_default().add_bitset(edge_bv_for_inserter.clone());
-                                            }
-                                            // Update cache
-                                            node_cache.entry(result_node.clone())
-                                                .and_modify(|(live, _)| *live |= &edge_bv_for_inserter);
-
-                                            dest_nodes_in_queue.entry(result_node)
-                                                .or_insert_with(RangeSetBlaze::new)
-                                                .bitor_assign(&edge_bv_for_inserter);
-                                        });
-                                    }
-                                });
+                            self.trie1_god.insert_edge_simple(src_node_idx, result_node, edge_key, final_edge_bv.clone());
+                            if let Some(mut dest_guard) = result_node.write(&self.trie1_god) {
+                                dest_guard.value.live_tokens |= &final_edge_bv;
                             }
 
-                            // Handle continuation state
-                            if let Some(end_state_val) = exec_result.end_state {
-                                timeit!("dfs_continuation_state", {
-                                    let final_tokenizer_state = TokenizerStateID(end_state_val);
-                                    let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
-
-                                    for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
-                                        let mut edge_bv = RangeSetBlaze::new();
-                                        edge_bv.insert(child_token_id);
-                                        let edge_bv_for_inserter = timeit!("dfs_bitset_and", { &edge_bv & src_contextual_tokens });
-                                        if edge_bv_for_inserter.is_empty() { continue; }
-
-                                        let src_node_idx = src_node_wrapper.as_arc().clone();
-                                        let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
-                                        let final_edge_bv = timeit!("dfs_bitset_and_2", { &edge_bv_for_inserter & &src_live_tokens });
-
-                                        if !final_edge_bv.is_empty() {
-                                            let end_idx = self.get_leaf_node();
-                                            if final_edge_bv.len() == 1 {
-                                                let token = final_edge_bv.iter().next().unwrap();
-                                                for terminal_id in &accessible_terminals {
-                                                    let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-                                                    pending_edges.entry(k).or_default().add_token(token);
-                                                }
-                                                pending_live_token_updates.entry(end_idx).or_default().add_token(token);
-                                            } else {
-                                                for terminal_id in &accessible_terminals {
-                                                    let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
-                                                    pending_edges.entry(k).or_default().add_bitset(final_edge_bv.clone());
-                                                }
-                                                pending_live_token_updates.entry(end_idx).or_default().add_bitset(final_edge_bv);
-                                            }
-                                        }
-                                    }
-
-                                    let entry = next_level_assoc.entry(final_tokenizer_state).or_default();
-                                    for (node, tokens) in precompute_nodes_with_tokens {
-                                        entry.entry(node).or_default().bitor_assign(&tokens);
-                                    }
-                                });
-                            }
-                        });
+                            assert_ne!(result_node, *src_node_wrapper);
+                            dest_nodes_in_queue.entry(result_node).or_insert_with(RangeSetBlaze::new).bitor_assign(&edge_bv_for_inserter);
+                        }
                     }
-                });
+
+                    if let Some(end_state_val) = exec_result.end_state {
+                        let final_tokenizer_state = TokenizerStateID(end_state_val);
+                        let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
+                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
+                            let llm_token_id = child_vocab_node.token_id();
+                            let mut edge_bv = RangeSetBlaze::new();
+                            edge_bv.insert(llm_token_id);
+                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
+                            if edge_bv_for_inserter.is_empty() { continue; }
+
+                            for terminal_id in &accessible_terminals {
+                                let edge_key = Some(terminal_id);
+                                let src_node_idx = *src_node_wrapper;
+                                let end_idx = self.get_leaf_node();
+
+                                let src_live_tokens = src_node_idx.read(&self.trie1_god).unwrap().value.live_tokens.clone();
+                                let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
+
+                                if !final_edge_bv.is_empty() {
+                                    self.trie1_god.insert_edge_simple(src_node_idx, end_idx, edge_key.copied(), final_edge_bv.clone());
+                                    if let Some(mut end_guard) = end_idx.write(&self.trie1_god) {
+                                        end_guard.value.live_tokens |= &final_edge_bv;
+                                    }
+                                }
+                            }
+                        }
+                        let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
+                        for (node, tokens) in precompute_nodes_with_tokens {
+                            entry
+                                .entry(node)
+                                .or_insert_with(RangeSetBlaze::new)
+                                .bitor_assign(&tokens);
+                        }
+                    }
+                }
             }
 
-            // === OPTIMIZATION 5: Batch write all edges and updates ===
-            stats.analyze_pending_edges(&pending_edges);
-            timeit!("dfs_batch_write", {
-                let mut updates_by_src: FxHashMap<TempPrecomputeNode1Index, Vec<(Option<GrammarTokenID>, TempPrecomputeNode1Index, TokenAcc)>> = FxHashMap::default();
-                for (key, acc) in pending_edges {
-                    if !acc.small.is_empty() || !acc.big.is_empty() {
-                        updates_by_src.entry(key.src).or_default().push((key.key, key.dst, acc));
-                    }
-                }
-
-                let mut inner_guard = self.trie1_god.inner.write();
-
-                // Apply live token updates
-                for (node_idx, mut acc) in pending_live_token_updates {
-                    timeit!("dfs_batch_write_update_live_tokens", {
-                        if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
-                            let TokenAcc { ref mut small, big } = acc;
-                            if !small.is_empty() {
-                                small.sort_unstable();
-                                small.dedup();
-                                node.value.live_tokens.extend(small.iter().copied());
-                            }
-                            for big_bv in big {
-                                node.value.live_tokens |= &big_bv;
-                            }
-                        }
-                    });
-                }
-
-                // Apply edge insertions
-                for (src, updates) in updates_by_src {
-                    timeit!("dfs_batch_write_insert_edges_for_src", {
-                        if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-                            for (key, dst, mut acc) in updates {
-                                timeit!("dfs_batch_write_insert_edges_for_src_inner_loop", {
-                                    let TokenAcc { ref mut small, big } = acc;
-                                    let dest_map = timeit!("dfs_batch_write_get_dest_map", {
-                                        src_node.children_mut().entry(key).or_default()
-                                    });
-                                    
-                                    if !small.is_empty() {
-                                        timeit!("dfs_batch_write_small_sort_dedup", {
-                                            small.sort_unstable();
-                                            small.dedup();
-                                        });
-                                    }
-
-                                    match dest_map.entry(dst) {
-                                        crate::datastructures::OrderedMapEntry::Occupied(mut occupied) => {
-                                            timeit!("dfs_batch_write_occupied", {
-                                                let existing_bv = occupied.get_mut();
-                                                if !small.is_empty() {
-                                                    timeit!("dfs_batch_write_occupied_extend_small", {
-                                                        existing_bv.extend(small.iter().copied());
-                                                    });
-                                                }
-                                                if !big.is_empty() {
-                                                    timeit!("dfs_batch_write_occupied_merge_big", {
-                                                        for big_bv in big {
-                                                            *existing_bv |= &big_bv;
-                                                        }
-                                                    });
-                                                }
-                                            });
-                                        }
-                                        crate::datastructures::OrderedMapEntry::Vacant(vacant) => {
-                                            timeit!("dfs_batch_write_vacant", {
-                                                if !small.is_empty() || !big.is_empty() {
-                                                    let mut new_bv = timeit!("dfs_batch_write_vacant_from_iter", {
-                                                        RangeSetBlaze::from_iter(small.iter().copied())
-                                                    });
-                                                    if !big.is_empty() {
-                                                        timeit!("dfs_batch_write_vacant_merge_big", {
-                                                            for big_bv in big {
-                                                                new_bv |= &big_bv;
-                                                            }
-                                                        });
-                                                    }
-                                                    timeit!("dfs_batch_write_vacant_insert", {
-                                                        vacant.insert(new_bv);
-                                                    });
-                                                }
-                                            });
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    });
-                }
-            });
-
             if !next_level_assoc.is_empty() {
-                self.dfs(child_vocab_node, next_level_assoc, stats);
+                self.dfs(child_vocab_node, next_level_assoc);
             }
         }
     }
