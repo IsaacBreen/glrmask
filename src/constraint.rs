@@ -2639,7 +2639,10 @@ impl<'r> Precomputer1<'r> {
         }
         crate::profiler::reset();
         let mut stats = std::mem::take(&mut self.dfs_stats);
-        self.dfs(&self.vocab.root, assoc, &mut stats);
+        // Temporarily move vocab out of self to satisfy the borrow checker.
+        let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
+        self.dfs(&vocab.root, assoc, &mut stats);
+        self.vocab = vocab; // Move it back.
         self.dfs_stats = stats;
         self.dfs_stats.print();
         crate::debug!(2, "Finished precompute DFS");
