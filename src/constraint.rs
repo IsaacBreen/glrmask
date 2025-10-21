@@ -64,7 +64,7 @@ use std::borrow::Borrow;
 use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
-use std::iter::{FromIterator, once};
+use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
 
@@ -2502,10 +2502,6 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) leaf_node:        PrecomputeNode1Index,
     pub(crate) dfs_stats:        DfsStats,
     pub(crate) trie1_god:        Trie1GodWrapper,
-    singletons: Vec<HybridBitset>,
-    global_edges: RefCell<FxHashMap<EdgeKey, HybridBitset>>,
-    global_live: RefCell<FxHashMap<PrecomputeNode1Index, HybridBitset>>,
-    known_children: RefCell<FxHashMap<(PrecomputeNode1Index, Option<GrammarTokenID>), FxHashMap<PrecomputeNode1Index, HybridBitset>>>,
 }
 
 impl<'r> Precomputer0<'r> {}
@@ -2557,15 +2553,6 @@ impl<'r> Precomputer1<'r> {
         let leaf_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
         crate::debug!(2, "Created trie1 leaf node");
 
-        let singletons = (0..=internal_max_llm_token)
-            .map(|i| {
-                let mut bv = HybridBitset::zeros();
-                bv.insert(i);
-                bv
-            })
-            .collect();
-
-
         Self {
             tokenizer,
             parser,
@@ -2583,38 +2570,11 @@ impl<'r> Precomputer1<'r> {
             leaf_node,
             dfs_stats: DfsStats::default(),
             trie1_god,
-            singletons,
-            global_edges: RefCell::new(FxHashMap::default()),
-            global_live: RefCell::new(FxHashMap::default()),
-            known_children: RefCell::new(FxHashMap::default()),
         }
     }
 
     fn get_leaf_node(&self) -> PrecomputeNode1Index {
         self.leaf_node.clone()
-    }
-
-    fn flush_globals(&mut self) {
-        timeit!("flush_globals", {
-            let mut inner_guard = self.trie1_god.inner.write();
-
-            // Apply live token updates
-            for (node_idx, live_tokens) in self.global_live.get_mut() {
-                if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
-                    node.value.live_tokens |= live_tokens.clone();
-                }
-            }
-
-            // Apply edge insertions
-            for (EdgeKey { src, key, dst }, bv) in self.global_edges.get_mut() {
-                if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
-                    src_node.children_mut().entry(*key).or_default()
-                        .entry(dst.clone())
-                        .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv.clone())
-                        .or_insert(bv.clone());
-                }
-            }
-        });
     }
 
     fn finish(
@@ -2660,10 +2620,10 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn run_dfs(&mut self) {
-        let mut assoc: FxHashMap<
+        let mut assoc: HashMap<
             TokenizerStateID,
-            FxHashMap<PrecomputeNode1Index, LLMTokenBV>,
-        > = FxHashMap::default();
+            HashMap<PrecomputeNode1Index, LLMTokenBV>,
+        > = HashMap::new();
 
         for (sid, arc) in &self.roots {
             assoc
@@ -2679,37 +2639,38 @@ impl<'r> Precomputer1<'r> {
         }
         crate::profiler::reset();
         let mut stats = std::mem::take(&mut self.dfs_stats);
-        self.dfs(&self.vocab.root, assoc, &mut stats);
-
-        stats.analyze_pending_edges(&self.global_edges.borrow());
+        // Temporarily move vocab out of self to satisfy the borrow checker.
+        let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
+        self.dfs(&vocab.root, assoc, &mut stats);
+        self.vocab = vocab; // Move it back.
         self.dfs_stats = stats;
         self.dfs_stats.print();
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish();
-
-        self.flush_globals();
-
         crate::profiler::print_summary();
         crate::debug!(2, "Precomputation complete");
     }
 
     fn dfs(
-        &self,
+        &mut self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: FxHashMap<TokenizerStateID, FxHashMap<PrecomputeNode1Index, LLMTokenBV>>,
+        assoc_by_state: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
         stats: &mut DfsStats,
     ) {
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut exec_memo: FxHashMap<(usize, TokenizerStateID), Arc<crate::tokenizer::ExecuteResult>> = FxHashMap::default();
-            let mut work_queue: Vec<FxHashMap<TokenizerStateID, FxHashMap<PrecomputeNode1Index, LLMTokenBV>>> = vec![FxHashMap::default(); segment_bytes.len() + 1];
-            work_queue[0] = assoc_by_state.clone();
+            let mut exec_memo = HashMap::new();
+            let mut work_queue: BTreeMap<
+                usize,
+                HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
+            > = BTreeMap::new();
+            work_queue.insert(0, assoc_by_state.clone());
 
-            let mut next_level_assoc: FxHashMap<_, FxHashMap<_, _>> = FxHashMap::default();
+            let mut next_level_assoc: HashMap<_, HashMap<_, _>> = HashMap::new();
 
             // === OPTIMIZATION 1: Cache node data to avoid repeated lock acquisitions ===
-            let mut node_cache: FxHashMap<PrecomputeNode1Index, (HybridBitset, bool)> = FxHashMap::default();
-            let get_node_data = |cache: &mut FxHashMap<_, _>, idx: &PrecomputeNode1Index, trie1_god: &Trie1GodWrapper| {
+            let mut node_cache: HashMap<PrecomputeNode1Index, (HybridBitset, bool)> = HashMap::new();
+            let get_node_data = |cache: &mut HashMap<_, _>, idx: &PrecomputeNode1Index| {
                 cache.entry(idx.clone()).or_insert_with(|| {
                     let guard = idx.read(&self.trie1_god).unwrap();
                     (guard.value.live_tokens.clone(), guard.value.end)
@@ -2717,26 +2678,22 @@ impl<'r> Precomputer1<'r> {
             };
 
             // === OPTIMIZATION 2: Batch all edge insertions and updates ===
-            // This is now handled by global aggregators on `self`.
+            let mut pending_edges: FxHashMap<EdgeKey, HybridBitset> = FxHashMap::default();
+            let mut pending_live_token_updates: FxHashMap<PrecomputeNode1Index, HybridBitset> = FxHashMap::default();
 
             // === OPTIMIZATION 3: Pre-compute child_vocab reachable tokens (used frequently) ===
             let child_reachable = child_vocab_node.reachable_token_ids();
             let child_token_id = child_vocab_node.token_id();
 
             // === OPTIMIZATION 4: Pre-compute possible_matches_at_end for all states we might need ===
-            let mut possible_matches_cache: FxHashMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> = FxHashMap::default();
+            let mut possible_matches_cache: HashMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> = HashMap::new();
 
-            for pos in 0..=segment_bytes.len() {
-                let states_at_pos = if let Some(states) = work_queue.get_mut(pos) {
-                    std::mem::take(states)
-                } else { continue; };
-                if states_at_pos.is_empty() { continue; }
-
+            while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 timeit!("dfs_while_loop_body", {
                     if pos == segment_bytes.len() {
                         timeit!("dfs_end_of_segment_propagate", {
                             for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
-                                let entry: &mut FxHashMap<PrecomputeNode1Index, LLMTokenBV> = next_level_assoc.entry(tokenizer_state_id).or_default();
+                                let entry: &mut HashMap<PrecomputeNode1Index, LLMTokenBV> = next_level_assoc.entry(tokenizer_state_id).or_default();
                                 for (node, tokens) in nodes_with_tokens {
                                     entry.entry(node).or_default().bitor_assign(&tokens);
                                 }
@@ -2750,7 +2707,7 @@ impl<'r> Precomputer1<'r> {
                             let exec_result = timeit!("dfs_exec_tokenizer", {
                                 exec_memo
                                     .entry((pos, tokenizer_state_id))
-                                    .or_insert_with(|| Arc::new(self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id)))
+                                    .or_insert_with(|| self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id))
                             });
 
                             let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
@@ -2772,28 +2729,31 @@ impl<'r> Precomputer1<'r> {
                                     for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
                                         timeit!("dfs_for_src_nodes", {
                                             let src_node_idx = src_node_wrapper.as_arc().clone();
-                                            let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx, &self.trie1_god);
-                                            let mask = src_contextual_tokens & &src_live_tokens;
+
+                                            // Use cache instead of repeated reads
+                                            let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
 
                                             // Handle exact end-of-segment match
                                             if next_pos == segment_bytes.len() {
                                                 timeit!("dfs_end_of_segment_match", {
-                                                    let edge_bv = &self.singletons[child_token_id];
-                                                    let final_edge_bv = edge_bv & &mask;
+                                                    let mut edge_bv = HybridBitset::zeros();
+                                                    edge_bv.insert(child_token_id);
+                                                    let final_edge_bv = timeit!("dfs_bitset_and_and", { &(&edge_bv & src_contextual_tokens) & &src_live_tokens });
 
                                                     if !final_edge_bv.is_empty() {
                                                         let end_idx = self.get_leaf_node();
-                                                        let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx.clone() };
-                                                        self.global_edges.borrow_mut().entry(k)
+                                                        let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: end_idx };
+                                                        pending_edges.entry(k)
                                                             .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
                                                             .or_insert(final_edge_bv.clone());
-                                                        self.global_live.borrow_mut().entry(end_idx)
+                                                        pending_live_token_updates.entry(end_idx)
                                                             .or_insert_with(HybridBitset::zeros)
                                                             .bitor_assign(&final_edge_bv);
                                                     }
                                                 });
                                             }
 
+                                            // Compute edge_bv once
                                             let mut edge_bv = child_reachable.clone();
                                             if next_pos == segment_bytes.len() {
                                                 edge_bv.set(child_token_id, false);
@@ -2802,11 +2762,12 @@ impl<'r> Precomputer1<'r> {
                                                 timeit!("dfs_bitset_sub", edge_bv -= matches_for_terminal);
                                             }
 
-                                            let edge_bv_for_inserter = &edge_bv & &mask;
+                                            let edge_bv_for_inserter = timeit!("dfs_bitset_and_and_2", { &(&edge_bv & src_contextual_tokens) & &src_live_tokens });
                                             if edge_bv_for_inserter.is_empty() { continue; }
 
                                             let next_tokenizer_state = self.tokenizer.initial_state_id();
-                                            let dest_nodes_in_queue = work_queue.get_mut(next_pos).unwrap()
+                                            let dest_nodes_in_queue = work_queue.entry(next_pos)
+                                                .or_default()
                                                 .entry(next_tokenizer_state)
                                                 .or_default();
 
@@ -2814,7 +2775,7 @@ impl<'r> Precomputer1<'r> {
                                             let mut dest_node_opt = timeit!("dfs_find_dest_node", {
                                                 dest_nodes_in_queue.iter()
                                                     .filter_map(|(dest_node, dest_contextual_tokens)| {
-                                                        let (dest_live_tokens, is_end) = get_node_data(&mut node_cache, dest_node, &self.trie1_god);
+                                                        let (dest_live_tokens, is_end) = get_node_data(&mut node_cache, dest_node);
                                                         if is_end { return None; }
 
                                                         let risky_tokens = timeit!("dfs_bitset_sub_2", { &edge_bv_for_inserter - dest_contextual_tokens });
@@ -2828,13 +2789,17 @@ impl<'r> Precomputer1<'r> {
 
                                             if dest_node_opt.is_none() {
                                                 timeit!("dfs_find_dest_node_in_children", {
-                                                    if let Some(children_of_src) = self.known_children.borrow().get(&(src_node_idx.clone(), Some(terminal_id))) {
-                                                        dest_node_opt = children_of_src.keys()
-                                                            .filter(|child_arc| {
-                                                                let (child_live_tokens, is_end) = get_node_data(&mut node_cache, child_arc, &self.trie1_god);
-                                                                !is_end && (&child_live_tokens & &edge_bv_for_inserter).is_empty()
-                                                            }).cloned().next();
-                                                    }
+                                                    // Check existing children - read once and cache
+                                                    let children_of_src: Vec<PrecomputeNode1Index> = {
+                                                        let guard = src_node_wrapper.as_arc().read(&self.trie1_god).unwrap();
+                                                        guard.children().values().flat_map(|m| m.keys().cloned()).collect()
+                                                    };
+
+                                                    dest_node_opt = children_of_src.iter()
+                                                        .filter(|child_arc| {
+                                                            let (child_live_tokens, is_end) = get_node_data(&mut node_cache, child_arc);
+                                                            !is_end && (&child_live_tokens & &edge_bv_for_inserter).is_empty()
+                                                        }).cloned().next();
                                                 });
                                             }
 
@@ -2847,16 +2812,15 @@ impl<'r> Precomputer1<'r> {
                                                 })
                                             });
 
-                                            let k = EdgeKey { src: src_node_idx.clone(), key: Some(terminal_id), dst: result_node.clone() };
-                                            self.global_edges.borrow_mut().entry(k)
+                                            let k = EdgeKey { src: src_node_idx, key: Some(terminal_id), dst: result_node.clone() };
+                                            pending_edges.entry(k)
                                                 .and_modify(|bv| bv.bitor_assign(&edge_bv_for_inserter))
                                                 .or_insert(edge_bv_for_inserter.clone());
-                                            self.global_live.borrow_mut().entry(result_node.clone())
+                                            pending_live_token_updates.entry(result_node.clone())
                                                 .or_insert_with(HybridBitset::zeros)
                                                 .bitor_assign(&edge_bv_for_inserter);
-                                            self.known_children.borrow_mut().entry((src_node_idx, Some(terminal_id))).or_default()
-                                                .entry(result_node.clone()).or_default().bitor_assign(&edge_bv_for_inserter);
 
+                                            // Update cache
                                             node_cache.entry(result_node.clone())
                                                 .and_modify(|(live, _)| *live |= &edge_bv_for_inserter);
 
@@ -2875,22 +2839,23 @@ impl<'r> Precomputer1<'r> {
                                     let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
 
                                     for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
-                                        let edge_bv = &self.singletons[child_token_id];
-                                        let edge_bv_for_inserter = edge_bv & src_contextual_tokens;
+                                        let mut edge_bv = HybridBitset::zeros();
+                                        edge_bv.insert(child_token_id);
+                                        let edge_bv_for_inserter = timeit!("dfs_bitset_and", { &edge_bv & src_contextual_tokens });
                                         if edge_bv_for_inserter.is_empty() { continue; }
 
                                         let src_node_idx = src_node_wrapper.as_arc().clone();
-                                        let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx, &self.trie1_god);
-                                        let final_edge_bv = &edge_bv_for_inserter & &src_live_tokens;
+                                        let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
+                                        let final_edge_bv = timeit!("dfs_bitset_and_2", { &edge_bv_for_inserter & &src_live_tokens });
 
                                         if !final_edge_bv.is_empty() {
                                             let end_idx = self.get_leaf_node();
                                             for terminal_id in &accessible_terminals {
-                                                let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx.clone() };
-                                                self.global_edges.borrow_mut().entry(k)
+                                                let k = EdgeKey { src: src_node_idx.clone(), key: Some(*terminal_id), dst: end_idx };
+                                                pending_edges.entry(k)
                                                     .and_modify(|bv| bv.bitor_assign(&final_edge_bv))
                                                     .or_insert(final_edge_bv.clone());
-                                                self.global_live.borrow_mut().entry(end_idx.clone())
+                                                pending_live_token_updates.entry(end_idx)
                                                     .or_insert_with(HybridBitset::zeros)
                                                     .bitor_assign(&final_edge_bv);
                                             }
@@ -2907,6 +2872,34 @@ impl<'r> Precomputer1<'r> {
                     }
                 });
             }
+
+            // === OPTIMIZATION 5: Batch write all edges and updates ===
+            timeit!("dfs_batch_write", {
+                let mut inner_guard = self.trie1_god.inner.write();
+
+                // Apply live token updates
+                for (node_idx, live_tokens) in pending_live_token_updates {
+                    timeit!("dfs_batch_write_update_live_tokens", {
+                        if let Some(node) = inner_guard.get_mut(node_idx.as_usize()) {
+                            node.value.live_tokens |= &live_tokens;
+                        }
+                    });
+                }
+
+                // Apply edge insertions
+                for (&EdgeKey { src, key, dst }, bv) in &pending_edges {
+                    timeit!("dfs_batch_write_insert_edge_simple", {
+                        if let Some(src_node) = inner_guard.get_mut(src.as_usize()) {
+                            src_node.children_mut().entry(key).or_default()
+                                .entry(dst)
+                                .and_modify(|existing_bv: &mut HybridBitset| *existing_bv |= bv)
+                                .or_insert(bv.clone());
+                        }
+                    });
+                }
+            });
+
+            stats.analyze_pending_edges(&pending_edges);
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc, stats);

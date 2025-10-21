@@ -46,12 +46,6 @@ reqwest = { version = "0.12.15", features = ["blocking", "json"] }
 debug = true
 #opt-level = 1
 
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-
 [features]
 no_pbar = []
 pbar = []
