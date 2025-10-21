@@ -2628,6 +2628,15 @@ impl<T> Arena<T> {
             .collect()
     }
 
+    /// Acquires the write lock and executes a closure with mutable access to ArenaInner.
+    pub fn with_write_lock<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut ArenaInner<T>) -> R
+    {
+        let mut guard = self.inner.write();
+        f(&mut *guard)
+    }
+
     pub fn deep_clone(&self) -> Self
     where
         T: Clone,
@@ -2715,6 +2724,35 @@ impl MergeableEdgeValue for HybridBitset {
 impl<T: Ord> MergeableEdgeValue for BTreeSet<T> {
     fn merge(&mut self, mut other: Self) {
         self.append(&mut other);
+    }
+}
+
+impl<EK, EV, T> ArenaInner<Trie<EK, EV, T>>
+where
+    EK: Ord + Clone,
+    EV: Clone + MergeableEdgeValue,
+{
+    /// Directly inserts or merges an edge without acquiring/releasing the RwLock.
+    /// Requires the Arena's write lock to be held externally.
+    pub fn insert_edge_direct(
+        &mut self,
+        src: Trie2Index,
+        dst: Trie2Index,
+        edge_key: EK,
+        edge_value: EV,
+    ) {
+        if let Some(src_node) = self.values[src.as_usize()].as_mut() {
+            src_node.children.entry(edge_key).or_default()
+                .entry(dst)
+                .and_modify(|ev| ev.merge(edge_value.clone()))
+                .or_insert(edge_value);
+        }
+    }
+
+    /// Directly gets a mutable reference to a node without acquiring/releasing the RwLock.
+    /// Requires the Arena's write lock to be held externally.
+    pub fn get_node_mut(&mut self, idx: Trie2Index) -> Option<&mut Trie<EK, EV, T>> {
+        self.values[idx.as_usize()].as_mut()
     }
 }
 

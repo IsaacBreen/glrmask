@@ -2794,19 +2794,17 @@ impl<'r> Precomputer1<'r> {
 
             // === OPTIMIZATION 5: Batch write all edges and updates ===
             timeit!("dfs_batch_write", {
-                for (src, dst, key, bv) in pending_edges {
-                    timeit!("dfs_batch_write_insert_edge_simple", {
-                        self.trie1_god.insert_edge_simple(src, dst, key, bv);
-                    });
-                }
+                self.trie1_god.with_write_lock(|arena_inner| {
+                    for (src, dst, key, bv) in pending_edges {
+                        arena_inner.insert_edge_direct(src, dst, key, bv);
+                    }
 
-                for (node_idx, live_tokens) in pending_live_token_updates {
-                    timeit!("dfs_batch_write_update_live_tokens", {
-                        if let Some(mut guard) = node_idx.write(&self.trie1_god) {
-                            guard.value.live_tokens |= &live_tokens;
+                    for (node_idx, live_tokens) in pending_live_token_updates {
+                        if let Some(node) = arena_inner.get_node_mut(node_idx) {
+                            node.value.live_tokens |= &live_tokens;
                         }
-                    });
-                }
+                    }
+                });
             });
 
             if !next_level_assoc.is_empty() {
