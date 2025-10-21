@@ -1,7 +1,9 @@
 use crate::finite_automata::{ExecutionResult, GroupID, Match, Regex};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
+use hashbrown::{HashMap, HashSet};
+use smallvec::SmallVec;
 
 // For debugging: verify equivalence classes using a brute-force method.
 const VERIFY_EQUIVALENCE_CLASSES: bool = false;
@@ -9,7 +11,7 @@ const VERIFY_EQUIVALENCE_CLASSES: bool = false;
 // A canonical representation of a signature. It can be hashed and compared.
 // It's derived from the graph of tokenization possibilities.
 // It represents the result of a single greedy tokenization step.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CanonicalSignature {
     // All possible matches and the signature of their remainders (sorted and deduped).
     matches: Vec<(GroupID, usize, SignatureId)>,
@@ -23,25 +25,35 @@ type SignatureId = usize;
 // Manages interning of canonical signatures to unique IDs.
 struct SignatureInterner {
     signatures: Vec<CanonicalSignature>,
-    map: HashMap<CanonicalSignature, SignatureId>,
+    buckets: HashMap<u128, Vec<SignatureId>>,
 }
 
 impl SignatureInterner {
     fn new() -> Self {
         SignatureInterner {
             signatures: Vec::new(),
-            map: HashMap::new(),
+            buckets: HashMap::new(),
         }
     }
 
     fn intern(&mut self, sig: CanonicalSignature) -> SignatureId {
-        if let Some(&id) = self.map.get(&sig) {
+        let fp = fingerprint_canonical_signature(&sig);
+        if let Some(ids) = self.buckets.get_mut(&fp) {
+            for &id in ids.iter() {
+                if self.signatures[id] == sig {
+                    return id;
+                }
+            }
+            let id = self.signatures.len();
+            self.signatures.push(sig);
+            ids.push(id);
+            return id;
+        } else {
+            let id = self.signatures.len();
+            self.signatures.push(sig);
+            self.buckets.insert(fp, vec![id]);
             return id;
         }
-        let id = self.signatures.len();
-        self.signatures.push(sig.clone());
-        self.map.insert(sig, id);
-        id
     }
 }
 
@@ -134,6 +146,35 @@ fn hash128(bytes: &[u8]) -> u128 {
     ((h1 as u128) << 64) | (h2 as u128)
 }
 
+#[inline]
+fn mix64(mut x: u64) -> u64 {
+    // SplitMix64 mix function
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d049bb133111eb);
+    x ^= x >> 31;
+    x
+}
+
+// Computes a 128-bit fingerprint for CanonicalSignature to bucket interning candidates.
+// This avoids hashing long vectors with the default hasher on every insertion/lookup.
+#[inline]
+fn fingerprint_canonical_signature(sig: &CanonicalSignature) -> u128 {
+    let mut h1: u64 = 0x9E3779B97F4A7C15;
+    let mut h2: u64 = 0xD6E8FEB86659FD93;
+    for &(g, p, r) in &sig.matches {
+        let k1 = mix64((g as u64).wrapping_mul(0x9E3779B185EBCA87) ^ (p as u64));
+        let k2 = mix64((r as u64).wrapping_mul(0x94D049BB133111EB) ^ ((p as u64) << 1));
+        h1 = h1.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(k1);
+        h2 = h2.wrapping_mul(0x94D049BB133111EB).wrapping_add(k2);
+    }
+    let fsv = sig.final_state.map(|x| x as u64).unwrap_or(0xFFFF_FFFF_FFFF_FFFF);
+    h1 ^= mix64(fsv);
+    h2 ^= mix64(fsv.rotate_left(17));
+    ((h1 as u128) << 64) | (h2 as u128)
+}
+
 pub struct EquivalenceAnalyzer<'a> {
     regex: &'a Regex,
     strings: &'a [Vec<u8>],
@@ -154,30 +195,52 @@ impl<'a> EquivalenceAnalyzer<'a> {
     fn compute_signature_for_state(
         &self,
         deduper: &mut SuffixDeduper<'a>,
-        cache_start: &mut HashMap<usize, SignatureId>,
-        cache_other: &mut HashMap<(usize, usize), SignatureId>,
+        cache_start: &mut Vec<Option<SignatureId>>,
+        cache_other: &mut Vec<HashMap<usize, SignatureId>>,
         interner: &mut SignatureInterner,
         node_id: usize,
         dfa_state: usize,
     ) -> SignatureId {
+        // Ensure cache capacity for current node
+        if cache_start.len() <= node_id {
+            let missing = node_id + 1 - cache_start.len();
+            cache_start.reserve(missing);
+            cache_other.reserve(missing);
+            for _ in 0..missing {
+                cache_start.push(None);
+                cache_other.push(HashMap::new());
+            }
+        }
         if dfa_state == self.regex.dfa.start_state {
-            if let Some(&sid) = cache_start.get(&node_id) {
+            if let Some(sid) = cache_start[node_id] {
                 return sid;
             }
-        } else if let Some(&sid) = cache_other.get(&(node_id, dfa_state)) {
-            return sid;
+        } else {
+            if let Some(sid) = cache_other[node_id].get(&dfa_state) {
+                return *sid;
+            }
         }
 
         let bytes = deduper.slice_of(node_id);
         let result = self.regex.execute_from_state2(bytes, dfa_state);
 
-        let mut matches_vec: Vec<(GroupID, usize, SignatureId)> = Vec::with_capacity(result.matches.len());
+        let mut matches_vec: SmallVec<[(GroupID, usize, SignatureId); 4]> = SmallVec::new();
         for m in result.matches {
             // Filter out zero-width tokens to avoid infinite recursion.
             if m.position == 0 {
                 continue;
             }
             let remainder_node = deduper.remainder_of(node_id, m.position);
+            // Ensure caches for the remainder node
+            if cache_start.len() <= remainder_node {
+                let missing = remainder_node + 1 - cache_start.len();
+                cache_start.reserve(missing);
+                cache_other.reserve(missing);
+                for _ in 0..missing {
+                    cache_start.push(None);
+                    cache_other.push(HashMap::new());
+                }
+            }
             let remainder_sig = self.compute_signature_for_state(
                 deduper,
                 cache_start,
@@ -193,15 +256,15 @@ impl<'a> EquivalenceAnalyzer<'a> {
         matches_vec.dedup();
 
         let sig = CanonicalSignature {
-            matches: matches_vec,
+            matches: matches_vec.into_vec(),
             final_state: result.end_state,
         };
         let sid = interner.intern(sig);
 
         if dfa_state == self.regex.dfa.start_state {
-            cache_start.insert(node_id, sid);
+            cache_start[node_id] = Some(sid);
         } else {
-            cache_other.insert((node_id, dfa_state), sid);
+            cache_other[node_id].insert(dfa_state, sid);
         }
         sid
     }
@@ -226,14 +289,24 @@ impl<'a> EquivalenceAnalyzer<'a> {
         let mut signature_interner = SignatureInterner::new();
         let mut deduper = SuffixDeduper::new(self.strings);
         // Cache for signatures at start_state and at other states.
-        let mut cache_start: HashMap<usize, SignatureId> = HashMap::new();
-        let mut cache_other: HashMap<(usize, usize), SignatureId> = HashMap::new();
+        let mut cache_start: Vec<Option<SignatureId>> = Vec::new();
+        let mut cache_other: Vec<HashMap<usize, SignatureId>> = Vec::new();
 
         // Classify original strings based on their signature vectors for the provided initial states.
-        let mut equivalence_classes: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
+        let mut equivalence_classes: HashMap<Vec<SignatureId>, Vec<usize>> = HashMap::new();
         for (i, _s) in self.strings.iter().enumerate() {
             pb.inc(1);
             let node_id = deduper.get_or_intern(i, 0);
+            // Ensure cache capacity for this node
+            if cache_start.len() <= node_id {
+                let missing = node_id + 1 - cache_start.len();
+                cache_start.reserve(missing);
+                cache_other.reserve(missing);
+                for _ in 0..missing {
+                    cache_start.push(None);
+                    cache_other.push(HashMap::new());
+                }
+            }
             let mut signature_vector = Vec::with_capacity(self.initial_states.len());
             for &initial_state in self.initial_states {
                 let sig_id = self.compute_signature_for_state(
@@ -254,7 +327,12 @@ impl<'a> EquivalenceAnalyzer<'a> {
             verify_equivalence_classes(self.regex, self.strings, self.initial_states, &equivalence_classes);
         }
 
-        equivalence_classes
+        // Convert to BTreeMap to preserve the original return type determinism.
+        let mut out: BTreeMap<Vec<SignatureId>, Vec<usize>> = BTreeMap::new();
+        for (k, v) in equivalence_classes {
+            out.entry(k).or_default().extend(v);
+        }
+        out
     }
 }
 
@@ -411,3 +489,4 @@ fn verify_equivalence_classes(
         panic!("Equivalence class verification failed.");
     }
 }
+

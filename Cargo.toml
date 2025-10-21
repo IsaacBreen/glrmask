@@ -7,6 +7,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+hashbrown = "0.14"
+smallvec = "1.13"
+indicatif = "0.17"
 bimap = "0.6.3"
 regex = "1.11.1"
 fixedbitset = "0.5.7"
