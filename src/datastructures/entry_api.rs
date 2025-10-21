@@ -38,20 +38,49 @@ where
     V: 'a,
 {
     /// An occupied entry.
-    Occupied(OccupiedEntry<'a, K, V>),
+    Occupied(OccupiedEntry<'a, V>),
     /// A vacant entry.
     Vacant(VacantEntry<'a, K, V>),
 }
 
 /// A view into an occupied entry in an `OrderedHashMap`.
-pub struct OccupiedEntry<'a, K, V> {
+pub struct OccupiedEntry<'a, V> {
     value: &'a mut V,
+}
+
+impl<'a, V> OccupiedEntry<'a, V> {
+    /// Gets a reference to the value in the entry.
+    pub fn get(&self) -> &V {
+        self.value
+    }
+
+    /// Gets a mutable reference to the value in the entry.
+    pub fn get_mut(&mut self) -> &mut V {
+        self.value
+    }
+
+    /// Converts the entry into a mutable reference to the value in the entry
+    /// with a lifetime bound to the map itself.
+    pub fn into_mut(self) -> &'a mut V {
+        self.value
+    }
 }
 
 /// A view into a vacant entry in an `OrderedHashMap`.
 pub struct VacantEntry<'a, K, V> {
     map: &'a mut OrderedHashMap<K, V>,
     key: K,
+}
+
+impl<'a, K, V> VacantEntry<'a, K, V>
+where
+    K: Eq + Hash + Clone,
+{
+    /// Inserts the value into the entry and returns a mutable reference to it.
+    pub fn insert(self, value: V) -> &'a mut V {
+        self.map.insert(self.key.clone(), value);
+        self.map.get_mut(&self.key).unwrap()
+    }
 }
 
 impl<'a, K, V> OrderedMapEntry<'a, K, V>
