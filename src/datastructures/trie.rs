@@ -1,9 +1,10 @@
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Display};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::Arc;
 
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::EntryApi;
@@ -88,7 +89,7 @@ impl Trie2Index {
         self,
         arena: &'a Arena<Trie<EK, EV, T>>,
     ) -> Option<Trie2ReadGuard<'a, EK, EV, T>> {
-        let guard = arena.inner.read().ok()?;
+        let guard = arena.inner.read();
         if guard.values.get(self.index.as_usize())?.is_none() {
             return None;
         }
@@ -104,7 +105,7 @@ impl Trie2Index {
         self,
         arena: &'a Arena<Trie<EK, EV, T>>,
     ) -> Option<Trie2WriteGuard<'a, EK, EV, T>> {
-        let guard = arena.inner.write().ok()?;
+        let guard = arena.inner.write();
         if guard.values.get(self.index.as_usize())?.is_none() {
             return None;
         }
@@ -433,7 +434,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn gc(arena: &Arena<Self>, roots: &[Trie2Index]) {
         let live_nodes_vec = Self::all_nodes(arena, roots);
         let live_nodes_set: HashSet<usize> = live_nodes_vec.into_iter().map(|idx| idx.as_usize()).collect();
-        let mut inner_guard = arena.inner.write().expect("Arena write lock poisoned during GC");
+        let mut inner_guard = arena.inner.write();
         for i in 0..inner_guard.values.len() {
             if !live_nodes_set.contains(&i) {
                 inner_guard.values[i] = None;
@@ -2464,8 +2465,8 @@ where
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
             || PartialEq::eq(
-                &*self.inner.read().unwrap(),
-                &*other.inner.read().unwrap(),
+                &*self.inner.read(),
+                &*other.inner.read(),
             )
     }
 }
@@ -2480,8 +2481,8 @@ where
             return Some(Ordering::Equal);
         }
         PartialOrd::partial_cmp(
-            &*self.inner.read().unwrap(),
-            &*other.inner.read().unwrap(),
+            &*self.inner.read(),
+            &*other.inner.read(),
         )
     }
 }
@@ -2495,8 +2496,8 @@ where
             return Ordering::Equal;
         }
         Ord::cmp(
-            &*self.inner.read().unwrap(),
-            &*other.inner.read().unwrap(),
+            &*self.inner.read(),
+            &*other.inner.read(),
         )
     }
 }
@@ -2525,7 +2526,7 @@ impl<T> Arena<T> {
 
     // Inserts `value` at the next free index and returns the Index.
     pub fn insert(&self, value: T) -> Index {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         let next = inner.counter;
         inner.counter = inner.counter.checked_add(1).expect("Arena index overflow");
 
@@ -2540,7 +2541,7 @@ impl<T> Arena<T> {
 
     // Replace or set a value at a specific index. Returns the old value if any.
     pub fn insert_at(&self, index: Index, value: T) -> Option<T> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         let idx = index.index;
         if idx >= inner.values.len() {
             inner.values.resize_with(idx + 1, || None);
@@ -2553,7 +2554,7 @@ impl<T> Arena<T> {
 
     // Remove a value at index, returning it if present.
     pub fn remove(&self, index: Index) -> Option<T> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         let idx = index.index;
         if idx < inner.values.len() {
             inner.values[idx].take()
@@ -2564,7 +2565,7 @@ impl<T> Arena<T> {
 
     // Returns true if the index exists in the arena.
     pub fn contains(&self, index: Index) -> bool {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         inner.values.get(index.index).map_or(false, |v| v.is_some())
     }
 
@@ -2573,31 +2574,31 @@ impl<T> Arena<T> {
     where
         T: Clone,
     {
-        self.inner.read().unwrap().values.get(index.index).and_then(|v| v.as_ref()).cloned()
+        self.inner.read().values.get(index.index).and_then(|v| v.as_ref()).cloned()
     }
 
     // Read access via a closure (no Clone bound required).
     pub fn with<R>(&self, index: Index, f: impl FnOnce(&T) -> R) -> Option<R> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read();
         guard.values.get(index.index).and_then(|opt| opt.as_ref()).map(f)
     }
 
     // Mutable access via a closure (no Clone bound required).
     pub fn with_mut<R>(&self, index: Index, f: impl FnOnce(&mut T) -> R) -> Option<R> {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write();
         guard.values.get_mut(index.index).and_then(|opt| opt.as_mut()).map(f)
     }
 
     pub fn len(&self) -> usize {
-        self.inner.read().unwrap().values.iter().filter(|v| v.is_some()).count()
+        self.inner.read().values.iter().filter(|v| v.is_some()).count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.read().unwrap().values.iter().all(|v| v.is_none())
+        self.inner.read().values.iter().all(|v| v.is_none())
     }
 
     pub fn clear(&self) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         inner.values.clear();
         inner.counter = 0;
     }
@@ -2606,7 +2607,6 @@ impl<T> Arena<T> {
     pub fn indices(&self) -> Vec<Index> {
         self.inner
             .read()
-            .unwrap()
             .values
             .iter()
             .enumerate()
@@ -2621,7 +2621,6 @@ impl<T> Arena<T> {
     {
         self.inner
             .read()
-            .unwrap()
             .values
             .iter()
             .enumerate()
@@ -2633,7 +2632,7 @@ impl<T> Arena<T> {
     where
         T: Clone,
     {
-        let inner_guard = self.inner.read().unwrap();
+        let inner_guard = self.inner.read();
         let cloned_inner = inner_guard.clone();
         Arena { inner: Arc::new(RwLock::new(cloned_inner)) }
     }
@@ -2644,7 +2643,7 @@ where
     T: JSONConvertible,
 {
     fn to_json(&self) -> JSONNode {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read();
         let mut obj = BTreeMap::new();
         obj.insert("counter".to_string(), guard.counter.to_json());
         let items: Vec<JSONNode> = guard.values.iter().enumerate().filter_map(|(k, v)| {
