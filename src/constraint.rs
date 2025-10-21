@@ -2554,10 +2554,10 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn run_dfs(&mut self) {
-        let mut assoc: BTreeMap<
+        let mut assoc: HashMap<
             TokenizerStateID,
-            OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>,
-        > = BTreeMap::new();
+            HashMap<PrecomputeNode1Index, LLMTokenBV>,
+        > = HashMap::new();
 
         for (sid, arc) in &self.roots {
             assoc
@@ -2580,18 +2580,19 @@ impl<'r> Precomputer1<'r> {
     fn dfs(
         &self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>>,
+        assoc_by_state: HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
     ) {
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+            let mut exec_memo = HashMap::new();
             let mut work_queue: BTreeMap<
                 usize,
-                BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>>,
+                HashMap<TokenizerStateID, HashMap<PrecomputeNode1Index, LLMTokenBV>>,
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
-            let mut next_level_assoc: BTreeMap<_, OrderedHashMap<_, _>> = BTreeMap::new();
+            let mut next_level_assoc: HashMap<_, HashMap<_, _>> = HashMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
@@ -2599,8 +2600,8 @@ impl<'r> Precomputer1<'r> {
                         let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
                         for (node, tokens) in nodes_with_tokens {
                             entry
-                                .entry(node)
-                                .or_insert_with(LLMTokenBV::zeros)
+                                .entry(node.clone())
+                                .or_default()
                                 .bitor_assign(&tokens);
                         }
                     }
@@ -2608,7 +2609,9 @@ impl<'r> Precomputer1<'r> {
                 }
 
                 for (tokenizer_state_id, precompute_nodes_with_tokens) in states_at_pos {
-                    let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
+                    let exec_result = exec_memo
+                        .entry((pos, tokenizer_state_id))
+                        .or_insert_with(|| self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id));
 
                     let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
                         self.possible_matches(child_vocab_node, TokenizerStateID(end_state_val))
@@ -2620,7 +2623,7 @@ impl<'r> Precomputer1<'r> {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
 
-                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
+                        for (src_node_wrapper, src_contextual_tokens) in precompute_nodes_with_tokens {
                             if next_pos == segment_bytes.len() {
                                 // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
                                 let llm_token_id = child_vocab_node.token_id();
@@ -2698,7 +2701,7 @@ impl<'r> Precomputer1<'r> {
                             };
 
                             self.trie1_god.insert_edge_simple(src_node_idx, result_node, edge_key, final_edge_bv.clone());
-                            if let Some(mut dest_guard) = result_node.write(&self.trie1_god) {
+                            if let Some(mut dest_guard) = result_node.as_arc().write(&self.trie1_god) {
                                 dest_guard.value.live_tokens |= &final_edge_bv;
                             }
 
@@ -2710,7 +2713,7 @@ impl<'r> Precomputer1<'r> {
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state = TokenizerStateID(end_state_val);
                         let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
-                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
+                        for (src_node_wrapper, src_contextual_tokens) in precompute_nodes_with_tokens {
                             let llm_token_id = child_vocab_node.token_id();
                             let mut edge_bv = HybridBitset::zeros();
                             edge_bv.insert(llm_token_id);
@@ -2727,7 +2730,7 @@ impl<'r> Precomputer1<'r> {
 
                                 if !final_edge_bv.is_empty() {
                                     self.trie1_god.insert_edge_simple(src_node_idx, end_idx, edge_key.copied(), final_edge_bv.clone());
-                                    if let Some(mut end_guard) = end_idx.write(&self.trie1_god) {
+                                    if let Some(mut end_guard) = end_idx.as_arc().write(&self.trie1_god) {
                                         end_guard.value.live_tokens |= &final_edge_bv;
                                     }
                                 }
@@ -2737,7 +2740,7 @@ impl<'r> Precomputer1<'r> {
                         for (node, tokens) in precompute_nodes_with_tokens {
                             entry
                                 .entry(node.clone())
-                                .or_insert_with(LLMTokenBV::zeros)
+                                .or_default()
                                 .bitor_assign(&tokens);
                         }
                     }

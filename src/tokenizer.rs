@@ -26,6 +26,8 @@ impl JSONConvertible for LLMTokenID {
 pub struct TokenizerStateID(pub usize);
 
 // Manual impl for TokenizerStateID (could be derived)
+
+// Manual impl for TokenizerStateID (could be derived)
 impl JSONConvertible for TokenizerStateID {
     fn to_json(&self) -> JSONNode {
         self.0.to_json()
