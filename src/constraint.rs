@@ -1780,6 +1780,8 @@ impl GrammarConstraint {
             token_name_map,
         );
 
+        assert!(!Trie::has_cycle(&trie1_god, precomputed1.values().cloned().collect::<Vec<_>>()));
+
         (precomputed1, trie1_god)
     }
 
