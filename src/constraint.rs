@@ -68,9 +68,11 @@ use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
 
+use smallvec::SmallVec;
+
 #[derive(Default)]
 struct TokenAcc {
-    small: Vec<usize>,     // overwhelmingly common case
+    small: SmallVec<[usize; 8]>,     // overwhelmingly common case
     big: Vec<HybridBitset>,          // rare, we store bitsets and fold once
 }
 impl TokenAcc {
@@ -117,18 +119,29 @@ struct EdgeAcc {
 impl EdgeAcc {
     #[inline(always)]
     fn entry_mut_for_dst(&mut self, dst: PrecomputeNode1Index) -> &mut TokenAcc {
-        if let Some((cur_dst, acc)) = self.dst_single.as_mut() {
-            if *cur_dst == dst {
-                return acc;
-            }
-            // Escalate to map
+        let is_match = if let Some((cur_dst, _)) = &self.dst_single {
+            *cur_dst == dst
+        } else {
+            false
+        };
+
+        if is_match {
+            return &mut self.dst_single.as_mut().unwrap().1;
+        }
+
+        // Escalate if needed
+        if self.dst_single.is_some() {
             let (old_dst, old_acc) = self.dst_single.take().unwrap();
             self.dst_multi.insert(old_dst, old_acc);
         }
-        if self.dst_single.is_none() && self.dst_multi.is_empty() {
+
+        // If we started empty, create a single one
+        if self.dst_multi.is_empty() {
             self.dst_single = Some((dst, TokenAcc::default()));
             return &mut self.dst_single.as_mut().unwrap().1;
         }
+
+        // Otherwise, use the multi map
         self.dst_multi.entry(dst).or_default()
     }
 }
@@ -2804,9 +2817,9 @@ impl<'r> Precomputer1<'r> {
 
             // === OPTIMIZATION 1: Cache node data to avoid repeated lock acquisitions ===
             let mut node_cache: HashMap<PrecomputeNode1Index, (HybridBitset, bool)> = HashMap::new();
-            let get_node_data = |cache: &mut HashMap<_, _>, idx: &PrecomputeNode1Index| {
+            let get_node_data = |cache: &mut HashMap<_, _>, idx: &PrecomputeNode1Index, god: &Trie1GodWrapper| {
                 cache.entry(idx.clone()).or_insert_with(|| {
-                    let guard = idx.read(&self.trie1_god).unwrap();
+                    let guard = idx.read(god).unwrap();
                     (guard.value.live_tokens.clone(), guard.value.end)
                 }).clone()
             };
@@ -2862,13 +2875,13 @@ impl<'r> Precomputer1<'r> {
                                             let src_node_idx = src_node_wrapper.as_arc().clone();
 
                                             // Use cache instead of repeated reads
-                                            let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
+                                            let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx, &self.trie1_god);
 
                                             // Handle exact end-of-segment match
                                             if next_pos == segment_bytes.len() {
                                                 // Single-token fast path: avoid allocating/intersecting bitsets
                                                 if src_contextual_tokens.contains(child_token_id) {
-                                                    let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
+                                                    let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx, &self.trie1_god);
                                                     if src_live_tokens.contains(child_token_id) {
                                                         let end_idx = self.get_leaf_node();
                                                         self.acc_edge_one(
@@ -2911,7 +2924,7 @@ impl<'r> Precomputer1<'r> {
                                             let dest_node_opt = timeit!("dfs_find_dest_node", {
                                                 dest_nodes_in_queue.iter()
                                                     .filter_map(|(dest_node, dest_contextual_tokens)| {
-                                                        let (dest_live_tokens, is_end) = get_node_data(&mut node_cache, dest_node);
+                                                        let (dest_live_tokens, is_end) = get_node_data(&mut node_cache, dest_node, &self.trie1_god);
                                                         if is_end { return None; }
 
                                                         let risky_tokens = timeit!("dfs_bitset_sub_2", { &edge_bv_for_inserter - dest_contextual_tokens });
@@ -2966,7 +2979,7 @@ impl<'r> Precomputer1<'r> {
                                         if edge_bv_for_inserter.is_empty() { continue; }
 
                                         let src_node_idx = src_node_wrapper.as_arc().clone();
-                                        let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx);
+                                        let (src_live_tokens, _) = get_node_data(&mut node_cache, &src_node_idx, &self.trie1_god);
                                         let final_edge_bv = timeit!("dfs_bitset_and_2", { &edge_bv_for_inserter & &src_live_tokens });
 
                                         if !final_edge_bv.is_empty() {
