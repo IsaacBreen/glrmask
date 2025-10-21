@@ -2,11 +2,9 @@
 #![ignore(IGNORE)]
 
 // --- Lexical Grammar (Minimal) ---
-IGNORE ::= ( WS | COMMENT )+ ;
-WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
-SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ;
+IGNORE ::= WS | MULTI_LINE_COMMENT ;
+WS ::= ' ' ;
 MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ;
 
-program ::= 'x' '=' 'x' EOF
+program ::= 'x' '=' EOF
 EOF ::= '<|EOF|>' ;
