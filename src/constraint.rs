@@ -2714,16 +2714,16 @@ impl<'r> Precomputer1<'r> {
 
                                             if dest_node_opt.is_none() {
                                                 timeit!("dfs_find_dest_node_in_children", {
-                                                    // Check existing children - read once and cache
-                                                    let children_of_src: Vec<PrecomputeNode1Index> = {
+                                                    // Check existing children for the current terminal_id
+                                                    let children_for_terminal: Vec<PrecomputeNode1Index> = {
                                                         let guard = src_node_wrapper.as_arc().read(&self.trie1_god).unwrap();
-                                                        guard.children().values().flat_map(|m| m.keys().cloned()).collect()
+                                                        guard.get(&Some(terminal_id)).map_or(Vec::new(), |m| m.keys().cloned().collect())
                                                     };
 
-                                                    dest_node_opt = children_of_src.iter()
+                                                    dest_node_opt = children_for_terminal.iter()
                                                         .filter(|child_arc| {
-                                                            let (child_live_tokens, is_end) = get_node_data(&mut node_cache, child_arc);
-                                                            !is_end && (&child_live_tokens & &edge_bv_for_inserter).is_empty()
+                                                            let (_, is_end) = get_node_data(&mut node_cache, child_arc);
+                                                            !is_end
                                                         }).cloned().next();
                                                 });
                                             }
