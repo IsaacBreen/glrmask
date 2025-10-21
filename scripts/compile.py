@@ -11,6 +11,7 @@ import requests
 def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
     """
     Loads a vocabulary from a local path, a URL, or a direct list of strings.
+    The vocabulary can be a JSON dictionary (token -> id) or a JSON list of strings.
     """
     if vocab_list:
         print(f"Loading vocabulary from command-line list ({len(vocab_list)} tokens).")
@@ -21,10 +22,19 @@ def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, 
     if url and path:
         raise ValueError("Provide either --vocab-url or --vocab-path, not both.")
 
+    def _load_and_process_vocab(vocab_path: Path) -> dict[str, int]:
+        with open(vocab_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            print(f"Loaded vocabulary is a list of strings, converting to a dictionary ({len(data)} tokens).")
+            return {token: i for i, token in enumerate(data)}
+        raise TypeError(f"Unsupported vocabulary format in {vocab_path}. Expected a dict[str, int] or a list[str], but got {type(data)}.")
+
     if path:
         print(f"Loading vocabulary from local path: {path}")
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        return _load_and_process_vocab(path)
 
     # Handle URL download and caching
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -45,8 +55,7 @@ def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, 
     else:
         print(f"Loading vocabulary from cache: {cache_path}")
 
-    with open(cache_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    return _load_and_process_vocab(cache_path)
 
 def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
     """

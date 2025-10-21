@@ -15,10 +15,14 @@ local_system:
       import requests
 
       # --- Helper Functions ---
-      def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
+      def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
           """
-          Loads a vocabulary from a local path or downloads it from a URL, using a cache.
+          Loads a vocabulary from a local path, a URL, or a direct list of strings.
           """
+          if vocab_list:
+              print(f"Loading vocabulary from command-line list ({len(vocab_list)} tokens).")
+              return {token: i for i, token in enumerate(vocab_list)}
+
           if not url and not path:
               raise ValueError("Either --vocab-url or --vocab-path must be provided.")
           if url and path:
@@ -161,6 +165,11 @@ local_system:
 
         # 3. Do everything in one step (from scratch)
         python scripts/compile.py -g src/js.ebnf -o .cache/constraints/js_gpt2.json.gz --vocab-url <URL>
+
+        # 4. Use a small, explicit vocabulary for testing
+        python scripts/compile.py \\
+          -g src/js.ebnf -o .cache/constraints/js_simple.json.gz \\
+          --vocab-list '{' '}' '[' ']' ',"' '":' ' "' 'true' 'false' 'null' '123'
       """
           parser = argparse.ArgumentParser(
               description="A helper script to compile a grammar constraint file.",
@@ -173,6 +182,7 @@ local_system:
           vocab_group = parser.add_mutually_exclusive_group(required=True)
           vocab_group.add_argument("--vocab-url", type=str, help="URL of the JSON vocabulary file to download.")
           vocab_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
+          vocab_group.add_argument("--vocab-list", type=str, nargs='+', help="A list of strings to use as the vocabulary.")
 
           parser.add_argument("--cache-dir", type=Path, default=Path(".cache/vocabs"), help="Directory to cache downloaded vocabularies.")
           parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
@@ -201,7 +211,7 @@ local_system:
               parser.error(f"The path specified for --from-precompute0 does not exist: {args.from_precompute0}")
 
           # 1. Get the vocabulary
-          vocab = get_vocab(args.vocab_url, args.vocab_path, args.cache_dir, args.force_download)
+          vocab = get_vocab(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
 
           # 2. Apply filters
           modified_vocab = filter_vocab(vocab, args.max_token_len)
@@ -247,6 +257,7 @@ local_system:
       def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
           """
           Loads a vocabulary from a local path, a URL, or a direct list of strings.
+          The vocabulary can be a JSON dictionary (token -> id) or a JSON list of strings.
           """
           if vocab_list:
               print(f"Loading vocabulary from command-line list ({len(vocab_list)} tokens).")
@@ -257,10 +268,19 @@ local_system:
           if url and path:
               raise ValueError("Provide either --vocab-url or --vocab-path, not both.")
 
+          def _load_and_process_vocab(vocab_path: Path) -> dict[str, int]:
+              with open(vocab_path, 'r', encoding='utf-8') as f:
+                  data = json.load(f)
+              if isinstance(data, dict):
+                  return data
+              if isinstance(data, list):
+                  print(f"Loaded vocabulary is a list of strings, converting to a dictionary ({len(data)} tokens).")
+                  return {token: i for i, token in enumerate(data)}
+              raise TypeError(f"Unsupported vocabulary format in {vocab_path}. Expected a dict[str, int] or a list[str], but got {type(data)}.")
+
           if path:
               print(f"Loading vocabulary from local path: {path}")
-              with open(path, 'r', encoding='utf-8') as f:
-                  return json.load(f)
+              return _load_and_process_vocab(path)
 
           # Handle URL download and caching
           cache_dir.mkdir(parents=True, exist_ok=True)
@@ -281,8 +301,7 @@ local_system:
           else:
               print(f"Loading vocabulary from cache: {cache_path}")
 
-          with open(cache_path, 'r', encoding='utf-8') as f:
-              return json.load(f)
+          return _load_and_process_vocab(cache_path)
 
       def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
           """
@@ -525,10 +544,14 @@ messages:
       import requests
 
       # --- Helper Functions ---
-      def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
+      def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
           """
-          Loads a vocabulary from a local path or downloads it from a URL, using a cache.
+          Loads a vocabulary from a local path, a URL, or a direct list of strings.
           """
+          if vocab_list:
+              print(f"Loading vocabulary from command-line list ({len(vocab_list)} tokens).")
+              return {token: i for i, token in enumerate(vocab_list)}
+
           if not url and not path:
               raise ValueError("Either --vocab-url or --vocab-path must be provided.")
           if url and path:
@@ -671,6 +694,11 @@ messages:
 
         # 3. Do everything in one step (from scratch)
         python scripts/compile.py -g src/js.ebnf -o .cache/constraints/js_gpt2.json.gz --vocab-url <URL>
+
+        # 4. Use a small, explicit vocabulary for testing
+        python scripts/compile.py \\
+          -g src/js.ebnf -o .cache/constraints/js_simple.json.gz \\
+          --vocab-list '{' '}' '[' ']' ',"' '":' ' "' 'true' 'false' 'null' '123'
       """
           parser = argparse.ArgumentParser(
               description="A helper script to compile a grammar constraint file.",
@@ -683,6 +711,7 @@ messages:
           vocab_group = parser.add_mutually_exclusive_group(required=True)
           vocab_group.add_argument("--vocab-url", type=str, help="URL of the JSON vocabulary file to download.")
           vocab_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
+          vocab_group.add_argument("--vocab-list", type=str, nargs='+', help="A list of strings to use as the vocabulary.")
 
           parser.add_argument("--cache-dir", type=Path, default=Path(".cache/vocabs"), help="Directory to cache downloaded vocabularies.")
           parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
@@ -711,7 +740,7 @@ messages:
               parser.error(f"The path specified for --from-precompute0 does not exist: {args.from_precompute0}")
 
           # 1. Get the vocabulary
-          vocab = get_vocab(args.vocab_url, args.vocab_path, args.cache_dir, args.force_download)
+          vocab = get_vocab(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
 
           # 2. Apply filters
           modified_vocab = filter_vocab(vocab, args.max_token_len)
@@ -746,7 +775,7 @@ messages:
       ```
     metadata:
       filename: scripts/compile.py
-  - user: Allow for optionally specifying an exact vocab as a list of strings.
+  - user: Make it so the passed vocab JSON can just be a list of strings, no IDs.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -765,135 +794,119 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to allow specifying a vocabulary as a list of strings, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to modify the script, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      Here are the edits for `scripts/compile.py`:
+      Here are the edits for `scripts/compile.py` to allow the vocabulary JSON to be a list of strings.
 
-      1.  **Update the `get_vocab` function:**
-          *   Change its signature to accept a new `vocab_list` argument.
-          *   Update the docstring to reflect the new functionality.
-          *   Add logic at the beginning of the function to handle the `vocab_list` if it's provided.
+      1.  **Locate the `get_vocab` function.** We will modify this function to handle the new vocabulary format.
 
-          The new function definition should look like this:
+      2.  **Update the function's docstring** to mention that a JSON list of strings is a valid format.
+          *   Change this:
+              ```python
+                  """
+                  Loads a vocabulary from a local path, a URL, or a direct list of strings.
+                  """
+              ```
+          *   To this:
+              ```python
+                  """
+                  Loads a vocabulary from a local path, a URL, or a direct list of strings.
+                  The vocabulary can be a JSON dictionary (token -> id) or a JSON list of strings.
+                  """
+              ```
 
-          ```python
-          def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
-              """
-              Loads a vocabulary from a local path, a URL, or a direct list of strings.
-              """
-              if vocab_list:
-                  print(f"Loading vocabulary from command-line list ({len(vocab_list)} tokens).")
-                  return {token: i for i, token in enumerate(vocab_list)}
-          
-              if not url and not path:
-                  raise ValueError("Either --vocab-url or --vocab-path must be provided.")
-              if url and path:
-                  raise ValueError("Provide either --vocab-url or --vocab-path, not both.")
-          
-              if path:
-                  print(f"Loading vocabulary from local path: {path}")
-                  with open(path, 'r', encoding='utf-8') as f:
+      3.  **Add a helper function inside `get_vocab`**. Right after the initial argument validation, insert a new nested function named `_load_and_process_vocab`. This function will contain the logic to open a vocabulary file, parse the JSON, and handle both dictionary and list formats.
+          *   Insert the following code block after the line `raise ValueError("Provide either --vocab-url or --vocab-path, not both.")`:
+              ```python
+                  def _load_and_process_vocab(vocab_path: Path) -> dict[str, int]:
+                      with open(vocab_path, 'r', encoding='utf-8') as f:
+                          data = json.load(f)
+                      if isinstance(data, dict):
+                          return data
+                      if isinstance(data, list):
+                          print(f"Loaded vocabulary is a list of strings, converting to a dictionary ({len(data)} tokens).")
+                          return {token: i for i, token in enumerate(data)}
+                      raise TypeError(f"Unsupported vocabulary format in {vocab_path}. Expected a dict[str, int] or a list[str], but got {type(data)}.")
+              ```
+
+      4.  **Update the local path loading logic.** Modify the `if path:` block to use the new helper function.
+          *   Change this:
+              ```python
+                  if path:
+                      print(f"Loading vocabulary from local path: {path}")
+                      with open(path, 'r', encoding='utf-8') as f:
+                          return json.load(f)
+              ```
+          *   To this:
+              ```python
+                  if path:
+                      print(f"Loading vocabulary from local path: {path}")
+                      return _load_and_process_vocab(path)
+              ```
+
+      5.  **Update the cached URL loading logic.** Modify the final return statement of the function to also use the new helper.
+          *   Change this:
+              ```python
+                  with open(cache_path, 'r', encoding='utf-8') as f:
                       return json.load(f)
-              
-              # ... (rest of the function is unchanged)
-          ```
-
-      2.  **Update the `main` function:**
-          *   In the `argparse` setup, add a new `--vocab-list` argument to the `vocab_group`. It should accept one or more string values.
-
-          ```python
-          vocab_group = parser.add_mutually_exclusive_group(required=True)
-          vocab_group.add_argument("--vocab-url", type=str, help="URL of the JSON vocabulary file to download.")
-          vocab_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
-          vocab_group.add_argument("--vocab-list", type=str, nargs='+', help="A list of strings to use as the vocabulary.")
-          ```
-
-          *   Modify the call to `get_vocab` to pass the new `args.vocab_list` value.
-
-          ```python
-          # 1. Get the vocabulary
-          vocab = get_vocab(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
-          ```
-
-          *   Add a new example to the `epilog` help text to demonstrate how to use the new `--vocab-list` option.
-
-          ```python
-          epilog = """
-          Examples:
-            # 1. Generate only the precompute0 cache
-            # ... (existing examples) ...
-          
-            # 3. Do everything in one step (from scratch)
-            python scripts/compile.py -g src/js.ebnf -o .cache/constraints/js_gpt2.json.gz --vocab-url <URL>
-
-            # 4. Use a small, explicit vocabulary for testing
-            python scripts/compile.py \\
-              -g src/js.ebnf -o .cache/constraints/js_simple.json.gz \\
-              --vocab-list '{' '}' '[' ']' ',"' '":' ' "' 'true' 'false' 'null' '123'
-          """
-          ```
+              ```
+          *   To this:
+              ```python
+                  return _load_and_process_vocab(cache_path)
+              ```
 
       ### Git Diff
 
-      Here is the git diff to apply these changes directly.
+      Here is the git diff that applies the changes described above.
 
       ```diff
       diff --git a/scripts/compile.py b/scripts/compile.py
-      index 211111c..1111111 100644
+      index 911111e..1111111 100644
       --- a/scripts/compile.py
       +++ b/scripts/compile.py
-      @@ -8,12 +8,16 @@
-       import requests
-       
+      @@ -10,7 +10,8 @@
        # --- Helper Functions ---
-      -def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
-      +def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
+       def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
            """
-      -    Loads a vocabulary from a local path or downloads it from a URL, using a cache.
-      +    Loads a vocabulary from a local path, a URL, or a direct list of strings.
+           Loads a vocabulary from a local path, a URL, or a direct list of strings.
+      +    The vocabulary can be a JSON dictionary (token -> id) or a JSON list of strings.
            """
-      -    if not url and not path:
-      +    if vocab_list:
-      +        print(f"Loading vocabulary from command-line list ({len(vocab_list)} tokens).")
-      +        return {token: i for i, token in enumerate(vocab_list)}
-      +
-      +    if not url and not path:
-               raise ValueError("Either --vocab-url or --vocab-path must be provided.")
+           if vocab_list:
+               print(f"Loading vocabulary from command-line list ({len(vocab_list)} tokens).")
+      @@ -21,11 +22,21 @@
            if url and path:
                raise ValueError("Provide either --vocab-url or --vocab-path, not both.")
-      @@ -145,7 +149,12 @@
-           --output .cache/constraints/js_gpt2.json.gz
        
-         # 3. Do everything in one step (from scratch)
-      -  python scripts/compile.py -g src/js.ebnf -o .cache/constraints/js_gpt2.json.gz --vocab-url <URL>
-      +  python scripts/compile.py -g src/js.ebnf -o .cache/constraints/js_gpt2.json.gz --vocab-url <URL>
+      +    def _load_and_process_vocab(vocab_path: Path) -> dict[str, int]:
+      +        with open(vocab_path, 'r', encoding='utf-8') as f:
+      +            data = json.load(f)
+      +        if isinstance(data, dict):
+      +            return data
+      +        if isinstance(data, list):
+      +            print(f"Loaded vocabulary is a list of strings, converting to a dictionary ({len(data)} tokens).")
+      +            return {token: i for i, token in enumerate(data)}
+      +        raise TypeError(f"Unsupported vocabulary format in {vocab_path}. Expected a dict[str, int] or a list[str], but got {type(data)}.")
       +
-      +  # 4. Use a small, explicit vocabulary for testing
-      +  python scripts/compile.py \\
-      +    -g src/js.ebnf -o .cache/constraints/js_simple.json.gz \\
-      +    --vocab-list '{' '}' '[' ']' ',"' '":' ' "' 'true' 'false' 'null' '123'
-       """
-           parser = argparse.ArgumentParser(
-               description="A helper script to compile a grammar constraint file.",
-      @@ -157,6 +166,7 @@
-           vocab_group = parser.add_mutually_exclusive_group(required=True)
-           vocab_group.add_argument("--vocab-url", type=str, help="URL of the JSON vocabulary file to download.")
-           vocab_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
-      +    vocab_group.add_argument("--vocab-list", type=str, nargs='+', help="A list of strings to use as the vocabulary.")
+           if path:
+               print(f"Loading vocabulary from local path: {path}")
+      -        with open(path, 'r', encoding='utf-8') as f:
+      -            return json.load(f)
+      +        return _load_and_process_vocab(path)
        
-           parser.add_argument("--cache-dir", type=Path, default=Path(".cache/vocabs"), help="Directory to cache downloaded vocabularies.")
-           parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
-      @@ -182,7 +192,7 @@
-               parser.error(f"The path specified for --from-precompute0 does not exist: {args.from_precompute0}")
+           # Handle URL download and caching
+           cache_dir.mkdir(parents=True, exist_ok=True)
+      @@ -46,8 +57,7 @@
+           else:
+               print(f"Loading vocabulary from cache: {cache_path}")
        
-           # 1. Get the vocabulary
-      -    vocab = get_vocab(args.vocab_url, args.vocab_path, args.cache_dir, args.force_download)
-      +    vocab = get_vocab(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
+      -    with open(cache_path, 'r', encoding='utf-8') as f:
+      -        return json.load(f)
+      +    return _load_and_process_vocab(cache_path)
        
-           # 2. Apply filters
-           modified_vocab = filter_vocab(vocab, args.max_token_len)
+       def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
+           """
 
       ```
     metadata:
@@ -906,7 +919,7 @@ messages:
       Applying patch to 'scripts/compile.py' using custom patcher...
       Successfully applied patch and wrote to scripts/compile.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Allow specifying vocabulary as a
-      list of strings via --vocab-list"'
+  - user: 'Changes committed with message: "feat: Allow vocabulary JSON to be a list
+      of strings in get_vocab"'
     metadata:
 ...
