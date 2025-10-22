@@ -2237,6 +2237,13 @@ impl GrammarConstraint {
             }
         }
 
+        println!("Intermediate trie3 before eliminating negative pops:");
+        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+            .display_edge_keys_only()
+            .display_nodes()
+            .omit_depth()
+            ;
+        println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
