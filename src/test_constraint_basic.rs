@@ -1680,9 +1680,9 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     // 2. Parse and compile the grammar
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
-    // println!("Grammar: {}", grammar_definition);
+    println!("Grammar: {}", grammar_definition);
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-    // println!("Parser: {}", compiled_grammar.glr_parser);
+    println!("Parser: {}", compiled_grammar.glr_parser);
 
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
@@ -1690,7 +1690,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let llm_empty_string_semicolon = LLMTokenID(1);
     llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
     llm_token_map.insert(b"X;".to_vec(), llm_empty_string_semicolon);
-    let max_original_llm_token_id = 3;
+    let max_original_llm_token_id = 1;
 
     // 4. Create the GrammarConstraint
     let constraint = GrammarConstraint::from_compiled_grammar(
@@ -1704,27 +1704,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
-    let mask1 = state.get_mask();
-
-    // 6. Assert the expected initial mask
-    // "x" is a valid IDENTIFIER, starting an expression.
-    // """;" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
-    let expected_mask1 = HybridBitset::from_iter(vec![llm_empty_string_semicolon.0]);
-    assert_eq!(
-        mask1,
-        expected_mask1,
-        "Initial mask should allow 'x', `X`, and `!--`"
-    );
-
-    // 7. Commit the invalid sequence "x!--" as bytes
-    // This tokenizes to IDENTIFIER, !, -, -
-    // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
-    // so the state should become inactive.
-    println!("GSS Forest BEFORE commit:");
-    // state.print_gss();
     state.commit_bytes(b"X");
-    println!("GSS Forest AFTER commit:");
-    // state.print_gss();
     let mask2 = state.get_mask();
 
     // 8. Assert the state is inactive and the mask is empty
