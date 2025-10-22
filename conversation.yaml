@@ -207,6 +207,7 @@ local_system:
       import tempfile
       import sys
       import uuid
+      import re
       import datetime
       from multiprocessing import Pool
       from typing import List
@@ -234,7 +235,7 @@ local_system:
       """
 
       # The string to look for in the command's output that indicates a mismatch.
-      MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
+      MISMATCH_INDICATOR = r"rust_model__js_constraint.*❌"
 
       # The base directory where results will be saved.
       RESULTS_BASE_DIR = "delta_debug_results"
@@ -272,7 +273,7 @@ local_system:
                   encoding='utf-8'
               )
               output = result.stdout + result.stderr
-              mismatch_found = MISMATCH_INDICATOR in output
+              mismatch_found = re.search(MISMATCH_INDICATOR, output)
               if not mismatch_found:
                   # Added for debugging: print command and output if the check fails.
                   print("\n--- DEBUG: Mismatch indicator not found in output ---")
@@ -432,7 +433,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -936,5 +937,78 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Add debug logging to run_test_with_vocab
       to show command/output on initial check failure"'
+    metadata:
+  - user: |-
+      Diff of scripts/delta_debug.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: rust_model__js_constraint_04798d6d-553f-4cd9-ad6e-a331d89beaf5                ❌
+    metadata:
+  - user: Ah, this is why. Make it so the indicator is instead a regex pattern.
+    metadata:
+  - assistant: |-
+      This is a great catch. The UUID in the constraint file name makes the simple string search unreliable. I will update the script to use a regular expression for the mismatch indicator.
+
+      ### Step-by-step Instructions
+
+      1.  **Import `re`:**
+          In `scripts/delta_debug.py`, add the `re` module to the imports at the top of the file.
+
+      2.  **Update `MISMATCH_INDICATOR`:**
+          Change the `MISMATCH_INDICATOR` constant to a regular expression pattern that accounts for the variable UUID part of the constraint file name.
+
+      3.  **Update `run_test_with_vocab`:**
+          Change the check inside `run_test_with_vocab` from a simple string containment (`in`) to a regular expression search (`re.search`).
+
+      ### Git Diff
+
+      Here is the git diff to apply these changes to `scripts/delta_debug.py`.
+
+      ```diff
+      diff --git a/scripts/delta_debug.py b/scripts/delta_debug.py
+      index 180630b..84d8527 100644
+      --- a/scripts/delta_debug.py
+      +++ b/scripts/delta_debug.py
+      @@ -4,6 +4,7 @@
+       import tempfile
+       import sys
+       import uuid
+      +import re
+       import datetime
+       from multiprocessing import Pool
+       from typing import List
+      @@ -27,7 +28,7 @@
+       """
+       
+       # The string to look for in the command's output that indicates a mismatch.
+      -MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
+      +MISMATCH_INDICATOR = r"rust_model__js_constraint.*❌"
+       
+       # The base directory where results will be saved.
+       RESULTS_BASE_DIR = "delta_debug_results"
+      @@ -58,7 +59,7 @@
+                   encoding='utf-8'
+               )
+               output = result.stdout + result.stderr
+      -        mismatch_found = MISMATCH_INDICATOR in output
+      +        mismatch_found = re.search(MISMATCH_INDICATOR, output)
+               if not mismatch_found:
+                   # Added for debugging: print command and output if the check fails.
+                   print("\n--- DEBUG: Mismatch indicator not found in output ---")
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/delta_debug.py
+      Applying patch to 'scripts/delta_debug.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/delta_debug.py.
+    metadata:
+  - user: 'Changes committed with message: "Implement parallel vocabulary minimization
+      using multiprocessing Pool and switch mismatch indicator check to regex"'
     metadata:
 ...

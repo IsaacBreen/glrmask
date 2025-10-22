@@ -5,6 +5,7 @@ import os
 import tempfile
 import sys
 import uuid
+import re
 import datetime
 from multiprocessing import Pool
 from typing import List
@@ -32,7 +33,7 @@ bash python/run_benchmarks.sh \
 """
 
 # The string to look for in the command's output that indicates a mismatch.
-MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
+MISMATCH_INDICATOR = r"rust_model__js_constraint.*❌"
 
 # The base directory where results will be saved.
 RESULTS_BASE_DIR = "delta_debug_results"
@@ -70,7 +71,7 @@ def run_test_with_vocab(vocab_list: List[str]) -> bool:
             encoding='utf-8'
         )
         output = result.stdout + result.stderr
-        mismatch_found = MISMATCH_INDICATOR in output
+        mismatch_found = re.search(MISMATCH_INDICATOR, output)
         if not mismatch_found:
             # Added for debugging: print command and output if the check fails.
             print("\n--- DEBUG: Mismatch indicator not found in output ---")
