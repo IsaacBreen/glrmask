@@ -337,8 +337,6 @@ class BruteForceModel(GraphProvider):
         return {}
 
     def commit(self, token_id: int):
-        token_bytes = self.id_to_token[token_id]
-        print(f"Committing token {token_bytes}...")
         self.state = self._commit_on_state(self.state, token_id)
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
