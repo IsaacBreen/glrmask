@@ -83,12 +83,14 @@ fn convert_to_intermediate2(
         std::collections::VecDeque::new();
 
     for (sid, root1) in roots1 {
-        let root2 = Intermediate2PrecomputeNode3Index::new(god2.insert(Intermediate2PrecomputeNode3::new(
-            root1.read(god1).unwrap().value.clone(),
-        )));
+        let root2 = *node_map.entry(*root1).or_insert_with(|| {
+            let new_node = Intermediate2PrecomputeNode3Index::new(god2.insert(
+                Intermediate2PrecomputeNode3::new(root1.read(god1).unwrap().value.clone()),
+            ));
+            q.push_back(*root1);
+            new_node
+        });
         roots2.insert(*sid, root2);
-        node_map.insert(*root1, root2);
-        q.push_back(*root1);
     }
 
     let mut visited = HashSet::new();
@@ -148,12 +150,14 @@ fn convert_from_intermediate2(
         std::collections::VecDeque::new();
 
     for (sid, root2) in roots2 {
-        let root1 = IntermediatePrecomputeNode3Index::new(god1.insert(IntermediatePrecomputeNode3::new(
-            root2.read(god2).unwrap().value.clone(),
-        )));
+        let root1 = *node_map.entry(*root2).or_insert_with(|| {
+            let new_node = IntermediatePrecomputeNode3Index::new(god1.insert(
+                IntermediatePrecomputeNode3::new(root2.read(god2).unwrap().value.clone()),
+            ));
+            q.push_back(*root2);
+            new_node
+        });
         roots1.insert(*sid, root1);
-        node_map.insert(*root2, root1);
-        q.push_back(*root2);
     }
 
     let mut visited = HashSet::new();
