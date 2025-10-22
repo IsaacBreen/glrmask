@@ -1631,6 +1631,83 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::error::Error>> {
+    // This test checks the behavior of the #![ignore(...)] directive with
+    // LLM tokens that are either fully ignored or partially ignored.
+
+    // 1. Define the EBNF grammar. 'IGNORE' matches one or more spaces or "/*" sequences.
+    // We use a regex to combine them into a single terminal to avoid a panic,
+    // as the current implementation only supports one ignore terminal ID.
+    let ebnf_grammar = indoc! {r#"
+        #![ignore(IGNORE)]
+        program ::= 'x' ;
+        IGNORE ::= /( |\/\*)+/ ;
+    "#};
+
+    // 2. Parse and compile the grammar
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+
+    // 3. Define the LLM vocabulary
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_space_eq = LLMTokenID(0); // " =" - starts with an ignored char, but '=' is invalid
+    let llm_comment = LLMTokenID(1);  // "/*" - is a full ignored token
+    let llm_x = LLMTokenID(2);        // "x" - the required token
+    llm_token_map.insert(b" =".to_vec(), llm_space_eq);
+    llm_token_map.insert(b"/*".to_vec(), llm_comment);
+    llm_token_map.insert(b"x".to_vec(), llm_x);
+    let max_original_llm_token_id = 2;
+
+    // 4. Create the GrammarConstraint
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map,
+        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+        max_original_llm_token_id,
+    );
+
+    // 5. Initialize state and get the initial mask
+    let mut state = constraint.init();
+    let mask1 = state.get_mask();
+
+    // 6. Assert the initial mask
+    // The grammar can start with 'x' or any number of IGNORE tokens.
+    // "/*" is a full IGNORE token and should be allowed.
+    // " =" starts with " ", which matches IGNORE, but is followed by "=", which is not
+    // a valid token. Therefore, the entire LLM token " =" does not form a valid
+    // sequence of grammar tokens and should not be in the mask.
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_comment.0, llm_x.0]);
+    assert_eq!(
+        mask1,
+        expected_mask1,
+        "Initial mask should allow '/*' and 'x', but not ' ='"
+    );
+
+    // 7. Commit an ignore token
+    state.commit(llm_comment); // Commit "/*"
+    let mask2 = state.get_mask();
+
+    // 8. Assert the mask after committing an ignore token
+    // The parser state should not change, so the mask should be the same.
+    assert_eq!(mask2, expected_mask1, "Mask after ignore token should be unchanged");
+
+    // 9. Commit the required token 'x'
+    state.commit(llm_x);
+    let mask3 = state.get_mask();
+
+    // 10. Assert the final mask
+    // After 'x', the program is complete. It can be followed by more IGNORE tokens or EOF.
+    let expected_mask_after_x = HybridBitset::from_iter(vec![llm_comment.0]);
+    assert_eq!(
+        mask3,
+        expected_mask_after_x,
+        "Mask after 'x' should allow only IGNORE tokens"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>> {
     // This test verifies that for a grammar with a known ambiguity that can cause
     // GSS explosion, the structural sharing remains effective. A low sharing factor
