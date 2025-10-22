@@ -671,7 +671,7 @@ impl Default for GrammarConstraintConfig {
             trie2: Trie2Config::off(),
             trie3: Trie3Config::off(),
             intermediate_trie3_templates: IntermediateTrie3Config::off(),
-            intermediate_trie3_main: IntermediateTrie3Config::off(),
+            intermediate_trie3_main: IntermediateTrie3Config::default(),
         }
     }
 }
