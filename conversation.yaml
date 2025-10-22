@@ -299,8 +299,9 @@ local_system:
           parser.add_argument(
               '--keep-tokens',
               type=str,
-              default="",
-              help="Comma-separated list of tokens to always keep in the vocabulary (e.g., 'token1,token2'). These tokens will not be removed during minimization."
+              nargs='+',
+              default=[],
+              help="List of tokens to always keep in the vocabulary (e.g., --keep-tokens token1 token2). These tokens will not be removed during minimization."
           )
           args = parser.parse_args()
 
@@ -321,8 +322,7 @@ local_system:
               original_vocab = json.load(f)
 
           # --- New logic to separate fixed and removable vocab ---
-          keep_tokens_list = [t.strip() for t in args.keep_tokens.split(',') if t.strip()]
-          fixed_vocab = set(keep_tokens_list)
+          fixed_vocab = set(args.keep_tokens)
 
           # The list of tokens we will actually be minimizing
           removable_vocab = [token for token in original_vocab if token not in fixed_vocab]
@@ -1711,5 +1711,69 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Add --keep-tokens CLI argument to fix
       tokens during parallel vocabulary minimization"'
+    metadata:
+  - user: |-
+      Diff of scripts/delta_debug.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Use nargs '+' instead of a csv list
+    metadata:
+  - assistant: |-
+      The request to change the `--keep-tokens` argument from a comma-separated string to using `nargs='+'` is a good usability improvement. This allows users to pass tokens directly as separate arguments on the command line.
+
+      Here are the step-by-step instructions and the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Modify `main` function in `scripts/delta_debug.py` (Argument Parsing):**
+          Change the definition of the `--keep-tokens` argument to use `nargs='+'` and set the default to an empty list `[]`. I will also update the help message.
+
+      2.  **Modify `main` function in `scripts/delta_debug.py` (Token Processing):**
+          Update the logic to process `args.keep_tokens` to directly use the list of strings, removing the now-obsolete comma-splitting logic.
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/scripts/delta_debug.py b/scripts/delta_debug.py
+      index 5454179..5624248 100644
+      --- a/scripts/delta_debug.py
+      +++ b/scripts/delta_debug.py
+      @@ -87,9 +87,9 @@
+           parser.add_argument(
+               '--keep-tokens',
+               type=str,
+      -        default="",
+      -        help="Comma-separated list of tokens to always keep in the vocabulary (e.g., 'token1,token2'). These tokens will not be removed during minimization."
+      +        nargs='+',
+      +        default=[],
+      +        help="List of tokens to always keep in the vocabulary (e.g., --keep-tokens token1 token2). These tokens will not be removed during minimization."
+           )
+           args = parser.parse_args()
+       
+      @@ -107,8 +107,7 @@
+               original_vocab = json.load(f)
+       
+           # --- New logic to separate fixed and removable vocab ---
+      -    keep_tokens_list = [t.strip() for t in args.keep_tokens.split(',') if t.strip()]
+      -    fixed_vocab = set(keep_tokens_list)
+      +    fixed_vocab = set(args.keep_tokens)
+       
+           # The list of tokens we will actually be minimizing
+           removable_vocab = [token for token in original_vocab if token not in fixed_vocab]
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/delta_debug.py
+      Applying patch to 'scripts/delta_debug.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/delta_debug.py.
+    metadata:
+  - user: "Changes committed with message: \"Refactor --keep-tokens argument to use
+      nargs='+' for token list input\""
     metadata:
 ...

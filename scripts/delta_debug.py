@@ -97,8 +97,9 @@ def main():
     parser.add_argument(
         '--keep-tokens',
         type=str,
-        default="",
-        help="Comma-separated list of tokens to always keep in the vocabulary (e.g., 'token1,token2'). These tokens will not be removed during minimization."
+        nargs='+',
+        default=[],
+        help="List of tokens to always keep in the vocabulary (e.g., --keep-tokens token1 token2). These tokens will not be removed during minimization."
     )
     args = parser.parse_args()
 
@@ -119,8 +120,7 @@ def main():
         original_vocab = json.load(f)
 
     # --- New logic to separate fixed and removable vocab ---
-    keep_tokens_list = [t.strip() for t in args.keep_tokens.split(',') if t.strip()]
-    fixed_vocab = set(keep_tokens_list)
+    fixed_vocab = set(args.keep_tokens)
 
     # The list of tokens we will actually be minimizing
     removable_vocab = [token for token in original_vocab if token not in fixed_vocab]
