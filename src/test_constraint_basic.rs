@@ -1639,9 +1639,15 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
     // We use a regex to combine them into a single terminal to avoid a panic,
     // as the current implementation only supports one ignore terminal ID.
     let ebnf_grammar = indoc! {r#"
+        // Instruct the parser to ignore Whitespace and single-line Comments.
         #![ignore(IGNORE)]
+
         program ::= 'x' ;
-        IGNORE ::= /( |\/\*)+/ ;
+
+        // --- Lexical Grammar (Minimal) ---
+        IGNORE ::= ( ' ' | MULTI_LINE_COMMENT )+ ;
+        WS ::= ' ' ;
+        MULTI_LINE_COMMENT ::= '/*' ;
     "#};
 
     // 2. Parse and compile the grammar
