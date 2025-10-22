@@ -2244,6 +2244,7 @@ impl GrammarConstraint {
             &mut intermediate_precomputed3,
             &intermediate_trie3_god,
         );
+        intermediate_roots = intermediate_precomputed3.values().cloned().collect();
 
         println!("Final intermediate trie3:");
         let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
