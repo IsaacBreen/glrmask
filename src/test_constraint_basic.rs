@@ -1633,71 +1633,10 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar
-    let ebnf_grammar = indoc! {r#"
-        // Instruct the parser to ignore Whitespace and Comments between tokens.
-        program ::= statement_list? EOF;
-        EOF ::= '<|EOF|>';
-
-        // --- Statements (Simplified) ---
-        statement_list ::= statement+ ;
-
-        statement ::=
-            block
-          | declaration_statement
-          | if_statement
-          | while_statement
-          | function_declaration
-          | return_statement
-          | expression_statement
-          ;
-
-        expression_statement ::= expression ';'? ;
-        block ::= '{' statement_list? '}' ;
-
-        declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
-        if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-        while_statement ::= 'while' '(' expression ')' statement ;
-        function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-        parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-        return_statement ::= 'return' expression? ';'? ;
-
-        // --- Expressions (Heavily Simplified & Collapsed Precedence) ---
-        expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
-
-        equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
-
-        additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-
-        multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
-
-        unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
-
-        call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
-        arguments ::= ( expression ( ',' expression )* )? ;
-
-        primary_expression ::=
-            'this'
-          | IDENTIFIER
-          | literal
-          | '(' expression ')'
-          ;
-
-        // --- Literals and Primitives (Simplified) ---
-        literal ::=
-            'null'
-          | 'true' | 'false'
-          | NUMERIC_LITERAL
-          | STRING_LITERAL
-          ;
-
-        // Simplified regex-style definitions for terminals
-        NUMERIC_LITERAL ::= '1' ;
-        STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
-        IDENTIFIER ::= 'x' ;
-    "#};
+    let ebnf_grammar = fs::read_to_string("src/js_like.ebnf")?;
 
     // 2. Parse and compile the grammar
-    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
     println!("Grammar: {}", grammar_definition);
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Parser: {}", compiled_grammar.glr_parser);
