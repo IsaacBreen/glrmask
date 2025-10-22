@@ -1649,7 +1649,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let llm_empty_string_semicolon = LLMTokenID(2);
     llm_token_map.insert(b"x".to_vec(), llm_x);
     llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
-    llm_token_map.insert(b"'';".to_vec(), llm_empty_string_semicolon);
+    llm_token_map.insert(b"\"\";".to_vec(), llm_empty_string_semicolon);
     let max_original_llm_token_id = 3;
 
     // 4. Create the GrammarConstraint
@@ -1673,17 +1673,17 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     state2.commit_bytes(b"x;;;");
     assert!(!state2.is_active());
     let mut state2 = state.clone();
-    state2.commit_bytes(b"x'';");
+    state2.commit_bytes(b"x\"\";");
     assert!(state2.is_active());
 
     // 6. Assert the expected initial mask
     // "x" is a valid IDENTIFIER, starting an expression.
-    // "'';" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
+    // """;" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
     let expected_mask1 = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
     assert_eq!(
         mask1,
         expected_mask1,
-        "Initial mask should allow 'x', `''`, and `!--`"
+        "Initial mask should allow 'x', `\"\"`, and `!--`"
     );
 
     // 7. Commit the invalid sequence "x!--" as bytes
