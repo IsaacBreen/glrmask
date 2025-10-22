@@ -125,6 +125,8 @@ def main():
             else:
                 # Mismatch disappeared, this chunk is essential. Move to the next one.
                 print(" KEPT (essential).")
+                if len(test_vocab) < 10:
+                    print(test_vocab)
                 start_index = end_index
 
         # If we completed a full pass for this chunk size without removing anything,
