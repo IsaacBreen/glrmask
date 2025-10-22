@@ -260,6 +260,15 @@ pub struct IntermediatePrecomputedNodeContents3 {
     pub end: bool,
 }
 
+impl Display for IntermediatePrecomputedNodeContents3 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.end {
+            f.write_str("[END]")?
+        }
+        Ok(())
+    }
+}
+
 impl IntermediatePrecomputedNodeContents3 {
     pub fn leaf() -> Self {
         Self { end: true }
