@@ -115,8 +115,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config,
         loaded_pc0,
     );
-    grammar_constraint.dump_precomputed1();
-    grammar_constraint.dump_precomputed3();
 
     println!("GrammarConstraint constructed successfully.");
     if let Some(path) = args.save_precompute0.as_ref() {
