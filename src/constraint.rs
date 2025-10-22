@@ -1243,6 +1243,8 @@ impl GrammarConstraint {
             precompute3_vocab,
         };
 
+        gc.dump_precomputed1();
+        gc.dump_precomputed3();
         gc
     }
     pub fn new_with_config_and_precompute0_cache(
