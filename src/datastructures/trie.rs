@@ -2799,8 +2799,21 @@ impl<T> Arena<T> {
         Arena { inner: Arc::new(RwLock::new(cloned_inner)) }
     }
 
-    pub fn replace_with(&self, other: Self) {
-        todo!()
+    pub fn replace_with(&self, other: Self)
+    where
+        T: Clone,
+    {
+        match Arc::try_unwrap(other.inner) {
+            Ok(rwlock) => {
+                let mut self_inner = self.inner.write();
+                *self_inner = rwlock.into_inner();
+            }
+            Err(arc) => {
+                let other_inner = arc.read();
+                let mut self_inner = self.inner.write();
+                *self_inner = other_inner.clone();
+            }
+        }
     }
 }
 
