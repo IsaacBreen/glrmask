@@ -1,10 +1,9 @@
 // Instruct the parser to ignore Whitespace and single-line Comments.
 #![ignore(IGNORE)]
 
-program ::= 'x' '=' ;
+program ::= 'x' ;
 
 // --- Lexical Grammar (Minimal) ---
 IGNORE ::= ( ' ' | MULTI_LINE_COMMENT )+ ;
 WS ::= ' ' ;
 MULTI_LINE_COMMENT ::= '/*' ;
-
