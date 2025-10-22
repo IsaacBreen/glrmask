@@ -1599,7 +1599,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // println!("Tokenizer: {}", constraint.tokenizer);
     // println!("Parser: {}", constraint.parser);
     // constraint.dump_precomputed0();
-    // constraint.dump_precomputed1();
+    constraint.dump_precomputed1();
     constraint.dump_precomputed3();
 
     // 4. Initialize state and get the initial mask
@@ -1618,7 +1618,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Commit "a" and get the next mask
     state.commit(llm_a);
-    // state.print_gss();
+    state.print_gss();
     let mask2 = state.get_mask();
 
     let expected_mask2 = HybridBitset::from_iter(vec![]);
@@ -1638,9 +1638,9 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     // 2. Parse and compile the grammar
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
-    println!("Grammar: {}", grammar_definition);
+    // println!("Grammar: {}", grammar_definition);
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-    println!("Parser: {}", compiled_grammar.glr_parser);
+    // println!("Parser: {}", compiled_grammar.glr_parser);
 
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
@@ -1661,8 +1661,8 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
     );
-    constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
+    // constraint.dump_precomputed1();
+    // constraint.dump_precomputed3();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -1683,10 +1683,10 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
     // so the state should become inactive.
     println!("GSS Forest BEFORE commit:");
-    state.print_gss();
+    // state.print_gss();
     state.commit_bytes(b"x");
     println!("GSS Forest AFTER commit:");
-    state.print_gss();
+    // state.print_gss();
     let mask2 = state.get_mask();
 
     // 8. Assert the state is inactive and the mask is empty
