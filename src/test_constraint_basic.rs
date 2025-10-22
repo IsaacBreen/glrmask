@@ -1635,7 +1635,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 1. Define the EBNF grammar
     let ebnf_grammar = indoc! {r#"
         program ::= unary_expression+;
-        unary_expression ::= ( '~' unary_expression | ( 'XX' ) ) ';'?;
+        unary_expression ::= ( '~' unary_expression | 'X' ) ';'?;
     "#};
 
     // 2. Parse and compile the grammar
@@ -1655,6 +1655,8 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
     );
+    constraint.dump_precomputed1();
+    constraint.dump_precomputed3();
 
     // 5. Initialize state and get the initial mask
     let state = constraint.init();
