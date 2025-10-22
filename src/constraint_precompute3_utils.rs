@@ -1996,10 +1996,6 @@ pub fn merge_nodes_trie3_ultrafast(
 }
 
 pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_llm_token_id: usize, max_state_id: usize) {
-    // Important: Edges in this trie each consume exactly one LLM token.
-    // Any transform must preserve the number of token-consumption steps.
-    // Do not attempt to bypass or contract paths across multiple edges; that changes
-    // path lengths and breaks semantics (was the cause of prior mismatches).
     crate::debug!(2, "Compressing Trie 3 edges (safe local coalescing)...");
 
     // Pass 1: local coalesce within each node
