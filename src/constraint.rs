@@ -36,7 +36,7 @@ use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_on_stored
 use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
-use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
+use crate::datastructures::trie::{EdgeInserter, PrettyPrintOptions, Trie, Trie2Index};
 use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::EntryApi;
@@ -2000,6 +2000,16 @@ impl GrammarConstraint {
 
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
+        for (tid, (start, end)) in &terminal_templates {
+            let terminal = token_name_map.get_by_right(tid).unwrap();
+            println!("\n--- Intermediate Trie3 Template for terminal {:?}: ---", terminal);
+            let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+                .display_edge_keys_only()
+                .display_nodes()
+                .omit_depth()
+                ;
+            println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &options));
+        }
 
         if is_debug_level_enabled(2) {
             println!("\n--- Intermediate Trie3 Template Statistics ---");
@@ -2238,13 +2248,13 @@ impl GrammarConstraint {
             }
         }
 
-        // println!("Intermediate trie3 before eliminating negative pops:");
-        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-        //     .display_edge_keys_only()
-        //     .display_nodes()
-        //     .omit_depth()
-        //     ;
-        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+        println!("Intermediate trie3 before eliminating negative pops:");
+        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+            .display_edge_keys_only()
+            .display_nodes()
+            .omit_depth()
+            ;
+        println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
