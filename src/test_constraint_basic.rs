@@ -1676,6 +1676,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let ebnf_grammar = indoc! {r#"
         program ::= unary_expression unary_expression '$';
         unary_expression ::= ( '!' unary_expression | 'X' ) ';'?;
+
         // program ::= unary_expression ';'? unary_expression ';'? '$';
         // unary_expression ::= '!' unary_expression | 'X' ;
     "#};

@@ -40,8 +40,8 @@ impl Default for Trie1Config {
             enabled: true,
             early_flatten_epsilon: true,
             minimize_by_signature: true,
-            merge_equivalent_llm_tokens: true,
-            reorder_llm_tokens: true,
+            merge_equivalent_llm_tokens: false, // TEMP
+            reorder_llm_tokens: false, // TEMP
             prune_on_no_terminal_follow: false,
             prune_nodes_not_reaching_end: true,
             prune_dead_paths: true,

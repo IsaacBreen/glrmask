@@ -130,8 +130,8 @@ impl Default for Trie3Config {
         Self {
             enabled: true,
             num_passes: 1,
-            merge_equivalent_llm_tokens: true,
-            reorder_llm_tokens: true,
+            merge_equivalent_llm_tokens: false, // TEMP
+            reorder_llm_tokens: false, // TEMP
             constrain_bitvecs: true,
             gc: true,
             prune_dead_paths: true,
