@@ -465,7 +465,7 @@ pub fn optimize_trie3_size(
             println!("Failing path: {:#?}", path);
 
             // Minimize the example
-            let (mut arena_a, mut roots_a_vec) = if a_is_original { (original_arena.deep_clone(), original_roots_vec) } else { (trie3_god.deep_clone(), optimized_roots_vec) };
+            let (mut arena_a, mut roots_a_vec) = if a_is_original { (original_arena.deep_clone(), original_roots_vec.clone()) } else { (trie3_god.deep_clone(), optimized_roots_vec.clone()) };
             let (mut arena_b, mut roots_b_vec) = if a_is_original { (trie3_god.deep_clone(), optimized_roots_vec) } else { (original_arena.deep_clone(), original_roots_vec) };
 
             println!("Attempting to minimize failing example by trimming...");
