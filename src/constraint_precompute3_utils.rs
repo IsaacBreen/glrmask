@@ -408,15 +408,50 @@ pub fn optimize_trie3_size(
         );
 
         let compare = |p1: &PrecomputeTrie3Path, p2: &PrecomputeTrie3Path| -> PathComparison {
+            fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
+                let (_root_contents, edges) = path;
+                let mut llm_intersection = LLMTokenBV::max_ones();
+                let mut state_checks = BTreeMap::<isize, StateIDBV>::new();
+                let mut current_pos: isize = 0;
+
+                for ((pop, llm_bv), state_bv, _node_contents) in edges {
+                    current_pos += *pop;
+                    llm_intersection &= llm_bv;
+                    
+                    state_checks.entry(current_pos)
+                        .and_modify(|e| *e &= state_bv)
+                        .or_insert_with(|| state_bv.clone());
+                }
+                (llm_intersection, state_checks)
+            }
+
             if p1.0 != p2.0 {
                 return PathComparison::Different;
             }
+
             if p1.1.len() > p2.1.len() {
                 return PathComparison::Different;
             }
-            if p2.1[..p1.1.len()] != p1.1[..] {
+
+            // We only need to compare the prefix of p2 that has the same length as p1.
+            let p2_prefix_path = (p2.0.clone(), p2.1[..p1.1.len()].to_vec());
+            
+            let (llm1, states1) = get_path_summary(p1);
+            let (llm2_prefix, states2_prefix) = get_path_summary(&p2_prefix_path);
+
+            if !llm2_prefix.is_subset(&llm1) {
                 return PathComparison::Different;
             }
+
+            let all_positions: BTreeSet<_> = states1.keys().chain(states2_prefix.keys()).copied().collect();
+            for pos in all_positions {
+                let s1 = states1.get(&pos).cloned().unwrap_or_else(StateIDBV::max_ones);
+                let s2_prefix = states2_prefix.get(&pos).cloned().unwrap_or_else(StateIDBV::max_ones);
+                if !s2_prefix.is_subset(&s1) {
+                    return PathComparison::Different;
+                }
+            }
+
             if p1.1.len() == p2.1.len() {
                 PathComparison::Equal
             } else {
