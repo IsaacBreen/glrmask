@@ -1631,11 +1631,11 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
+fn test_js_like_grammar_initial_mask0() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar
     let ebnf_grammar = indoc! {r#"
         program ::= unary_expression+;
-        unary_expression ::= ( '~' unary_expression | 'X' ) ';'?;
+        unary_expression ::= ( '~' unary_expression | 'X' )? ';'?;
     "#};
 
     // 2. Parse and compile the grammar
@@ -1655,8 +1655,8 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
     );
-    constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
+    // constraint.dump_precomputed1();
+    // constraint.dump_precomputed3();
 
     // 5. Initialize state and get the initial mask
     let state = constraint.init();
@@ -1665,6 +1665,82 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         mask1,
         expected_mask1
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Define the EBNF grammar
+    // let ebnf_grammar = fs::read_to_string("src/js_simplified6.ebnf")?;
+    let ebnf_grammar = fs::read_to_string("/Users/isaacbreen/Projects2/temp/.temp.ebnf")?;
+
+    // 2. Parse and compile the grammar
+    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
+    // println!("Grammar: {}", grammar_definition);
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    // println!("Parser: {}", compiled_grammar.glr_parser);
+
+    // 3. Define the LLM vocabulary
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_semicolons = LLMTokenID(0);
+    let llm_empty_string_semicolon = LLMTokenID(1);
+    llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
+    llm_token_map.insert(b"\"\";".to_vec(), llm_empty_string_semicolon);
+    let max_original_llm_token_id = 3;
+
+    // 4. Create the GrammarConstraint
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map,
+        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+        max_original_llm_token_id,
+    );
+    // constraint.dump_precomputed1();
+    // constraint.dump_precomputed3();
+
+    // 5. Initialize state and get the initial mask
+    let mut state = constraint.init();
+    let mask1 = state.get_mask();
+
+    let mut state2 = state.clone();
+    state2.commit_bytes(b"\"\"");
+    assert!(state2.is_active());
+    let mut state2 = state.clone();
+    state2.commit_bytes(b"\"\";;;");
+    assert!(!state2.is_active());
+    let mut state2 = state.clone();
+    state2.commit_bytes(b"\"\"\"\";");
+    assert!(state2.is_active());
+
+    // 6. Assert the expected initial mask
+    // "x" is a valid IDENTIFIER, starting an expression.
+    // """;" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_empty_string_semicolon.0]);
+    assert_eq!(
+        mask1,
+        expected_mask1,
+        "Initial mask should allow 'x', `\"\"`, and `!--`"
+    );
+
+    // 7. Commit the invalid sequence "x!--" as bytes
+    // This tokenizes to IDENTIFIER, !, -, -
+    // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
+    // so the state should become inactive.
+    println!("GSS Forest BEFORE commit:");
+    // state.print_gss();
+    state.commit_bytes(b"\"\"");
+    println!("GSS Forest AFTER commit:");
+    // state.print_gss();
+    let mask2 = state.get_mask();
+
+    // 8. Assert the state is inactive and the mask is empty
+    assert!(state.is_active(), "State should be inactive after committing invalid sequence 'x!--'");
+    let expected_mask2 = HybridBitset::from_iter(vec![llm_empty_string_semicolon.0]);
+    assert_eq!(
+        mask2,
+        expected_mask2,
     );
 
     Ok(())
