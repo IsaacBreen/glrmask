@@ -1678,6 +1678,19 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
         "Initial mask should allow 'x', `''`, and `!--`"
     );
 
+    let mut state2 = state.clone();
+    state2.commit_bytes(b"xx");
+    assert!(state2.is_active());
+    let mut state2 = state.clone();
+    state2.commit_bytes(b"x!--");
+    assert!(state2.is_active());
+    let mut state2 = state.clone();
+    state2.commit_bytes(b"x;;;");
+    assert!(!state2.is_active());
+    let mut state2 = state.clone();
+    state2.commit_bytes(b"x'';");
+    assert!(state2.is_active());
+
     // 7. Commit the invalid sequence "x!--" as bytes
     // This tokenizes to IDENTIFIER, !, -, -
     // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
