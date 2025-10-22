@@ -1996,19 +1996,11 @@ pub fn merge_nodes_trie3_ultrafast(
 }
 
 pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_llm_token_id: usize, max_state_id: usize) {
-    crate::debug!(2, "Compressing Trie 3 edges (conservative edge-reducing transforms)...");
-
-    let all_llm_bv = LLMTokenBV::ones(max_llm_token_id + 1);
-    let all_sids_bv = StateIDBV::ones(max_state_id + 1);
-
-    // Helper: is the LLM-token BV "all tokens"?
-    let is_all_llm = |bv: &LLMTokenBV| -> bool {
-        bv.is_superset(&all_llm_bv) || *bv == LLMTokenBV::max_ones()
-    };
-    // Helper: is the StateIDBV "all states"?
-    let is_all_sids = |bv: &StateIDBV| -> bool {
-        bv.is_superset(&all_sids_bv) || *bv == StateIDBV::max_ones()
-    };
+    // Important: Edges in this trie each consume exactly one LLM token.
+    // Any transform must preserve the number of token-consumption steps.
+    // Do not attempt to bypass or contract paths across multiple edges; that changes
+    // path lengths and breaks semantics (was the cause of prior mismatches).
+    crate::debug!(2, "Compressing Trie 3 edges (safe local coalescing)...");
 
     // Pass 1: local coalesce within each node
     let coalesce_edges_within_nodes = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
@@ -2074,109 +2066,6 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         changed_any
     };
 
-    // Pass 2: Bypass “single-target” nodes.
-    // General path contraction: if a node B (not end) has any number of outgoing edges but
-    // they ALL go to the same destination C (and C != B), then any incoming edge to B from A
-    // can be rerouted directly to C by composing constraints:
-    // A --(p1, L1, S1)--> B --(p2, L2, S2)--> C  becomes  A --(p1+p2, L1&L2, S1&S2)--> C
-    // (applied for each outgoing edge variant of B). This strictly generalizes the prior “single-exit”
-    // (exactly one key and one dest) case.
-    let bypass_single_exit_nodes = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
-        let nodes = Trie::all_nodes(trie3_god, roots_vec);
-        let mut changed_any = false;
-
-        // 1. Identify all “single-target” nodes and aggregate their outgoing edges by (pop, LLM) -> union(SIDs).
-        // Exclude end nodes and self-targeting nodes.
-        let mut single_target_info: HashMap<Trie2Index, (Trie2Index, Vec<(isize, LLMTokenBV, StateIDBV)>)> = HashMap::new();
-        for n in &nodes {
-            let g = n.read(trie3_god).expect("read");
-            if g.value.end || g.children().is_empty() {
-                continue;
-            }
-            // Check that all outgoing edges go to the same destination.
-            let mut unique_dest: Option<Trie2Index> = None;
-            let mut aborted = false;
-            let mut aggr: BTreeMap<(isize, LLMTokenBV), StateIDBV> = BTreeMap::new();
-            for (ek, dm) in g.children() {
-                for (dst, sids) in dm {
-                    if let Some(u) = unique_dest {
-                        if *dst != u { aborted = true; break; }
-                    } else {
-                        unique_dest = Some(*dst);
-                    }
-                    aggr.entry((ek.0, ek.1.clone()))
-                        .and_modify(|e| *e |= sids)
-                        .or_insert_with(|| sids.clone());
-                }
-                if aborted { break; }
-            }
-            if aborted { continue; }
-            if let Some(c) = unique_dest {
-                if c == *n { continue; } // avoid self-loop cases
-                let mut vec_edges = Vec::with_capacity(aggr.len());
-                for ((p2, l2), s2) in aggr {
-                    vec_edges.push((p2, l2, s2));
-                }
-                single_target_info.insert(*n, (c, vec_edges));
-            }
-        }
-        if single_target_info.is_empty() { return false; }
-
-        #[cfg(not(rustrover))]
-        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Bypass)", total = nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
-        #[cfg(rustrover)]
-        let it = nodes.iter();
-        for u in it {
-            let old_children = u.read(trie3_god).expect("read").children().clone();
-            if old_children.is_empty() { continue; }
-
-            let mut new_children = old_children.clone();
-            let mut local_changed = false;
-
-            for ((p1, l1), dm) in &old_children {
-                for (v, s1) in dm {
-                    if let Some((c, edges_vec)) = single_target_info.get(v) {
-                        local_changed = true;
-
-                        // Remove old edge u -> v from our temporary new_children map
-                        let current_dm = new_children.get_mut(&(*p1, l1.clone())).unwrap();
-                        current_dm.remove(v);
-                        if current_dm.is_empty() {
-                            new_children.remove(&(*p1, l1.clone()));
-                        }
-
-                        // Add composed edges u -> c for every outgoing variant of v (=B)
-                        for (p2, l2, s2) in edges_vec {
-                            let p_new = p1 + p2;
-                            let l_new = l1 & l2;
-                            let s_new = s1 & s2;
-                            if !l_new.is_empty() && !s_new.is_empty() {
-                                new_children.entry((p_new, l_new)).or_default()
-                                    .entry(*c)
-                                    .and_modify(|s| *s |= &s_new)
-                                    .or_insert(s_new.clone());
-                            }
-                        }
-                    }
-                }
-            }
-
-            if local_changed {
-                changed_any = true;
-                let mut u_guard = u.write(trie3_god).expect("write");
-                *u_guard.children_mut() = new_children;
-                // Recompute live tokens as they may have changed
-                let mut new_live = LLMTokenBV::zeros();
-                for ((_, llm_bv), _) in u_guard.children() {
-                    new_live |= llm_bv;
-                }
-                u_guard.value.live_tokens = new_live;
-            }
-        }
-
-        changed_any
-    };
-
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     if Trie::all_nodes(trie3_god, &roots_vec).is_empty() {
         return;
@@ -2189,10 +2078,6 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         let mut pass_changed = false;
         // 1) Coalesce within nodes (cheap win)
         if coalesce_edges_within_nodes(trie3_god, &roots_vec) {
-            pass_changed = true;
-        }
-        // 2) Bypass single-exit nodes to contract paths.
-        if bypass_single_exit_nodes(trie3_god, &roots_vec) {
             pass_changed = true;
         }
         if pass_changed {
