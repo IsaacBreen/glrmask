@@ -29,7 +29,7 @@ bash python/run_benchmarks.sh \
 """
 
 # The string to look for in the command's output that indicates a mismatch.
-MISMATCH_INDICATOR = "❌"
+MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
 
 # The file where the final, minimal vocabulary will be saved.
 MINIMAL_VOCAB_OUTPUT_PATH = "minimal_vocab.json"
