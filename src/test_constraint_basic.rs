@@ -1631,6 +1631,124 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Define the EBNF grammar
+    let ebnf_grammar = indoc! {r#"
+        // Instruct the parser to ignore Whitespace and Comments between tokens.
+        #![ignore(IGNORE)]
+
+        program ::= statement_list? EOF;
+        EOF ::= '<|EOF|>';
+
+        // --- Lexical Grammar (Unchanged) ---
+        IGNORE ::= ( WS | COMMENT )+ ;
+        WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+        COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
+        SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ;
+        MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ;
+
+        // --- Statements (Simplified) ---
+        statement_list ::= statement+ ;
+
+        statement ::=
+            block
+          | declaration_statement
+          | if_statement
+          | while_statement
+          | function_declaration
+          | return_statement
+          | expression_statement
+          ;
+
+        expression_statement ::= expression ';'? ;
+        block ::= '{' statement_list? '}' ;
+
+        declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
+        if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
+        while_statement ::= 'while' '(' expression ')' statement ;
+        function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
+        parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
+        return_statement ::= 'return' expression? ';'? ;
+
+        // --- Expressions (Heavily Simplified & Collapsed Precedence) ---
+        expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
+
+        equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
+
+        additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+
+        multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
+
+        unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
+
+        call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
+        arguments ::= ( expression ( ',' expression )* )? ;
+
+        primary_expression ::=
+            'this'
+          | IDENTIFIER
+          | literal
+          | '(' expression ')'
+          ;
+
+        // --- Literals and Primitives (Simplified) ---
+        literal ::=
+            'null'
+          | 'true' | 'false'
+          | NUMERIC_LITERAL
+          | STRING_LITERAL
+          ;
+
+        // Simplified regex-style definitions for terminals
+        NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
+        STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
+        IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+    "#};
+
+    // 2. Parse and compile the grammar
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+
+    // 3. Define the LLM vocabulary
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_x = LLMTokenID(0);
+    let llm_not_comment = LLMTokenID(1);
+    let llm_semicolons = LLMTokenID(2);
+    let llm_empty_string_semicolon = LLMTokenID(3);
+    llm_token_map.insert(b"x".to_vec(), llm_x);
+    llm_token_map.insert(b"!--".to_vec(), llm_not_comment);
+    llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
+    llm_token_map.insert(b"'';".to_vec(), llm_empty_string_semicolon);
+    let max_original_llm_token_id = 3;
+
+    // 4. Create the GrammarConstraint
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map,
+        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+        max_original_llm_token_id,
+    );
+
+    // 5. Initialize state and get the initial mask
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+
+    // 6. Assert the expected mask
+    // "x" is a valid IDENTIFIER, starting an expression.
+    // "'';" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
+    // "!--" is not a valid start. It tokenizes to '!' then '-', but the second '-' is invalid.
+    // ";;;" is not a valid start as statements cannot be empty.
+    let expected_mask = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
+    assert_eq!(
+        mask,
+        expected_mask,
+        "Initial mask should allow 'x' and `''`"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::error::Error>> {
     // This test checks the behavior of the #![ignore(...)] directive with
     // LLM tokens that are either fully ignored or partially ignored.
