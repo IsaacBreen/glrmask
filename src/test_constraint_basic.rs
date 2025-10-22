@@ -1724,11 +1724,24 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let max_original_llm_token_id = 3;
 
     // 4. Create the GrammarConstraint
-    let constraint = GrammarConstraint::from_compiled_grammar(
-        compiled_grammar,
+    // let constraint = GrammarConstraint::from_compiled_grammar(
+    //     compiled_grammar,
+    //     llm_token_map,
+    //     LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+    //     max_original_llm_token_id,
+    // );
+
+    let mut config = GrammarConstraintConfig::default();
+    let loaded_pc0 = None;
+
+    let constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
+        compiled_grammar.tokenizer,
+        compiled_grammar.glr_parser,
         llm_token_map,
-        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+        compiled_grammar.definition.terminal_to_group_id().clone(),
         max_original_llm_token_id,
+        &config,
+        loaded_pc0,
     );
 
     // 5. Initialize state and get the initial mask

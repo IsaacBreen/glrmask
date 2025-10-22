@@ -142,5 +142,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Successfully saved constraint to {:?}", output_path);
     }
 
+    let mut s = grammar_constraint.init();
+    s.commit_bytes(b"x");
+    println!("MASK: {:?}", s.get_mask());
+
     Ok(())
 }
