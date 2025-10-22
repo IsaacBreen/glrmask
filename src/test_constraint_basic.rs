@@ -1708,6 +1708,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 2. Parse and compile the grammar
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    println!("Parser: {}", compiled_grammar.glr_parser);
 
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
