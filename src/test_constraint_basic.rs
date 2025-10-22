@@ -1674,13 +1674,8 @@ fn test_js_like_grammar_initial_mask0() -> Result<(), Box<dyn std::error::Error>
 fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar
     let ebnf_grammar = indoc! {r#"
-        program ::= statement+ EOF;
-        statement ::= 'X' ';' ;
-        EOF ::= '$';
-
-        // Lexical Grammar
-        'X' ::= 'X';
-        ';' ::= ';';
+        program ::= unary_expression+;
+        unary_expression ::= ( '!' unary_expression | ( 'X' ) ) ';'?;
     "#};
 
     // 2. Parse and compile the grammar
@@ -1692,9 +1687,9 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
     let llm_semicolons = LLMTokenID(0);
-    let llm_x_semicolon = LLMTokenID(1);
+    let llm_empty_string_semicolon = LLMTokenID(1);
     llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
-    llm_token_map.insert(b"X;".to_vec(), llm_x_semicolon);
+    llm_token_map.insert(b"X;".to_vec(), llm_empty_string_semicolon);
     let max_original_llm_token_id = 3;
 
     // 4. Create the GrammarConstraint
@@ -1712,24 +1707,32 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let mask1 = state.get_mask();
 
     // 6. Assert the expected initial mask
-    let expected_mask1 = HybridBitset::from_iter(vec![llm_x_semicolon.0]);
+    // "x" is a valid IDENTIFIER, starting an expression.
+    // """;" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_empty_string_semicolon.0]);
     assert_eq!(
         mask1,
         expected_mask1,
-        "Initial mask should only allow 'X;'"
+        "Initial mask should allow 'x', `X`, and `!--`"
     );
 
-    // 7. Commit the valid token "X;"
-    state.commit(llm_x_semicolon);
-    assert!(state.is_active(), "State should be active after committing 'X;'");
+    // 7. Commit the invalid sequence "x!--" as bytes
+    // This tokenizes to IDENTIFIER, !, -, -
+    // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
+    // so the state should become inactive.
+    println!("GSS Forest BEFORE commit:");
+    // state.print_gss();
+    state.commit_bytes(b"X");
+    println!("GSS Forest AFTER commit:");
+    // state.print_gss();
     let mask2 = state.get_mask();
 
-    // 8. Assert the mask is empty (expecting EOF, which is not in the LLM vocab)
-    let expected_mask2 = HybridBitset::from_iter(vec![]);
+    // 8. Assert the state is inactive and the mask is empty
+    assert!(state.is_active(), "State should be inactive after committing invalid sequence 'x!--'");
+    let expected_mask2 = HybridBitset::from_iter(vec![llm_empty_string_semicolon.0]);
     assert_eq!(
         mask2,
         expected_mask2,
-        "Mask after 'X;' should be empty (expecting EOF)"
     );
 
     Ok(())
