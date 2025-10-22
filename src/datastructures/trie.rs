@@ -1,4 +1,5 @@
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use rand::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Display};
@@ -2037,6 +2038,203 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 }
             }
         }
+    }
+}
+
+/// The result of comparing two paths in a Trie.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum PathComparison {
+    /// The first path is a prefix of the second path.
+    Prefix,
+    /// The two paths are equal.
+    Equal,
+    /// The paths are different and neither is a prefix of the other.
+    Different,
+}
+
+/// Represents a path in a Trie, starting from a root.
+/// It consists of the root's value and a sequence of edges and destination node values.
+pub type TriePath<EK, EV, T> = (T, Vec<(EK, EV, T)>);
+
+// Implementation block for stochastic equivalence testing
+impl<EK, EV, T> Trie<EK, EV, T>
+where
+    EK: Ord + Clone,
+    EV: Clone,
+    T: Clone + PartialEq,
+{
+    /// Stochastically checks if two tries are equivalent by sampling paths from each and
+    /// verifying their existence in the other.
+    ///
+    /// # Arguments
+    /// * `arena_a`, `roots_a`: The first trie.
+    /// * `arena_b`, `roots_b`: The second trie.
+    /// * `num_samples`: The number of paths to sample from each trie.
+    /// * `max_path_len`: The maximum length of paths to sample.
+    /// * `compare`: A closure that compares two paths and returns a `PathComparison`.
+    /// * `rng`: A random number generator.
+    ///
+    /// # Returns
+    /// `true` if all sampled paths from one trie are found in the other, `false` otherwise.
+    pub fn are_tries_equivalent_stochastic<F, R>(
+        arena_a: &Arena<Self>,
+        roots_a: &[Trie2Index],
+        arena_b: &Arena<Self>,
+        roots_b: &[Trie2Index],
+        num_samples: usize,
+        max_path_len: usize,
+        mut compare: F,
+        rng: &mut R,
+    ) -> bool
+    where
+        F: FnMut(&TriePath<EK, EV, T>, &TriePath<EK, EV, T>) -> PathComparison + Clone,
+        R: Rng + ?Sized,
+    {
+        // Sample from A, check in B
+        for _ in 0..num_samples {
+            if let Some(path_a) = Self::sample_path(arena_a, roots_a, max_path_len, rng) {
+                if !Self::path_exists(arena_b, roots_b, &path_a, compare.clone()) {
+                    return false; // Found a path in A that's not in B
+                }
+            }
+        }
+
+        // Sample from B, check in A
+        for _ in 0..num_samples {
+            if let Some(path_b) = Self::sample_path(arena_b, roots_b, max_path_len, rng) {
+                if !Self::path_exists(arena_a, roots_a, &path_b, compare.clone()) {
+                    return false; // Found a path in B that's not in A
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Samples a random path from the trie, starting from one of the roots.
+    pub fn sample_path<R: Rng + ?Sized>(
+        arena: &Arena<Self>,
+        roots: &[Trie2Index],
+        max_len: usize,
+        rng: &mut R,
+    ) -> Option<TriePath<EK, EV, T>> {
+        if roots.is_empty() {
+            return None;
+        }
+
+        let root_idx = *roots.choose(rng).unwrap();
+        let root_guard = root_idx.read(arena)?;
+        let root_value = root_guard.value.clone();
+
+        let mut current_path = Vec::new();
+        let mut current_node_idx = root_idx;
+        let path_len = if max_len > 0 { rng.gen_range(0..=max_len) } else { 0 };
+
+        for _ in 0..path_len {
+            let current_node_guard = current_node_idx.read(arena)?;
+            let all_edges: Vec<(EK, EV, Trie2Index)> = current_node_guard
+                .children()
+                .iter()
+                .flat_map(|(ek, dest_map)| {
+                    dest_map
+                        .iter()
+                        .map(move |(child_idx, ev)| (ek.clone(), ev.clone(), *child_idx))
+                })
+                .collect();
+
+            if all_edges.is_empty() {
+                break; // Reached a leaf
+            }
+
+            let (edge_key, edge_value, next_node_idx) = all_edges.choose(rng).unwrap().clone();
+
+            let next_node_guard = next_node_idx.read(arena)?;
+            let next_node_value = next_node_guard.value.clone();
+
+            current_path.push((edge_key, edge_value, next_node_value));
+            current_node_idx = next_node_idx;
+        }
+
+        Some((root_value, current_path))
+    }
+
+    /// Checks if a given path exists in the trie, starting from its roots.
+    /// The `compare` closure is used to guide the search.
+    pub fn path_exists<F>(
+        arena: &Arena<Self>,
+        roots: &[Trie2Index],
+        path_to_find: &TriePath<EK, EV, T>,
+        mut compare: F,
+    ) -> bool
+    where
+        F: FnMut(&TriePath<EK, EV, T>, &TriePath<EK, EV, T>) -> PathComparison,
+    {
+        for &root in roots {
+            if let Some(root_guard) = root.read(arena) {
+                let candidate_path = (root_guard.value.clone(), Vec::new());
+                match compare(&candidate_path, path_to_find) {
+                    PathComparison::Equal => return true,
+                    PathComparison::Prefix => {
+                        if Self::path_exists_recursive(
+                            arena,
+                            root,
+                            candidate_path,
+                            path_to_find,
+                            &mut compare,
+                        ) {
+                            return true;
+                        }
+                    }
+                    PathComparison::Different => continue,
+                }
+            }
+        }
+        false
+    }
+
+    /// Recursive helper for `path_exists`.
+    fn path_exists_recursive<F>(
+        arena: &Arena<Self>,
+        current_node_idx: Trie2Index,
+        current_path: TriePath<EK, EV, T>,
+        path_to_find: &TriePath<EK, EV, T>,
+        compare: &mut F,
+    ) -> bool
+    where
+        F: FnMut(&TriePath<EK, EV, T>, &TriePath<EK, EV, T>) -> PathComparison,
+    {
+        let current_node_guard = match current_node_idx.read(arena) {
+            Some(g) => g,
+            None => return false,
+        };
+
+        for (ek, dest_map) in current_node_guard.children() {
+            for (child_idx, ev) in dest_map.iter() {
+                if let Some(child_guard) = child_idx.read(arena) {
+                    let mut new_path = current_path.clone();
+                    new_path
+                        .1
+                        .push((ek.clone(), ev.clone(), child_guard.value.clone()));
+
+                    match compare(&new_path, path_to_find) {
+                        PathComparison::Equal => return true,
+                        PathComparison::Prefix => {
+                            if Self::path_exists_recursive(
+                                arena,
+                                *child_idx,
+                                new_path,
+                                path_to_find,
+                                compare,
+                            ) {
+                                return true;
+                            }
+                        }
+                        PathComparison::Different => continue,
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
