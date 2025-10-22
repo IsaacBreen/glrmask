@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - scripts/delta_debug.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     scripts/delta_debug.py: |-
@@ -177,6 +177,7 @@ local_system:
       import os
       import tempfile
       import sys
+      import datetime
       from typing import List
 
       # --- Configuration ---
@@ -204,8 +205,8 @@ local_system:
       # The string to look for in the command's output that indicates a mismatch.
       MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
 
-      # The file where the final, minimal vocabulary will be saved.
-      MINIMAL_VOCAB_OUTPUT_PATH = "minimal_vocab.json"
+      # The base directory where results will be saved.
+      RESULTS_BASE_DIR = "delta_debug_results"
 
       # --- Script Logic ---
 
@@ -244,6 +245,12 @@ local_system:
           """
           print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
 
+          # Create a unique directory for this run's results
+          timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+          results_dir = os.path.join(RESULTS_BASE_DIR, timestamp)
+          os.makedirs(results_dir, exist_ok=True)
+          print(f"Results will be saved in: '{results_dir}'")
+
           # 1. Load the original vocabulary
           if not os.path.exists(ORIGINAL_VOCAB_PATH):
               print(f"Error: Original vocabulary file not found at '{ORIGINAL_VOCAB_PATH}'")
@@ -266,6 +273,7 @@ local_system:
           minimal_vocab = list(original_vocab)
           print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
 
+          reduction_step = 0
           chunk_size = len(minimal_vocab) // 2
           while chunk_size >= 1:
               print(f"\n--- Testing with chunk size: {chunk_size} ---")
@@ -293,8 +301,12 @@ local_system:
                       # Mismatch still occurs, so the removal was successful
                       minimal_vocab = test_vocab
 
-                      # Save intermediate progress
-                      with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
+                      # Save intermediate progress to a new file
+                      reduction_step += 1
+                      new_size = len(minimal_vocab)
+                      filename = f"step_{reduction_step:04d}_size_{new_size}.json"
+                      output_path = os.path.join(results_dir, filename)
+                      with open(output_path, 'w') as f:
                           json.dump(minimal_vocab, f, indent=2)
 
                       removed_in_pass = True
@@ -323,9 +335,11 @@ local_system:
           print(json.dumps(minimal_vocab, indent=2))
 
           # Save the result to a file
-          with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
+          final_output_path = os.path.join(results_dir, "minimal_vocab.json")
+          with open(final_output_path, 'w') as f:
               json.dump(minimal_vocab, f, indent=2)
-          print(f"\n✅ Minimal vocabulary saved to '{MINIMAL_VOCAB_OUTPUT_PATH}'")
+          print(f"\n✅ Minimal vocabulary saved to '{final_output_path}'")
+          print(f"Intermediate steps are also saved in '{results_dir}'")
 
 
       if __name__ == "__main__":
@@ -686,5 +700,195 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Save minimal vocabulary state incrementally
       during delta debugging"'
+    metadata:
+  - user: |-
+      Diff of scripts/delta_debug.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Save in a temporary directory. And save each step, not just the final result.
+    metadata:
+  - assistant: |-
+      Excellent idea. Saving each reduction step to a unique, timestamped directory will give you a full audit trail of the minimization process and protect your results from being overwritten.
+
+      Here are the step-by-step instructions to implement this, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `scripts/delta_debug.py`**.
+
+      2.  **Add the `datetime` import**: At the top of the file, add `import datetime` to handle timestamping.
+
+          ```python
+          import sys
+          import datetime
+          from typing import List
+          ```
+
+      3.  **Change the output path configuration**: Find and replace the `MINIMAL_VOCAB_OUTPUT_PATH` variable with a new variable for a base results directory.
+
+          ```python
+          # The string to look for in the command's output that indicates a mismatch.
+          MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
+          
+          # The base directory where results will be saved.
+          RESULTS_BASE_DIR = "delta_debug_results"
+          ```
+
+      4.  **Create a unique results directory**: In the `main` function, right at the beginning, insert the code to create a new subdirectory for the current run's results.
+
+          ```python
+          def main():
+              """
+              Main function to perform the vocabulary minimization.
+              """
+              print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
+          
+              # Create a unique directory for this run's results
+              timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+              results_dir = os.path.join(RESULTS_BASE_DIR, timestamp)
+              os.makedirs(results_dir, exist_ok=True)
+              print(f"Results will be saved in: '{results_dir}'")
+          
+              # 1. Load the original vocabulary
+              # ...
+          ```
+
+      5.  **Initialize a step counter**: Before the main minimization loop (`while chunk_size >= 1:`), add a counter for the reduction steps.
+
+          ```python
+          minimal_vocab = list(original_vocab)
+          print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
+
+          reduction_step = 0
+          chunk_size = len(minimal_vocab) // 2
+          while chunk_size >= 1:
+              # ...
+          ```
+
+      6.  **Update the incremental save logic**: Inside the `if run_test_with_vocab(test_vocab):` block, replace the previous save logic with the new logic to save a uniquely named file for each step.
+
+          *   **Remove** the old block:
+              ```python
+              # Save intermediate progress
+              with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
+                  json.dump(minimal_vocab, f, indent=2)
+              ```
+          *   **Add** the new block in its place:
+              ```python
+              # Save intermediate progress to a new file
+              reduction_step += 1
+              new_size = len(minimal_vocab)
+              filename = f"step_{reduction_step:04d}_size_{new_size}.json"
+              output_path = os.path.join(results_dir, filename)
+              with open(output_path, 'w') as f:
+                  json.dump(minimal_vocab, f, indent=2)
+              ```
+
+      7.  **Update the final save logic**: At the end of the `main` function, modify the final save and print statements to use the new results directory.
+
+          ```python
+          # Save the result to a file
+          final_output_path = os.path.join(results_dir, "minimal_vocab.json")
+          with open(final_output_path, 'w') as f:
+              json.dump(minimal_vocab, f, indent=2)
+          print(f"\n✅ Minimal vocabulary saved to '{final_output_path}'")
+          print(f"Intermediate steps are also saved in '{results_dir}'")
+          ```
+
+      ### Git Diff
+
+      Here is the git diff to apply these changes directly.
+
+      ```diff
+      diff --git a/scripts/delta_debug.py b/scripts/delta_debug.py
+      --- a/scripts/delta_debug.py
+      +++ b/scripts/delta_debug.py
+      @@ -4,6 +4,7 @@
+       import os
+       import tempfile
+       import sys
+      +import datetime
+       from typing import List
+       
+       # --- Configuration ---
+      @@ -28,8 +29,8 @@
+       # The string to look for in the command's output that indicates a mismatch.
+       MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
+       
+      -# The file where the final, minimal vocabulary will be saved.
+      -MINIMAL_VOCAB_OUTPUT_PATH = "minimal_vocab.json"
+      +# The base directory where results will be saved.
+      +RESULTS_BASE_DIR = "delta_debug_results"
+       
+       # --- Script Logic ---
+       
+      @@ -70,6 +71,12 @@
+           """
+           print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
+       
+      +    # Create a unique directory for this run's results
+      +    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+      +    results_dir = os.path.join(RESULTS_BASE_DIR, timestamp)
+      +    os.makedirs(results_dir, exist_ok=True)
+      +    print(f"Results will be saved in: '{results_dir}'")
+      +
+           # 1. Load the original vocabulary
+           if not os.path.exists(ORIGINAL_VOCAB_PATH):
+               print(f"Error: Original vocabulary file not found at '{ORIGINAL_VOCAB_PATH}'")
+      @@ -90,6 +97,7 @@
+           minimal_vocab = list(original_vocab)
+           print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
+       
+      +    reduction_step = 0
+           chunk_size = len(minimal_vocab) // 2
+           while chunk_size >= 1:
+               print(f"\n--- Testing with chunk size: {chunk_size} ---")
+      @@ -115,11 +123,14 @@
+                   if run_test_with_vocab(test_vocab):
+                       # Mismatch still occurs, so the removal was successful
+                       minimal_vocab = test_vocab
+       
+      -                # Save intermediate progress
+      -                with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
+      +                # Save intermediate progress to a new file
+      +                reduction_step += 1
+      +                new_size = len(minimal_vocab)
+      +                filename = f"step_{reduction_step:04d}_size_{new_size}.json"
+      +                output_path = os.path.join(results_dir, filename)
+      +                with open(output_path, 'w') as f:
+                           json.dump(minimal_vocab, f, indent=2)
+       
+                       removed_in_pass = True
+                       print(f" REMOVED. New size: {len(minimal_vocab)}")
+      @@ -145,9 +156,11 @@
+           print(json.dumps(minimal_vocab, indent=2))
+       
+           # Save the result to a file
+      -    with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
+      +    final_output_path = os.path.join(results_dir, "minimal_vocab.json")
+      +    with open(final_output_path, 'w') as f:
+               json.dump(minimal_vocab, f, indent=2)
+      -    print(f"\n✅ Minimal vocabulary saved to '{MINIMAL_VOCAB_OUTPUT_PATH}'")
+      +    print(f"\n✅ Minimal vocabulary saved to '{final_output_path}'")
+      +    print(f"Intermediate steps are also saved in '{results_dir}'")
+       
+       
+       if __name__ == "__main__":
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/delta_debug.py
+      Applying patch to 'scripts/delta_debug.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/delta_debug.py.
+    metadata:
+  - user: 'Changes committed with message: "feat: Save intermediate delta-debug results
+      to timestamped directories"'
     metadata:
 ...

@@ -4,6 +4,7 @@ import subprocess
 import os
 import tempfile
 import sys
+import datetime
 from typing import List
 
 # --- Configuration ---
@@ -31,8 +32,8 @@ bash python/run_benchmarks.sh \
 # The string to look for in the command's output that indicates a mismatch.
 MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
 
-# The file where the final, minimal vocabulary will be saved.
-MINIMAL_VOCAB_OUTPUT_PATH = "minimal_vocab.json"
+# The base directory where results will be saved.
+RESULTS_BASE_DIR = "delta_debug_results"
 
 # --- Script Logic ---
 
@@ -71,6 +72,12 @@ def main():
     """
     print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
 
+    # Create a unique directory for this run's results
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    results_dir = os.path.join(RESULTS_BASE_DIR, timestamp)
+    os.makedirs(results_dir, exist_ok=True)
+    print(f"Results will be saved in: '{results_dir}'")
+
     # 1. Load the original vocabulary
     if not os.path.exists(ORIGINAL_VOCAB_PATH):
         print(f"Error: Original vocabulary file not found at '{ORIGINAL_VOCAB_PATH}'")
@@ -93,6 +100,7 @@ def main():
     minimal_vocab = list(original_vocab)
     print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
 
+    reduction_step = 0
     chunk_size = len(minimal_vocab) // 2
     while chunk_size >= 1:
         print(f"\n--- Testing with chunk size: {chunk_size} ---")
@@ -120,8 +128,12 @@ def main():
                 # Mismatch still occurs, so the removal was successful
                 minimal_vocab = test_vocab
 
-                # Save intermediate progress
-                with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
+                # Save intermediate progress to a new file
+                reduction_step += 1
+                new_size = len(minimal_vocab)
+                filename = f"step_{reduction_step:04d}_size_{new_size}.json"
+                output_path = os.path.join(results_dir, filename)
+                with open(output_path, 'w') as f:
                     json.dump(minimal_vocab, f, indent=2)
 
                 removed_in_pass = True
@@ -150,9 +162,11 @@ def main():
     print(json.dumps(minimal_vocab, indent=2))
 
     # Save the result to a file
-    with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
+    final_output_path = os.path.join(results_dir, "minimal_vocab.json")
+    with open(final_output_path, 'w') as f:
         json.dump(minimal_vocab, f, indent=2)
-    print(f"\n✅ Minimal vocabulary saved to '{MINIMAL_VOCAB_OUTPUT_PATH}'")
+    print(f"\n✅ Minimal vocabulary saved to '{final_output_path}'")
+    print(f"Intermediate steps are also saved in '{results_dir}'")
 
 
 if __name__ == "__main__":
