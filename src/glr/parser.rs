@@ -2307,6 +2307,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
     /// Returns true iff simulating a single-step with `token_id` would perform any SHIFT.
     /// This clones the parser state and early-exits on the first SHIFT.
     pub fn allows_terminal(&self, token_id: TerminalID) -> bool {
+        let mut self_clone = self.clone();
+        self_clone.step(token_id);
+        return self_clone.is_ok();
+
         // Treat the ignore token as always "allowed" (it doesn't shift but is always consumable).
         if Some(token_id) == self.parser.ignore_terminal_id {
             return true;
