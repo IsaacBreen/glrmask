@@ -1054,6 +1054,12 @@ impl PyGrammarConstraintState {
         });
     }
 
+    fn commit_bytes(&mut self, llm_token_bytes: &[u8]) {
+        self.inner.with_inner_mut(|state| {
+            state.commit_bytes(llm_token_bytes);
+        });
+    }
+
     fn print_stats(&self) {
         self.inner.with_inner(|state| state.print_gss_stats());
     }
