@@ -120,6 +120,8 @@ def main():
                 minimal_vocab = test_vocab
                 removed_in_pass = True
                 print(f" REMOVED. New size: {len(minimal_vocab)}")
+                if len(test_vocab) < 10:
+                    print(test_vocab)
                 # Restart the scan for this chunk size, as the list has changed
                 start_index = 0
             else:
