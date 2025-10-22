@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - src/test_constraint_basic.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/test_constraint_basic.rs: |-
@@ -4620,19 +4620,28 @@ local_system:
 
           // 5. Initialize state and get the initial mask
           let mut state = constraint.init();
-          let mask = state.get_mask();
+          let mask1 = state.get_mask();
 
-          // 6. Assert the expected mask
+          // 6. Assert the expected initial mask
           // "x" is a valid IDENTIFIER, starting an expression.
           // "'';" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
-          // "!--" is not a valid start. It tokenizes to '!' then '-', but the second '-' is invalid.
-          // ";;;" is not a valid start as statements cannot be empty.
-          let expected_mask = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
+          let expected_mask1 = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
           assert_eq!(
-              mask,
-              expected_mask,
+              mask1,
+              expected_mask1,
               "Initial mask should allow 'x' and `''`"
           );
+
+          // 7. Commit the invalid sequence "x!--" as bytes
+          // This tokenizes to IDENTIFIER, !, -, -
+          // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
+          // so the state should become inactive.
+          state.commit_bytes(b"x!--");
+          let mask2 = state.get_mask();
+
+          // 8. Assert the state is inactive and the mask is empty
+          assert!(!state.is_active(), "State should be inactive after committing invalid sequence 'x!--'");
+          assert_eq!(mask2, HybridBitset::zeros(), "Mask should be empty after committing invalid sequence 'x!--'");
 
           Ok(())
       }
@@ -5896,7 +5905,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -9183,5 +9192,136 @@ messages:
     metadata:
   - user: 'Changes committed with message: "test: Add test case for initial mask with
       JS-like grammar and custom vocab"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Use the input string `x!--`.
+    metadata:
+  - assistant: |-
+      This is a great test case to check how the constraint layer handles an invalid sequence of grammar tokens resulting from a byte commit.
+
+      I will update the `test_js_like_grammar_initial_mask` function to commit the bytes `x!--` and assert that the constraint state becomes inactive, resulting in an empty mask.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file**: `src/test_constraint_basic.rs`
+      2.  **Modify the test**: Locate the `test_js_like_grammar_initial_mask` function and insert the logic to commit `b"x!--"` and check the resulting state and mask.
+
+          Replace the following lines (around line 1789):
+
+          ```rust
+              // 5. Initialize state and get the initial mask
+              let mut state = constraint.init();
+              let mask = state.get_mask();
+
+              // 6. Assert the expected mask
+              // "x" is a valid IDENTIFIER, starting an expression.
+              // "'';" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
+              // "!--" is not a valid start. It tokenizes to '!' then '-', but the second '-' is invalid.
+              // ";;;" is not a valid start as statements cannot be empty.
+              let expected_mask = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
+              assert_eq!(
+                  mask,
+                  expected_mask,
+                  "Initial mask should allow 'x' and `''`"
+              );
+
+              Ok(())
+          }
+          ```
+
+          With this updated code:
+
+          ```rust
+              // 5. Initialize state and get the initial mask
+              let mut state = constraint.init();
+              let mask1 = state.get_mask();
+
+              // 6. Assert the expected initial mask
+              // "x" is a valid IDENTIFIER, starting an expression.
+              // "'';" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
+              let expected_mask1 = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
+              assert_eq!(
+                  mask1,
+                  expected_mask1,
+                  "Initial mask should allow 'x' and `''`"
+              );
+
+              // 7. Commit the invalid sequence "x!--" as bytes
+              // This tokenizes to IDENTIFIER, !, -, -
+              // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
+              // so the state should become inactive.
+              state.commit_bytes(b"x!--");
+              let mask2 = state.get_mask();
+
+              // 8. Assert the state is inactive and the mask is empty
+              assert!(!state.is_active(), "State should be inactive after committing invalid sequence 'x!--'");
+              assert_eq!(mask2, HybridBitset::zeros(), "Mask should be empty after committing invalid sequence 'x!--'");
+
+              Ok(())
+          }
+          ```
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      index 50058e1..4310168 100644
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1769,21 +1769,25 @@
+           );
+       
+           // 5. Initialize state and get the initial mask
+           let mut state = constraint.init();
+      -    let mask = state.get_mask();
+      +    let mask1 = state.get_mask();
+       
+      -    // 6. Assert the expected mask
+      +    // 6. Assert the expected initial mask
+           // "x" is a valid IDENTIFIER, starting an expression.
+           // "'';" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
+      -    // "!--" is not a valid start. It tokenizes to '!' then '-', but the second '-' is invalid.
+      -    // ";;;" is not a valid start as statements cannot be empty.
+      -    let expected_mask = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
+      +    let expected_mask1 = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
+           assert_eq!(
+      -        mask,
+      -        expected_mask,
+      +        mask1,
+      +        expected_mask1,
+               "Initial mask should allow 'x' and `''`"
+           );
+       
+      +    // 7. Commit the invalid sequence "x!--" as bytes
+      +    // This tokenizes to IDENTIFIER, !, -, -
+      +    // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
+      +    // so the state should become inactive.
+      +    state.commit_bytes(b"x!--");
+      +    let mask2 = state.get_mask();
+      +
+      +    // 8. Assert the state is inactive and the mask is empty
+      +    assert!(!state.is_active(), "State should be inactive after committing invalid sequence 'x!--'");
+      +    assert_eq!(mask2, HybridBitset::zeros(), "Mask should be empty after committing invalid sequence 'x!--'");
+      +
+           Ok(())
+       }
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: "Changes committed with message: \"test: Extend JS-like grammar test to
+      check state after committing invalid sequence 'x!--'\""
     metadata:
 ...

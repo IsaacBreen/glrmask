@@ -1731,19 +1731,28 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
-    let mask = state.get_mask();
+    let mask1 = state.get_mask();
 
-    // 6. Assert the expected mask
+    // 6. Assert the expected initial mask
     // "x" is a valid IDENTIFIER, starting an expression.
     // "'';" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
-    // "!--" is not a valid start. It tokenizes to '!' then '-', but the second '-' is invalid.
-    // ";;;" is not a valid start as statements cannot be empty.
-    let expected_mask = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
     assert_eq!(
-        mask,
-        expected_mask,
+        mask1,
+        expected_mask1,
         "Initial mask should allow 'x' and `''`"
     );
+
+    // 7. Commit the invalid sequence "x!--" as bytes
+    // This tokenizes to IDENTIFIER, !, -, -
+    // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
+    // so the state should become inactive.
+    state.commit_bytes(b"x!--");
+    let mask2 = state.get_mask();
+
+    // 8. Assert the state is inactive and the mask is empty
+    assert!(!state.is_active(), "State should be inactive after committing invalid sequence 'x!--'");
+    assert_eq!(mask2, HybridBitset::zeros(), "Mask should be empty after committing invalid sequence 'x!--'");
 
     Ok(())
 }
