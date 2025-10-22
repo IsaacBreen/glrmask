@@ -25,10 +25,12 @@ class Model:
         mask_bv = self.constraint_state.get_mask_bv()
 
         # print("\n--- get_mask END (rust_model.py) ---")
+        print(f"get_mask() returned {RangeSet.from_ranges(mask_bv.to_ranges())}")
         return RangeSet.from_ranges(mask_bv.to_ranges())
 
     def commit(self, token_id: int):
         """Commits a token to the underlying Rust state."""
+        print("Committing token", token_id)
         self.constraint_state.commit(token_id)
 
     def is_end(self, node: int) -> bool:
