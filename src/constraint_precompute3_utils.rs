@@ -1730,11 +1730,9 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
     let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
 
     for it in 0..max_iters {
-        // Signature is (end_flag, map<(pop, dest_class) -> union of StateIDBVs>)
-        // This is more aggressive than using a BTreeSet of SIDs, as it allows merging
-        // nodes that have different SID distributions as long as the total set of states
-        // required to reach a destination class is the same.
-        type SignatureStructural3 = (bool, BTreeMap<(isize, usize), StateIDBV>);
+        // Signature is (end_flag, aggregated edges keyed by (pop, llm_bv, dest_class)).
+        // Including the LLMTokenBV ensures we don't merge nodes that differ on token distributions.
+        type SignatureStructural3 = (bool, Vec<((isize, LLMTokenBV, usize), StateIDBV)>);
 
         let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
         let mut new_class = vec![0; n];
@@ -1746,15 +1744,17 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
         #[cfg(rustrover)]
         let its = 0..n;
         for u in its {
-            let mut aggr: BTreeMap<(isize, usize), StateIDBV> = BTreeMap::new();
-            for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
-                // _bv_key (LLM tokens) is IGNORED for structural equivalence.
+            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+            for (p, bv_key, v_dense, sids) in &raw_edges[u] {
                 let dest_class = prev_class[*v_dense];
-                let key = (*p, dest_class);
-                *aggr.entry(key).or_default() |= sids;
+                let key = (*p, bv_key.clone(), dest_class);
+                aggr.entry(key)
+                    .and_modify(|e| *e |= sids)
+                    .or_insert_with(|| sids.clone());
             }
 
-            let sig: SignatureStructural3 = (ends[u], aggr);
+            let agg_edges: Vec<((isize, LLMTokenBV, usize), StateIDBV)> = aggr.into_iter().collect();
+            let sig: SignatureStructural3 = (ends[u], agg_edges);
 
             let cid = *sig_to_id.entry(sig).or_insert_with(|| {
                 let id = next_id;
@@ -1791,31 +1791,27 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
 
     for class_id in 0..num_classes {
         if let Some(rep_idx) = representatives[class_id] {
-            // Gather all nodes belonging to this class
-            let nodes_in_class: Vec<Trie2Index> = final_partition.iter().enumerate()
-                .filter(|(_, &c)| c == class_id)
-                .map(|(i, _)| old_of[i])
-                .collect();
+            // Use a single exemplar node from the class to rebuild the representative's edges
+            // based on the final partition (safe and deterministic).
+            let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
 
+            // Aggregate edges by (pop, llm_bv, dest_class)
+            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+            for (p, bv_key, v_dense, sids) in &raw_edges[u_dense] {
+                let dest_class = final_partition[*v_dense];
+                aggr.entry((*p, bv_key.clone(), dest_class))
+                    .and_modify(|e| *e |= sids)
+                    .or_insert_with(|| sids.clone());
+            }
+
+            // Build representative children by mapping dest classes to their representatives.
             let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-
-            // Merge all edges from all nodes in the class into the representative.
-            for node_idx in &nodes_in_class {
-                let guard = node_idx.read(trie3_god).unwrap();
-
-                for ((pop, llm_bv), dest_map) in guard.children() {
-                    for (dest_idx, sids) in dest_map {
-                        // Remap destination to its representative
-                        let dest_rep_idx = *node_to_rep.get(dest_idx).unwrap();
-
-                        // Insert into new_children.
-                        // Note: This may create parallel edges (same pop/dest_rep/sids, different llm_bv)
-                        // if the original nodes had them. Subsequent edge compression will fix this.
-                        let new_dest_map = new_children.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
-                        new_dest_map.entry(dest_rep_idx)
-                            .and_modify(|e| *e |= sids) // Union SIDs if exact edge exists
-                            .or_insert_with(|| sids.clone());
-                    }
+            for ((p, bv_key, dest_class), sids) in aggr {
+                if let Some(dest_rep_idx) = representatives[dest_class] {
+                    let dm = new_children.entry((p, bv_key.clone())).or_insert_with(OrderedHashMap::new);
+                    dm.entry(dest_rep_idx)
+                        .and_modify(|e| *e |= &sids)
+                        .or_insert(sids);
                 }
             }
 
