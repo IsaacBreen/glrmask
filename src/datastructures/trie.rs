@@ -2798,6 +2798,10 @@ impl<T> Arena<T> {
         let cloned_inner = inner_guard.clone();
         Arena { inner: Arc::new(RwLock::new(cloned_inner)) }
     }
+
+    pub fn replace_with(&self, other: Self) {
+        todo!()
+    }
 }
 
 impl<T> JSONConvertible for Arena<T>

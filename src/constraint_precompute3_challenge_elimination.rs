@@ -227,7 +227,7 @@ pub fn eliminate_pushes_and_pops(
     let (roots2, god2) = convert_to_intermediate2(roots, god);
     let (roots3, god3) = convert_from_intermediate2(&roots2, &god2);
     *roots = roots3;
-    std::mem::swap(&mut god.inner.write(), &mut god3.inner.write());
+    god.replace_with(god3);
     return;
 
     const DEBUG: bool = false;
