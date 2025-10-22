@@ -375,6 +375,7 @@ class BruteForceModel(GraphProvider):
         return GSS.merge_many(shifted)
 
     def get_mask(self) -> RangeSetOut:
+        print(f"States: {list(self.state.keys())}")
         stats = Stats.get()
         stats.start('get_mask')
         
