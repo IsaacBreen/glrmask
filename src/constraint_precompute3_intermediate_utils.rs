@@ -14,6 +14,7 @@ const DEBUG_LOG: bool = cfg!(debug_assertions);
 #[derive(Debug, Clone)]
 pub struct IntermediateTrie3Config {
     pub enabled: bool,
+    pub verbose: bool,
     pub prune_unproductive_paths: bool,
     pub contract_noop_chains: bool,
     pub normalize_checkllm_edges: bool,
@@ -26,6 +27,7 @@ impl Default for IntermediateTrie3Config {
     fn default() -> Self {
         Self {
             enabled: true,
+            verbose: false,
             prune_unproductive_paths: false,
             contract_noop_chains: false,
             normalize_checkllm_edges: false,
@@ -40,6 +42,7 @@ impl IntermediateTrie3Config {
     pub fn off() -> Self {
         Self {
             enabled: false,
+            verbose: false,
             prune_unproductive_paths: false,
             contract_noop_chains: false,
             normalize_checkllm_edges: false,
@@ -801,28 +804,51 @@ pub fn optimize_intermediate_trie3(
     }
     let original_roots = roots.to_vec();
 
+    // Helper for verbose printing
+    let print_graph = |pass_name: &str| {
+        if config.verbose {
+            println!("\n--- Graph state after: {} ---", pass_name);
+            let options = crate::datastructures::trie::PrettyPrintOptions::default()
+                .display_edge_keys_only()
+                .omit_depth()
+                .display_nodes();
+            println!("{}", Trie::pretty_print_with_options(god, roots, &options));
+        }
+    };
+
+    if config.verbose {
+        print_graph("Initial State");
+    }
+
     if DEBUG_LOG { has_true_cycle_intermediate_trie3(god, roots); }
 
     if config.prune_unproductive_paths {
         prune_unproductive_paths_intermediate_trie3(roots, god);
+        print_graph("Prune Unproductive Paths");
     }
 
     // Pass A: aggressively remove simple NoOp chains (epsilon-like edges).
     if config.contract_noop_chains {
         if DEBUG_LOG { println!("[optimize_intermediate_trie3] Contracting NoOp chains..."); }
         let mut passes = 0;
+        let mut changed_in_loop = false;
         while contract_noop_chains(roots, god) {
             passes += 1;
+            changed_in_loop = true;
             if DEBUG_LOG { println!("[optimize_intermediate_trie3] NoOp chain contraction pass {} complete.", passes); }
             if passes > 10 {
                  if DEBUG_LOG { println!("[optimize_intermediate_trie3] WARN: NoOp chain contraction took too many passes, breaking."); }
                  break;
             }
         }
+        if changed_in_loop {
+            print_graph("Contract NoOp Chains");
+        }
         if passes > 0 {
             if DEBUG_LOG { println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC."); }
             if config.gc {
                 gc_preserving_ends(god, roots);
+                print_graph("GC after NoOp Contraction");
             }
         } else {
             if DEBUG_LOG { println!("[optimize_intermediate_trie3] NoOp chains contracted."); }
@@ -834,24 +860,33 @@ pub fn optimize_intermediate_trie3(
     let mut changed_any = false;
     if config.normalize_checkllm_edges {
         if DEBUG_LOG { println!("[optimize_intermediate_trie3] Normalizing CheckLLM edges..."); }
-        changed_any |= normalize_checkllm_edges_for_all(roots, god);
+        if normalize_checkllm_edges_for_all(roots, god) {
+            changed_any = true;
+            print_graph("Normalize CheckLLM Edges");
+        }
     }
     if config.contract_checkllm_chains {
         if DEBUG_LOG { println!("[optimize_intermediate_trie3] Contracting CheckLLM chains..."); }
         let mut chain_passes = 0usize;
+        let mut contracted_chains = false;
         while contract_checkllm_chains(roots, god) {
             chain_passes += 1;
             changed_any = true;
+            contracted_chains = true;
             if chain_passes > 10 {
                 if DEBUG_LOG { println!("[optimize_intermediate_trie3] WARN: CheckLLM chain contraction took too many passes, breaking."); }
                 break;
             }
+        }
+        if contracted_chains {
+            print_graph("Contract CheckLLM Chains");
         }
     }
     if changed_any {
         if DEBUG_LOG { println!("[optimize_intermediate_trie3] CheckLLM normalization/chain contraction made changes. Running GC."); }
         if config.gc {
             gc_preserving_ends(god, roots);
+            print_graph("GC after CheckLLM Ops");
         }
     }
     if DEBUG_LOG { has_true_cycle_intermediate_trie3(god, roots); }
@@ -873,9 +908,13 @@ pub fn optimize_intermediate_trie3(
         // Normalize again before canonical rewiring to maximize equality exposure.
         if config.normalize_checkllm_edges && normalize_checkllm_edges_for_all(roots, god) {
             if DEBUG_LOG { println!("[optimize_intermediate_trie3] Normalization revealed new opportunities pre-canonicalization."); }
+            print_graph("Pre-Deduplication CheckLLM Normalization");
         }
 
         let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
+        if merges > 0 || edges_rewired > 0 {
+            print_graph("Structural Deduplication (Rewire)");
+        }
         if DEBUG_LOG {
             println!(
                 "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
@@ -887,6 +926,7 @@ pub fn optimize_intermediate_trie3(
         let mut polish_changed = false;
         if config.normalize_checkllm_edges && normalize_checkllm_edges_for_all(roots, god) {
             polish_changed = true;
+            print_graph("Polish Pass: CheckLLM Normalization");
         }
         if polish_changed {
             if DEBUG_LOG { println!("[optimize_intermediate_trie3] Polishing: rerunning WL refinement after normalization..."); }
@@ -898,6 +938,9 @@ pub fn optimize_intermediate_trie3(
                 );
             }
             let (merges2, edges_rewired2) = rewire_to_canonical(&colors2, roots, god, &mut node_map);
+            if merges2 > 0 || edges_rewired2 > 0 {
+                print_graph("Structural Deduplication (Polish Rewire)");
+            }
             if DEBUG_LOG {
                 println!(
                     "[optimize_intermediate_trie3] Polish rewiring done: merges={}, edges_rewired={}",
@@ -916,6 +959,7 @@ pub fn optimize_intermediate_trie3(
     if config.gc {
         if DEBUG_LOG { println!("[optimize_intermediate_trie3] Running final GC."); }
         gc_preserving_ends(god, &new_roots);
+        print_graph("Final GC");
     }
 
     // assert!(
