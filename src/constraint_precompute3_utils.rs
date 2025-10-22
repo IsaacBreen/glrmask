@@ -131,7 +131,7 @@ impl Default for Trie3Config {
             constrain_bitvecs: true,
             gc: true,
             prune_dead_paths: true,
-            compress_edges: false,
+            compress_edges: true,
             merge_nodes_exact: Trie3MergeConfig::default(),
             merge_nodes_structural: true,
             merge_nodes_ultrafast: false,
@@ -2074,30 +2074,53 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         changed_any
     };
 
-    // Pass 2: Bypass single-exit nodes.
-    // This is a general path-contraction optimization. If a node B is not an end state and
-    // has exactly one outgoing edge to a single destination C, any incoming edge to B from A
-    // can be rerouted to C, composing the pops and intersecting the constraints.
-    // A --(p1, L1, S1)--> B --(p2, L2, S2)--> C  =>  A --(p1+p2, L1&L2, S1&S2)--> C
-    // This is a powerful transform that subsumes shortcut_zero_pop_chains and shortcut_universal_pop_step.
+    // Pass 2: Bypass “single-target” nodes.
+    // General path contraction: if a node B (not end) has any number of outgoing edges but
+    // they ALL go to the same destination C (and C != B), then any incoming edge to B from A
+    // can be rerouted directly to C by composing constraints:
+    // A --(p1, L1, S1)--> B --(p2, L2, S2)--> C  becomes  A --(p1+p2, L1&L2, S1&S2)--> C
+    // (applied for each outgoing edge variant of B). This strictly generalizes the prior “single-exit”
+    // (exactly one key and one dest) case.
     let bypass_single_exit_nodes = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
         let nodes = Trie::all_nodes(trie3_god, roots_vec);
         let mut changed_any = false;
 
-        // 1. Identify all single-exit nodes.
-        let mut single_exit_info: HashMap<Trie2Index, (isize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+        // 1. Identify all “single-target” nodes and aggregate their outgoing edges by (pop, LLM) -> union(SIDs).
+        // Exclude end nodes and self-targeting nodes.
+        let mut single_target_info: HashMap<Trie2Index, (Trie2Index, Vec<(isize, LLMTokenBV, StateIDBV)>)> = HashMap::new();
         for n in &nodes {
             let g = n.read(trie3_god).expect("read");
-            if g.value.end { continue; }
-            if g.children().len() == 1 {
-                let ((p2, l2), dm) = g.children().iter().next().unwrap();
-                if dm.len() == 1 {
-                    let (c, s2) = dm.iter().next().unwrap();
-                    single_exit_info.insert(*n, (*p2, l2.clone(), *c, s2.clone()));
+            if g.value.end || g.children().is_empty() {
+                continue;
+            }
+            // Check that all outgoing edges go to the same destination.
+            let mut unique_dest: Option<Trie2Index> = None;
+            let mut aborted = false;
+            let mut aggr: BTreeMap<(isize, LLMTokenBV), StateIDBV> = BTreeMap::new();
+            for (ek, dm) in g.children() {
+                for (dst, sids) in dm {
+                    if let Some(u) = unique_dest {
+                        if *dst != u { aborted = true; break; }
+                    } else {
+                        unique_dest = Some(*dst);
+                    }
+                    aggr.entry((ek.0, ek.1.clone()))
+                        .and_modify(|e| *e |= sids)
+                        .or_insert_with(|| sids.clone());
                 }
+                if aborted { break; }
+            }
+            if aborted { continue; }
+            if let Some(c) = unique_dest {
+                if c == *n { continue; } // avoid self-loop cases
+                let mut vec_edges = Vec::with_capacity(aggr.len());
+                for ((p2, l2), s2) in aggr {
+                    vec_edges.push((p2, l2, s2));
+                }
+                single_target_info.insert(*n, (c, vec_edges));
             }
         }
-        if single_exit_info.is_empty() { return false; }
+        if single_target_info.is_empty() { return false; }
 
         #[cfg(not(rustrover))]
         let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Bypass)", total = nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
@@ -2112,7 +2135,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
 
             for ((p1, l1), dm) in &old_children {
                 for (v, s1) in dm {
-                    if let Some((p2, l2, c, s2)) = single_exit_info.get(v) {
+                    if let Some((c, edges_vec)) = single_target_info.get(v) {
                         local_changed = true;
 
                         // Remove old edge u -> v from our temporary new_children map
@@ -2122,16 +2145,17 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
                             new_children.remove(&(*p1, l1.clone()));
                         }
 
-                        // Add new composed edge u -> c
-                        let p_new = p1 + p2;
-                        let l_new = l1 & l2;
-                        let s_new = s1 & s2;
-
-                        if !l_new.is_empty() && !s_new.is_empty() {
-                            new_children.entry((p_new, l_new)).or_default()
-                                .entry(*c)
-                                .and_modify(|s| *s |= &s_new)
-                                .or_insert(s_new.clone());
+                        // Add composed edges u -> c for every outgoing variant of v (=B)
+                        for (p2, l2, s2) in edges_vec {
+                            let p_new = p1 + p2;
+                            let l_new = l1 & l2;
+                            let s_new = s1 & s2;
+                            if !l_new.is_empty() && !s_new.is_empty() {
+                                new_children.entry((p_new, l_new)).or_default()
+                                    .entry(*c)
+                                    .and_modify(|s| *s |= &s_new)
+                                    .or_insert(s_new.clone());
+                            }
                         }
                     }
                 }
