@@ -27,7 +27,7 @@ impl Default for IntermediateTrie3Config {
     fn default() -> Self {
         Self {
             enabled: true,
-            verbose: false,
+            verbose: true,
             prune_unproductive_paths: false,
             contract_noop_chains: false,
             normalize_checkllm_edges: false,
@@ -47,7 +47,7 @@ impl IntermediateTrie3Config {
             contract_noop_chains: false,
             normalize_checkllm_edges: false,
             contract_checkllm_chains: false,
-            structural_deduplication: true,
+            structural_deduplication: false,
             gc: false,
         }
     }
