@@ -4565,16 +4565,13 @@ local_system:
       fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
           // 1. Define the EBNF grammar
           let ebnf_grammar = indoc! {r#"
-              program ::= SEMICOLON_TRIPLE EOF;
-              SEMICOLON_TRIPLE ::= ';' ';' ';';
-              EOF ::= '$';
+              program ::= unary_expression+;
+              unary_expression ::= ( '!' unary_expression | ( '""' ) ) ';'?;
           "#};
 
           // 2. Parse and compile the grammar
           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
-          // println!("Grammar: {}", grammar_definition);
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-          // println!("Parser: {}", compiled_grammar.glr_parser);
 
           // 3. Define the LLM vocabulary
           let mut llm_token_map = LLMTokenMap::new();
@@ -4589,11 +4586,9 @@ local_system:
               LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
               max_original_llm_token_id,
           );
-          // constraint.dump_precomputed1();
-          // constraint.dump_precomputed3();
 
           // 5. Initialize state and get the initial mask
-          let mut state = constraint.init();
+          let state = constraint.init();
           let mask1 = state.get_mask();
           let expected_mask1 = HybridBitset::from_iter(vec![llm_semicolons.0]);
           assert_eq!(
@@ -8821,7 +8816,10 @@ messages:
       ```
     metadata:
       filename: src/test_constraint_basic.rs
-  - user: Keep the grammar and LLM tokens the same, basically. Simplify test_js_like_grammar_initial_mask
+  - user: Clean test_js_like_grammar_initial_mask. Keep the grammar and LLM tokens
+      the same, basically. It's a delicate one. But it produces some unique behavior.
+      Can't go into it now. Just keep the grammar and vocab basically the same. Clean
+      the rest up.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8840,45 +8838,52 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions and the corresponding git diff to simplify the `test_js_like_grammar_initial_mask` test.
+      This task involves cleaning up the `test_js_like_grammar_initial_mask` test case by removing unnecessary comments and print statements, and making minor simplifications.
 
-      The simplification involves changing the EBNF grammar to explicitly require a sequence of three semicolons, which matches the single LLM token `";;;"`, making the test's intent clearer.
+      Here are the step-by-step instructions:
 
-      ### Step-by-step Instructions
+      ### `src/test_constraint_basic.rs`
 
-      In the file `src/test_constraint_basic.rs`, modify the `test_js_like_grammar_initial_mask` function by replacing the EBNF grammar string.
+      1.  **Remove commented-out `println!` calls:**
+          Remove the lines `// println!("Grammar: {}", grammar_definition);` and `// println!("Parser: {}", compiled_grammar.glr_parser);` inside `test_js_like_grammar_initial_mask`.
 
-      1.  **Open** `src/test_constraint_basic.rs`.
-      2.  **Locate** the `test_js_like_grammar_initial_mask` function (around line 1029).
-      3.  **Replace** the existing `ebnf_grammar` definition with the following simplified version:
+      2.  **Remove commented-out `dump_precomputed` calls:**
+          Remove the lines `// constraint.dump_precomputed1();` and `// constraint.dump_precomputed3();` inside `test_js_like_grammar_initial_mask`.
 
-          ```rust
-          // 1. Define the EBNF grammar
-          let ebnf_grammar = indoc! {r#"
-              program ::= SEMICOLON_TRIPLE EOF;
-              SEMICOLON_TRIPLE ::= ';' ';' ';';
-              EOF ::= '$';
-          "#};
-          ```
-
-      ### Git Diff
+      3.  **Remove unnecessary `mut` from `state`:**
+          Change `let mut state = constraint.init();` to `let state = constraint.init();` since `state` is only used to call `get_mask()` and is not mutated via `commit()`.
 
       ```diff
       diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
       --- a/src/test_constraint_basic.rs
       +++ b/src/test_constraint_basic.rs
-      @@ -1029,8 +1029,9 @@
-       fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
-           // 1. Define the EBNF grammar
-           let ebnf_grammar = indoc! {r#"
-      -        program ::= unary_expression+;
-      -        unary_expression ::= ( '!' unary_expression | ( '""' ) ) ';'?;
-      +        program ::= SEMICOLON_TRIPLE EOF;
-      +        SEMICOLON_TRIPLE ::= ';' ';' ';';
-      +        EOF ::= '$';
-           "#};
+      @@ -1124,14 +1124,10 @@
        
            // 2. Parse and compile the grammar
+           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
+      -    // println!("Grammar: {}", grammar_definition);
+           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -    // println!("Parser: {}", compiled_grammar.glr_parser);
+       
+           // 3. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+           let llm_semicolons = LLMTokenID(0);
+           llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
+           let max_original_llm_token_id = 0;
+       
+      @@ -1143,10 +1139,8 @@
+               LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+           );
+      -    // constraint.dump_precomputed1();
+      -    // constraint.dump_precomputed3();
+       
+           // 5. Initialize state and get the initial mask
+      -    let mut state = constraint.init();
+      +    let state = constraint.init();
+           let mask1 = state.get_mask();
+           let expected_mask1 = HybridBitset::from_iter(vec![llm_semicolons.0]);
+           assert_eq!(
       ```
     metadata:
   - user: |
@@ -8890,6 +8895,7 @@ messages:
       Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
       Successfully applied patch and wrote to src/test_constraint_basic.rs.
     metadata:
-  - user: 'Changes committed with message: "Simplify EBNF grammar in test_js_like_grammar_initial_mask"'
+  - user: 'Changes committed with message: "Clean up test_js_like_grammar_initial_mask
+      by removing commented debug output and unnecessary mutability"'
     metadata:
 ...
