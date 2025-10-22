@@ -28,12 +28,12 @@ impl Default for IntermediateTrie3Config {
         Self {
             enabled: true,
             verbose: true,
-            prune_unproductive_paths: false,
-            contract_noop_chains: false,
-            normalize_checkllm_edges: false,
-            contract_checkllm_chains: false,
+            prune_unproductive_paths: true,
+            contract_noop_chains: true,
+            normalize_checkllm_edges: true,
+            contract_checkllm_chains: true,
             structural_deduplication: true,
-            gc: false,
+            gc: true,
         }
     }
 }
