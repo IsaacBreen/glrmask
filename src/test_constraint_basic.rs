@@ -1723,25 +1723,29 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     llm_token_map.insert(b"'';".to_vec(), llm_empty_string_semicolon);
     let max_original_llm_token_id = 3;
 
-    // 4. Create the GrammarConstraint
-    // let constraint = GrammarConstraint::from_compiled_grammar(
-    //     compiled_grammar,
-    //     llm_token_map,
-    //     LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
-    //     max_original_llm_token_id,
-    // );
 
-    let mut config = GrammarConstraintConfig::default();
-    let loaded_pc0 = None;
-
-    let constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
-        compiled_grammar.tokenizer,
-        compiled_grammar.glr_parser,
-        llm_token_map,
-        compiled_grammar.definition.terminal_to_group_id().clone(),
+    let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar.clone(),
+        llm_token_map.clone(),
+        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
-        &config,
-        loaded_pc0,
+    );
+    let mut s = grammar_constraint.init();
+    s.commit_bytes(b"x");
+    println!("HERE!!");
+    println!("{}", compiled_grammar);
+    dbg!(&llm_token_map);
+    dbg!(&max_original_llm_token_id);
+    println!("MASK: {:?}", s.get_mask());
+
+
+
+    // 4. Create the GrammarConstraint
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map,
+        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+        max_original_llm_token_id,
     );
 
     // 5. Initialize state and get the initial mask
