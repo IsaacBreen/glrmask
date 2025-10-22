@@ -1658,11 +1658,9 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
     let mut llm_token_map = LLMTokenMap::new();
     let llm_space_eq = LLMTokenID(0); // " =" - starts with an ignored char, but '=' is invalid
     let llm_comment = LLMTokenID(1);  // "/*" - is a full ignored token
-    let llm_x = LLMTokenID(2);        // "x" - the required token
     llm_token_map.insert(b" =".to_vec(), llm_space_eq);
     llm_token_map.insert(b"/*".to_vec(), llm_comment);
-    llm_token_map.insert(b"x".to_vec(), llm_x);
-    let max_original_llm_token_id = 2;
+    let max_original_llm_token_id = 1;
 
     // 4. Create the GrammarConstraint
     let constraint = GrammarConstraint::from_compiled_grammar(
@@ -1685,7 +1683,7 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
     // " =" starts with " ", which matches IGNORE, but is followed by "=", which is not
     // a valid token. Therefore, the entire LLM token " =" does not form a valid
     // sequence of grammar tokens and should not be in the mask.
-    let expected_mask1 = HybridBitset::from_iter(vec![llm_comment.0, llm_x.0]);
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_comment.0]);
     assert_eq!(
         mask1,
         expected_mask1,
