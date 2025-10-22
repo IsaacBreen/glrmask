@@ -1687,7 +1687,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let llm_semicolons = LLMTokenID(0);
     let llm_empty_string_semicolon = LLMTokenID(1);
     llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
-    llm_token_map.insert(b"\"\";".to_vec(), llm_empty_string_semicolon);
+    llm_token_map.insert(b"XX;".to_vec(), llm_empty_string_semicolon);
     let max_original_llm_token_id = 3;
 
     // 4. Create the GrammarConstraint
@@ -1705,13 +1705,13 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let mask1 = state.get_mask();
 
     let mut state2 = state.clone();
-    state2.commit_bytes(b"\"\"");
+    state2.commit_bytes(b"XX");
     assert!(state2.is_active());
     let mut state2 = state.clone();
-    state2.commit_bytes(b"\"\";;;");
+    state2.commit_bytes(b"XX;;;");
     assert!(!state2.is_active());
     let mut state2 = state.clone();
-    state2.commit_bytes(b"\"\"\"\";");
+    state2.commit_bytes(b"XXXX;");
     assert!(state2.is_active());
 
     // 6. Assert the expected initial mask
@@ -1721,7 +1721,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         mask1,
         expected_mask1,
-        "Initial mask should allow 'x', `\"\"`, and `!--`"
+        "Initial mask should allow 'x', `XX`, and `!--`"
     );
 
     // 7. Commit the invalid sequence "x!--" as bytes
@@ -1730,7 +1730,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // so the state should become inactive.
     println!("GSS Forest BEFORE commit:");
     // state.print_gss();
-    state.commit_bytes(b"\"\"");
+    state.commit_bytes(b"XX");
     println!("GSS Forest AFTER commit:");
     // state.print_gss();
     let mask2 = state.get_mask();
