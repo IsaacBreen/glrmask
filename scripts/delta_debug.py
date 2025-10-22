@@ -70,7 +70,17 @@ def run_test_with_vocab(vocab_list: List[str]) -> bool:
             encoding='utf-8'
         )
         output = result.stdout + result.stderr
-        return MISMATCH_INDICATOR in output
+        mismatch_found = MISMATCH_INDICATOR in output
+        if not mismatch_found:
+            # Added for debugging: print command and output if the check fails.
+            print("\n--- DEBUG: Mismatch indicator not found in output ---")
+            print(f"Command executed:\n{command}")
+            print(f"\nReturn code: {result.returncode}")
+            print("\n--- Combined STDOUT and STDERR ---")
+            print(output)
+            print("--- END DEBUG ---")
+
+        return mismatch_found
     finally:
         os.remove(temp_vocab_path)
         if os.path.exists(temp_constraint_path):
