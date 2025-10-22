@@ -1633,11 +1633,9 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar
-    // let ebnf_grammar = fs::read_to_string("src/js_simplified6.ebnf")?;
-    let ebnf_grammar = fs::read_to_string("/Users/isaacbreen/Projects2/temp/.temp.ebnf")?;
     let ebnf_grammar = indoc! {r#"
-        program ::= unary_expression+;
-        unary_expression ::= ( '!' unary_expression | ( '""' ) ) ';'?;
+        program ::= statement+;
+        statement ::= 'a' 'b'? ;
     "#};
 
     // 2. Parse and compile the grammar
@@ -1648,9 +1646,11 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
-    let llm_semicolons = LLMTokenID(0);
-    llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
-    let max_original_llm_token_id = 0;
+    let llm_a = LLMTokenID(0);
+    let llm_ab = LLMTokenID(1);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b"ab".to_vec(), llm_ab);
+    let max_original_llm_token_id = 1;
 
     // 4. Create the GrammarConstraint
     let constraint = GrammarConstraint::from_compiled_grammar(
@@ -1665,11 +1665,10 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
     let mask1 = state.get_mask();
-    let expected_mask1 = HybridBitset::from_iter(vec![llm_semicolons.0]);
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_ab.0]);
     assert_eq!(
         mask1,
-        expected_mask1,
-        "Initial mask should allow 'x', `\"\"`, and `!--`"
+        expected_mask1
     );
 
     Ok(())
