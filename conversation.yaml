@@ -9768,6 +9768,31 @@ local_system:
                   Vec<((isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents)>,
               );
 
+              fn pretty_print_path(path: &PrecomputeTrie3Path) -> String {
+                  let (root_contents, edges) = path;
+                  let mut s = String::new();
+                  s.push_str(&format!(
+                      "[Root] end: {}, live_tokens: {:?}\n",
+                      root_contents.end, root_contents.live_tokens
+                  ));
+
+                  for (i, (edge_key, state_bv, dest_contents)) in edges.iter().enumerate() {
+                      let (pop, llm_bv) = edge_key;
+                      s.push_str("  |\n");
+                      s.push_str(&format!(
+                          "  +-- Edge(pop={}): llm_tokens={:?}, state_ids={:?}\n",
+                          pop, llm_bv, state_bv
+                      ));
+                      s.push_str("  |\n");
+                      s.push_str("  V\n");
+                      s.push_str(&format!(
+                          "[Node {}] end: {}, live_tokens: {:?}\n",
+                          i + 1, dest_contents.end, dest_contents.live_tokens
+                      ));
+                  }
+                  s
+              }
+
               fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
                   let (root_contents, edges) = path;
                   let mut llm_intersection = LLMTokenBV::max_ones();
@@ -9876,8 +9901,8 @@ local_system:
                   for (pos, sids) in &states {
                       println!("  pos {}: {:?}", pos, sids);
                   }
-                  println!("\n--- Failing Path (Raw) ---");
-                  println!("{:#?}", path);
+                  println!("\n--- Failing Path (Formatted) ---");
+                  println!("{}", pretty_print_path(&path));
 
                   // Minimize the example
                   let (mut arena_a, mut roots_a_vec) = if a_is_original { (original_arena.deep_clone(), original_roots_vec.clone()) } else { (trie3_god.deep_clone(), optimized_roots_vec.clone()) };
@@ -9900,8 +9925,8 @@ local_system:
                   for (pos, sids) in &states {
                       println!("  pos {}: {:?}", pos, sids);
                   }
-                  println!("\n--- Failing Path (Raw) ---");
-                  println!("{:#?}", path);
+                  println!("\n--- Failing Path (Formatted) ---");
+                  println!("{}", pretty_print_path(&path));
                   println!("\n--- Trie A (path SHOULD exist here) ---");
                   println!("{}", Trie::pretty_print(&arena_a, &roots_a_vec));
                   println!("\n--- Trie B (path should NOT exist here) ---");
@@ -18394,5 +18419,193 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Correct Trie path equivalence comparison
       logic with semantic validation and enhanced failure reporting"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      --- Failing Path (Raw) ---
+      (
+          PrecomputedNodeContents {
+              end: false,
+              live_tokens: HybridBitset {
+                  inner: 0..=1,
+              },
+          },
+          [
+              (
+                  (
+                      0,
+                      HybridBitset {
+                          inner: 0..=1,
+                      },
+                  ),
+                  HybridBitset {
+                      inner: 0..=usize::MAX,
+                  },
+                  PrecomputedNodeContents {
+                      end: false,
+                      live_tokens: HybridBitset {
+                          inner: ,
+                      },
+                  },
+              ),
+          ],
+      )
+    metadata:
+  - user: Still hard to read this. Make it pretty
+    metadata:
+  - assistant: |-
+      Of course. The debug output for failing paths can be hard to parse. I'll introduce a pretty-printing function to format the path in a more structured and readable way.
+
+      Here are the step-by-step instructions, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `src/constraint_precompute3_utils.rs`**.
+
+      2.  **Navigate to the `optimize_trie3_size` function**. Inside this function, find the `if let (Some(original_arena), Some(original_roots)) = ...` block where the stochastic equivalence check is performed.
+
+      3.  **Add a new helper function `pretty_print_path`**. This function will format the raw path data into a readable string. Insert the following code right after the `type PrecomputeTrie3Path = ...;` line:
+
+          ```rust
+                  fn pretty_print_path(path: &PrecomputeTrie3Path) -> String {
+                      let (root_contents, edges) = path;
+                      let mut s = String::new();
+                      s.push_str(&format!(
+                          "[Root] end: {}, live_tokens: {:?}\n",
+                          root_contents.end, root_contents.live_tokens
+                      ));
+          
+                      for (i, (edge_key, state_bv, dest_contents)) in edges.iter().enumerate() {
+                          let (pop, llm_bv) = edge_key;
+                          s.push_str("  |\n");
+                          s.push_str(&format!(
+                              "  +-- Edge(pop={}): llm_tokens={:?}, state_ids={:?}\n",
+                              pop, llm_bv, state_bv
+                          ));
+                          s.push_str("  |\n");
+                          s.push_str("  V\n");
+                          s.push_str(&format!(
+                              "[Node {}] end: {}, live_tokens: {:?}\n",
+                              i + 1, dest_contents.end, dest_contents.live_tokens
+                          ));
+                      }
+                      s
+                  }
+          ```
+
+      4.  **Update the failure message to use the new pretty-printer**. Locate the `if let Some(path) = failing_path` block. You will modify two `println!` statements inside it.
+
+          *   Find the first instance of `println!("\n--- Failing Path (Raw) ---");` and the line that follows it.
+          *   **Replace** these two lines:
+              ```rust
+                          println!("\n--- Failing Path (Raw) ---");
+                          println!("{:#?}", path);
+              ```
+              with these lines to call the new function and update the heading:
+              ```rust
+                          println!("\n--- Failing Path (Formatted) ---");
+                          println!("{}", pretty_print_path(&path));
+              ```
+
+          *   Find the second instance inside the `"--- MINIMIZED FAILING EXAMPLE ---"` section.
+          *   **Replace** these two lines:
+              ```rust
+                          println!("\n--- Failing Path (Raw) ---");
+                          println!("{:#?}", path);
+              ```
+              with these lines:
+              ```rust
+                          println!("\n--- Failing Path (Formatted) ---");
+                          println!("{}", pretty_print_path(&path));
+              ```
+
+      ### Git Diff
+
+      Here is the git diff to apply the changes directly.
+
+      ```diff
+      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 6119842..74f6390 100644
+      --- a/src/constraint_precompute3_utils.rs
+      +++ b/src/constraint_precompute3_utils.rs
+      @@ -405,6 +405,29 @@
+                   Vec<((isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents)>,
+               );
+       
+      +        fn pretty_print_path(path: &PrecomputeTrie3Path) -> String {
+      +            let (root_contents, edges) = path;
+      +            let mut s = String::new();
+      +            s.push_str(&format!(
+      +                "[Root] end: {}, live_tokens: {:?}\n",
+      +                root_contents.end, root_contents.live_tokens
+      +            ));
+      +
+      +            for (i, (edge_key, state_bv, dest_contents)) in edges.iter().enumerate() {
+      +                let (pop, llm_bv) = edge_key;
+      +                s.push_str("  |\n");
+      +                s.push_str(&format!(
+      +                    "  +-- Edge(pop={}): llm_tokens={:?}, state_ids={:?}\n",
+      +                    pop, llm_bv, state_bv
+      +                ));
+      +                s.push_str("  |\n");
+      +                s.push_str("  V\n");
+      +                s.push_str(&format!(
+      +                    "[Node {}] end: {}, live_tokens: {:?}\n",
+      +                    i + 1, dest_contents.end, dest_contents.live_tokens
+      +                ));
+      +            }
+      +            s
+      +        }
+      +
+               fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
+                   let (root_contents, edges) = path;
+                   let mut llm_intersection = LLMTokenBV::max_ones();
+      @@ -493,8 +516,8 @@
+                   for (pos, sids) in &states {
+                       println!("  pos {}: {:?}", pos, sids);
+                   }
+      -            println!("\n--- Failing Path (Raw) ---");
+      -            println!("{:#?}", path);
+      +            println!("\n--- Failing Path (Formatted) ---");
+      +            println!("{}", pretty_print_path(&path));
+       
+                   // Minimize the example
+                   let (mut arena_a, mut roots_a_vec) = if a_is_original { (original_arena.deep_clone(), original_roots_vec.clone()) } else { (trie3_god.deep_clone(), optimized_roots_vec.clone()) };
+      @@ -515,8 +538,8 @@
+                   for (pos, sids) in &states {
+                       println!("  pos {}: {:?}", pos, sids);
+                   }
+      -            println!("\n--- Failing Path (Raw) ---");
+      -            println!("{:#?}", path);
+      +            println!("\n--- Failing Path (Formatted) ---");
+      +            println!("{}", pretty_print_path(&path));
+                   println!("\n--- Trie A (path SHOULD exist here) ---");
+                   println!("{}", Trie::pretty_print(&arena_a, &roots_a_vec));
+                   println!("\n--- Trie B (path should NOT exist here) ---");
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_utils.rs
+      Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor: Add path pretty-printing utility
+      and use it in failure reporting"'
     metadata:
 ...

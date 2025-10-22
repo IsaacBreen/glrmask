@@ -407,6 +407,31 @@ pub fn optimize_trie3_size(
             Vec<((isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents)>,
         );
 
+        fn pretty_print_path(path: &PrecomputeTrie3Path) -> String {
+            let (root_contents, edges) = path;
+            let mut s = String::new();
+            s.push_str(&format!(
+                "[Root] end: {}, live_tokens: {:?}\n",
+                root_contents.end, root_contents.live_tokens
+            ));
+
+            for (i, (edge_key, state_bv, dest_contents)) in edges.iter().enumerate() {
+                let (pop, llm_bv) = edge_key;
+                s.push_str("  |\n");
+                s.push_str(&format!(
+                    "  +-- Edge(pop={}): llm_tokens={:?}, state_ids={:?}\n",
+                    pop, llm_bv, state_bv
+                ));
+                s.push_str("  |\n");
+                s.push_str("  V\n");
+                s.push_str(&format!(
+                    "[Node {}] end: {}, live_tokens: {:?}\n",
+                    i + 1, dest_contents.end, dest_contents.live_tokens
+                ));
+            }
+            s
+        }
+
         fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
             let (root_contents, edges) = path;
             let mut llm_intersection = LLMTokenBV::max_ones();
@@ -515,8 +540,8 @@ pub fn optimize_trie3_size(
             for (pos, sids) in &states {
                 println!("  pos {}: {:?}", pos, sids);
             }
-            println!("\n--- Failing Path (Raw) ---");
-            println!("{:#?}", path);
+            println!("\n--- Failing Path (Formatted) ---");
+            println!("{}", pretty_print_path(&path));
 
             // Minimize the example
             let (mut arena_a, mut roots_a_vec) = if a_is_original { (original_arena.deep_clone(), original_roots_vec.clone()) } else { (trie3_god.deep_clone(), optimized_roots_vec.clone()) };
@@ -539,8 +564,8 @@ pub fn optimize_trie3_size(
             for (pos, sids) in &states {
                 println!("  pos {}: {:?}", pos, sids);
             }
-            println!("\n--- Failing Path (Raw) ---");
-            println!("{:#?}", path);
+            println!("\n--- Failing Path (Formatted) ---");
+            println!("{}", pretty_print_path(&path));
             println!("\n--- Trie A (path SHOULD exist here) ---");
             println!("{}", Trie::pretty_print(&arena_a, &roots_a_vec));
             println!("\n--- Trie B (path should NOT exist here) ---");
