@@ -71,7 +71,7 @@ def run_test_with_vocab(vocab_list: List[str]) -> bool:
             encoding='utf-8'
         )
         output = result.stdout + result.stderr
-        mismatch_found = re.search(MISMATCH_INDICATOR, output)
+        mismatch_found = bool(re.search(MISMATCH_INDICATOR, output))
         if not mismatch_found:
             # Added for debugging: print command and output if the check fails.
             print("\n--- DEBUG: Mismatch indicator not found in output ---")

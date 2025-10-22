@@ -273,7 +273,7 @@ local_system:
                   encoding='utf-8'
               )
               output = result.stdout + result.stderr
-              mismatch_found = re.search(MISMATCH_INDICATOR, output)
+              mismatch_found = bool(re.search(MISMATCH_INDICATOR, output))
               if not mismatch_found:
                   # Added for debugging: print command and output if the check fails.
                   print("\n--- DEBUG: Mismatch indicator not found in output ---")
@@ -433,7 +433,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -1010,5 +1010,474 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Implement parallel vocabulary minimization
       using multiprocessing Pool and switch mismatch indicator check to regex"'
+    metadata:
+  - user: |-
+      Diff of scripts/delta_debug.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      python scripts/delta_debug.py
+      --- Vocabulary Minimizer (Fast Delta-Debugging Method) ---
+      Results will be saved in: 'delta_debug_results/2025-10-22_15-37-02'
+      Loaded original vocabulary with 14605 tokens.
+
+      Step 1: Verifying that the original vocabulary causes a mismatch...
+      ✅ Success: Original vocabulary confirmed to cause a mismatch.
+
+      Step 2: Starting minimization from 14605 tokens using chunk removal...
+      Using 5 parallel processes.
+
+      --- Testing with chunk size: 7302 ---
+      Testing removal of 3 chunks in parallel...
+
+      --- DEBUG: Mismatch indicator not found in output ---
+      Command executed:
+      python scripts/compile.py     --grammar src/js_simplified2.ebnf     --output /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz     --vocab-path /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpiov5hwqp.json     && REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 CONSTRAINT_FILE="/var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz" CODE_FILE=./src/example_code8.js bash python/run_benchmarks.sh     python/aug25/models/bruteforce_model.py     python/aug25/models/rust_model.py
+
+      Return code: 0
+
+      --- Combined STDOUT and STDERR ---
+      Loading grammar from: "src/js_simplified2.ebnf"
+      [DEBUG] 2] src/interface/interface.rs:717: Augmented start_production_name: "start'"
+      Removing always-null terminals: {}
+      Processing may-be-null terminals: {}
+      Compiling grammar...
+      [DEBUG] 2] src/interface/interface.rs:1081: Building tokenizer from definition
+      [DEBUG] 2] src/interface/interface.rs:1086: Building GLR parser from definition
+      [DEBUG] 2] src/glr/table.rs:1413: Validating initial grammar
+      [DEBUG] 2] src/glr/table.rs:1419: Removing productions with undefined non-terminals
+      [DEBUG] 2] src/glr/analyze.rs:728: Resolving direct right-recursion for 'unary_expression', creating new non-terminal 'unary_expression_rr'
+      [DEBUG] 2] src/glr/analyze.rs:736:   Transforming non-recursive rule 'unary_expression -> call_expression' -> 'unary_expression -> unary_expression_rr call_expression'
+      [DEBUG] 2] src/glr/analyze.rs:746:   Transforming recursive rule 'unary_expression -> unary_expression[0] unary_expression' -> 'unary_expression_rr -> unary_expression_rr unary_expression[0]'
+      [DEBUG] 2] src/glr/analyze.rs:750:   Adding new epsilon rule: 'unary_expression_rr ->'
+      [DEBUG] 2] src/glr/table.rs:1455: Stage 1
+      [DEBUG] 2] src/glr/table.rs:1458: Stage 2
+      [DEBUG] 2] src/glr/table.rs:1461: Stage 3
+      [DEBUG] 2] src/glr/table.rs:1464: Stage 4
+      [DEBUG] 2] src/glr/table.rs:1467: Stage 5
+      [DEBUG] 2] src/glr/table.rs:1470: Stage 6
+      [DEBUG] 2] src/glr/table.rs:1473: Stage 7
+      [DEBUG] 2] src/glr/table.rs:1476: Stage 8
+      [DEBUG] 2] src/glr/table.rs:1480: Stage 9: Precomputing substring gotos
+      [DEBUG] 2] src/glr/table.rs:1483: Stage 10: Precomputing reduce goto map
+      [DEBUG] 2] src/glr/table.rs:1486: Finalizing table
+
+      --- Combined States Statistics ---
+      Total combined states: 40
+      Sole Shift actions: Total: 179, Min/Max per state: 0/31, Avg per state: 4.47
+        Distribution (count -> #states): 0: 18, 1: 5, 2: 3, 3: 1, 4: 2, 10: 5, 11: 1, 16: 3, 17: 1, 31: 1
+      Sole Reduce actions: Total: 3403, Min/Max per state: 0/1791, Avg per state: 85.08
+        Distribution (count -> #states): 0: 6, 1: 1, 2: 1, 4: 1, 20: 2, 31: 3, 32: 1, 35: 1, 38: 6, 42: 1, 54: 1, 56: 1, 57: 3, 60: 2, 62: 1, 64: 1, 77: 1, 83: 1, 86: 2, 88: 1, 93: 1, 95: 1, 1791: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 40
+      Goto actions: Total: 192, Min/Max per state: 0/45, Avg per state: 4.80
+        Distribution (count -> #states): 0: 18, 1: 6, 2: 4, 3: 1, 6: 1, 7: 1, 8: 1, 10: 2, 15: 1, 18: 3, 20: 1, 45: 1
+      ------------------------------------
+      Number of combined states: 40
+      [DEBUG] 2] src/glr/table.rs:1495: Done generating GLR parser
+      Grammar compiled successfully.
+      --- Stored Below-Bottom Cache Statistics ---
+      Cache is empty.
+      Loading vocabulary from: "/var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpto1g5ryc.json"
+      Vocabulary loaded (7303 tokens, max ID: 7302).
+
+      Constructing GrammarConstraint...
+      [DEBUG] 2] src/equivalence_analysis_finite_automata.rs:274: Starting LLM token equivalence analysis (on-demand) for 7303 strings...
+      [DEBUG] 2] src/constraint.rs:948: LLM Token Equivalence Analysis:
+      [DEBUG] 2] src/constraint.rs:949:   - Original LLM tokens: 7303
+      [DEBUG] 2] src/constraint.rs:950:   - Equivalence classes: 518
+      [DEBUG] 2] src/constraint.rs:952:   - Reduction factor: 14.10x
+      [DEBUG] 2] src/constraint.rs:969:   - Class size distribution (top 10 largest):
+          - size 1174: 1 classes
+          - size 882: 1 classes
+          - size 838: 1 classes
+          - size 665: 1 classes
+          - size 336: 1 classes
+          - size 329: 1 classes
+          - size 319: 1 classes
+          - size 212: 1 classes
+          - size 139: 1 classes
+          - size 137: 1 classes
+          - ...
+      [DEBUG] 2] src/constraint.rs:1296: Building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree (fast builder)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:303: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:307: Done computing reachable IDs in 90.291µs
+      [DEBUG] 2] src/constraint.rs:1298: Done building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/constraint.rs:1304: Computing possible_matches for all 113 tokenizer states
+      [DEBUG] 2] src/constraint.rs:1314: Finished computing possible_matches
+      [DEBUG] 2] src/constraint.rs:1317: Building state_map_by_llm and terminal_map_by_llm
+      [DEBUG] 2] src/constraint.rs:1319: Built state_map_by_llm with 518 entries
+      [DEBUG] 2] src/constraint.rs:1325: Computing terminal follow sets
+      [DEBUG] 2] src/constraint.rs:1345: Computed terminal_follow_map_ids with 30 entries.
+      [DEBUG] 2] src/constraint.rs:2691: Building vocab prefix tree
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree (fast builder)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:303: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:307: Done computing reachable IDs in 86.458µs
+      [DEBUG] 2] src/constraint.rs:2693: Done building vocab prefix tree
+      [DEBUG] 2] src/constraint.rs:2703: Created trie1 roots for 113 tokenizer states
+      [DEBUG] 2] src/constraint.rs:2705: Counting vocab nodes for progress bar...
+      [DEBUG] 2] src/constraint.rs:2707: Counted 519 vocab nodes
+      [DEBUG] 2] src/constraint.rs:2720: Created trie1 leaf node
+      [DEBUG] 2] src/constraint.rs:2847: Starting precompute DFS
+
+      --- Precomputer1 DFS Stats ---
+      Total pending edges processed: 0
+      Unique src nodes: 0
+      Unique dst nodes: 0
+      Unique keys: 0
+      --- End Precomputer1 DFS Stats ---
+
+      [DEBUG] 2] src/constraint.rs:2858: Finished precompute DFS
+      [DEBUG] 2] src/constraint.rs:2861: Precomputation complete
+      [DEBUG] 2] src/constraint_extra.rs:1039: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1150: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 127 unique nodes, of which
+          - 113 are roots
+          - 14 are non-roots, of which
+              - 13 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 127
+        Total Edges: 383
+          Edges with None Key: 0
+          Edges with Some Key: 383
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    1.51
+        Average edge occupancy for None-key edges:    0.00
+        Total ranges in all HybridBitsets: 2229
+      [DEBUG] 2] src/constraint.rs:1994: Precomputing Trie 3 (template-driven)...
+
+      --- Intermediate Trie3 Template Statistics ---
+      Terminal Name             ID         Nodes      Edges
+      ------------------------- ----- ---------- ----------
+      'EOF'                     0           1272       2086
+      'IDENTIFIER'              1           1226       2000
+      'IGNORE'                  2              3          2
+      'NUMERIC_LITERAL'         3           1208       1976
+      'STRING_LITERAL'          4           1208       1976
+      '';''                     5            632       1028
+      ''{''                     6           1131       1876
+      ''}''                     7           1272       2086
+      ''let''                   8           1131       1876
+      ''=''                     9            324        477
+      ''if''                    10          1131       1876
+      ''(''                     11          1010       1617
+      '')''                     12           685       1097
+      ''else''                  13          1119       1860
+      ''while''                 14          1131       1876
+      ''function''              15          1131       1876
+      '',''                     16           644       1043
+      ''return''                17          1131       1876
+      ''==''                    18           316        466
+      ''!=''                    19           316        466
+      ''<''                     20           316        466
+      ''>''                     21           316        466
+      ''+''                     22           235        339
+      ''-''                     23           894       1394
+      ''*''                     24           163        227
+      ''/''                     25           163        227
+      ''!''                     26          1208       1976
+      ''.''                     27            70         86
+      ''this''                  28          1208       1976
+      ''null''                  29          1208       1976
+      ''true''                  30          1208       1976
+      ''false''                 31          1208       1976
+      --------------------------------------------
+
+      Union Across All Templates:
+        Unique nodes: 26218
+        Total edges: 42521
+        Nodes shared by >= 2 templates: 0 (0.0%)
+      --------------------------------------------
+
+      [DEBUG] 2] src/constraint.rs:2117: Entering precompute3 special_map_grouped
+      [DEBUG] 2] src/constraint.rs:2223: Optimizing intermediate trie3...
+      [DEBUG] 2] src/constraint.rs:2249: Processing and rebuilding trie3 paths...
+      [DEBUG] 2] src/constraint.rs:2265: Converting intermediate trie3 to final Trie3 format...
+      [DEBUG] 2] src/constraint.rs:2280: Finished precomputing Trie 3.
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 162759 unique nodes, of which
+          - 113 are roots
+          - 162646 are non-roots, of which
+              - 144337 are internal (non-root, non-leaf)
+              - 18309 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 162759
+        Total Edges: 279653
+        Nodes with End Marker: 1
+        Average edge fanout:    1.92
+        Total ranges in all HybridBitsets: 513822
+      ---------------------------------
+      GrammarConstraint constructed successfully.
+      Saving GrammarConstraint to: "/var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz"
+      Successfully saved constraint to "/var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz"
+      Loading vocabulary from local path: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpiov5hwqp.json
+      Loaded vocabulary is a list of strings, converting to a dictionary (7303 tokens).
+      Temporary vocabulary saved to: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpto1g5ryc.json
+      Building compiler with 'cargo build --release'...
+      Build successful.
+
+      Running compiler: ENABLE_PROGRESS_BAR=1 target/release/grammar-compiler --grammar src/js_simplified2.ebnf --vocab /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpto1g5ryc.json --output /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz
+      Cleaned up temporary vocabulary file.
+      Detected legacy model-only syntax. Using CONSTRAINT_FILE env var.
+      Benchmark results will be saved in: benchmark_results/2025-10-22_15-38-52
+      Benchmark pairs: python/aug25/models/bruteforce_model.py:/var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz python/aug25/models/rust_model.py:/var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz
+      Code: ./src/example_code8.js
+      Repeat count: 1
+      Aggregation: min
+      ---
+      Skipping C++ extension build (SKIP_CPP_BUILD=1).
+      ---
+      Automating Rust module build...
+        Building Rust modules with maturin...
+      ✏️  Setting installed package as editable
+      Rust module build complete.
+      ---
+      Starting benchmark runs...
+
+      >>> Running benchmark for: bruteforce_model.py with js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz
+      python -m python.aug25.benchmark_runner --code ./src/example_code8.js --constraint-file /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz --model python/aug25/models/bruteforce_model.py --output benchmark_results/2025-10-22_15-38-52 --repeat 1
+
+      --- Combined States Statistics ---
+      Total combined states: 40
+      Sole Shift actions: Total: 179, Min/Max per state: 0/31, Avg per state: 4.47
+        Distribution (count -> #states): 0: 18, 1: 5, 2: 3, 3: 1, 4: 2, 10: 5, 11: 1, 16: 3, 17: 1, 31: 1
+      Sole Reduce actions: Total: 3403, Min/Max per state: 0/1791, Avg per state: 85.08
+        Distribution (count -> #states): 0: 6, 1: 1, 2: 1, 4: 1, 20: 2, 31: 3, 32: 1, 35: 1, 38: 6, 42: 1, 54: 1, 56: 1, 57: 3, 60: 2, 62: 1, 64: 1, 77: 1, 83: 1, 86: 2, 88: 1, 93: 1, 95: 1, 1791: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 40
+      Goto actions: Total: 192, Min/Max per state: 0/45, Avg per state: 4.80
+        Distribution (count -> #states): 0: 18, 1: 6, 2: 4, 3: 1, 6: 1, 7: 1, 8: 1, 10: 2, 15: 1, 18: 3, 20: 1, 45: 1
+      ------------------------------------
+      --- Setting up benchmark environment ---
+      Loading pre-compiled grammar constraint from: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz
+      Loading model from: python/aug25/models/bruteforce_model.py
+      Model loaded in 5.2312 seconds.
+      Loading and tokenizing code from: src/example_code8.js
+
+      >>> Benchmark for  failed with exit code 1. Skipping.
+
+      >>> Running benchmark for: rust_model.py with js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz
+      python -m python.aug25.benchmark_runner --code ./src/example_code8.js --constraint-file /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz --model python/aug25/models/rust_model.py --output benchmark_results/2025-10-22_15-38-52 --repeat 1
+
+      --- Combined States Statistics ---
+      Total combined states: 40
+      Sole Shift actions: Total: 179, Min/Max per state: 0/31, Avg per state: 4.47
+        Distribution (count -> #states): 0: 18, 1: 5, 2: 3, 3: 1, 4: 2, 10: 5, 11: 1, 16: 3, 17: 1, 31: 1
+      Sole Reduce actions: Total: 3403, Min/Max per state: 0/1791, Avg per state: 85.08
+        Distribution (count -> #states): 0: 6, 1: 1, 2: 1, 4: 1, 20: 2, 31: 3, 32: 1, 35: 1, 38: 6, 42: 1, 54: 1, 56: 1, 57: 3, 60: 2, 62: 1, 64: 1, 77: 1, 83: 1, 86: 2, 88: 1, 93: 1, 95: 1, 1791: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 40
+      Goto actions: Total: 192, Min/Max per state: 0/45, Avg per state: 4.80
+        Distribution (count -> #states): 0: 18, 1: 6, 2: 4, 3: 1, 6: 1, 7: 1, 8: 1, 10: 2, 15: 1, 18: 3, 20: 1, 45: 1
+      ------------------------------------
+      --- Setting up benchmark environment ---
+      Loading pre-compiled grammar constraint from: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc.json.gz
+      Loading model from: python/aug25/models/rust_model.py
+      Model loaded in 1.1527 seconds.
+      Loading and tokenizing code from: src/example_code8.js
+
+      >>> Benchmark for  failed with exit code 1. Skipping.
+
+      All benchmark runs completed.
+      ---
+      Analyzing results and generating plots...
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-10-22_15-38-52/*.json --baseline bruteforce_model__js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc --output-dir benchmark_results/2025-10-22_15-38-52/analysis --agg-method min --skip-plots
+      Error: No .json files found in the specified paths.
+
+      ---
+      Benchmark analysis complete.
+      Baseline: bruteforce_model__js_constraint_c7c436e8-002f-460b-aa94-881c7387c2dc
+      Summary printed above. Plots are saved in: benchmark_results/2025-10-22_15-38-52/analysis
+      Full JSON results are in: benchmark_results/2025-10-22_15-38-52
+          Blocking waiting for file lock on package cache
+          Blocking waiting for file lock on package cache
+          Blocking waiting for file lock on package cache
+          Blocking waiting for file lock on build directory
+          Finished `release` profile [optimized] target(s) in 0.49s
+
+                                                                                                                                                                                                                        
+      Converting grammar expressions to productions: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:00<00:00, 61326.18it/s]
+      Converting grammar expressions to productions: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:00<00:00, 52344.65it/s]
+                                                                                                                                                                                                                        
+      Traversing edges:  61%|███████████████████████████████████████████████████████████████████████████████████████████▋                                                           | 232/383 [00:00<00:00, 2299.40it/s]
+      Traversing edges: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 383/383 [00:00<00:00, 2031.35it/s]🔗 Found pyo3 bindings
+      🐍 Found CPython 3.12 at /Users/isaacbreen/miniforge3/envs/py312/bin/python
+      warning: unused import: `LeveledGSSStats as CoreLeveledGSSStats`
+       --> src/lib.rs:8:49
+        |
+      8 | use crate::core::{LeveledGSS as CoreLeveledGSS, LeveledGSSStats as CoreLeveledGSSStats, Merge};
+        |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        |
+        = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+      warning: unused variable: `py`
+         --> src/lib.rs:137:23
+          |
+      137 |         fn fmt_subset(py: Python, set: &PySet, max_items: usize) -> PyResult<String> {
+          |                       ^^ help: if this is intentional, prefix it with an underscore: `_py`
+          |
+          = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+      warning: unused variable: `memo`
+         --> src/lib.rs:327:37
+          |
+      327 |     fn apply(&self, func: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
+          |                                     ^^^^ help: if this is intentional, prefix it with an underscore: `_memo`
+
+      warning: unused variable: `memo`
+         --> src/lib.rs:342:42
+          |
+      342 |     fn prune(&self, predicate: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
+          |                                          ^^^^ help: if this is intentional, prefix it with an underscore: `_memo`
+
+      warning: unused variable: `memo`
+         --> src/lib.rs:357:50
+          |
+      357 |     fn apply_and_prune(&self, mutator: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
+          |                                                  ^^^^ help: if this is intentional, prefix it with an underscore: `_memo`
+
+      warning: method `visit_accs` is never used
+          --> src/core.rs:1422:12
+           |
+       555 | impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
+           | ------------------------------------------------------------------------- method in this implementation
+      ...
+      1422 |     pub fn visit_accs<F>(&self, mut f: F)
+           |            ^^^^^^^^^^
+           |
+           = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+      warning: non-local `impl` definition, `impl` blocks should be written at the same level as their item
+         --> src/lib.rs:198:1
+          |
+      198 | #[pymethods]
+          | -^^^^^^^^^^^
+          | |
+          | `PyClassImplCollector` is not local
+          | `PyClassNewTextSignature` is not local
+          | move the `impl` block outside of this function `trampoline` and up 4 bodies
+      199 | impl LeveledGSS {
+          |      ----------
+          |      |
+          |      `LeveledGSS` is not local
+          |      `LeveledGSS` is not local
+          |
+          = note: the attribute macro `pymethods` defines the non-local `impl`, and may need to be changed
+          = note: the attribute macro `pymethods` may come from an old version of the `pyo3_macros` crate, try updating your dependency with `cargo update -p pyo3_macros`
+          = note: an `impl` is never scoped, even when it is nested inside an item, as it may impact type checking outside of that item, which can be the case if neither the trait or the self type are at the same nesting level as the `impl`
+          = note: `#[warn(non_local_definitions)]` on by default
+          = note: this warning originates in the attribute macro `pymethods` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      warning: `leveled_gss_rs` (lib) generated 7 warnings (run `cargo fix --lib -p leveled_gss_rs` to apply 1 suggestion)
+          Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+      📦 Built wheel for CPython 3.12 to /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/.tmpqacUOS/leveled_gss_rs-0.1.0-cp312-cp312-macosx_11_0_arm64.whl
+      🛠 Installed leveled_gss_rs-0.1.0
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 373, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 369, in main
+          run_benchmark(args, run_index=i)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 236, in run_benchmark
+          tokens_with_pos = greedy_tokenizer(code_bytes, id_to_token)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 78, in greedy_tokenizer
+          raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+      ValueError: Failed to tokenize. No token found for prefix: b'x='
+      python/run_benchmarks.sh: line 244: model_to_benchmark: unbound variable
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 373, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 369, in main
+          run_benchmark(args, run_index=i)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 236, in run_benchmark
+          tokens_with_pos = greedy_tokenizer(code_bytes, id_to_token)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 78, in greedy_tokenizer
+          raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+      ValueError: Failed to tokenize. No token found for prefix: b'x='
+      python/run_benchmarks.sh: line 244: model_to_benchmark: unbound variable
+
+      --- END DEBUG ---
+      Traceback (most recent call last):
+        File "/Users/isaacbreen/Projects2/grammars2024/scripts/delta_debug.py", line 222, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/scripts/delta_debug.py", line 161, in main
+          results = pool.map(run_test_with_vocab, tasks)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/multiprocessing/pool.py", line 367, in map
+          return self._map_async(func, iterable, mapstar, chunksize).get()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/multiprocessing/pool.py", line 774, in get
+          raise self._value
+      multiprocessing.pool.MaybeEncodingError: Error sending result: '[<re.Match object; span=(85594, 85673), match='rust_model__js_constraint_5752960a-d150-432e-8c83>]'. Reason: 'TypeError("cannot pickle 're.Match' object")'
+    metadata:
+  - assistant: |-
+      I see what's happening. We've run into two separate issues.
+
+      1.  **The `TypeError`:** The `multiprocessing` library can't handle passing `re.Match` objects between processes. The `run_test_with_vocab` function needs to return a simple boolean (`True` or `False`) instead.
+      2.  **The `ValueError`:** The debug output shows the underlying benchmark is failing with `ValueError: Failed to tokenize. No token found for prefix: b'x='`. This happens when we remove a chunk of the vocabulary that contains essential tokens (like `=`), and the test code can no longer be parsed. This causes the benchmark to crash before it can even check for a mismatch.
+
+      The script is correctly treating the `ValueError` case as "the mismatch didn't happen," which is what we want. However, the `TypeError` is a bug in the script itself that is crashing the whole process.
+
+      I will fix the `TypeError` by ensuring `run_test_with_vocab` returns a boolean.
+
+      ### Step-by-step Instructions
+
+      1.  **Modify `run_test_with_vocab` in `scripts/delta_debug.py`:**
+          I will change the line that checks for the mismatch to explicitly convert the result of `re.search` to a boolean. This will solve the `TypeError` because booleans can be safely passed between processes.
+
+      ### Git Diff
+
+      Here is the git diff to apply the change to `scripts/delta_debug.py`.
+
+      ```diff
+      diff --git a/scripts/delta_debug.py b/scripts/delta_debug.py
+      index 84d8527..575317b 100644
+      --- a/scripts/delta_debug.py
+      +++ b/scripts/delta_debug.py
+      @@ -58,7 +58,7 @@
+                   encoding='utf-8'
+               )
+               output = result.stdout + result.stderr
+      -        mismatch_found = re.search(MISMATCH_INDICATOR, output)
+      +        mismatch_found = bool(re.search(MISMATCH_INDICATOR, output))
+               if not mismatch_found:
+                   # Added for debugging: print command and output if the check fails.
+                   print("\n--- DEBUG: Mismatch indicator not found in output ---")
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/delta_debug.py
+      Applying patch to 'scripts/delta_debug.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/delta_debug.py.
+    metadata:
+  - user: 'Changes committed with message: "Parallelize vocabulary minimization with
+      multiprocessing Pool, use regex for mismatch check, and fix multiprocessing
+      return type"'
     metadata:
 ...
