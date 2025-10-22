@@ -47,7 +47,7 @@ impl IntermediateTrie3Config {
             contract_noop_chains: false,
             normalize_checkllm_edges: false,
             contract_checkllm_chains: false,
-            structural_deduplication: false,
+            structural_deduplication: true,
             gc: false,
         }
     }
@@ -127,11 +127,11 @@ fn build_node_signature(
     // Collect children grouped by edge key, mapped to their current colors.
     let mut edges: Vec<(IntermediateTrie3EdgeKey, Vec<usize>)> = Vec::new();
     for (ek, dsts) in guard.children().iter() {
-        let mut cols: Vec<usize> = dsts
+        // Preserve insertion order of children under a given edge key. Do not sort.
+        let cols: Vec<usize> = dsts
             .keys()
             .map(|d| *color_map.get(d).unwrap_or(&0usize))
             .collect();
-        cols.sort_unstable();
         edges.push((ek.clone(), cols));
     }
     edges.sort(); // ensure deterministic order
@@ -143,8 +143,8 @@ fn build_node_signature(
 struct WLNodeSignature {
     end: bool,
     // edges: in BTreeMap edge-key order already, so no need to re-sort keys here.
-    // Each entry is (interned_edge_key_id, sorted [(child_color, count)]).
-    edges: Vec<(u32, Vec<(usize, u32)>)>,
+    // Each entry is (interned_edge_key_id, child_colors_in_stable_insertion_order).
+    edges: Vec<(u32, Vec<usize>)>,
 }
 
 fn build_node_signature_fast(
@@ -156,22 +156,19 @@ fn build_node_signature_fast(
     let guard = idx.read(god).expect("Invalid index during signature build");
     let end = guard.value.end;
 
-    let mut edges: Vec<(u32, Vec<(usize, u32)>)> = Vec::new();
+    let mut edges: Vec<(u32, Vec<usize>)> = Vec::new();
     for (ek, dsts) in guard.children().iter() {
         let key_id = *key_ids
             .get(ek)
             .expect("edge key missing from interning map");
 
-        // Aggregate child colors to counts instead of sorting many duplicates.
-        let mut counts: HashMap<usize, u32> = HashMap::new();
+        // Preserve insertion order of children under the edge key.
+        let mut seq: Vec<usize> = Vec::with_capacity(dsts.len());
         for (d, _ev) in dsts.iter() {
             let c = *color_map.get(d).expect("color missing for reachable node");
-            *counts.entry(c).or_insert(0) += 1;
+            seq.push(c);
         }
-        let mut vec_counts: Vec<(usize, u32)> = counts.into_iter().collect();
-        // Deterministic order: sort by color id.
-        vec_counts.sort_unstable_by_key(|(c, _)| *c);
-        edges.push((key_id, vec_counts));
+        edges.push((key_id, seq));
     }
     // No need to sort 'edges': guard.children() is already a BTreeMap in key order.
     WLNodeSignature { end, edges }
@@ -636,47 +633,31 @@ fn rewire_to_canonical(
         );
     }
 
-    // Prepare rewiring plan: for each src and edge key, move edges to canonical destination.
-    let mut plan: BTreeMap<
-        IntermediatePrecomputeNode3Index,
-        BTreeMap<IntermediateTrie3EdgeKey, Vec<(IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)>>
-    > = BTreeMap::new();
-
+    // Order-preserving rewiring: for each src and edge key, rebuild the destination list
+    // in insertion order, mapping to canonical destinations and deduplicating only exact
+    // duplicates created by canonicalization (first occurrence wins).
+    let mut edges_rewired = 0usize;
     for src in &reachable {
-        if let Some(r) = src.read(god) {
-            for (ek, dsts) in r.children().iter() {
-                for (dst, _ev) in dsts.iter() {
-                    let c = colors[dst];
-                    let canon_dst = *canon_by_color.get(&c).unwrap();
-                    if canon_dst != *dst {
-                        plan.entry(*src)
-                            .or_default()
-                            .entry(ek.clone())
-                            .or_default()
-                            .push((*dst, canon_dst));
+        if let Some(mut w) = src.write(god) {
+            // Take children and rebuild to preserve insertion order of destinations.
+            let old_children = std::mem::take(w.children_mut());
+            for (ek, dsts) in old_children {
+                let mut seen: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+                let mut new_dsts: OrderedHashMap<IntermediatePrecomputeNode3Index, ()> =
+                    OrderedHashMap::new();
+                for (dst, ev) in dsts.into_iter() {
+                    let c = colors[&dst];
+                    let canon_dst = *canon_by_color.get(&c).expect("canonical missing for color");
+                    if canon_dst != dst {
+                        edges_rewired += 1;
+                    }
+                    // Keep first occurrence to preserve alternative precedence.
+                    if seen.insert(canon_dst) {
+                        new_dsts.insert(canon_dst, ev);
                     }
                 }
-            }
-        }
-    }
-
-    // Apply rewiring plan.
-    let mut edges_rewired = 0usize;
-    for (src, by_key) in plan {
-        if let Some(mut w) = src.write(god) {
-            for (ek, mods) in by_key {
-                if let Some(map) = w.get_mut(&ek) {
-                    for (old_dst, new_dst) in mods {
-                        if old_dst == new_dst {
-                            continue;
-                        }
-                        if let Some(ev) = map.remove(&old_dst) {
-                            // Insert the new edge. This correctly handles cases where multiple children
-                            // are remapped to the same canonical destination.
-                            map.insert(new_dst, ev);
-                            edges_rewired += 1;
-                        }
-                    }
+                if !new_dsts.is_empty() {
+                    w.children_mut().insert(ek, new_dsts);
                 }
             }
         }
