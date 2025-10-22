@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - src/datastructures/trie.rs
     - src/constraint_precompute3_utils.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/datastructures/trie.rs: |
@@ -9768,32 +9768,36 @@ local_system:
                   Vec<((isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents)>,
               );
 
-              let compare = |p1: &PrecomputeTrie3Path, p2: &PrecomputeTrie3Path| -> PathComparison {
-                  fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
-                      let (_root_contents, edges) = path;
-                      let mut llm_intersection = LLMTokenBV::max_ones();
-                      let mut state_checks = BTreeMap::<isize, StateIDBV>::new();
-                      let mut current_pos: isize = 0;
+              fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
+                  let (root_contents, edges) = path;
+                  let mut llm_intersection = LLMTokenBV::max_ones();
+                  let mut state_checks = BTreeMap::<isize, StateIDBV>::new();
+                  let mut current_pos: isize = 0;
 
-                      for ((pop, llm_bv), state_bv, _node_contents) in edges {
-                          current_pos += *pop;
-                          llm_intersection &= llm_bv;
-                          
-                          state_checks.entry(current_pos)
-                              .and_modify(|e| *e &= state_bv)
-                              .or_insert_with(|| state_bv.clone());
-                      }
-                      (llm_intersection, state_checks)
+                  let mut current_node_live_tokens = &root_contents.live_tokens;
+
+                  for ((pop, llm_bv), state_bv, next_node_contents) in edges {
+                      llm_intersection &= current_node_live_tokens;
+                      llm_intersection &= llm_bv;
+
+                      current_pos += *pop;
+                      state_checks.entry(current_pos)
+                          .and_modify(|e| *e &= state_bv)
+                          .or_insert_with(|| state_bv.clone());
+                      
+                      current_node_live_tokens = &next_node_contents.live_tokens;
                   }
 
+                  (llm_intersection, state_checks)
+              }
+
+              let compare = |p1: &PrecomputeTrie3Path, p2: &PrecomputeTrie3Path| -> PathComparison {
                   if p1.0 != p2.0 {
                       return PathComparison::Different;
                   }
-
                   if p1.1.len() > p2.1.len() {
                       return PathComparison::Different;
                   }
-
                   // We only need to compare the prefix of p2 that has the same length as p1.
                   let p2_prefix_path = (p2.0.clone(), p2.1[..p1.1.len()].to_vec());
                   
@@ -9833,6 +9837,9 @@ local_system:
               // Check paths from original in optimized
               for _ in 0..num_samples {
                   if let Some(path) = Trie::sample_path(&original_arena, &original_roots_vec, max_path_len, &mut rng) {
+                      if get_path_summary(&path).0.is_empty() {
+                          continue; // Path is semantically invalid due to inconsistent live_tokens.
+                      }
                       if !Trie::path_exists(trie3_god, &optimized_roots_vec, &path, compare) {
                           failing_path = Some(path);
                           a_is_original = true;
@@ -9845,6 +9852,9 @@ local_system:
                   // Check paths from optimized in original
                   for _ in 0..num_samples {
                       if let Some(path) = Trie::sample_path(trie3_god, &optimized_roots_vec, max_path_len, &mut rng) {
+                          if get_path_summary(&path).0.is_empty() {
+                              continue; // Path is semantically invalid
+                          }
                           if !Trie::path_exists(&original_arena, &original_roots_vec, &path, compare) {
                               failing_path = Some(path);
                               a_is_original = false;
@@ -9858,7 +9868,16 @@ local_system:
                   println!("Stochastic equivalence check FAILED!");
                   let (trie_a_name, trie_b_name) = if a_is_original { ("original", "optimized") } else { ("optimized", "original") };
                   println!("Found path in {} that does not exist in {}.", trie_a_name, trie_b_name);
-                  println!("Failing path: {:#?}", path);
+                  
+                  let (llm, states) = get_path_summary(&path);
+                  println!("--- Failing Path Summary ---");
+                  println!("Valid for LLM tokens: {:?}", llm);
+                  println!("State checks per position:");
+                  for (pos, sids) in &states {
+                      println!("  pos {}: {:?}", pos, sids);
+                  }
+                  println!("\n--- Failing Path (Raw) ---");
+                  println!("{:#?}", path);
 
                   // Minimize the example
                   let (mut arena_a, mut roots_a_vec) = if a_is_original { (original_arena.deep_clone(), original_roots_vec.clone()) } else { (trie3_god.deep_clone(), optimized_roots_vec.clone()) };
@@ -9874,7 +9893,14 @@ local_system:
                   }
 
                   println!("--- MINIMIZED FAILING EXAMPLE ---");
-                  println!("--- Failing Path ---");
+                  println!("--- Failing Path Summary ---");
+                  let (llm, states) = get_path_summary(&path);
+                  println!("Valid for LLM tokens: {:?}", llm);
+                  println!("State checks per position:");
+                  for (pos, sids) in &states {
+                      println!("  pos {}: {:?}", pos, sids);
+                  }
+                  println!("\n--- Failing Path (Raw) ---");
                   println!("{:#?}", path);
                   println!("\n--- Trie A (path SHOULD exist here) ---");
                   println!("{}", Trie::pretty_print(&arena_a, &roots_a_vec));
@@ -17845,5 +17871,528 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Correct Trie path equivalence comparison
       logic to use LLM BV intersection and state BV mapping."'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      --- MINIMIZED FAILING EXAMPLE ---
+      --- Failing Path ---
+      (
+          PrecomputedNodeContents {
+              end: false,
+              live_tokens: HybridBitset {
+                  inner: 0..=1,
+              },
+          },
+          [
+              (
+                  (
+                      0,
+                      HybridBitset {
+                          inner: 0..=1,
+                      },
+                  ),
+                  HybridBitset {
+                      inner: 0..=usize::MAX,
+                  },
+                  PrecomputedNodeContents {
+                      end: false,
+                      live_tokens: HybridBitset {
+                          inner: ,
+                      },
+                  },
+              ),
+              (
+                  (
+                      0,
+                      HybridBitset {
+                          inner: 0..=1,
+                      },
+                  ),
+                  HybridBitset {
+                      inner: 0..=0,
+                  },
+                  PrecomputedNodeContents {
+                      end: false,
+                      live_tokens: HybridBitset {
+                          inner: ,
+                      },
+                  },
+              ),
+              (
+                  (
+                      0,
+                      HybridBitset {
+                          inner: 0..=1,
+                      },
+                  ),
+                  HybridBitset {
+                      inner: 0..=usize::MAX,
+                  },
+                  PrecomputedNodeContents {
+                      end: false,
+                      live_tokens: HybridBitset {
+                          inner: ,
+                      },
+                  },
+              ),
+              (
+                  (
+                      0,
+                      HybridBitset {
+                          inner: 1..=1,
+                      },
+                  ),
+                  HybridBitset {
+                      inner: 0..=usize::MAX,
+                  },
+                  PrecomputedNodeContents {
+                      end: true,
+                      live_tokens: HybridBitset {
+                          inner: ,
+                      },
+                  },
+              ),
+          ],
+      )
+
+      --- Trie A (path SHOULD exist here) ---
+      [Root 0]
+      └── [Node 0] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner: 0..=1 } })
+          └── Edge: (0, HybridBitset { inner: 0..=1 }) (value: HybridBitset { inner: 0..=usize::MAX })
+              └── [Node 1] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner:  } })
+                  └── Edge: (0, HybridBitset { inner: 0..=1 }) (value: HybridBitset { inner: 0..=0 })
+                      └── [Node 2] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner:  } })
+                          └── Edge: (0, HybridBitset { inner: 0..=1 }) (value: HybridBitset { inner: 0..=usize::MAX })
+                              └── [Node 3] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner:  } })
+                                  └── Edge: (0, HybridBitset { inner: 1..=1 }) (value: HybridBitset { inner: 0..=usize::MAX })
+                                      └── [Node 4] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: true, live_tokens: HybridBitset { inner:  } })
+
+      [Root 1]
+      └── [Node 5] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner: 0..=1 } })
+
+      [Root 2]
+      └── [Node 5] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner: 0..=1 } }) (Shared, already shown)
+
+
+      --- Trie B (path should NOT exist here) ---
+      [Root 0]
+      └── [Node 0] (max_depth: 0, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner: 0..=1 } })
+
+      [Root 1]
+      └── [Node 1] (max_depth: 0, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner:  } })
+
+      [Root 2]
+      └── [Node 1] (max_depth: 0, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner:  } }) (Shared, already shown)
+
+
+
+      thread 'test_constraint_basic::test_trivial' (16165073) panicked at src/constraint_precompute3_utils.rs:523:13:
+      Stochastic equivalence check failed. See minimized example above.
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::constraint_precompute3_utils::optimize_trie3_size
+                   at ./src/constraint_precompute3_utils.rs:523:13
+         3: sep1::constraint::GrammarConstraint::precompute3
+                   at ./src/constraint.rs:2282:9
+         4: sep1::constraint::GrammarConstraint::new_with_config
+                   at ./src/constraint.rs:1219:41
+         5: sep1::constraint::GrammarConstraint::new
+                   at ./src/constraint.rs:997:9
+         6: sep1::test_constraint_basic::test_trivial
+                   at ./src/test_constraint_basic.rs:64:22
+         7: sep1::test_constraint_basic::test_trivial::{{closure}}
+                   at ./src/test_constraint_basic.rs:34:18
+         8: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         9: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - user: This is actually wrong. The optimizations definintely *do* work for this
+      trie. But also make the prints for the mismatch more useful. Hard to read.
+    metadata:
+  - assistant: |-
+      Of course. It appears the stochastic equivalence check is failing due to semantically invalid paths being generated from tries with inconsistent `live_tokens` caches. The check can be made more robust by validating paths against these caches and improving the debug output will help diagnose any future issues.
+
+      Here are the step-by-step instructions to fix the issue, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `src/constraint_precompute3_utils.rs`**.
+
+      2.  **Locate the `optimize_trie3_size` function**. Inside this function, find the `if let (Some(original_arena), Some(original_roots)) = ...` block. This is where the equivalence check is performed.
+
+      3.  **Replace the `compare` closure and its internal helper function**. You will replace the existing `compare` closure with a new helper function `get_path_summary` defined outside the closure, and a new `compare` closure that uses it. This new helper will correctly validate a path's semantic validity by checking `live_tokens`.
+
+          *   **Delete** the entire `let compare = ...;` block, which currently looks like this:
+              ```rust
+                      let compare = |p1: &PrecomputeTrie3Path, p2: &PrecomputeTrie3Path| -> PathComparison {
+                          fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
+                              // ... implementation ...
+                          }
+              
+                          // ... implementation of compare ...
+                      };
+              ```
+          *   **Insert** the following code in its place. This defines the corrected helper function and the new `compare` closure.
+              ```rust
+                      fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
+                          let (root_contents, edges) = path;
+                          let mut llm_intersection = LLMTokenBV::max_ones();
+                          let mut state_checks = BTreeMap::<isize, StateIDBV>::new();
+                          let mut current_pos: isize = 0;
+              
+                          let mut current_node_live_tokens = &root_contents.live_tokens;
+              
+                          for ((pop, llm_bv), state_bv, next_node_contents) in edges {
+                              llm_intersection &= current_node_live_tokens;
+                              llm_intersection &= llm_bv;
+              
+                              current_pos += *pop;
+                              state_checks.entry(current_pos)
+                                  .and_modify(|e| *e &= state_bv)
+                                  .or_insert_with(|| state_bv.clone());
+                              
+                              current_node_live_tokens = &next_node_contents.live_tokens;
+                          }
+              
+                          (llm_intersection, state_checks)
+                      }
+              
+                      let compare = |p1: &PrecomputeTrie3Path, p2: &PrecomputeTrie3Path| -> PathComparison {
+                          if p1.0 != p2.0 {
+                              return PathComparison::Different;
+                          }
+                          if p1.1.len() > p2.1.len() {
+                              return PathComparison::Different;
+                          }
+                          let p2_prefix_path = (p2.0.clone(), p2.1[..p1.1.len()].to_vec());
+                          
+                          let (llm1, states1) = get_path_summary(p1);
+                          let (llm2_prefix, states2_prefix) = get_path_summary(&p2_prefix_path);
+              
+                          if !llm2_prefix.is_subset(&llm1) {
+                              return PathComparison::Different;
+                          }
+              
+                          let all_positions: BTreeSet<_> = states1.keys().chain(states2_prefix.keys()).copied().collect();
+                          for pos in all_positions {
+                              let s1 = states1.get(&pos).cloned().unwrap_or_else(StateIDBV::max_ones);
+                              let s2_prefix = states2_prefix.get(&pos).cloned().unwrap_or_else(StateIDBV::max_ones);
+                              if !s2_prefix.is_subset(&s1) {
+                                  return PathComparison::Different;
+                              }
+                          }
+              
+                          if p1.1.len() == p2.1.len() {
+                              PathComparison::Equal
+                          } else {
+                              PathComparison::Prefix
+                          }
+                      };
+              ```
+
+      4.  **Add validation for sampled paths**. In the two `for` loops that sample paths, add a check to ensure the path is semantically valid before checking for its existence in the other trie.
+
+          *   Find the first sampling loop:
+              ```rust
+                      // Check paths from original in optimized
+                      for _ in 0..num_samples {
+                          if let Some(path) = Trie::sample_path(&original_arena, &original_roots_vec, max_path_len, &mut rng) {
+                              if !Trie::path_exists(trie3_god, &optimized_roots_vec, &path, compare) {
+                                  failing_path = Some(path);
+                                  a_is_original = true;
+                                  break;
+                              }
+                          }
+                      }
+              ```
+          *   **Modify it** to add the validity check:
+              ```rust
+                      // Check paths from original in optimized
+                      for _ in 0..num_samples {
+                          if let Some(path) = Trie::sample_path(&original_arena, &original_roots_vec, max_path_len, &mut rng) {
+                              if get_path_summary(&path).0.is_empty() {
+                                  continue; // Path is semantically invalid due to inconsistent live_tokens.
+                              }
+                              if !Trie::path_exists(trie3_god, &optimized_roots_vec, &path, compare) {
+                                  failing_path = Some(path);
+                                  a_is_original = true;
+                                  break;
+                              }
+                          }
+                      }
+              ```
+          *   Find the second sampling loop:
+              ```rust
+                      // Check paths from optimized in original
+                      for _ in 0..num_samples {
+                          if let Some(path) = Trie::sample_path(trie3_god, &optimized_roots_vec, max_path_len, &mut rng) {
+                              if !Trie::path_exists(&original_arena, &original_roots_vec, &path, compare) {
+                                  failing_path = Some(path);
+                                  a_is_original = false;
+                                  break;
+                              }
+                          }
+                      }
+              ```
+          *   **Modify it** to add the validity check:
+              ```rust
+                      // Check paths from optimized in original
+                      for _ in 0..num_samples {
+                          if let Some(path) = Trie::sample_path(trie3_god, &optimized_roots_vec, max_path_len, &mut rng) {
+                              if get_path_summary(&path).0.is_empty() {
+                                  continue; // Path is semantically invalid
+                              }
+                              if !Trie::path_exists(&original_arena, &original_roots_vec, &path, compare) {
+                                  failing_path = Some(path);
+                                  a_is_original = false;
+                                  break;
+                              }
+                          }
+                      }
+              ```
+
+      5.  **Improve the failure message**. To make debugging easier, enhance the `println!` statements inside the `if let Some(path) = failing_path` block.
+
+          *   Find this block:
+              ```rust
+                      if let Some(path) = failing_path {
+                          println!("Stochastic equivalence check FAILED!");
+                          let (trie_a_name, trie_b_name) = if a_is_original { ("original", "optimized") } else { ("optimized", "original") };
+                          println!("Found path in {} that does not exist in {}.", trie_a_name, trie_b_name);
+                          println!("Failing path: {:#?}", path);
+              
+                          // ... minimization logic ...
+              
+                          println!("--- MINIMIZED FAILING EXAMPLE ---");
+                          println!("--- Failing Path ---");
+                          println!("{:#?}", path);
+                          println!("\n--- Trie A (path SHOULD exist here) ---");
+                          // ...
+                      }
+              ```
+          *   **Replace it** with the following, which adds a "Path Summary" section to the output:
+              ```rust
+                      if let Some(path) = failing_path {
+                          println!("Stochastic equivalence check FAILED!");
+                          let (trie_a_name, trie_b_name) = if a_is_original { ("original", "optimized") } else { ("optimized", "original") };
+                          println!("Found path in {} that does not exist in {}.", trie_a_name, trie_b_name);
+                          
+                          let (llm, states) = get_path_summary(&path);
+                          println!("--- Failing Path Summary ---");
+                          println!("Valid for LLM tokens: {:?}", llm);
+                          println!("State checks per position:");
+                          for (pos, sids) in &states {
+                              println!("  pos {}: {:?}", pos, sids);
+                          }
+                          println!("\n--- Failing Path (Raw) ---");
+                          println!("{:#?}", path);
+              
+                          // Minimize the example
+                          let (mut arena_a, mut roots_a_vec) = if a_is_original { (original_arena.deep_clone(), original_roots_vec.clone()) } else { (trie3_god.deep_clone(), optimized_roots_vec.clone()) };
+                          let (mut arena_b, mut roots_b_vec) = if a_is_original { (trie3_god.deep_clone(), optimized_roots_vec) } else { (original_arena.deep_clone(), original_roots_vec) };
+              
+                          println!("Attempting to minimize failing example by trimming...");
+                          for i in 0..100 {
+                              let (trimmed_a, trimmed_roots_a) = Trie::trim_randomly(&arena_a, &roots_a_vec, 0.1, &mut rng);
+                              if Trie::path_exists(&trimmed_a, &trimmed_roots_a, &path, compare) { arena_a = trimmed_a; roots_a_vec = trimmed_roots_a; }
+                              let (trimmed_b, trimmed_roots_b) = Trie::trim_randomly(&arena_b, &roots_b_vec, 0.1, &mut rng);
+                              if !Trie::path_exists(&trimmed_b, &trimmed_roots_b, &path, compare) { arena_b = trimmed_b; roots_b_vec = trimmed_roots_b; }
+                              if (i + 1) % 10 == 0 { println!("Trimming iteration {}...", i + 1); }
+                          }
+              
+                          println!("--- MINIMIZED FAILING EXAMPLE ---");
+                          println!("--- Failing Path Summary ---");
+                          let (llm, states) = get_path_summary(&path);
+                          println!("Valid for LLM tokens: {:?}", llm);
+                          println!("State checks per position:");
+                          for (pos, sids) in &states {
+                              println!("  pos {}: {:?}", pos, sids);
+                          }
+                          println!("\n--- Failing Path (Raw) ---");
+                          println!("{:#?}", path);
+                          println!("\n--- Trie A (path SHOULD exist here) ---");
+                          println!("{}", Trie::pretty_print(&arena_a, &roots_a_vec));
+                          println!("\n--- Trie B (path should NOT exist here) ---");
+                          println!("{}", Trie::pretty_print(&arena_b, &roots_b_vec));
+              
+                          panic!("Stochastic equivalence check failed. See minimized example above.");
+                      }
+              ```
+
+      ### Git Diff
+
+      Here is the git diff for the changes:
+
+      ```diff
+      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 2f34279..6119842 100644
+      --- a/src/constraint_precompute3_utils.rs
+      +++ b/src/constraint_precompute3_utils.rs
+      @@ -402,52 +402,68 @@
+                   Vec<((isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents)>,
+               );
+       
+      +        fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
+      +            let (root_contents, edges) = path;
+      +            let mut llm_intersection = LLMTokenBV::max_ones();
+      +            let mut state_checks = BTreeMap::<isize, StateIDBV>::new();
+      +            let mut current_pos: isize = 0;
+      +
+      +            let mut current_node_live_tokens = &root_contents.live_tokens;
+      +
+      +            for ((pop, llm_bv), state_bv, next_node_contents) in edges {
+      +                llm_intersection &= current_node_live_tokens;
+      +                llm_intersection &= llm_bv;
+      +
+      +                current_pos += *pop;
+      +                state_checks.entry(current_pos)
+      +                    .and_modify(|e| *e &= state_bv)
+      +                    .or_insert_with(|| state_bv.clone());
+      +                
+      +                current_node_live_tokens = &next_node_contents.live_tokens;
+      +            }
+      +
+      +            (llm_intersection, state_checks)
+      +        }
+      +
+               let compare = |p1: &PrecomputeTrie3Path, p2: &PrecomputeTrie3Path| -> PathComparison {
+      -            fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
+      -                let (_root_contents, edges) = path;
+      -                let mut llm_intersection = LLMTokenBV::max_ones();
+      -                let mut state_checks = BTreeMap::<isize, StateIDBV>::new();
+      -                let mut current_pos: isize = 0;
+      -
+      -                for ((pop, llm_bv), state_bv, _node_contents) in edges {
+      -                    current_pos += *pop;
+      -                    llm_intersection &= llm_bv;
+      -                    
+      -                    state_checks.entry(current_pos)
+      -                        .and_modify(|e| *e &= state_bv)
+      -                        .or_insert_with(|| state_bv.clone());
+      -                }
+      -                (llm_intersection, state_checks)
+      -            }
+      -
+                   if p1.0 != p2.0 {
+                       return PathComparison::Different;
+                   }
+      -
+                   if p1.1.len() > p2.1.len() {
+                       return PathComparison::Different;
+                   }
+      -
+                   // We only need to compare the prefix of p2 that has the same length as p1.
+                   let p2_prefix_path = (p2.0.clone(), p2.1[..p1.1.len()].to_vec());
+                   
+                   let (llm1, states1) = get_path_summary(p1);
+                   let (llm2_prefix, states2_prefix) = get_path_summary(&p2_prefix_path);
+       
+                   if !llm2_prefix.is_subset(&llm1) {
+                       return PathComparison::Different;
+                   }
+       
+                   let all_positions: BTreeSet<_> = states1.keys().chain(states2_prefix.keys()).copied().collect();
+                   for pos in all_positions {
+                       let s1 = states1.get(&pos).cloned().unwrap_or_else(StateIDBV::max_ones);
+                       let s2_prefix = states2_prefix.get(&pos).cloned().unwrap_or_else(StateIDBV::max_ones);
+                       if !s2_prefix.is_subset(&s1) {
+                           return PathComparison::Different;
+                       }
+                   }
+       
+                   if p1.1.len() == p2.1.len() {
+                       PathComparison::Equal
+                   } else {
+                       PathComparison::Prefix
+                   }
+               };
+       
+               let mut rng = rand::thread_rng();
+               let num_samples = 1000;
+      @@ -461,6 +477,9 @@
+               // Check paths from original in optimized
+               for _ in 0..num_samples {
+                   if let Some(path) = Trie::sample_path(&original_arena, &original_roots_vec, max_path_len, &mut rng) {
+      +                if get_path_summary(&path).0.is_empty() {
+      +                    continue; // Path is semantically invalid due to inconsistent live_tokens.
+      +                }
+                       if !Trie::path_exists(trie3_god, &optimized_roots_vec, &path, compare) {
+                           failing_path = Some(path);
+                           a_is_original = true;
+      @@ -473,6 +492,9 @@
+                   // Check paths from optimized in original
+                   for _ in 0..num_samples {
+                       if let Some(path) = Trie::sample_path(trie3_god, &optimized_roots_vec, max_path_len, &mut rng) {
+      +                    if get_path_summary(&path).0.is_empty() {
+      +                        continue; // Path is semantically invalid
+      +                    }
+                           if !Trie::path_exists(&original_arena, &original_roots_vec, &path, compare) {
+                               failing_path = Some(path);
+                               a_is_original = false;
+      @@ -485,8 +507,17 @@
+                   println!("Stochastic equivalence check FAILED!");
+                   let (trie_a_name, trie_b_name) = if a_is_original { ("original", "optimized") } else { ("optimized", "original") };
+                   println!("Found path in {} that does not exist in {}.", trie_a_name, trie_b_name);
+      -            println!("Failing path: {:#?}", path);
+      +            
+      +            let (llm, states) = get_path_summary(&path);
+      +            println!("--- Failing Path Summary ---");
+      +            println!("Valid for LLM tokens: {:?}", llm);
+      +            println!("State checks per position:");
+      +            for (pos, sids) in &states {
+      +                println!("  pos {}: {:?}", pos, sids);
+      +            }
+      +            println!("\n--- Failing Path (Raw) ---");
+      +            println!("{:#?}", path);
+       
+                   // Minimize the example
+                   let (mut arena_a, mut roots_a_vec) = if a_is_original { (original_arena.deep_clone(), original_roots_vec.clone()) } else { (trie3_god.deep_clone(), optimized_roots_vec.clone()) };
+      @@ -501,8 +532,15 @@
+                   }
+       
+                   println!("--- MINIMIZED FAILING EXAMPLE ---");
+      -            println!("--- Failing Path ---");
+      +            println!("--- Failing Path Summary ---");
+      +            let (llm, states) = get_path_summary(&path);
+      +            println!("Valid for LLM tokens: {:?}", llm);
+      +            println!("State checks per position:");
+      +            for (pos, sids) in &states {
+      +                println!("  pos {}: {:?}", pos, sids);
+      +            }
+      +            println!("\n--- Failing Path (Raw) ---");
+                   println!("{:#?}", path);
+                   println!("\n--- Trie A (path SHOULD exist here) ---");
+                   println!("{}", Trie::pretty_print(&arena_a, &roots_a_vec));
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_utils.rs
+      Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Correct Trie path equivalence comparison
+      logic with semantic validation and enhanced failure reporting"'
     metadata:
 ...

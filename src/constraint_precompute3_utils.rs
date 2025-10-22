@@ -407,32 +407,36 @@ pub fn optimize_trie3_size(
             Vec<((isize, LLMTokenBV), StateIDBV, PrecomputedNodeContents)>,
         );
 
-        let compare = |p1: &PrecomputeTrie3Path, p2: &PrecomputeTrie3Path| -> PathComparison {
-            fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
-                let (_root_contents, edges) = path;
-                let mut llm_intersection = LLMTokenBV::max_ones();
-                let mut state_checks = BTreeMap::<isize, StateIDBV>::new();
-                let mut current_pos: isize = 0;
+        fn get_path_summary(path: &PrecomputeTrie3Path) -> (LLMTokenBV, BTreeMap<isize, StateIDBV>) {
+            let (root_contents, edges) = path;
+            let mut llm_intersection = LLMTokenBV::max_ones();
+            let mut state_checks = BTreeMap::<isize, StateIDBV>::new();
+            let mut current_pos: isize = 0;
 
-                for ((pop, llm_bv), state_bv, _node_contents) in edges {
-                    current_pos += *pop;
-                    llm_intersection &= llm_bv;
-                    
-                    state_checks.entry(current_pos)
-                        .and_modify(|e| *e &= state_bv)
-                        .or_insert_with(|| state_bv.clone());
-                }
-                (llm_intersection, state_checks)
+            let mut current_node_live_tokens = &root_contents.live_tokens;
+
+            for ((pop, llm_bv), state_bv, next_node_contents) in edges {
+                llm_intersection &= current_node_live_tokens;
+                llm_intersection &= llm_bv;
+
+                current_pos += *pop;
+                state_checks.entry(current_pos)
+                    .and_modify(|e| *e &= state_bv)
+                    .or_insert_with(|| state_bv.clone());
+                
+                current_node_live_tokens = &next_node_contents.live_tokens;
             }
 
+            (llm_intersection, state_checks)
+        }
+
+        let compare = |p1: &PrecomputeTrie3Path, p2: &PrecomputeTrie3Path| -> PathComparison {
             if p1.0 != p2.0 {
                 return PathComparison::Different;
             }
-
             if p1.1.len() > p2.1.len() {
                 return PathComparison::Different;
             }
-
             // We only need to compare the prefix of p2 that has the same length as p1.
             let p2_prefix_path = (p2.0.clone(), p2.1[..p1.1.len()].to_vec());
             
@@ -472,6 +476,9 @@ pub fn optimize_trie3_size(
         // Check paths from original in optimized
         for _ in 0..num_samples {
             if let Some(path) = Trie::sample_path(&original_arena, &original_roots_vec, max_path_len, &mut rng) {
+                if get_path_summary(&path).0.is_empty() {
+                    continue; // Path is semantically invalid due to inconsistent live_tokens.
+                }
                 if !Trie::path_exists(trie3_god, &optimized_roots_vec, &path, compare) {
                     failing_path = Some(path);
                     a_is_original = true;
@@ -484,6 +491,9 @@ pub fn optimize_trie3_size(
             // Check paths from optimized in original
             for _ in 0..num_samples {
                 if let Some(path) = Trie::sample_path(trie3_god, &optimized_roots_vec, max_path_len, &mut rng) {
+                    if get_path_summary(&path).0.is_empty() {
+                        continue; // Path is semantically invalid
+                    }
                     if !Trie::path_exists(&original_arena, &original_roots_vec, &path, compare) {
                         failing_path = Some(path);
                         a_is_original = false;
@@ -497,7 +507,16 @@ pub fn optimize_trie3_size(
             println!("Stochastic equivalence check FAILED!");
             let (trie_a_name, trie_b_name) = if a_is_original { ("original", "optimized") } else { ("optimized", "original") };
             println!("Found path in {} that does not exist in {}.", trie_a_name, trie_b_name);
-            println!("Failing path: {:#?}", path);
+            
+            let (llm, states) = get_path_summary(&path);
+            println!("--- Failing Path Summary ---");
+            println!("Valid for LLM tokens: {:?}", llm);
+            println!("State checks per position:");
+            for (pos, sids) in &states {
+                println!("  pos {}: {:?}", pos, sids);
+            }
+            println!("\n--- Failing Path (Raw) ---");
+            println!("{:#?}", path);
 
             // Minimize the example
             let (mut arena_a, mut roots_a_vec) = if a_is_original { (original_arena.deep_clone(), original_roots_vec.clone()) } else { (trie3_god.deep_clone(), optimized_roots_vec.clone()) };
@@ -513,7 +532,14 @@ pub fn optimize_trie3_size(
             }
 
             println!("--- MINIMIZED FAILING EXAMPLE ---");
-            println!("--- Failing Path ---");
+            println!("--- Failing Path Summary ---");
+            let (llm, states) = get_path_summary(&path);
+            println!("Valid for LLM tokens: {:?}", llm);
+            println!("State checks per position:");
+            for (pos, sids) in &states {
+                println!("  pos {}: {:?}", pos, sids);
+            }
+            println!("\n--- Failing Path (Raw) ---");
             println!("{:#?}", path);
             println!("\n--- Trie A (path SHOULD exist here) ---");
             println!("{}", Trie::pretty_print(&arena_a, &roots_a_vec));
