@@ -4,6 +4,4 @@
 program ::= 'x' ;
 
 // --- Lexical Grammar (Minimal) ---
-IGNORE ::= ( ' ' | MULTI_LINE_COMMENT )+ ;
-WS ::= ' ' ;
-MULTI_LINE_COMMENT ::= '/*' ;
+IGNORE ::= ( ' ' | '/*' )+ ;
