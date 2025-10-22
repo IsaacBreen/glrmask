@@ -6,6 +6,7 @@ import tempfile
 import sys
 import uuid
 import datetime
+from multiprocessing import Pool
 from typing import List
 
 # --- Configuration ---
@@ -110,59 +111,76 @@ def main():
     minimal_vocab = list(original_vocab)
     print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
 
+    num_cpus = max(1, os.cpu_count() // 2)
+    print(f"Using {num_cpus} parallel processes.")
+
     reduction_step = 0
     chunk_size = len(minimal_vocab) // 2
-    while chunk_size >= 1:
-        print(f"\n--- Testing with chunk size: {chunk_size} ---")
-        removed_in_pass = False
-        start_index = 0
-        while start_index < len(minimal_vocab):
-            end_index = min(start_index + chunk_size, len(minimal_vocab))
 
-            # Create a test vocabulary by removing the current chunk
-            test_vocab = minimal_vocab[:start_index] + minimal_vocab[end_index:]
-            excluded_vocab = minimal_vocab[start_index:end_index]
+    with Pool(processes=num_cpus) as pool:
+        while chunk_size >= 1:
+            print(f"\n--- Testing with chunk size: {chunk_size} ---")
+            removed_in_pass = False
 
-            # Don't test an empty vocabulary, just skip
-            if not test_vocab:
-                start_index = end_index
-                continue
+            while True:  # Keep trying with this chunk size as long as we are making progress
+                num_chunks = (len(minimal_vocab) + chunk_size - 1) // chunk_size
+                if num_chunks < 2:
+                    break  # Not enough chunks to test for removal
 
-            num_chunks = (len(minimal_vocab) + chunk_size - 1) // chunk_size
-            current_chunk_num = (start_index // chunk_size) + 1
-
-            progress = f"[{current_chunk_num}/{num_chunks}]"
-            print(f"{progress} Trying to remove {end_index - start_index} tokens (indices {start_index}-{end_index-1})...", end='', flush=True)
-
-            if run_test_with_vocab(test_vocab):
-                # Mismatch still occurs, so the removal was successful
-                minimal_vocab = test_vocab
-
-                # Save intermediate progress to a new file
-                reduction_step += 1
-                new_size = len(minimal_vocab)
-                filename = f"step_{reduction_step:04d}_size_{new_size}.json"
-                output_path = os.path.join(results_dir, filename)
-                with open(output_path, 'w') as f:
-                    json.dump(minimal_vocab, f, indent=2)
-
-                removed_in_pass = True
-                print(f" REMOVED. New size: {len(minimal_vocab)}")
-                if len(excluded_vocab) < 10:
-                    print(excluded_vocab)
-                # Restart the scan for this chunk size, as the list has changed
+                tasks = []
+                chunk_metadata = []
                 start_index = 0
-            else:
-                # Mismatch disappeared, this chunk is essential. Move to the next one.
-                print(" KEPT (essential).")
-                if len(excluded_vocab) < 10:
-                    print(excluded_vocab)
-                start_index = end_index
+                while start_index < len(minimal_vocab):
+                    end_index = min(start_index + chunk_size, len(minimal_vocab))
+                    test_vocab = minimal_vocab[:start_index] + minimal_vocab[end_index:]
 
-        # If we completed a full pass for this chunk size without removing anything,
-        # it's time to try smaller chunks.
-        if not removed_in_pass:
-            chunk_size //= 2
+                    if not test_vocab:
+                        start_index = end_index
+                        continue
+
+                    tasks.append(test_vocab)
+                    chunk_metadata.append({
+                        "start": start_index,
+                        "end": end_index,
+                        "excluded": minimal_vocab[start_index:end_index]
+                    })
+                    start_index = end_index
+
+                print(f"Testing removal of {len(tasks)} chunks in parallel...")
+                results = pool.map(run_test_with_vocab, tasks)
+
+                found_reduction = False
+                for i, mismatch_persists in enumerate(results):
+                    if mismatch_persists:
+                        # Mismatch still occurs, so the removal was successful
+                        meta = chunk_metadata[i]
+                        minimal_vocab = tasks[i]
+
+                        # Save intermediate progress
+                        reduction_step += 1
+                        new_size = len(minimal_vocab)
+                        filename = f"step_{reduction_step:04d}_size_{new_size}.json"
+                        output_path = os.path.join(results_dir, filename)
+                        with open(output_path, 'w') as f:
+                            json.dump(minimal_vocab, f, indent=2)
+
+                        removed_in_pass = True
+                        found_reduction = True
+                        print(f"REMOVED chunk (indices {meta['start']}-{meta['end']-1}). New size: {len(minimal_vocab)}")
+                        if len(meta['excluded']) < 10:
+                            print(meta['excluded'])
+
+                        # Restart the scan for this chunk size with the smaller vocab
+                        break
+
+                if not found_reduction:
+                    print("No more reductions possible with this chunk size.")
+                    break  # Exit the inner while True loop
+
+            # If we completed a full pass for this chunk size without removing anything,
+            # it's time to try smaller chunks.
+            if not removed_in_pass:
+                chunk_size //= 2
 
     # 4. Final result
     print("\n--- Minimization Complete ---")

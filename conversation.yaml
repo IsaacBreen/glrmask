@@ -1,175 +1,9 @@
 local_system:
   attached_files:
     - scripts/delta_debug.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
-    scripts/delta_debug.py: |-
-      #!/usr/bin/env python3
-      import json
-      import subprocess
-      import os
-      import tempfile
-      import sys
-      from typing import List
-
-      # --- Configuration ---
-
-      # The original, full vocabulary file that causes the mismatch.
-      ORIGINAL_VOCAB_PATH = ".temp.vocab.json"
-
-      # The command to run. Use a placeholder `{vocab_path}` which the script
-      # will replace with the path to the temporary vocab file for each test.
-      # NOTE: Using shell=True, so ensure this command is safe.
-      COMMAND_TEMPLATE = """
-      python scripts/compile.py \
-          --grammar src/js_simplified2.ebnf \
-          --output .cache/test_vocabs/js_constraint.json.gz \
-          --vocab-path {vocab_path} \
-          && \
-      REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
-      CONSTRAINT_FILE=".cache/test_vocabs/js_constraint.json.gz" \
-      CODE_FILE=./src/example_code8.js \
-      bash python/run_benchmarks.sh \
-          python/aug25/models/bruteforce_model.py \
-          python/aug25/models/rust_model.py
-      """
-
-      # The string to look for in the command's output that indicates a mismatch.
-      MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
-
-      # The file where the final, minimal vocabulary will be saved.
-      MINIMAL_VOCAB_OUTPUT_PATH = "minimal_vocab.json"
-
-      # --- Script Logic ---
-
-      def run_test_with_vocab(vocab_list: List[str]) -> bool:
-          """
-          Runs the benchmark command with a given vocabulary list.
-
-          Args:
-              vocab_list: A list of strings representing the vocabulary.
-
-          Returns:
-              True if a mismatch occurs, False otherwise.
-          """
-          with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_file:
-              json.dump(vocab_list, tmp_file)
-              temp_vocab_path = tmp_file.name
-
-          try:
-              command = COMMAND_TEMPLATE.format(vocab_path=temp_vocab_path).strip()
-              result = subprocess.run(
-                  command,
-                  shell=True,
-                  capture_output=True,
-                  text=True,
-                  encoding='utf-8'
-              )
-              output = result.stdout + result.stderr
-              return MISMATCH_INDICATOR in output
-          finally:
-              os.remove(temp_vocab_path)
-
-
-      def main():
-          """
-          Main function to perform the vocabulary minimization.
-          """
-          print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
-
-          # 1. Load the original vocabulary
-          if not os.path.exists(ORIGINAL_VOCAB_PATH):
-              print(f"Error: Original vocabulary file not found at '{ORIGINAL_VOCAB_PATH}'")
-              sys.exit(1)
-
-          with open(ORIGINAL_VOCAB_PATH, 'r') as f:
-              original_vocab = json.load(f)
-
-          print(f"Loaded original vocabulary with {len(original_vocab)} tokens.")
-
-          # 2. Initial check: Verify that the full vocabulary causes a mismatch
-          print("\nStep 1: Verifying that the original vocabulary causes a mismatch...")
-          if not run_test_with_vocab(original_vocab):
-              print("Error: The original vocabulary does not seem to cause a mismatch.")
-              print("Please ensure the COMMAND_TEMPLATE and MISMATCH_INDICATOR are correct.")
-              sys.exit(1)
-          print("✅ Success: Original vocabulary confirmed to cause a mismatch.")
-
-          # 3. Start the minimization process
-          minimal_vocab = list(original_vocab)
-          print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
-
-          chunk_size = len(minimal_vocab) // 2
-          while chunk_size >= 1:
-              print(f"\n--- Testing with chunk size: {chunk_size} ---")
-              removed_in_pass = False
-              start_index = 0
-              while start_index < len(minimal_vocab):
-                  end_index = min(start_index + chunk_size, len(minimal_vocab))
-
-                  # Create a test vocabulary by removing the current chunk
-                  test_vocab = minimal_vocab[:start_index] + minimal_vocab[end_index:]
-                  excluded_vocab = minimal_vocab[start_index:end_index]
-
-                  # Don't test an empty vocabulary, just skip
-                  if not test_vocab:
-                      start_index = end_index
-                      continue
-
-                  num_chunks = (len(minimal_vocab) + chunk_size - 1) // chunk_size
-                  current_chunk_num = (start_index // chunk_size) + 1
-
-                  progress = f"[{current_chunk_num}/{num_chunks}]"
-                  print(f"{progress} Trying to remove {end_index - start_index} tokens (indices {start_index}-{end_index-1})...", end='', flush=True)
-
-                  if run_test_with_vocab(test_vocab):
-                      # Mismatch still occurs, so the removal was successful
-                      minimal_vocab = test_vocab
-                      removed_in_pass = True
-                      print(f" REMOVED. New size: {len(minimal_vocab)}")
-                      if len(excluded_vocab) < 10:
-                          print(excluded_vocab)
-                      # Restart the scan for this chunk size, as the list has changed
-                      start_index = 0
-                  else:
-                      # Mismatch disappeared, this chunk is essential. Move to the next one.
-                      print(" KEPT (essential).")
-                      if len(excluded_vocab) < 10:
-                          print(excluded_vocab)
-                      start_index = end_index
-
-              # If we completed a full pass for this chunk size without removing anything,
-              # it's time to try smaller chunks.
-              if not removed_in_pass:
-                  chunk_size //= 2
-
-          # 4. Final result
-          print("\n--- Minimization Complete ---")
-          print(f"\nOriginal vocabulary size: {len(original_vocab)}")
-          print(f"Minimal vocabulary size: {len(minimal_vocab)}")
-          print("\nEssential tokens causing the mismatch:")
-          print(json.dumps(minimal_vocab, indent=2))
-
-          # Save the result to a file
-          with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
-              json.dump(minimal_vocab, f, indent=2)
-          print(f"\n✅ Minimal vocabulary saved to '{MINIMAL_VOCAB_OUTPUT_PATH}'")
-
-
-      if __name__ == "__main__":
-          # Ensure required files/scripts exist before running
-          required_scripts = [
-              "scripts/compile.py",
-              "python/run_benchmarks.sh",
-          ]
-          for script in required_scripts:
-              if not os.path.exists(script):
-                  print(f"Error: Required script '{script}' not found in the current directory.")
-                  sys.exit(1)
-
-          main()
-  prev_file_contents:
     scripts/delta_debug.py: |-
       #!/usr/bin/env python3
       import json
@@ -364,6 +198,219 @@ local_system:
                   sys.exit(1)
 
           main()
+  prev_file_contents:
+    scripts/delta_debug.py: |-
+      #!/usr/bin/env python3
+      import json
+      import subprocess
+      import os
+      import tempfile
+      import sys
+      import uuid
+      import datetime
+      from multiprocessing import Pool
+      from typing import List
+
+      # --- Configuration ---
+
+      # The original, full vocabulary file that causes the mismatch.
+      ORIGINAL_VOCAB_PATH = ".temp.vocab.json"
+
+      # The command to run. Use a placeholder `{vocab_path}` which the script
+      # will replace with the path to the temporary vocab file for each test.
+      # NOTE: Using shell=True, so ensure this command is safe.
+      COMMAND_TEMPLATE = """
+      python scripts/compile.py \
+          --grammar src/js_simplified2.ebnf \
+          --output {constraint_path} \
+          --vocab-path {vocab_path} \
+          && \
+      REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
+      CONSTRAINT_FILE="{constraint_path}" \
+      CODE_FILE=./src/example_code8.js \
+      bash python/run_benchmarks.sh \
+          python/aug25/models/bruteforce_model.py \
+          python/aug25/models/rust_model.py
+      """
+
+      # The string to look for in the command's output that indicates a mismatch.
+      MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
+
+      # The base directory where results will be saved.
+      RESULTS_BASE_DIR = "delta_debug_results"
+
+      # --- Script Logic ---
+
+      def run_test_with_vocab(vocab_list: List[str]) -> bool:
+          """
+          Runs the benchmark command with a given vocabulary list.
+
+          Args:
+              vocab_list: A list of strings representing the vocabulary.
+
+          Returns:
+              True if a mismatch occurs, False otherwise.
+          """
+          with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_file:
+              json.dump(vocab_list, tmp_file)
+              temp_vocab_path = tmp_file.name
+
+          # Generate a unique path for the constraint file
+          constraint_filename = f"js_constraint_{uuid.uuid4()}.json.gz"
+          temp_constraint_path = os.path.join(tempfile.gettempdir(), constraint_filename)
+
+          try:
+              command = COMMAND_TEMPLATE.format(
+                  vocab_path=temp_vocab_path,
+                  constraint_path=temp_constraint_path
+              ).strip()
+              result = subprocess.run(
+                  command,
+                  shell=True,
+                  capture_output=True,
+                  text=True,
+                  encoding='utf-8'
+              )
+              output = result.stdout + result.stderr
+              return MISMATCH_INDICATOR in output
+          finally:
+              os.remove(temp_vocab_path)
+              if os.path.exists(temp_constraint_path):
+                  os.remove(temp_constraint_path)
+
+
+      def main():
+          """
+          Main function to perform the vocabulary minimization.
+          """
+          print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
+
+          # Create a unique directory for this run's results
+          timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+          results_dir = os.path.join(RESULTS_BASE_DIR, timestamp)
+          os.makedirs(results_dir, exist_ok=True)
+          print(f"Results will be saved in: '{results_dir}'")
+
+          # 1. Load the original vocabulary
+          if not os.path.exists(ORIGINAL_VOCAB_PATH):
+              print(f"Error: Original vocabulary file not found at '{ORIGINAL_VOCAB_PATH}'")
+              sys.exit(1)
+
+          with open(ORIGINAL_VOCAB_PATH, 'r') as f:
+              original_vocab = json.load(f)
+
+          print(f"Loaded original vocabulary with {len(original_vocab)} tokens.")
+
+          # 2. Initial check: Verify that the full vocabulary causes a mismatch
+          print("\nStep 1: Verifying that the original vocabulary causes a mismatch...")
+          if not run_test_with_vocab(original_vocab):
+              print("Error: The original vocabulary does not seem to cause a mismatch.")
+              print("Please ensure the COMMAND_TEMPLATE and MISMATCH_INDICATOR are correct.")
+              sys.exit(1)
+          print("✅ Success: Original vocabulary confirmed to cause a mismatch.")
+
+          # 3. Start the minimization process
+          minimal_vocab = list(original_vocab)
+          print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
+
+          num_cpus = max(1, os.cpu_count() // 2)
+          print(f"Using {num_cpus} parallel processes.")
+
+          reduction_step = 0
+          chunk_size = len(minimal_vocab) // 2
+
+          with Pool(processes=num_cpus) as pool:
+              while chunk_size >= 1:
+                  print(f"\n--- Testing with chunk size: {chunk_size} ---")
+                  removed_in_pass = False
+
+                  while True:  # Keep trying with this chunk size as long as we are making progress
+                      num_chunks = (len(minimal_vocab) + chunk_size - 1) // chunk_size
+                      if num_chunks < 2:
+                          break  # Not enough chunks to test for removal
+
+                      tasks = []
+                      chunk_metadata = []
+                      start_index = 0
+                      while start_index < len(minimal_vocab):
+                          end_index = min(start_index + chunk_size, len(minimal_vocab))
+                          test_vocab = minimal_vocab[:start_index] + minimal_vocab[end_index:]
+
+                          if not test_vocab:
+                              start_index = end_index
+                              continue
+
+                          tasks.append(test_vocab)
+                          chunk_metadata.append({
+                              "start": start_index,
+                              "end": end_index,
+                              "excluded": minimal_vocab[start_index:end_index]
+                          })
+                          start_index = end_index
+
+                      print(f"Testing removal of {len(tasks)} chunks in parallel...")
+                      results = pool.map(run_test_with_vocab, tasks)
+
+                      found_reduction = False
+                      for i, mismatch_persists in enumerate(results):
+                          if mismatch_persists:
+                              # Mismatch still occurs, so the removal was successful
+                              meta = chunk_metadata[i]
+                              minimal_vocab = tasks[i]
+
+                              # Save intermediate progress
+                              reduction_step += 1
+                              new_size = len(minimal_vocab)
+                              filename = f"step_{reduction_step:04d}_size_{new_size}.json"
+                              output_path = os.path.join(results_dir, filename)
+                              with open(output_path, 'w') as f:
+                                  json.dump(minimal_vocab, f, indent=2)
+
+                              removed_in_pass = True
+                              found_reduction = True
+                              print(f"REMOVED chunk (indices {meta['start']}-{meta['end']-1}). New size: {len(minimal_vocab)}")
+                              if len(meta['excluded']) < 10:
+                                  print(meta['excluded'])
+
+                              # Restart the scan for this chunk size with the smaller vocab
+                              break
+
+                      if not found_reduction:
+                          print("No more reductions possible with this chunk size.")
+                          break  # Exit the inner while True loop
+
+                  # If we completed a full pass for this chunk size without removing anything,
+                  # it's time to try smaller chunks.
+                  if not removed_in_pass:
+                      chunk_size //= 2
+
+          # 4. Final result
+          print("\n--- Minimization Complete ---")
+          print(f"\nOriginal vocabulary size: {len(original_vocab)}")
+          print(f"Minimal vocabulary size: {len(minimal_vocab)}")
+          print("\nEssential tokens causing the mismatch:")
+          print(json.dumps(minimal_vocab, indent=2))
+
+          # Save the result to a file
+          final_output_path = os.path.join(results_dir, "minimal_vocab.json")
+          with open(final_output_path, 'w') as f:
+              json.dump(minimal_vocab, f, indent=2)
+          print(f"\n✅ Minimal vocabulary saved to '{final_output_path}'")
+          print(f"Intermediate steps are also saved in '{results_dir}'")
+
+
+      if __name__ == "__main__":
+          # Ensure required files/scripts exist before running
+          required_scripts = [
+              "scripts/compile.py",
+              "python/run_benchmarks.sh",
+          ]
+          for script in required_scripts:
+              if not os.path.exists(script):
+                  print(f"Error: Required script '{script}' not found in the current directory.")
+                  sys.exit(1)
+
+          main()
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -375,7 +422,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -414,6 +461,8 @@ messages:
       import os
       import tempfile
       import sys
+      import uuid
+      import datetime
       from typing import List
 
       # --- Configuration ---
@@ -427,11 +476,11 @@ messages:
       COMMAND_TEMPLATE = """
       python scripts/compile.py \
           --grammar src/js_simplified2.ebnf \
-          --output .cache/test_vocabs/js_constraint.json.gz \
+          --output {constraint_path} \
           --vocab-path {vocab_path} \
           && \
       REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
-      CONSTRAINT_FILE=".cache/test_vocabs/js_constraint.json.gz" \
+      CONSTRAINT_FILE="{constraint_path}" \
       CODE_FILE=./src/example_code8.js \
       bash python/run_benchmarks.sh \
           python/aug25/models/bruteforce_model.py \
@@ -441,8 +490,8 @@ messages:
       # The string to look for in the command's output that indicates a mismatch.
       MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
 
-      # The file where the final, minimal vocabulary will be saved.
-      MINIMAL_VOCAB_OUTPUT_PATH = "minimal_vocab.json"
+      # The base directory where results will be saved.
+      RESULTS_BASE_DIR = "delta_debug_results"
 
       # --- Script Logic ---
 
@@ -460,8 +509,15 @@ messages:
               json.dump(vocab_list, tmp_file)
               temp_vocab_path = tmp_file.name
 
+          # Generate a unique path for the constraint file
+          constraint_filename = f"js_constraint_{uuid.uuid4()}.json.gz"
+          temp_constraint_path = os.path.join(tempfile.gettempdir(), constraint_filename)
+
           try:
-              command = COMMAND_TEMPLATE.format(vocab_path=temp_vocab_path).strip()
+              command = COMMAND_TEMPLATE.format(
+                  vocab_path=temp_vocab_path,
+                  constraint_path=temp_constraint_path
+              ).strip()
               result = subprocess.run(
                   command,
                   shell=True,
@@ -473,6 +529,8 @@ messages:
               return MISMATCH_INDICATOR in output
           finally:
               os.remove(temp_vocab_path)
+              if os.path.exists(temp_constraint_path):
+                  os.remove(temp_constraint_path)
 
 
       def main():
@@ -480,6 +538,12 @@ messages:
           Main function to perform the vocabulary minimization.
           """
           print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
+
+          # Create a unique directory for this run's results
+          timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+          results_dir = os.path.join(RESULTS_BASE_DIR, timestamp)
+          os.makedirs(results_dir, exist_ok=True)
+          print(f"Results will be saved in: '{results_dir}'")
 
           # 1. Load the original vocabulary
           if not os.path.exists(ORIGINAL_VOCAB_PATH):
@@ -503,6 +567,7 @@ messages:
           minimal_vocab = list(original_vocab)
           print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
 
+          reduction_step = 0
           chunk_size = len(minimal_vocab) // 2
           while chunk_size >= 1:
               print(f"\n--- Testing with chunk size: {chunk_size} ---")
@@ -529,6 +594,15 @@ messages:
                   if run_test_with_vocab(test_vocab):
                       # Mismatch still occurs, so the removal was successful
                       minimal_vocab = test_vocab
+
+                      # Save intermediate progress to a new file
+                      reduction_step += 1
+                      new_size = len(minimal_vocab)
+                      filename = f"step_{reduction_step:04d}_size_{new_size}.json"
+                      output_path = os.path.join(results_dir, filename)
+                      with open(output_path, 'w') as f:
+                          json.dump(minimal_vocab, f, indent=2)
+
                       removed_in_pass = True
                       print(f" REMOVED. New size: {len(minimal_vocab)}")
                       if len(excluded_vocab) < 10:
@@ -555,9 +629,11 @@ messages:
           print(json.dumps(minimal_vocab, indent=2))
 
           # Save the result to a file
-          with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
+          final_output_path = os.path.join(results_dir, "minimal_vocab.json")
+          with open(final_output_path, 'w') as f:
               json.dump(minimal_vocab, f, indent=2)
-          print(f"\n✅ Minimal vocabulary saved to '{MINIMAL_VOCAB_OUTPUT_PATH}'")
+          print(f"\n✅ Minimal vocabulary saved to '{final_output_path}'")
+          print(f"Intermediate steps are also saved in '{results_dir}'")
 
 
       if __name__ == "__main__":
@@ -575,67 +651,7 @@ messages:
       ```
     metadata:
       filename: scripts/delta_debug.py
-  - user: |-
-      python scripts/delta_debug.py
-      --- Vocabulary Minimizer (Fast Delta-Debugging Method) ---
-      Loaded original vocabulary with 14605 tokens.
-
-      Step 1: Verifying that the original vocabulary causes a mismatch...
-      ✅ Success: Original vocabulary confirmed to cause a mismatch.
-
-      Step 2: Starting minimization from 14605 tokens using chunk removal...
-
-      --- Testing with chunk size: 7302 ---
-      [1/3] Trying to remove 7302 tokens (indices 0-7301)... KEPT (essential).
-      [2/3] Trying to remove 7302 tokens (indices 7302-14603)... REMOVED. New size: 7303
-      [1/2] Trying to remove 7302 tokens (indices 0-7301)... KEPT (essential).
-      [2/2] Trying to remove 1 tokens (indices 7302-7302)... REMOVED. New size: 7302
-      ['Ġ(/']
-
-      --- Testing with chunk size: 7302 ---
-
-      --- Testing with chunk size: 3651 ---
-      [1/2] Trying to remove 3651 tokens (indices 0-3650)... KEPT (essential).
-      [2/2] Trying to remove 3651 tokens (indices 3651-7301)... REMOVED. New size: 3651
-
-      --- Testing with chunk size: 3651 ---
-
-      --- Testing with chunk size: 1825 ---
-      [1/3] Trying to remove 1825 tokens (indices 0-1824)... KEPT (essential).
-      [2/3] Trying to remove 1825 tokens (indices 1825-3649)... KEPT (essential).
-      [3/3] Trying to remove 1 tokens (indices 3650-3650)... REMOVED. New size: 3650
-      ['ials']
-      [1/2] Trying to remove 1825 tokens (indices 0-1824)... KEPT (essential).
-      [2/2] Trying to remove 1825 tokens (indices 1825-3649)... KEPT (essential).
-
-      --- Testing with chunk size: 1825 ---
-      [1/2] Trying to remove 1825 tokens (indices 0-1824)... KEPT (essential).
-      [2/2] Trying to remove 1825 tokens (indices 1825-3649)... KEPT (essential).
-
-      --- Testing with chunk size: 912 ---
-      [1/5] Trying to remove 912 tokens (indices 0-911)... KEPT (essential).
-      [2/5] Trying to remove 912 tokens (indices 912-1823)... REMOVED. New size: 2738
-      [1/4] Trying to remove 912 tokens (indices 0-911)... KEPT (essential).
-      [2/4] Trying to remove 912 tokens (indices 912-1823)... REMOVED. New size: 1826
-      [1/3] Trying to remove 912 tokens (indices 0-911)... KEPT (essential).
-      [2/3] Trying to remove 912 tokens (indices 912-1823)... KEPT (essential).
-      [3/3] Trying to remove 2 tokens (indices 1824-1825)... REMOVED. New size: 1824
-      ['CO', 'yo']
-      [1/2] Trying to remove 912 tokens (indices 0-911)... KEPT (essential).
-      [2/2] Trying to remove 912 tokens (indices 912-1823)... KEPT (essential).
-
-      --- Testing with chunk size: 912 ---
-      [1/2] Trying to remove 912 tokens (indices 0-911)... KEPT (essential).
-      [2/2] Trying to remove 912 tokens (indices 912-1823)... KEPT (essential).
-
-      --- Testing with chunk size: 456 ---
-      [1/4] Trying to remove 456 tokens (indices 0-455)... KEPT (essential).
-      [2/4] Trying to remove 456 tokens (indices 456-911)... KEPT (essential).
-      [3/4] Trying to remove 456 tokens (indices 912-1367)... KEPT (essential).
-      [4/4] Trying to remove 456 tokens (indices 1368-1823)... REMOVED. New size: 1368
-      [1/3] Trying to remove 456 tokens (indices 0-455)...
-    metadata:
-  - user: Modify this to save the results as we go, just in case there's a crash.
+  - user: Make this work in parallel. Use half the number of CPUs available.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -654,396 +670,178 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Saving progress for a long-running script is a great idea to prevent data loss from unexpected interruptions. Here are the step-by-step instructions and the corresponding git diff to modify `scripts/delta_debug.py`.
+      Of course. Here are the step-by-step instructions to parallelize the delta-debugging script, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I'll add the logic to save the `minimal_vocab.json` file every time a smaller vocabulary is successfully found.
+      I will modify `scripts/delta_debug.py` to use Python's `multiprocessing` module. This will allow the script to test multiple vocabulary chunks in parallel, significantly speeding up the minimization process.
 
-      1.  **Open the file `scripts/delta_debug.py`**.
-
-      2.  **Navigate to the main minimization loop.**
-          Find the `if run_test_with_vocab(test_vocab):` block, which is located inside the nested `while` loops within the `main` function. This block is executed when a chunk of the vocabulary has been successfully removed without fixing the mismatch.
-
-      3.  **Insert the code to save the file.**
-          Immediately after the line `minimal_vocab = test_vocab`, add the following snippet to write the current state of `minimal_vocab` to the output file:
-
+      1.  **Import `multiprocessing`:**
+          In `scripts/delta_debug.py`, add the following line to the import section at the top of the file:
           ```python
-                      # Save intermediate progress
-                      with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
-                          json.dump(minimal_vocab, f, indent=2)
+          from multiprocessing import Pool
           ```
 
-      This ensures that `minimal_vocab.json` is always up-to-date with the smallest vocabulary found so far.
+      2.  **Parallelize the Minimization Loop:**
+          In the `main` function, I will replace the sequential minimization loop with a new implementation that uses a `Pool` of worker processes. This new loop will:
+          *   Calculate the number of CPUs to use (half of the available cores).
+          *   For each chunk size, generate all possible sub-vocabularies that result from removing one chunk.
+          *   Distribute these sub-vocabularies to the worker pool to be tested in parallel.
+          *   Greedily accept the first successful reduction found, update the vocabulary, and restart the process with the new, smaller vocabulary.
+
+          This change replaces the block of code under the comment `# 3. Start the minimization process`.
 
       ### Git Diff
 
-      Here is the git diff for the change. You can apply this patch directly.
+      Here is the git diff to apply these changes to `scripts/delta_debug.py`.
 
       ```diff
       diff --git a/scripts/delta_debug.py b/scripts/delta_debug.py
+      index 455476a..7101859 100644
       --- a/scripts/delta_debug.py
       +++ b/scripts/delta_debug.py
-      @@ -149,6 +149,11 @@
-                   if run_test_with_vocab(test_vocab):
-                       # Mismatch still occurs, so the removal was successful
-                       minimal_vocab = test_vocab
-      +
-      +                # Save intermediate progress
-      +                with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
-      +                    json.dump(minimal_vocab, f, indent=2)
-      +
-                       removed_in_pass = True
-                       print(f" REMOVED. New size: {len(minimal_vocab)}")
-                       if len(excluded_vocab) < 10:
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: scripts/delta_debug.py
-      Applying patch to 'scripts/delta_debug.py' using custom patcher...
-      Successfully applied patch and wrote to scripts/delta_debug.py.
-    metadata:
-  - user: 'Changes committed with message: "feat: Save minimal vocabulary state incrementally
-      during delta debugging"'
-    metadata:
-  - user: |-
-      Diff of scripts/delta_debug.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Save in a temporary directory. And save each step, not just the final result.
-    metadata:
-  - assistant: |-
-      Excellent idea. Saving each reduction step to a unique, timestamped directory will give you a full audit trail of the minimization process and protect your results from being overwritten.
-
-      Here are the step-by-step instructions to implement this, followed by the git diff.
-
-      ### Step-by-step Instructions
-
-      1.  **Open `scripts/delta_debug.py`**.
-
-      2.  **Add the `datetime` import**: At the top of the file, add `import datetime` to handle timestamping.
-
-          ```python
-          import sys
-          import datetime
-          from typing import List
-          ```
-
-      3.  **Change the output path configuration**: Find and replace the `MINIMAL_VOCAB_OUTPUT_PATH` variable with a new variable for a base results directory.
-
-          ```python
-          # The string to look for in the command's output that indicates a mismatch.
-          MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
-          
-          # The base directory where results will be saved.
-          RESULTS_BASE_DIR = "delta_debug_results"
-          ```
-
-      4.  **Create a unique results directory**: In the `main` function, right at the beginning, insert the code to create a new subdirectory for the current run's results.
-
-          ```python
-          def main():
-              """
-              Main function to perform the vocabulary minimization.
-              """
-              print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
-          
-              # Create a unique directory for this run's results
-              timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-              results_dir = os.path.join(RESULTS_BASE_DIR, timestamp)
-              os.makedirs(results_dir, exist_ok=True)
-              print(f"Results will be saved in: '{results_dir}'")
-          
-              # 1. Load the original vocabulary
-              # ...
-          ```
-
-      5.  **Initialize a step counter**: Before the main minimization loop (`while chunk_size >= 1:`), add a counter for the reduction steps.
-
-          ```python
-          minimal_vocab = list(original_vocab)
-          print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
-
-          reduction_step = 0
-          chunk_size = len(minimal_vocab) // 2
-          while chunk_size >= 1:
-              # ...
-          ```
-
-      6.  **Update the incremental save logic**: Inside the `if run_test_with_vocab(test_vocab):` block, replace the previous save logic with the new logic to save a uniquely named file for each step.
-
-          *   **Remove** the old block:
-              ```python
-              # Save intermediate progress
-              with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
-                  json.dump(minimal_vocab, f, indent=2)
-              ```
-          *   **Add** the new block in its place:
-              ```python
-              # Save intermediate progress to a new file
-              reduction_step += 1
-              new_size = len(minimal_vocab)
-              filename = f"step_{reduction_step:04d}_size_{new_size}.json"
-              output_path = os.path.join(results_dir, filename)
-              with open(output_path, 'w') as f:
-                  json.dump(minimal_vocab, f, indent=2)
-              ```
-
-      7.  **Update the final save logic**: At the end of the `main` function, modify the final save and print statements to use the new results directory.
-
-          ```python
-          # Save the result to a file
-          final_output_path = os.path.join(results_dir, "minimal_vocab.json")
-          with open(final_output_path, 'w') as f:
-              json.dump(minimal_vocab, f, indent=2)
-          print(f"\n✅ Minimal vocabulary saved to '{final_output_path}'")
-          print(f"Intermediate steps are also saved in '{results_dir}'")
-          ```
-
-      ### Git Diff
-
-      Here is the git diff to apply these changes directly.
-
-      ```diff
-      diff --git a/scripts/delta_debug.py b/scripts/delta_debug.py
-      --- a/scripts/delta_debug.py
-      +++ b/scripts/delta_debug.py
-      @@ -4,6 +4,7 @@
-       import os
-       import tempfile
+      @@ -6,6 +6,7 @@
        import sys
-      +import datetime
+       import uuid
+       import datetime
+      +from multiprocessing import Pool
        from typing import List
        
        # --- Configuration ---
-      @@ -28,8 +29,8 @@
-       # The string to look for in the command's output that indicates a mismatch.
-       MISMATCH_INDICATOR = "rust_model__js_constraint                ❌"
+      @@ -100,66 +101,72 @@
+               sys.exit(1)
+           print("✅ Success: Original vocabulary confirmed to cause a mismatch.")
        
-      -# The file where the final, minimal vocabulary will be saved.
-      -MINIMAL_VOCAB_OUTPUT_PATH = "minimal_vocab.json"
-      +# The base directory where results will be saved.
-      +RESULTS_BASE_DIR = "delta_debug_results"
-       
-       # --- Script Logic ---
-       
-      @@ -70,6 +71,12 @@
-           """
-           print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
-       
-      +    # Create a unique directory for this run's results
-      +    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-      +    results_dir = os.path.join(RESULTS_BASE_DIR, timestamp)
-      +    os.makedirs(results_dir, exist_ok=True)
-      +    print(f"Results will be saved in: '{results_dir}'")
-      +
-           # 1. Load the original vocabulary
-           if not os.path.exists(ORIGINAL_VOCAB_PATH):
-               print(f"Error: Original vocabulary file not found at '{ORIGINAL_VOCAB_PATH}'")
-      @@ -90,6 +97,7 @@
+      -    # 3. Start the minimization process
+      +    # 3. Start the minimization process
            minimal_vocab = list(original_vocab)
            print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
        
-      +    reduction_step = 0
-           chunk_size = len(minimal_vocab) // 2
-           while chunk_size >= 1:
-               print(f"\n--- Testing with chunk size: {chunk_size} ---")
-      @@ -115,11 +123,14 @@
-                   if run_test_with_vocab(test_vocab):
-                       # Mismatch still occurs, so the removal was successful
-                       minimal_vocab = test_vocab
-       
-      -                # Save intermediate progress
-      -                with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
-      +                # Save intermediate progress to a new file
-      +                reduction_step += 1
-      +                new_size = len(minimal_vocab)
-      +                filename = f"step_{reduction_step:04d}_size_{new_size}.json"
-      +                output_path = os.path.join(results_dir, filename)
-      +                with open(output_path, 'w') as f:
-                           json.dump(minimal_vocab, f, indent=2)
-       
-                       removed_in_pass = True
-                       print(f" REMOVED. New size: {len(minimal_vocab)}")
-      @@ -145,9 +156,11 @@
-           print(json.dumps(minimal_vocab, indent=2))
-       
-           # Save the result to a file
-      -    with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
-      +    final_output_path = os.path.join(results_dir, "minimal_vocab.json")
-      +    with open(final_output_path, 'w') as f:
-               json.dump(minimal_vocab, f, indent=2)
-      -    print(f"\n✅ Minimal vocabulary saved to '{MINIMAL_VOCAB_OUTPUT_PATH}'")
-      +    print(f"\n✅ Minimal vocabulary saved to '{final_output_path}'")
-      +    print(f"Intermediate steps are also saved in '{results_dir}'")
-       
-       
-       if __name__ == "__main__":
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: scripts/delta_debug.py
-      Applying patch to 'scripts/delta_debug.py' using custom patcher...
-      Successfully applied patch and wrote to scripts/delta_debug.py.
-    metadata:
-  - user: 'Changes committed with message: "feat: Save intermediate delta-debug results
-      to timestamped directories"'
-    metadata:
-  - user: |-
-      Diff of scripts/delta_debug.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Store the constraint `.json.gz` file in temp location, random so there's
-      no conflicts.
-    metadata:
-  - assistant: |-
-      This is a crucial change for robustness, especially if the script were to be run in parallel or if a previous run left the file in a bad state.
-
-      Here are the step-by-step instructions and the corresponding git diff to use a temporary, unique path for the constraint file.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `scripts/delta_debug.py`**.
-
-      2.  **Add `uuid` import**: Add `import uuid` to the list of imports at the top of the file.
-
-          ```python
-          import tempfile
-          import sys
-          import datetime
-          import uuid # ADD THIS LINE
-          from typing import List
-          ```
-
-      3.  **Update `COMMAND_TEMPLATE`**: Modify the `COMMAND_TEMPLATE` in the configuration section to use a new placeholder `{constraint_path}` instead of the fixed path `.cache/test_vocabs/js_constraint.json.gz`. This placeholder must be used for both the `scripts/compile.py --output` and the `CONSTRAINT_FILE` environment variable.
-
-          ```python
-          # The command to run. Use a placeholder `{vocab_path}` which the script
-          # will replace with the path to the temporary vocab file for each test.
-          # NOTE: Using shell=True, so ensure this command is safe.
-          COMMAND_TEMPLATE = """
-          python scripts/compile.py \
-              --grammar src/js_simplified2.ebnf \
-              --output {constraint_path} \
-              --vocab-path {vocab_path} \
-              && \
-          REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
-          CONSTRAINT_FILE="{constraint_path}" \
-          CODE_FILE=./src/example_code8.js \
-          bash python/run_benchmarks.sh \
-              python/aug25/models/bruteforce_model.py \
-              python/aug25/models/rust_model.py
-          """
-          ```
-
-      4.  **Update `run_test_with_vocab`**: Modify the function to generate a unique temporary path for the constraint file and ensure it is cleaned up.
-
-          *   Inside `run_test_with_vocab`, before the `try` block, generate a unique path for the constraint file using `uuid` and `tempfile.gettempdir()`.
-          *   Update the `command` formatting to include the new `temp_constraint_path`.
-          *   Add cleanup logic for the constraint file in the `finally` block.
-
-          The `run_test_with_vocab` function should look like this after the changes:
-
-          ```python
-          def run_test_with_vocab(vocab_list: List[str]) -> bool:
-              # ... (existing code to create temp_vocab_path) ...
-
-              # Generate a unique path for the constraint file
-              constraint_filename = f"js_constraint_{uuid.uuid4()}.json.gz"
-              temp_constraint_path = os.path.join(tempfile.gettempdir(), constraint_filename)
-
-              try:
-                  command = COMMAND_TEMPLATE.format(
-                      vocab_path=temp_vocab_path,
-                      constraint_path=temp_constraint_path # Pass the unique path
-                  ).strip()
-                  result = subprocess.run(
-                      # ... (rest of subprocess.run) ...
-                  )
-                  output = result.stdout + result.stderr
-                  return MISMATCH_INDICATOR in output
-              finally:
-                  os.remove(temp_vocab_path)
-                  # Clean up the temporary constraint file if it was created
-                  if os.path.exists(temp_constraint_path):
-                      os.remove(temp_constraint_path)
-          ```
-
-      ### Git Diff
-
-      Here is the git diff for the changes.
-
-      ```diff
-      diff --git a/scripts/delta_debug.py b/scripts/delta_debug.py
-      --- a/scripts/delta_debug.py
-      +++ b/scripts/delta_debug.py
-      @@ -4,6 +4,7 @@
-       import os
-       import tempfile
-       import sys
-      +import uuid
-       import datetime
-       from typing import List
-       
-      @@ -17,13 +18,13 @@
-       # NOTE: Using shell=True, so ensure this command is safe.
-       COMMAND_TEMPLATE = """
-       python scripts/compile.py \
-           --grammar src/js_simplified2.ebnf \
-      -    --output .cache/test_vocabs/js_constraint.json.gz \
-      +    --output {constraint_path} \
-           --vocab-path {vocab_path} \
-           && \
-       REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
-      -CONSTRAINT_FILE=".cache/test_vocabs/js_constraint.json.gz" \
-      +CONSTRAINT_FILE="{constraint_path}" \
-       CODE_FILE=./src/example_code8.js \
-       bash python/run_benchmarks.sh \
-           python/aug25/models/bruteforce_model.py \
-      @@ -44,19 +45,26 @@
-               json.dump(vocab_list, tmp_file)
-               temp_vocab_path = tmp_file.name
-       
-      +    # Generate a unique path for the constraint file
-      +    constraint_filename = f"js_constraint_{uuid.uuid4()}.json.gz"
-      +    temp_constraint_path = os.path.join(tempfile.gettempdir(), constraint_filename)
+      +    num_cpus = max(1, os.cpu_count() // 2)
+      +    print(f"Using {num_cpus} parallel processes.")
       +
-           try:
-      -        command = COMMAND_TEMPLATE.format(vocab_path=temp_vocab_path).strip()
-      +        command = COMMAND_TEMPLATE.format(
-      +            vocab_path=temp_vocab_path,
-      +            constraint_path=temp_constraint_path
-      +        ).strip()
-               result = subprocess.run(
-                   command,
-                   shell=True,
-                   capture_output=True,
-                   text=True,
-                   encoding='utf-8'
-               )
-               output = result.stdout + result.stderr
-               return MISMATCH_INDICATOR in output
-           finally:
-               os.remove(temp_vocab_path)
-      +        if os.path.exists(temp_constraint_path):
-      +            os.remove(temp_constraint_path)
+           reduction_step = 0
+           chunk_size = len(minimal_vocab) // 2
+      -    while chunk_size >= 1:
+      -        print(f"\n--- Testing with chunk size: {chunk_size} ---")
+      -        removed_in_pass = False
+      -        start_index = 0
+      -        while start_index < len(minimal_vocab):
+      -            end_index = min(start_index + chunk_size, len(minimal_vocab))
+      -
+      -            # Create a test vocabulary by removing the current chunk
+      -            test_vocab = minimal_vocab[:start_index] + minimal_vocab[end_index:]
+      -            excluded_vocab = minimal_vocab[start_index:end_index]
+      -
+      -            # Don't test an empty vocabulary, just skip
+      -            if not test_vocab:
+      -                start_index = end_index
+      -                continue
+      -
+      -            num_chunks = (len(minimal_vocab) + chunk_size - 1) // chunk_size
+      -            current_chunk_num = (start_index // chunk_size) + 1
+      -
+      -            progress = f"[{current_chunk_num}/{num_chunks}]"
+      -            print(f"{progress} Trying to remove {end_index - start_index} tokens (indices {start_index}-{end_index-1})...", end='', flush=True)
+      -
+      -            if run_test_with_vocab(test_vocab):
+      -                # Mismatch still occurs, so the removal was successful
+      -                minimal_vocab = test_vocab
+      -
+      -                # Save intermediate progress to a new file
+      -                reduction_step += 1
+      -                new_size = len(minimal_vocab)
+      -                filename = f"step_{reduction_step:04d}_size_{new_size}.json"
+      -                output_path = os.path.join(results_dir, filename)
+      -                with open(output_path, 'w') as f:
+      -                    json.dump(minimal_vocab, f, indent=2)
+      -
+      -                removed_in_pass = True
+      -                print(f" REMOVED. New size: {len(minimal_vocab)}")
+      -                if len(excluded_vocab) < 10:
+      -                    print(excluded_vocab)
+      -                # Restart the scan for this chunk size, as the list has changed
+      -                start_index = 0
+      -            else:
+      -                # Mismatch disappeared, this chunk is essential. Move to the next one.
+      -                print(" KEPT (essential).")
+      -                if len(excluded_vocab) < 10:
+      -                    print(excluded_vocab)
+      -                start_index = end_index
+      -
+      -        # If we completed a full pass for this chunk size without removing anything,
+      -        # it's time to try smaller chunks.
+      -        if not removed_in_pass:
+      -            chunk_size //= 2
+      +
+      +    with Pool(processes=num_cpus) as pool:
+      +        while chunk_size >= 1:
+      +            print(f"\n--- Testing with chunk size: {chunk_size} ---")
+      +            removed_in_pass = False
+      +
+      +            while True:  # Keep trying with this chunk size as long as we are making progress
+      +                num_chunks = (len(minimal_vocab) + chunk_size - 1) // chunk_size
+      +                if num_chunks < 2:
+      +                    break  # Not enough chunks to test for removal
+      +
+      +                tasks = []
+      +                chunk_metadata = []
+      +                start_index = 0
+      +                while start_index < len(minimal_vocab):
+      +                    end_index = min(start_index + chunk_size, len(minimal_vocab))
+      +                    test_vocab = minimal_vocab[:start_index] + minimal_vocab[end_index:]
+      +
+      +                    if not test_vocab:
+      +                        start_index = end_index
+      +                        continue
+      +
+      +                    tasks.append(test_vocab)
+      +                    chunk_metadata.append({
+      +                        "start": start_index,
+      +                        "end": end_index,
+      +                        "excluded": minimal_vocab[start_index:end_index]
+      +                    })
+      +                    start_index = end_index
+      +
+      +                print(f"Testing removal of {len(tasks)} chunks in parallel...")
+      +                results = pool.map(run_test_with_vocab, tasks)
+      +
+      +                found_reduction = False
+      +                for i, mismatch_persists in enumerate(results):
+      +                    if mismatch_persists:
+      +                        # Mismatch still occurs, so the removal was successful
+      +                        meta = chunk_metadata[i]
+      +                        minimal_vocab = tasks[i]
+      +
+      +                        # Save intermediate progress
+      +                        reduction_step += 1
+      +                        new_size = len(minimal_vocab)
+      +                        filename = f"step_{reduction_step:04d}_size_{new_size}.json"
+      +                        output_path = os.path.join(results_dir, filename)
+      +                        with open(output_path, 'w') as f:
+      +                            json.dump(minimal_vocab, f, indent=2)
+      +
+      +                        removed_in_pass = True
+      +                        found_reduction = True
+      +                        print(f"REMOVED chunk (indices {meta['start']}-{meta['end']-1}). New size: {len(minimal_vocab)}")
+      +                        if len(meta['excluded']) < 10:
+      +                            print(meta['excluded'])
+      +
+      +                        # Restart the scan for this chunk size with the smaller vocab
+      +                        break
+      +
+      +                if not found_reduction:
+      +                    print("No more reductions possible with this chunk size.")
+      +                    break  # Exit the inner while True loop
+      +
+      +            # If we completed a full pass for this chunk size without removing anything,
+      +            # it's time to try smaller chunks.
+      +            if not removed_in_pass:
+      +                chunk_size //= 2
        
-       
-       def main():
+           # 4. Final result
+           print("\n--- Minimization Complete ---")
+
       ```
     metadata:
   - user: |
@@ -1055,7 +853,7 @@ messages:
       Applying patch to 'scripts/delta_debug.py' using custom patcher...
       Successfully applied patch and wrote to scripts/delta_debug.py.
     metadata:
-  - user: 'Changes committed with message: "refactor: Use unique temp paths for constraint
-      files and organize results into timestamped directories"'
+  - user: 'Changes committed with message: "Parallelize vocabulary minimization in
+      delta_debug.py using multiprocessing Pool"'
     metadata:
 ...
