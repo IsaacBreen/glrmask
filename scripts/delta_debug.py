@@ -4,6 +4,7 @@ import subprocess
 import os
 import tempfile
 import sys
+import uuid
 import datetime
 from typing import List
 
@@ -18,11 +19,11 @@ ORIGINAL_VOCAB_PATH = ".temp.vocab.json"
 COMMAND_TEMPLATE = """
 python scripts/compile.py \
     --grammar src/js_simplified2.ebnf \
-    --output .cache/test_vocabs/js_constraint.json.gz \
+    --output {constraint_path} \
     --vocab-path {vocab_path} \
     && \
 REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
-CONSTRAINT_FILE=".cache/test_vocabs/js_constraint.json.gz" \
+CONSTRAINT_FILE="{constraint_path}" \
 CODE_FILE=./src/example_code8.js \
 bash python/run_benchmarks.sh \
     python/aug25/models/bruteforce_model.py \
@@ -51,8 +52,15 @@ def run_test_with_vocab(vocab_list: List[str]) -> bool:
         json.dump(vocab_list, tmp_file)
         temp_vocab_path = tmp_file.name
 
+    # Generate a unique path for the constraint file
+    constraint_filename = f"js_constraint_{uuid.uuid4()}.json.gz"
+    temp_constraint_path = os.path.join(tempfile.gettempdir(), constraint_filename)
+
     try:
-        command = COMMAND_TEMPLATE.format(vocab_path=temp_vocab_path).strip()
+        command = COMMAND_TEMPLATE.format(
+            vocab_path=temp_vocab_path,
+            constraint_path=temp_constraint_path
+        ).strip()
         result = subprocess.run(
             command,
             shell=True,
@@ -64,6 +72,8 @@ def run_test_with_vocab(vocab_list: List[str]) -> bool:
         return MISMATCH_INDICATOR in output
     finally:
         os.remove(temp_vocab_path)
+        if os.path.exists(temp_constraint_path):
+            os.remove(temp_constraint_path)
 
 
 def main():

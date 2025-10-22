@@ -177,6 +177,7 @@ local_system:
       import os
       import tempfile
       import sys
+      import uuid
       import datetime
       from typing import List
 
@@ -191,11 +192,11 @@ local_system:
       COMMAND_TEMPLATE = """
       python scripts/compile.py \
           --grammar src/js_simplified2.ebnf \
-          --output .cache/test_vocabs/js_constraint.json.gz \
+          --output {constraint_path} \
           --vocab-path {vocab_path} \
           && \
       REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
-      CONSTRAINT_FILE=".cache/test_vocabs/js_constraint.json.gz" \
+      CONSTRAINT_FILE="{constraint_path}" \
       CODE_FILE=./src/example_code8.js \
       bash python/run_benchmarks.sh \
           python/aug25/models/bruteforce_model.py \
@@ -224,8 +225,15 @@ local_system:
               json.dump(vocab_list, tmp_file)
               temp_vocab_path = tmp_file.name
 
+          # Generate a unique path for the constraint file
+          constraint_filename = f"js_constraint_{uuid.uuid4()}.json.gz"
+          temp_constraint_path = os.path.join(tempfile.gettempdir(), constraint_filename)
+
           try:
-              command = COMMAND_TEMPLATE.format(vocab_path=temp_vocab_path).strip()
+              command = COMMAND_TEMPLATE.format(
+                  vocab_path=temp_vocab_path,
+                  constraint_path=temp_constraint_path
+              ).strip()
               result = subprocess.run(
                   command,
                   shell=True,
@@ -237,6 +245,8 @@ local_system:
               return MISMATCH_INDICATOR in output
           finally:
               os.remove(temp_vocab_path)
+              if os.path.exists(temp_constraint_path):
+                  os.remove(temp_constraint_path)
 
 
       def main():
@@ -365,7 +375,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -890,5 +900,162 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Save intermediate delta-debug results
       to timestamped directories"'
+    metadata:
+  - user: |-
+      Diff of scripts/delta_debug.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Store the constraint `.json.gz` file in temp location, random so there's
+      no conflicts.
+    metadata:
+  - assistant: |-
+      This is a crucial change for robustness, especially if the script were to be run in parallel or if a previous run left the file in a bad state.
+
+      Here are the step-by-step instructions and the corresponding git diff to use a temporary, unique path for the constraint file.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `scripts/delta_debug.py`**.
+
+      2.  **Add `uuid` import**: Add `import uuid` to the list of imports at the top of the file.
+
+          ```python
+          import tempfile
+          import sys
+          import datetime
+          import uuid # ADD THIS LINE
+          from typing import List
+          ```
+
+      3.  **Update `COMMAND_TEMPLATE`**: Modify the `COMMAND_TEMPLATE` in the configuration section to use a new placeholder `{constraint_path}` instead of the fixed path `.cache/test_vocabs/js_constraint.json.gz`. This placeholder must be used for both the `scripts/compile.py --output` and the `CONSTRAINT_FILE` environment variable.
+
+          ```python
+          # The command to run. Use a placeholder `{vocab_path}` which the script
+          # will replace with the path to the temporary vocab file for each test.
+          # NOTE: Using shell=True, so ensure this command is safe.
+          COMMAND_TEMPLATE = """
+          python scripts/compile.py \
+              --grammar src/js_simplified2.ebnf \
+              --output {constraint_path} \
+              --vocab-path {vocab_path} \
+              && \
+          REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
+          CONSTRAINT_FILE="{constraint_path}" \
+          CODE_FILE=./src/example_code8.js \
+          bash python/run_benchmarks.sh \
+              python/aug25/models/bruteforce_model.py \
+              python/aug25/models/rust_model.py
+          """
+          ```
+
+      4.  **Update `run_test_with_vocab`**: Modify the function to generate a unique temporary path for the constraint file and ensure it is cleaned up.
+
+          *   Inside `run_test_with_vocab`, before the `try` block, generate a unique path for the constraint file using `uuid` and `tempfile.gettempdir()`.
+          *   Update the `command` formatting to include the new `temp_constraint_path`.
+          *   Add cleanup logic for the constraint file in the `finally` block.
+
+          The `run_test_with_vocab` function should look like this after the changes:
+
+          ```python
+          def run_test_with_vocab(vocab_list: List[str]) -> bool:
+              # ... (existing code to create temp_vocab_path) ...
+
+              # Generate a unique path for the constraint file
+              constraint_filename = f"js_constraint_{uuid.uuid4()}.json.gz"
+              temp_constraint_path = os.path.join(tempfile.gettempdir(), constraint_filename)
+
+              try:
+                  command = COMMAND_TEMPLATE.format(
+                      vocab_path=temp_vocab_path,
+                      constraint_path=temp_constraint_path # Pass the unique path
+                  ).strip()
+                  result = subprocess.run(
+                      # ... (rest of subprocess.run) ...
+                  )
+                  output = result.stdout + result.stderr
+                  return MISMATCH_INDICATOR in output
+              finally:
+                  os.remove(temp_vocab_path)
+                  # Clean up the temporary constraint file if it was created
+                  if os.path.exists(temp_constraint_path):
+                      os.remove(temp_constraint_path)
+          ```
+
+      ### Git Diff
+
+      Here is the git diff for the changes.
+
+      ```diff
+      diff --git a/scripts/delta_debug.py b/scripts/delta_debug.py
+      --- a/scripts/delta_debug.py
+      +++ b/scripts/delta_debug.py
+      @@ -4,6 +4,7 @@
+       import os
+       import tempfile
+       import sys
+      +import uuid
+       import datetime
+       from typing import List
+       
+      @@ -17,13 +18,13 @@
+       # NOTE: Using shell=True, so ensure this command is safe.
+       COMMAND_TEMPLATE = """
+       python scripts/compile.py \
+           --grammar src/js_simplified2.ebnf \
+      -    --output .cache/test_vocabs/js_constraint.json.gz \
+      +    --output {constraint_path} \
+           --vocab-path {vocab_path} \
+           && \
+       REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
+      -CONSTRAINT_FILE=".cache/test_vocabs/js_constraint.json.gz" \
+      +CONSTRAINT_FILE="{constraint_path}" \
+       CODE_FILE=./src/example_code8.js \
+       bash python/run_benchmarks.sh \
+           python/aug25/models/bruteforce_model.py \
+      @@ -44,19 +45,26 @@
+               json.dump(vocab_list, tmp_file)
+               temp_vocab_path = tmp_file.name
+       
+      +    # Generate a unique path for the constraint file
+      +    constraint_filename = f"js_constraint_{uuid.uuid4()}.json.gz"
+      +    temp_constraint_path = os.path.join(tempfile.gettempdir(), constraint_filename)
+      +
+           try:
+      -        command = COMMAND_TEMPLATE.format(vocab_path=temp_vocab_path).strip()
+      +        command = COMMAND_TEMPLATE.format(
+      +            vocab_path=temp_vocab_path,
+      +            constraint_path=temp_constraint_path
+      +        ).strip()
+               result = subprocess.run(
+                   command,
+                   shell=True,
+                   capture_output=True,
+                   text=True,
+                   encoding='utf-8'
+               )
+               output = result.stdout + result.stderr
+               return MISMATCH_INDICATOR in output
+           finally:
+               os.remove(temp_vocab_path)
+      +        if os.path.exists(temp_constraint_path):
+      +            os.remove(temp_constraint_path)
+       
+       
+       def main():
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/delta_debug.py
+      Applying patch to 'scripts/delta_debug.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/delta_debug.py.
+    metadata:
+  - user: 'Changes committed with message: "refactor: Use unique temp paths for constraint
+      files and organize results into timestamped directories"'
     metadata:
 ...
