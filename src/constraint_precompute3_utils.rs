@@ -1996,5 +1996,114 @@ pub fn merge_nodes_trie3_ultrafast(
 }
 
 pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_llm_token_id: usize, max_state_id: usize) {
-    todo!()
+    crate::debug!(2, "Compressing Trie3 edges (group identical dest-maps and union token masks)...");
+
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    #[cfg(not(rustrover))]
+    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Compress Edges", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
+    #[cfg(rustrover)]
+    let it = all_nodes.iter();
+    for node_idx in it {
+        let mut w = node_idx.write(trie3_god).expect("write");
+        if w.children().is_empty() {
+            continue;
+        }
+
+        // Take existing children for processing.
+        let old_children = std::mem::take(w.children_mut());
+
+        // First stage: group by (pop, canonicalized destination map), while unioning LLM token masks for identical dest-maps.
+        // Canonicalization: BTreeMap<Trie2Index, StateIDBV> (sorted by destination) -> Vec<(Trie2Index, StateIDBV)> as a stable key.
+        use std::collections::BTreeMap as BTM;
+        use std::collections::HashMap as HM;
+
+        // by_pop: pop -> { canonical_dest_map_vec -> union_of_llm_bv }
+        let mut by_pop: BTM<isize, HM<Vec<(Trie2Index, StateIDBV)>, LLMTokenBV>> = BTM::new();
+
+        for ((pop, mut llm_bv), dest_map) in old_children {
+            // Constrain token bitset to bound and skip empties.
+            llm_bv.constrain(max_llm_token_id);
+            if llm_bv.is_empty() {
+                continue;
+            }
+
+            // Aggregate destinations by unioning SIDs and removing empties.
+            let mut dest_agg: BTM<Trie2Index, StateIDBV> = BTM::new();
+            for (dst, mut sids) in dest_map {
+                sids.constrain(max_state_id);
+                if sids.is_empty() { continue; }
+                dest_agg.entry(dst)
+                    .and_modify(|e| *e |= &sids)
+                    .or_insert(sids);
+            }
+            if dest_agg.is_empty() {
+                continue;
+            }
+
+            // Canonical destination vector (sorted by dst) for use as a key (Vec implements Hash/Eq/Ord given elements do).
+            let dest_vec: Vec<(Trie2Index, StateIDBV)> = dest_agg.into_iter().collect();
+
+            // Merge edges that have the same pop and identical destination map by unioning their LLM masks.
+            let entry = by_pop.entry(pop).or_default().entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
+            *entry |= &llm_bv;
+        }
+
+        // Second stage: for each pop, combine groups that happen to yield identical final LLMTokenBV
+        // by unioning their destination maps. This ensures we never create two entries keyed by the
+        // same (pop, LLMTokenBV); the union is semantically equivalent to having parallel edges for
+        // that same token-set.
+        let mut new_children: BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTM::new();
+        for (pop, groups) in by_pop {
+            // llm_bv -> aggregated destination map (as BTreeMap for determinism)
+            let mut out_by_llm: BTM<LLMTokenBV, BTM<Trie2Index, StateIDBV>> = BTM::new();
+
+            for (dest_vec, llm_bv) in groups {
+                if llm_bv.is_empty() {
+                    continue;
+                }
+                let dest_out = out_by_llm.entry(llm_bv).or_insert_with(BTM::new);
+                for (dst, sids) in dest_vec {
+                    dest_out.entry(dst)
+                        .and_modify(|e| *e |= &sids)
+                        .or_insert(sids);
+                }
+            }
+
+            // Emit final edges: (pop, llm_bv) -> OrderedHashMap<dst, StateIDBV>
+            for (llm_bv, dest_btree) in out_by_llm {
+                if llm_bv.is_empty() {
+                    continue;
+                }
+                let mut ordered_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
+                for (dst, sids) in dest_btree {
+                    if !sids.is_empty() {
+                        ordered_dm.insert(dst, sids);
+                    }
+                }
+                if !ordered_dm.is_empty() {
+                    // If an entry for (pop, llm_bv) already exists, union destination maps' SIDs (shouldn't happen,
+                    // but this keeps the structure robust).
+                    let entry = new_children.entry((pop, llm_bv)).or_insert_with(OrderedHashMap::new);
+                    for (dst, sids) in ordered_dm {
+                        entry.entry(dst)
+                            .and_modify(|e| *e |= &sids)
+                            .or_insert(sids);
+                    }
+                }
+            }
+        }
+
+        // Recompute live tokens as the union of all outgoing LLM masks.
+        let mut new_live = LLMTokenBV::zeros();
+        for ((_, llm_bv), _) in &new_children {
+            new_live |= llm_bv;
+        }
+        w.value.live_tokens = new_live;
+        *w.children_mut() = new_children;
+    }
+
+    crate::debug!(2, "Finished compressing Trie3 edges.");
 }
