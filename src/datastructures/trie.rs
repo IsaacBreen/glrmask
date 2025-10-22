@@ -2039,6 +2039,57 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             }
         }
     }
+
+    /// Creates a deep copy of the trie and randomly removes edges.
+    ///
+    /// This is useful for fuzz testing to simplify a complex graph.
+    ///
+    /// # Arguments
+    /// * `source_arena`: The original arena.
+    /// * `roots`: The roots of the graph to trim.
+    /// * `p`: The probability (between 0.0 and 1.0) of removing any given edge.
+    /// * `rng`: A random number generator.
+    ///
+    /// # Returns
+    /// A new, potentially smaller trie as `(Arena, Vec<Trie2Index>)`.
+    pub fn trim_randomly<R: Rng + ?Sized>(
+        source_arena: &Arena<Self>,
+        roots: &[Trie2Index],
+        p: f64,
+        rng: &mut R,
+    ) -> (Arena<Self>, Vec<Trie2Index>) {
+        // 1. Deep copy the trie
+        let (new_arena, new_roots, _) = Self::deep_copy_subtrees(source_arena, roots);
+        if roots.is_empty() {
+            return (new_arena, new_roots);
+        }
+
+        // 2. Collect all edges from the new trie
+        let all_nodes = Self::all_nodes(&new_arena, &new_roots);
+        let mut all_edges = Vec::new();
+        for &node_idx in &all_nodes {
+            if let Some(guard) = node_idx.read(&new_arena) {
+                for (ek, dest_map) in guard.children() {
+                    for (child_idx, _) in dest_map.iter() {
+                        all_edges.push((node_idx, ek.clone(), *child_idx));
+                    }
+                }
+            }
+        }
+
+        // 3. Randomly remove edges
+        for (src, ek, dst) in all_edges {
+            if rng.gen_bool(p) {
+                new_arena.remove_edge(src, dst, &ek);
+            }
+        }
+
+        // 4. Garbage collect unreachable nodes
+        Self::gc(&new_arena, &new_roots);
+
+        // 5. Return the trimmed trie
+        (new_arena, new_roots)
+    }
 }
 
 /// The result of comparing two paths in a Trie.
@@ -3107,6 +3158,39 @@ impl<T: Ord> MergeableEdgeValue for BTreeSet<T> {
 impl<EK, EV, T> Arena<Trie<EK, EV, T>>
 where
     EK: Ord + Clone,
+    EV: Clone,
+{
+    /// Removes the edge from `src` to `dst` with the given `edge_key`.
+    ///
+    /// Returns the removed edge value if the edge existed, otherwise `None`.
+    pub fn remove_edge(
+        &self,
+        src: Trie2Index,
+        dst: Trie2Index,
+        edge_key: &EK,
+    ) -> Option<EV> {
+        let mut src_guard = match src.write(self) {
+            Some(g) => g,
+            None => return None, // Source node not found
+        };
+
+        let removed_ev = src_guard
+            .children
+            .get_mut(edge_key)
+            .and_then(|dest_map| dest_map.remove(&dst));
+
+        // Clean up the BTreeMap entry if the OrderedHashMap is now empty
+        if removed_ev.is_some() && src_guard.children.get(edge_key).map_or(false, |m| m.is_empty()) {
+            src_guard.children.remove(edge_key);
+        }
+
+        removed_ev
+    }
+}
+
+impl<EK, EV, T> Arena<Trie<EK, EV, T>>
+where
+    EK: Ord + Clone,
     EV: Clone + MergeableEdgeValue,
 {
     /// Inserts an edge from `src` to `dst` with the given `edge_key` and `edge_value`.
@@ -3148,33 +3232,6 @@ where
                 }
             }
         }
-    }
-
-    /// Removes the edge from `src` to `dst` with the given `edge_key`.
-    ///
-    /// Returns the removed edge value if the edge existed, otherwise `None`.
-    pub fn remove_edge(
-        &self,
-        src: Trie2Index,
-        dst: Trie2Index,
-        edge_key: &EK,
-    ) -> Option<EV> {
-        let mut src_guard = match src.write(self) {
-            Some(g) => g,
-            None => return None, // Source node not found
-        };
-
-        let removed_ev = src_guard
-            .children
-            .get_mut(edge_key)
-            .and_then(|dest_map| dest_map.remove(&dst));
-
-        // Clean up the BTreeMap entry if the OrderedHashMap is now empty
-        if removed_ev.is_some() && src_guard.children.get(edge_key).map_or(false, |m| m.is_empty()) {
-            src_guard.children.remove(edge_key);
-        }
-
-        removed_ev
     }
 }
 
@@ -3366,5 +3423,75 @@ mod tests {
         let counted_edges_in_longest_path: Vec<_> = longest_path.1.iter().map(|(ek, _, _)| ek.as_str()).collect();
         assert_eq!(counted_edges_in_longest_path, vec!["to_a", "cycle_counted", "cycle_counted", "cycle_counted", "to_target"]);
     }
-}
 
+    #[test]
+    fn test_trim_randomly() {
+        type TestTrie = Trie<String, (), String>;
+        let arena = Arena::<TestTrie>::new();
+
+        // root -> n1 -> n3
+        //   |      |
+        //   +----->n2
+        let root = Trie2Index::from(arena.insert(Trie::new("root".to_string())));
+        let n1 = Trie2Index::from(arena.insert(Trie::new("n1".to_string())));
+        let n2 = Trie2Index::from(arena.insert(Trie::new("n2".to_string())));
+        let n3 = Trie2Index::from(arena.insert(Trie::new("n3".to_string())));
+
+        arena.insert_edge_simple(root, n1, "edge1".to_string(), ());
+        arena.insert_edge_simple(root, n2, "edge2".to_string(), ());
+        arena.insert_edge_simple(n1, n2, "edge3".to_string(), ());
+        arena.insert_edge_simple(n1, n3, "edge4".to_string(), ());
+
+        let roots = vec![root];
+        let original_stats = TestTrie::stats(&arena, &roots);
+        assert_eq!(original_stats.num_reachable_nodes, 4);
+        assert_eq!(original_stats.num_reachable_edges, 4);
+
+        let mut rng = rand::thread_rng();
+
+        // Test with p=1.0 (remove all edges)
+        let (trimmed_arena_all, trimmed_roots_all) =
+            TestTrie::trim_randomly(&arena, &roots, 1.0, &mut rng);
+        let trimmed_stats_all = TestTrie::stats(&trimmed_arena_all, &trimmed_roots_all);
+        assert_eq!(trimmed_stats_all.num_reachable_nodes, 1); // Only root should remain after GC
+        assert_eq!(trimmed_stats_all.num_reachable_edges, 0);
+        assert_eq!(trimmed_roots_all.len(), 1);
+        assert!(trimmed_roots_all[0].read(&trimmed_arena_all).unwrap().value == "root");
+
+        // Test with p=0.0 (remove no edges)
+        let (trimmed_arena_none, trimmed_roots_none) =
+            TestTrie::trim_randomly(&arena, &roots, 0.0, &mut rng);
+        let trimmed_stats_none = TestTrie::stats(&trimmed_arena_none, &trimmed_roots_none);
+        assert_eq!(trimmed_stats_none.num_reachable_nodes, 4);
+        assert_eq!(trimmed_stats_none.num_reachable_edges, 4);
+        assert!(TestTrie::are_graphs_equal(
+            &arena,
+            roots[0],
+            &trimmed_arena_none,
+            trimmed_roots_none[0]
+        ));
+
+        // Test with p=0.5 (remove some edges)
+        // Run a few times to reduce chance of all/none being removed.
+        let mut edges_removed = false;
+        for _ in 0..10 {
+            let (trimmed_arena_some, trimmed_roots_some) =
+                TestTrie::trim_randomly(&arena, &roots, 0.5, &mut rng);
+            let trimmed_stats_some = TestTrie::stats(&trimmed_arena_some, &trimmed_roots_some);
+            if trimmed_stats_some.num_reachable_edges < original_stats.num_reachable_edges {
+                edges_removed = true;
+                assert!(trimmed_stats_some.num_reachable_edges >= 0);
+                assert!(
+                    trimmed_stats_some.num_reachable_nodes <= original_stats.num_reachable_nodes
+                );
+            }
+            if edges_removed {
+                break;
+            }
+        }
+        assert!(
+            edges_removed,
+            "After 10 trials with p=0.5, no edges were removed, which is highly unlikely."
+        );
+    }
+}
