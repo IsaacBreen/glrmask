@@ -119,6 +119,11 @@ def main():
             if run_test_with_vocab(test_vocab):
                 # Mismatch still occurs, so the removal was successful
                 minimal_vocab = test_vocab
+
+                # Save intermediate progress
+                with open(MINIMAL_VOCAB_OUTPUT_PATH, 'w') as f:
+                    json.dump(minimal_vocab, f, indent=2)
+
                 removed_in_pass = True
                 print(f" REMOVED. New size: {len(minimal_vocab)}")
                 if len(excluded_vocab) < 10:
