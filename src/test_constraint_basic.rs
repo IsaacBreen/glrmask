@@ -1747,8 +1747,10 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // This tokenizes to IDENTIFIER, !, -, -
     // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
     // so the state should become inactive.
+    println!("GSS Forest BEFORE commit:");
     state.print_gss();
     state.commit_bytes(b"x!-");
+    println!("GSS Forest AFTER commit:");
     state.print_gss();
     let mask2 = state.get_mask();
 
