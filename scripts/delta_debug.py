@@ -73,14 +73,14 @@ def run_test_with_vocab(vocab_list: List[str]) -> bool:
         )
         output = result.stdout + result.stderr
         mismatch_found = bool(re.search(MISMATCH_INDICATOR, output))
-        if not mismatch_found:
-            # Added for debugging: print command and output if the check fails.
-            print("\n--- DEBUG: Mismatch indicator not found in output ---")
-            print(f"Command executed:\n{command}")
-            print(f"\nReturn code: {result.returncode}")
-            print("\n--- Combined STDOUT and STDERR ---")
-            print(output)
-            print("--- END DEBUG ---")
+        # if not mismatch_found:
+        #     # Added for debugging: print command and output if the check fails.
+        #     print("\n--- DEBUG: Mismatch indicator not found in output ---")
+        #     print(f"Command executed:\n{command}")
+        #     print(f"\nReturn code: {result.returncode}")
+        #     print("\n--- Combined STDOUT and STDERR ---")
+        #     print(output)
+        #     print("--- END DEBUG ---")
 
         return mismatch_found
     finally:
