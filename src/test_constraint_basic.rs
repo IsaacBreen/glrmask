@@ -1774,7 +1774,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let mask2 = state.get_mask();
 
     // 8. Assert the state is inactive and the mask is empty
-    assert!(state.is_active(), "State should be inactive after committing invalid sequence 'x!-'");
+    assert!(state.is_active(), "State should be inactive after committing invalid sequence 'x!--'");
     let expected_mask2 = HybridBitset::from_iter(vec![llm_x.0, llm_not_comment.0, llm_empty_string_semicolon.0]);
     assert_eq!(
         mask2,
