@@ -15,7 +15,7 @@ class Model:
     @staticmethod
     def from_json_string(s: str) -> "Model":
         constraint = ffi.GrammarConstraint.from_json_string(s)
-        constraint.dump_precomputed3()
+        # constraint.dump_precomputed3()
         constraint_state = ffi.GrammarConstraintState(constraint)
         return Model(constraint_state)
 
