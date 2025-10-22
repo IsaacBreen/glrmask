@@ -582,20 +582,17 @@ pub fn eliminate_pushes_and_pops(
     }
 
     // Deep-copy the new graph into the provided `god` and update roots.
-    let mut sids_in_order = Vec::new();
-    let mut new_roots_vec = Vec::new();
-    for (&sid, &root_idx) in &new_roots1_map {
-        sids_in_order.push(sid);
-        new_roots_vec.push(root_idx);
-    }
-
+    let old_roots_vec: Vec<_> = new_roots1_map.values().cloned().collect();
     god.clear();
-    let (final_roots_vec, _map) =
-        IntermediatePrecomputeNode3::deep_copy_subtrees_into(&new_god1, god, &new_roots_vec);
+    let (_new_roots_vec, old_to_new_map) =
+        IntermediatePrecomputeNode3::deep_copy_subtrees_into(&new_god1, god, &old_roots_vec);
 
     roots.clear();
-    for (sid, final_root_idx) in sids_in_order.iter().zip(final_roots_vec.iter()) {
-        roots.insert(*sid, *final_root_idx);
+    for (sid, old_root_idx) in &new_roots1_map {
+        let new_root_idx = *old_to_new_map
+            .get(old_root_idx)
+            .expect("deep_copy_subtrees_into should have mapped all roots");
+        roots.insert(*sid, new_root_idx);
     }
     if DEBUG {
         let final_nodes =
