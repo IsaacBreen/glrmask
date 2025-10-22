@@ -9,8 +9,6 @@ use crate::{
 use ordered_hash_map::OrderedHashMap;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-const DEBUG_LOG: bool = cfg!(debug_assertions);
-
 #[derive(Debug, Clone)]
 pub struct IntermediateTrie3Config {
     pub enabled: bool,
@@ -439,6 +437,7 @@ fn contract_noop_chains(
 fn wl_color_refine(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
+    config: &IntermediateTrie3Config,
 ) -> (BTreeMap<IntermediatePrecomputeNode3Index, usize>, usize, usize, usize) {
     // Restrict to reachable nodes to keep work bounded.
     let mut reachable = Trie::all_nodes(god, roots);
@@ -454,7 +453,7 @@ fn wl_color_refine(
             }
         }
     }
-    if DEBUG_LOG {
+    if config.verbose {
         println!(
             "[optimize_intermediate_trie3] Reachable nodes: {}, edges: {}",
             reachable.len(),
@@ -479,7 +478,7 @@ fn wl_color_refine(
         colors.insert(*idx, color);
     }
 
-    if DEBUG_LOG {
+    if config.verbose {
         println!(
             "[optimize_intermediate_trie3] Initial classes: {}",
             next_initial_color
@@ -522,7 +521,7 @@ fn wl_color_refine(
             }
         }
 
-        if DEBUG_LOG {
+        if config.verbose {
             println!(
                 "[optimize_intermediate_trie3] WL iteration {}: classes={}, changed={}",
                 iter,
@@ -547,6 +546,7 @@ fn rewire_to_canonical(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
     node_map: &mut BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index>,
+    config: &IntermediateTrie3Config,
 ) -> (usize, usize) {
     // Compute reachable again to scope work.
     let mut reachable = Trie::all_nodes(god, roots);
@@ -579,7 +579,7 @@ fn rewire_to_canonical(
             node_map.insert(*idx, canon);
         }
     }
-    if DEBUG_LOG {
+    if config.verbose {
         println!(
             "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
             canon_by_color.len(),
@@ -639,8 +639,9 @@ fn rewire_to_canonical(
 fn prune_unproductive_paths_intermediate_trie3(
     roots: &[IntermediatePrecomputeNode3Index],
     god: &IntermediateTrie3GodWrapper,
+    config: &IntermediateTrie3Config,
 ) {
-    if DEBUG_LOG { println!("[optimize_intermediate_trie3] Pruning nodes that cannot reach an end node..."); }
+    if config.verbose { println!("[optimize_intermediate_trie3] Pruning nodes that cannot reach an end node..."); }
     if roots.is_empty() {
         return;
     }
@@ -676,7 +677,7 @@ fn prune_unproductive_paths_intermediate_trie3(
     }
 
     if end_nodes_count == 0 {
-        if DEBUG_LOG { println!("[optimize_intermediate_trie3] No end nodes found; skipping pruning."); }
+        if config.verbose { println!("[optimize_intermediate_trie3] No end nodes found; skipping pruning."); }
         return;
     }
 
@@ -703,9 +704,7 @@ fn prune_unproductive_paths_intermediate_trie3(
     }
 
     // 4. Remove any edge to a non-productive destination
-    if DEBUG_LOG {
-        // Log only summary above; the per-node pruning happens below.
-    }
+    // Logging for this is done via print_graph after the pass.
     for n in &all_nodes {
         let mut w = n.write(god).expect("write");
         let old_children = std::mem::take(w.children_mut());
@@ -725,7 +724,7 @@ fn prune_unproductive_paths_intermediate_trie3(
     // 5. Recompute all max depths
     Trie::recompute_all_max_depths(god, roots);
 
-    if DEBUG_LOG { println!("[optimize_intermediate_trie3] Finished end-reachability pruning."); }
+    if config.verbose { println!("[optimize_intermediate_trie3] Finished end-reachability pruning."); }
 }
 
 fn gc_preserving_ends(
@@ -774,24 +773,24 @@ pub fn optimize_intermediate_trie3(
         print_graph("Initial State");
     }
 
-    if DEBUG_LOG { has_true_cycle_intermediate_trie3(god, roots); }
+    if config.verbose { has_true_cycle_intermediate_trie3(god, roots); }
 
     if config.prune_unproductive_paths {
-        prune_unproductive_paths_intermediate_trie3(roots, god);
+        prune_unproductive_paths_intermediate_trie3(roots, god, config);
         print_graph("Prune Unproductive Paths");
     }
 
     // Pass A: aggressively remove simple NoOp chains (epsilon-like edges).
     if config.contract_noop_chains {
-        if DEBUG_LOG { println!("[optimize_intermediate_trie3] Contracting NoOp chains..."); }
+        if config.verbose { println!("[optimize_intermediate_trie3] Contracting NoOp chains..."); }
         let mut passes = 0;
         let mut changed_in_loop = false;
         while contract_noop_chains(roots, god) {
             passes += 1;
             changed_in_loop = true;
-            if DEBUG_LOG { println!("[optimize_intermediate_trie3] NoOp chain contraction pass {} complete.", passes); }
+            if config.verbose { println!("[optimize_intermediate_trie3] NoOp chain contraction pass {} complete.", passes); }
             if passes > 10 {
-                 if DEBUG_LOG { println!("[optimize_intermediate_trie3] WARN: NoOp chain contraction took too many passes, breaking."); }
+                 if config.verbose { println!("[optimize_intermediate_trie3] WARN: NoOp chain contraction took too many passes, breaking."); }
                  break;
             }
         }
@@ -799,28 +798,28 @@ pub fn optimize_intermediate_trie3(
             print_graph("Contract NoOp Chains");
         }
         if passes > 0 {
-            if DEBUG_LOG { println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC."); }
+            if config.verbose { println!("[optimize_intermediate_trie3] NoOp chains contracted. Running GC."); }
             if config.gc {
                 gc_preserving_ends(god, roots);
                 print_graph("GC after NoOp Contraction");
             }
         } else {
-            if DEBUG_LOG { println!("[optimize_intermediate_trie3] NoOp chains contracted."); }
+            if config.verbose { println!("[optimize_intermediate_trie3] NoOp chains contracted."); }
         }
     }
-    if DEBUG_LOG { has_true_cycle_intermediate_trie3(god, roots); }
+    if config.verbose { has_true_cycle_intermediate_trie3(god, roots); }
 
     // Pass B: normalize CheckLLM partitions, then contract linear CheckLLM chains.
     let mut changed_any = false;
     if config.normalize_checkllm_edges {
-        if DEBUG_LOG { println!("[optimize_intermediate_trie3] Normalizing CheckLLM edges..."); }
+        if config.verbose { println!("[optimize_intermediate_trie3] Normalizing CheckLLM edges..."); }
         if normalize_checkllm_edges_for_all(roots, god) {
             changed_any = true;
             print_graph("Normalize CheckLLM Edges");
         }
     }
     if config.contract_checkllm_chains {
-        if DEBUG_LOG { println!("[optimize_intermediate_trie3] Contracting CheckLLM chains..."); }
+        if config.verbose { println!("[optimize_intermediate_trie3] Contracting CheckLLM chains..."); }
         let mut chain_passes = 0usize;
         let mut contracted_chains = false;
         while contract_checkllm_chains(roots, god) {
@@ -828,7 +827,7 @@ pub fn optimize_intermediate_trie3(
             changed_any = true;
             contracted_chains = true;
             if chain_passes > 10 {
-                if DEBUG_LOG { println!("[optimize_intermediate_trie3] WARN: CheckLLM chain contraction took too many passes, breaking."); }
+                if config.verbose { println!("[optimize_intermediate_trie3] WARN: CheckLLM chain contraction took too many passes, breaking."); }
                 break;
             }
         }
@@ -837,22 +836,22 @@ pub fn optimize_intermediate_trie3(
         }
     }
     if changed_any {
-        if DEBUG_LOG { println!("[optimize_intermediate_trie3] CheckLLM normalization/chain contraction made changes. Running GC."); }
+        if config.verbose { println!("[optimize_intermediate_trie3] CheckLLM normalization/chain contraction made changes. Running GC."); }
         if config.gc {
             gc_preserving_ends(god, roots);
             print_graph("GC after CheckLLM Ops");
         }
     }
-    if DEBUG_LOG { has_true_cycle_intermediate_trie3(god, roots); }
+    if config.verbose { has_true_cycle_intermediate_trie3(god, roots); }
 
     let mut node_map: BTreeMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
         BTreeMap::default();
 
     if config.structural_deduplication {
         // Pass 1: color-refinement-based structural deduplication with progress reporting.
-        if DEBUG_LOG { println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)..."); }
-        let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god);
-        if DEBUG_LOG {
+        if config.verbose { println!("[optimize_intermediate_trie3] Starting structural deduplication (WL color refinement)..."); }
+        let (colors, iters, classes, total_nodes) = wl_color_refine(roots, god, config);
+        if config.verbose {
             println!(
                 "[optimize_intermediate_trie3] Refinement complete: iterations={}, classes={}, nodes={}",
                 iters, classes, total_nodes
@@ -861,15 +860,15 @@ pub fn optimize_intermediate_trie3(
 
         // Normalize again before canonical rewiring to maximize equality exposure.
         if config.normalize_checkllm_edges && normalize_checkllm_edges_for_all(roots, god) {
-            if DEBUG_LOG { println!("[optimize_intermediate_trie3] Normalization revealed new opportunities pre-canonicalization."); }
+            if config.verbose { println!("[optimize_intermediate_trie3] Normalization revealed new opportunities pre-canonicalization."); }
             print_graph("Pre-Deduplication CheckLLM Normalization");
         }
 
-        let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map);
+        let (merges, edges_rewired) = rewire_to_canonical(&colors, roots, god, &mut node_map, config);
         if merges > 0 || edges_rewired > 0 {
             print_graph("Structural Deduplication (Rewire)");
         }
-        if DEBUG_LOG {
+        if config.verbose {
             println!(
                 "[optimize_intermediate_trie3] Rewiring done: merges={}, edges_rewired={}",
                 merges, edges_rewired
@@ -883,19 +882,19 @@ pub fn optimize_intermediate_trie3(
             print_graph("Polish Pass: CheckLLM Normalization");
         }
         if polish_changed {
-            if DEBUG_LOG { println!("[optimize_intermediate_trie3] Polishing: rerunning WL refinement after normalization..."); }
-            let (colors2, iters2, classes2, total_nodes2) = wl_color_refine(roots, god);
-            if DEBUG_LOG {
+            if config.verbose { println!("[optimize_intermediate_trie3] Polishing: rerunning WL refinement after normalization..."); }
+            let (colors2, iters2, classes2, total_nodes2) = wl_color_refine(roots, god, config);
+            if config.verbose {
                 println!(
                     "[optimize_intermediate_trie3] Polish refinement complete: iterations={}, classes={}, nodes={}",
                     iters2, classes2, total_nodes2
                 );
             }
-            let (merges2, edges_rewired2) = rewire_to_canonical(&colors2, roots, god, &mut node_map);
+            let (merges2, edges_rewired2) = rewire_to_canonical(&colors2, roots, god, &mut node_map, config);
             if merges2 > 0 || edges_rewired2 > 0 {
                 print_graph("Structural Deduplication (Polish Rewire)");
             }
-            if DEBUG_LOG {
+            if config.verbose {
                 println!(
                     "[optimize_intermediate_trie3] Polish rewiring done: merges={}, edges_rewired={}",
                     merges2, edges_rewired2
@@ -911,7 +910,7 @@ pub fn optimize_intermediate_trie3(
         .collect();
 
     if config.gc {
-        if DEBUG_LOG { println!("[optimize_intermediate_trie3] Running final GC."); }
+        if config.verbose { println!("[optimize_intermediate_trie3] Running final GC."); }
         gc_preserving_ends(god, &new_roots);
         print_graph("Final GC");
     }
@@ -921,7 +920,7 @@ pub fn optimize_intermediate_trie3(
     //     "Optimization failed to preserve graph equivalence for all roots"
     // );
 
-    if DEBUG_LOG { has_true_cycle_intermediate_trie3(god, &new_roots); }
+    if config.verbose { has_true_cycle_intermediate_trie3(god, &new_roots); }
 
     node_map
 }
