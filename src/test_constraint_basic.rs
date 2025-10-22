@@ -1633,7 +1633,8 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar
-    let ebnf_grammar = fs::read_to_string("src/js_like.ebnf")?;
+    // let ebnf_grammar = fs::read_to_string("src/js_simplified6.ebnf")?;
+    let ebnf_grammar = fs::read_to_string("/Users/isaacbreen/Projects2/temp/.temp.ebnf")?;
 
     // 2. Parse and compile the grammar
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
