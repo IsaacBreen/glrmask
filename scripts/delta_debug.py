@@ -5,6 +5,7 @@ import os
 import tempfile
 import sys
 import uuid
+import argparse
 import re
 import datetime
 from multiprocessing import Pool
@@ -92,6 +93,15 @@ def main():
     """
     Main function to perform the vocabulary minimization.
     """
+    parser = argparse.ArgumentParser(description="Delta-debug a vocabulary file to find the minimal set of tokens causing a mismatch.")
+    parser.add_argument(
+        '--keep-tokens',
+        type=str,
+        default="",
+        help="Comma-separated list of tokens to always keep in the vocabulary (e.g., 'token1,token2'). These tokens will not be removed during minimization."
+    )
+    args = parser.parse_args()
+
     print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
 
     # Create a unique directory for this run's results
@@ -108,25 +118,40 @@ def main():
     with open(ORIGINAL_VOCAB_PATH, 'r') as f:
         original_vocab = json.load(f)
 
+    # --- New logic to separate fixed and removable vocab ---
+    keep_tokens_list = [t.strip() for t in args.keep_tokens.split(',') if t.strip()]
+    fixed_vocab = set(keep_tokens_list)
+
+    # The list of tokens we will actually be minimizing
+    removable_vocab = [token for token in original_vocab if token not in fixed_vocab]
+
+    # Re-verify that all keep_tokens are actually in the original vocab
+    if not fixed_vocab.issubset(set(original_vocab)):
+        missing = fixed_vocab - set(original_vocab)
+        print(f"Warning: The following --keep-tokens were not found in '{ORIGINAL_VOCAB_PATH}': {missing}")
+
     print(f"Loaded original vocabulary with {len(original_vocab)} tokens.")
+    if fixed_vocab:
+        print(f"Keeping {len(fixed_vocab)} tokens fixed. Minimizing on {len(removable_vocab)} removable tokens.")
 
     # 2. Initial check: Verify that the full vocabulary causes a mismatch
     print("\nStep 1: Verifying that the original vocabulary causes a mismatch...")
-    if not run_test_with_vocab(original_vocab):
+    full_test_vocab = list(fixed_vocab) + removable_vocab
+    if not run_test_with_vocab(full_test_vocab):
         print("Error: The original vocabulary does not seem to cause a mismatch.")
         print("Please ensure the COMMAND_TEMPLATE and MISMATCH_INDICATOR are correct.")
         sys.exit(1)
     print("✅ Success: Original vocabulary confirmed to cause a mismatch.")
 
     # 3. Start the minimization process
-    minimal_vocab = list(original_vocab)
-    print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
+    minimal_removable_vocab = list(removable_vocab)
+    print(f"\nStep 2: Starting minimization from {len(minimal_removable_vocab)} removable tokens using chunk removal...")
 
     num_cpus = max(1, os.cpu_count() // 2)
     print(f"Using {num_cpus} parallel processes.")
 
     reduction_step = 0
-    chunk_size = len(minimal_vocab) // 2
+    chunk_size = len(minimal_removable_vocab) // 2
 
     with Pool(processes=num_cpus) as pool:
         while chunk_size >= 1:
@@ -134,18 +159,25 @@ def main():
             removed_in_pass = False
 
             while True:  # Keep trying with this chunk size as long as we are making progress
-                num_chunks = (len(minimal_vocab) + chunk_size - 1) // chunk_size
+                num_chunks = (len(minimal_removable_vocab) + chunk_size - 1) // chunk_size
                 if num_chunks < 2:
                     break  # Not enough chunks to test for removal
 
                 tasks = []
                 chunk_metadata = []
                 start_index = 0
-                while start_index < len(minimal_vocab):
-                    end_index = min(start_index + chunk_size, len(minimal_vocab))
-                    test_vocab = minimal_vocab[:start_index] + minimal_vocab[end_index:]
+                while start_index < len(minimal_removable_vocab):
+                    end_index = min(start_index + chunk_size, len(minimal_removable_vocab))
+                    
+                    # Create a test vocabulary by removing the current chunk from the removable list
+                    test_removable_vocab = minimal_removable_vocab[:start_index] + minimal_removable_vocab[end_index:]
+                    excluded_vocab = minimal_removable_vocab[start_index:end_index]
 
-                    if not test_vocab:
+                    # The actual vocab to test is the fixed part plus the test removable part
+                    test_vocab = list(fixed_vocab) + test_removable_vocab
+
+                    if len(test_vocab) == len(fixed_vocab):
+                        # Skip if we are removing the last removable chunk
                         start_index = end_index
                         continue
 
@@ -153,7 +185,7 @@ def main():
                     chunk_metadata.append({
                         "start": start_index,
                         "end": end_index,
-                        "excluded": minimal_vocab[start_index:end_index]
+                        "excluded": excluded_vocab
                     })
                     start_index = end_index
 
@@ -164,20 +196,21 @@ def main():
                 for i, mismatch_persists in enumerate(results):
                     if mismatch_persists:
                         # Mismatch still occurs, so the removal was successful
+                        test_removable_vocab = tasks[i][len(fixed_vocab):] # Extract the removable part
                         meta = chunk_metadata[i]
-                        minimal_vocab = tasks[i]
+                        minimal_removable_vocab = test_removable_vocab
 
                         # Save intermediate progress
                         reduction_step += 1
-                        new_size = len(minimal_vocab)
+                        new_size = len(minimal_removable_vocab) + len(fixed_vocab)
                         filename = f"step_{reduction_step:04d}_size_{new_size}.json"
                         output_path = os.path.join(results_dir, filename)
                         with open(output_path, 'w') as f:
-                            json.dump(minimal_vocab, f, indent=2)
+                            json.dump(list(fixed_vocab) + minimal_removable_vocab, f, indent=2)
 
                         removed_in_pass = True
                         found_reduction = True
-                        print(f"REMOVED chunk (indices {meta['start']}-{meta['end']-1}). New size: {len(minimal_vocab)}")
+                        print(f"REMOVED chunk (indices {meta['start']}-{meta['end']-1}). New size: {new_size}")
                         if len(meta['excluded']) < 10:
                             print(meta['excluded'])
 
@@ -195,8 +228,11 @@ def main():
 
     # 4. Final result
     print("\n--- Minimization Complete ---")
+    minimal_vocab = list(fixed_vocab) + minimal_removable_vocab
     print(f"\nOriginal vocabulary size: {len(original_vocab)}")
     print(f"Minimal vocabulary size: {len(minimal_vocab)}")
+    print(f"Fixed tokens: {len(fixed_vocab)}")
+    print(f"Removable tokens reduced from {len(removable_vocab)} to {len(minimal_removable_vocab)}")
     print("\nEssential tokens causing the mismatch:")
     print(json.dumps(minimal_vocab, indent=2))
 
