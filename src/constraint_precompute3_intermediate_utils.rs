@@ -141,6 +141,9 @@ fn build_node_signature(
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WLNodeSignature {
+    // Include the previous iteration color so that base labels (e.g., "is_root",
+    // degree buckets, etc.) are preserved through refinement.
+    prev_color: usize,
     end: bool,
     // edges: in BTreeMap edge-key order already, so no need to re-sort keys here.
     // Each entry is (interned_edge_key_id, child_colors_in_stable_insertion_order).
@@ -155,6 +158,9 @@ fn build_node_signature_fast(
 ) -> WLNodeSignature {
     let guard = idx.read(god).expect("Invalid index during signature build");
     let end = guard.value.end;
+    let prev_color = *color_map
+        .get(&idx)
+        .expect("color missing for reachable node");
 
     let mut edges: Vec<(u32, Vec<usize>)> = Vec::new();
     for (ek, dsts) in guard.children().iter() {
@@ -171,7 +177,7 @@ fn build_node_signature_fast(
         edges.push((key_id, seq));
     }
     // No need to sort 'edges': guard.children() is already a BTreeMap in key order.
-    WLNodeSignature { end, edges }
+    WLNodeSignature { prev_color, end, edges }
 }
 
 /// Compute in-degree for all nodes reachable from roots.
@@ -480,6 +486,8 @@ fn wl_color_refine(
     let mut reachable = Trie::all_nodes(god, roots);
     reachable.sort_unstable();
     reachable.dedup();
+    // Roots are special entry states; we keep track of them so we can seed WL with an "is_root" label.
+    let root_set: HashSet<IntermediatePrecomputeNode3Index> = roots.iter().copied().collect();
 
     // Compute an edge count for progress reporting and intern edge keys once.
     let mut edge_count: usize = 0;
@@ -509,13 +517,14 @@ fn wl_color_refine(
 
     // Initial colors: based on 'end' flag and out-degree for faster convergence.
     let mut colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
-    let mut initial_color_map: BTreeMap<(bool, usize), usize> = BTreeMap::new();
+    let mut initial_color_map: BTreeMap<(bool, usize, bool), usize> = BTreeMap::new();
     let mut next_initial_color = 0;
     for idx in &reachable {
         let g = idx.read(god).expect("read");
         let end = g.value.end;
         let out_degree = g.children().values().map(|dests| dests.len()).sum();
-        let key = (end, out_degree);
+        let is_root = root_set.contains(idx);
+        let key = (end, out_degree, is_root);
         let color = *initial_color_map.entry(key).or_insert_with(|| {
             let c = next_initial_color;
             next_initial_color += 1;
@@ -599,36 +608,55 @@ fn rewire_to_canonical(
     reachable.sort_unstable();
     reachable.dedup();
 
-    // Build canonical representative per color (pick minimum index).
-    let mut canon_by_color: HashMap<usize, IntermediatePrecomputeNode3Index> = HashMap::new();
+    // Roots should never become targets of canonicalization for non-root nodes.
+    let root_set: HashSet<IntermediatePrecomputeNode3Index> = roots.iter().copied().collect();
+
+    // Group nodes by their WL color.
+    let mut by_color: HashMap<usize, Vec<IntermediatePrecomputeNode3Index>> = HashMap::new();
     for idx in &reachable {
-        let c = colors[idx];
-        match canon_by_color.get(&c) {
-            Some(existing) => {
-                if idx.as_usize() < existing.as_usize() {
-                    canon_by_color.insert(c, *idx);
-                }
-            }
-            None => {
-                canon_by_color.insert(c, *idx);
-            }
-        }
+        by_color.entry(colors[idx]).or_default().push(*idx);
     }
 
-    // Build node->canonical map (only store changed ones into node_map)
+    // For each color, choose a canonical representative among non-roots (if any).
+    // Roots remain canonical to themselves to avoid introducing edges into root states.
+    let mut node_to_canon: HashMap<IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index> =
+        HashMap::new();
     let mut merges = 0usize;
-    for idx in &reachable {
-        let c = colors[idx];
-        let canon = *canon_by_color.get(&c).expect("canonical missing");
-        if *idx != canon {
-            merges += 1;
-            node_map.insert(*idx, canon);
+    for (_c, nodes) in by_color.iter_mut() {
+        // Deterministic order: choose minimum index.
+        nodes.sort_by_key(|i| i.as_usize());
+        let mut non_roots: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
+        let mut roots_in_group: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
+        for &n in nodes.iter() {
+            if root_set.contains(&n) {
+                roots_in_group.push(n);
+            } else {
+                non_roots.push(n);
+            }
+        }
+        if let Some(&canon_non_root) = non_roots.first() {
+            for n in non_roots {
+                node_to_canon.insert(n, canon_non_root);
+                if n != canon_non_root {
+                    merges += 1;
+                    node_map.insert(n, canon_non_root);
+                }
+            }
+            // Keep roots in this class canonical to themselves.
+            for r in roots_in_group {
+                node_to_canon.insert(r, r);
+            }
+        } else {
+            // Only roots exist in this color class: keep each as its own canonical.
+            for r in roots_in_group {
+                node_to_canon.insert(r, r);
+            }
         }
     }
     if config.verbose {
         println!(
             "[optimize_intermediate_trie3] Canonicalization: classes={}, merges={}",
-            canon_by_color.len(),
+            by_color.len(),
             merges
         );
     }
@@ -646,8 +674,7 @@ fn rewire_to_canonical(
                 let mut new_dsts: OrderedHashMap<IntermediatePrecomputeNode3Index, ()> =
                     OrderedHashMap::new();
                 for (dst, ev) in dsts.into_iter() {
-                    let c = colors[&dst];
-                    let canon_dst = *canon_by_color.get(&c).expect("canonical missing for color");
+                    let canon_dst = *node_to_canon.get(&dst).unwrap_or(&dst);
                     if canon_dst != dst {
                         edges_rewired += 1;
                     }
