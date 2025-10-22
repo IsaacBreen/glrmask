@@ -2297,10 +2297,14 @@ impl GrammarConstraint {
         let states_all = StateIDBV::max_ones();
 
         for (sid, old_root) in intermediate_precomputed3 {
-            let new_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
+            let new_root = *node_map.entry(*old_root).or_insert_with(|| {
+                let new_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(
+                    PrecomputedNodeContents::root(internal_max_llm_token),
+                )));
+                q.push_back(*old_root);
+                new_node
+            });
             precomputed3.insert(*sid, new_root);
-            node_map.insert(*old_root, new_root);
-            q.push_back(*old_root);
         }
 
         let mut visited = HashSet::new();
