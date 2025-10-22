@@ -3,15 +3,12 @@ import json
 import subprocess
 import os
 import tempfile
-import random
-import shutil
 import sys
 from typing import List
 
 # --- Configuration ---
 
 # The original, full vocabulary file that causes the mismatch.
-# The script will create a copy of this to work with.
 ORIGINAL_VOCAB_PATH = ".temp.vocab.json"
 
 # The command to run. Use a placeholder `{vocab_path}` which the script
@@ -23,7 +20,7 @@ python scripts/compile.py \
     --output .cache/test_vocabs/js_constraint.json.gz \
     --vocab-path {vocab_path} \
     && \
-SKIP_CPP_BUILD=1 REPEAT=1 AGG_METHOD="min" SKIP_RUST_BUILD=1 SKIP_CPP_BUILD=1 \
+REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_PLOTS=1 \
 CONSTRAINT_FILE=".cache/test_vocabs/js_constraint.json.gz" \
 CODE_FILE=./src/example_code8.js \
 bash python/run_benchmarks.sh \
@@ -37,7 +34,6 @@ MISMATCH_INDICATOR = "❌"
 # The file where the final, minimal vocabulary will be saved.
 MINIMAL_VOCAB_OUTPUT_PATH = "minimal_vocab.json"
 
-
 # --- Script Logic ---
 
 def run_test_with_vocab(vocab_list: List[str]) -> bool:
@@ -50,18 +46,12 @@ def run_test_with_vocab(vocab_list: List[str]) -> bool:
     Returns:
         True if a mismatch occurs, False otherwise.
     """
-    # Use a temporary file for the vocabulary
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_file:
         json.dump(vocab_list, tmp_file)
         temp_vocab_path = tmp_file.name
 
     try:
-        # Format the command with the temporary vocab path
         command = COMMAND_TEMPLATE.format(vocab_path=temp_vocab_path).strip()
-
-        # Execute the command
-        # We capture output and don't check for exit codes, as the script might "succeed"
-        # but still show a mismatch.
         result = subprocess.run(
             command,
             shell=True,
@@ -69,18 +59,9 @@ def run_test_with_vocab(vocab_list: List[str]) -> bool:
             text=True,
             encoding='utf-8'
         )
-
-        # Check stdout for the mismatch indicator
         output = result.stdout + result.stderr
-        if MISMATCH_INDICATOR in output:
-            # print("DEBUG: Mismatch detected.")
-            return True
-        else:
-            # print("DEBUG: No mismatch.")
-            return False
-
+        return MISMATCH_INDICATOR in output
     finally:
-        # Clean up the temporary file
         os.remove(temp_vocab_path)
 
 
@@ -88,7 +69,7 @@ def main():
     """
     Main function to perform the vocabulary minimization.
     """
-    print("--- Vocabulary Minimizer ---")
+    print("--- Vocabulary Minimizer (Fast Delta-Debugging Method) ---")
 
     # 1. Load the original vocabulary
     if not os.path.exists(ORIGINAL_VOCAB_PATH):
@@ -110,49 +91,49 @@ def main():
 
     # 3. Start the minimization process
     minimal_vocab = list(original_vocab)
-    print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens...")
+    print(f"\nStep 2: Starting minimization from {len(minimal_vocab)} tokens using chunk removal...")
 
-    pass_num = 0
-    while True:
-        pass_num += 1
-        tokens_removed_this_pass = 0
+    chunk_size = len(minimal_vocab) // 2
+    while chunk_size >= 1:
+        print(f"\n--- Testing with chunk size: {chunk_size} ---")
+        removed_in_pass = False
+        start_index = 0
+        while start_index < len(minimal_vocab):
+            end_index = min(start_index + chunk_size, len(minimal_vocab))
 
-        # Shuffle the list to avoid any order-dependent bias
-        tokens_to_try = list(minimal_vocab)
-        random.shuffle(tokens_to_try)
+            # Create a test vocabulary by removing the current chunk
+            test_vocab = minimal_vocab[:start_index] + minimal_vocab[end_index:]
 
-        print(f"\n--- Pass {pass_num} (current size: {len(minimal_vocab)}) ---")
+            # Don't test an empty vocabulary, just skip
+            if not test_vocab:
+                start_index = end_index
+                continue
 
-        for i, token_to_remove in enumerate(tokens_to_try):
-            # Don't try to remove the last token
-            if len(minimal_vocab) <= 1:
-                break
+            num_chunks = (len(minimal_vocab) + chunk_size - 1) // chunk_size
+            current_chunk_num = (start_index // chunk_size) + 1
 
-            # Create a test vocabulary without the current token
-            test_vocab = [t for t in minimal_vocab if t != token_to_remove]
+            progress = f"[{current_chunk_num}/{num_chunks}]"
+            print(f"{progress} Trying to remove {end_index - start_index} tokens (indices {start_index}-{end_index-1})...", end='', flush=True)
 
-            progress = f"[{i + 1}/{len(tokens_to_try)}]"
-            print(f"{progress} Trying to remove token: '{token_to_remove}'...", end='', flush=True)
-
-            # Run the test
             if run_test_with_vocab(test_vocab):
                 # Mismatch still occurs, so the removal was successful
                 minimal_vocab = test_vocab
-                tokens_removed_this_pass += 1
+                removed_in_pass = True
                 print(f" REMOVED. New size: {len(minimal_vocab)}")
-                # Restart the pass with the smaller set for efficiency
-                break
+                # Restart the scan for this chunk size, as the list has changed
+                start_index = 0
             else:
-                # Mismatch disappeared, so this token is essential
+                # Mismatch disappeared, this chunk is essential. Move to the next one.
                 print(" KEPT (essential).")
+                start_index = end_index
 
-        # If a full pass completes with no removals, we are done
-        if tokens_removed_this_pass == 0:
-            print("\n--- Minimization Complete ---")
-            print("A full pass was completed with no tokens removed.")
-            break
+        # If we completed a full pass for this chunk size without removing anything,
+        # it's time to try smaller chunks.
+        if not removed_in_pass:
+            chunk_size //= 2
 
     # 4. Final result
+    print("\n--- Minimization Complete ---")
     print(f"\nOriginal vocabulary size: {len(original_vocab)}")
     print(f"Minimal vocabulary size: {len(minimal_vocab)}")
     print("\nEssential tokens causing the mismatch:")
@@ -169,8 +150,6 @@ if __name__ == "__main__":
     required_scripts = [
         "scripts/compile.py",
         "python/run_benchmarks.sh",
-        "python/aug25/models/bruteforce_model.py",
-        "python/aug25/models/rust_model.py"
     ]
     for script in required_scripts:
         if not os.path.exists(script):
