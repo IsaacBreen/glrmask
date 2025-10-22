@@ -578,12 +578,6 @@ pub fn eliminate_pushes_and_pops(
 
     // Convert back to the original Trie format.
     let (new_roots1_map, new_god1) = convert_from_intermediate2(&roots2, &god2);
-
-    dbg!(&new_roots1_map);
-    dbg!(&new_god1);
-    dbg!(&roots);
-    dbg!(&god);
-
     if DEBUG {
         let final_nodes = IntermediatePrecomputeNode3::all_nodes(
             &new_god1,
@@ -615,8 +609,6 @@ pub fn eliminate_pushes_and_pops(
                 .len();
         println!("Final graph node count: {}", final_nodes);
     }
-    dbg!(&roots);
-    dbg!(&god);
 }
 
 // --- Assertion and Test Helpers (Unchanged) ---
