@@ -2254,13 +2254,13 @@ impl GrammarConstraint {
         );
         intermediate_roots = intermediate_precomputed3.values().cloned().collect();
 
-        // println!("Final intermediate trie3:");
-        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-        //     .display_edge_keys_only()
-        //     .display_nodes()
-        //     .omit_depth()
-        //     ;
-        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+        println!("Final intermediate trie3:");
+        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+            .display_edge_keys_only()
+            .display_nodes()
+            .omit_depth()
+            ;
+        println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
 
         // --- Convert intermediate trie to final Trie3 format ---
         crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");

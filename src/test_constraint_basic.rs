@@ -1700,7 +1700,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
         max_original_llm_token_id,
     );
     constraint.dump_precomputed1();
-    constraint.dump_precomputed3();
+    // constraint.dump_precomputed3();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
