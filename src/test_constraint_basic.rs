@@ -1599,7 +1599,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // println!("Tokenizer: {}", constraint.tokenizer);
     // println!("Parser: {}", constraint.parser);
     // constraint.dump_precomputed0();
-    constraint.dump_precomputed1();
+    // constraint.dump_precomputed1();
     constraint.dump_precomputed3();
 
     // 4. Initialize state and get the initial mask
@@ -1618,7 +1618,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Commit "a" and get the next mask
     state.commit(llm_a);
-    state.print_gss();
+    // state.print_gss();
     let mask2 = state.get_mask();
 
     let expected_mask2 = HybridBitset::from_iter(vec![]);
