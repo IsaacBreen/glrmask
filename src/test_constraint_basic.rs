@@ -1747,12 +1747,14 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // This tokenizes to IDENTIFIER, !, -, -
     // The parser accepts IDENTIFIER, but the subsequent ! is not a valid lookahead,
     // so the state should become inactive.
-    state.commit_bytes(b"x!--");
+    state.print_gss();
+    state.commit_bytes(b"x!-");
+    state.print_gss();
     let mask2 = state.get_mask();
 
     // 8. Assert the state is inactive and the mask is empty
-    assert!(!state.is_active(), "State should be inactive after committing invalid sequence 'x!--'");
-    assert_eq!(mask2, HybridBitset::zeros(), "Mask should be empty after committing invalid sequence 'x!--'");
+    assert!(!state.is_active(), "State should be inactive after committing invalid sequence 'x!-'");
+    assert_eq!(mask2, HybridBitset::zeros(), "Mask should be empty after committing invalid sequence 'x!-'");
 
     Ok(())
 }
