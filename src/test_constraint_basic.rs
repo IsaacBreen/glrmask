@@ -1635,7 +1635,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 1. Define the EBNF grammar
     let ebnf_grammar = indoc! {r#"
         program ::= unary_expression+;
-        unary_expression ::= ( '!' unary_expression | ( '""' ) ) ';'?;
+        unary_expression ::= ( '~' unary_expression | ( 'XX' ) ) ';'?;
     "#};
 
     // 2. Parse and compile the grammar
@@ -1644,9 +1644,11 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
-    let llm_semicolons = LLMTokenID(0);
-    llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
-    let max_original_llm_token_id = 0;
+    let llm_tilde = LLMTokenID(0);
+    let llm_xx = LLMTokenID(1);
+    llm_token_map.insert(b"~".to_vec(), llm_tilde);
+    llm_token_map.insert(b"XX".to_vec(), llm_xx);
+    let max_original_llm_token_id = 1;
 
     // 4. Create the GrammarConstraint
     let constraint = GrammarConstraint::from_compiled_grammar(
@@ -1659,7 +1661,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 5. Initialize state and get the initial mask
     let state = constraint.init();
     let mask1 = state.get_mask();
-    let expected_mask1 = HybridBitset::from_iter(vec![llm_semicolons.0]);
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_tilde.0, llm_xx.0]);
     assert_eq!(
         mask1,
         expected_mask1
