@@ -2001,7 +2001,7 @@ impl GrammarConstraint {
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
         for (tid, (start, end)) in &terminal_templates {
-            let terminal = token_name_map.get_by_right(tid).unwrap();
+            let terminal = token_name_map.get_by_right(&tid.0).unwrap();
             println!("\n--- Intermediate Trie3 Template for terminal {:?}: ---", terminal);
             let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
                 .display_edge_keys_only()
