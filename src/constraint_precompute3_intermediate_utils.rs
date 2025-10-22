@@ -9,6 +9,8 @@ use crate::{
 use ordered_hash_map::OrderedHashMap;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+const DEBUG_LOG: bool = true; // Set to true to enable verbose logging for optimization passes.
+
 #[derive(Debug, Clone)]
 pub struct IntermediateTrie3Config {
     pub enabled: bool,
@@ -135,6 +137,44 @@ fn build_node_signature(
     edges.sort(); // ensure deterministic order
 
     NodeSignature { end, edges }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WLNodeSignature {
+    end: bool,
+    // edges: in BTreeMap edge-key order already, so no need to re-sort keys here.
+    // Each entry is (interned_edge_key_id, sorted [(child_color, count)]).
+    edges: Vec<(u32, Vec<(usize, u32)>)>,
+}
+
+fn build_node_signature_fast(
+    idx: IntermediatePrecomputeNode3Index,
+    god: &IntermediateTrie3GodWrapper,
+    color_map: &BTreeMap<IntermediatePrecomputeNode3Index, usize>,
+    key_ids: &BTreeMap<IntermediateTrie3EdgeKey, u32>,
+) -> WLNodeSignature {
+    let guard = idx.read(god).expect("Invalid index during signature build");
+    let end = guard.value.end;
+
+    let mut edges: Vec<(u32, Vec<(usize, u32)>)> = Vec::new();
+    for (ek, dsts) in guard.children().iter() {
+        let key_id = *key_ids
+            .get(ek)
+            .expect("edge key missing from interning map");
+
+        // Aggregate child colors to counts instead of sorting many duplicates.
+        let mut counts: HashMap<usize, u32> = HashMap::new();
+        for (d, _ev) in dsts.iter() {
+            let c = *color_map.get(d).expect("color missing for reachable node");
+            *counts.entry(c).or_insert(0) += 1;
+        }
+        let mut vec_counts: Vec<(usize, u32)> = counts.into_iter().collect();
+        // Deterministic order: sort by color id.
+        vec_counts.sort_unstable_by_key(|(c, _)| *c);
+        edges.push((key_id, vec_counts));
+    }
+    // No need to sort 'edges': guard.children() is already a BTreeMap in key order.
+    WLNodeSignature { end, edges }
 }
 
 /// Compute in-degree for all nodes reachable from roots.
@@ -444,20 +484,29 @@ fn wl_color_refine(
     reachable.sort_unstable();
     reachable.dedup();
 
-    // Compute an edge count for progress reporting.
+    // Compute an edge count for progress reporting and intern edge keys once.
     let mut edge_count: usize = 0;
+    let mut key_ids: BTreeMap<IntermediateTrie3EdgeKey, u32> = BTreeMap::new();
+    let mut next_key_id: u32 = 0;
     for idx in &reachable {
         if let Some(g) = idx.read(god) {
             for (_ek, dsts) in g.children().iter() {
                 edge_count += dsts.len();
             }
+            for (ek, _dsts) in g.children().iter() {
+                if !key_ids.contains_key(ek) {
+                    key_ids.insert(ek.clone(), next_key_id);
+                    next_key_id += 1;
+                }
+            }
         }
     }
-    if config.verbose {
+    if DEBUG_LOG {
         println!(
-            "[optimize_intermediate_trie3] Reachable nodes: {}, edges: {}",
+            "[optimize_intermediate_trie3] Reachable nodes: {}, edges: {}, unique edge-keys: {}",
             reachable.len(),
-            edge_count
+            edge_count,
+            key_ids.len()
         );
     }
 
@@ -478,7 +527,7 @@ fn wl_color_refine(
         colors.insert(*idx, color);
     }
 
-    if config.verbose {
+    if DEBUG_LOG {
         println!(
             "[optimize_intermediate_trie3] Initial classes: {}",
             next_initial_color
@@ -489,20 +538,20 @@ fn wl_color_refine(
     let mut iter = 0usize;
     loop {
         iter += 1;
-        let mut sigs: Vec<(IntermediatePrecomputeNode3Index, NodeSignature)> =
+        let mut sigs: Vec<(IntermediatePrecomputeNode3Index, WLNodeSignature)> =
             Vec::with_capacity(reachable.len());
         for idx in &reachable {
-            let sig = build_node_signature(*idx, god, &colors);
+            let sig = build_node_signature_fast(*idx, god, &colors, &key_ids);
             sigs.push((*idx, sig));
         }
 
         // Intern signatures to compact color IDs.
-        let mut intern: BTreeMap<NodeSignature, usize> = BTreeMap::new();
+        let mut intern: HashMap<WLNodeSignature, usize> = HashMap::with_capacity(sigs.len() * 2);
         let mut next_color_id: usize = 0;
         let mut new_colors: BTreeMap<IntermediatePrecomputeNode3Index, usize> = BTreeMap::new();
 
         for (idx, sig) in sigs {
-            let cid = if let Some(c) = intern.get(&sig) {
+            let cid = if let Some(c) = intern.get(&sig) { //
                 *c
             } else {
                 let c = next_color_id;
@@ -521,7 +570,7 @@ fn wl_color_refine(
             }
         }
 
-        if config.verbose {
+        if DEBUG_LOG {
             println!(
                 "[optimize_intermediate_trie3] WL iteration {}: classes={}, changed={}",
                 iter,
@@ -950,36 +999,34 @@ fn detect_true_cycle_recursive_intermediate_trie3(
 
     recursion_stack.insert(node_idx, path.len() - 1);
 
-    let children_to_visit = if let Some(guard) = node_idx.read(god) {
-        guard.children().clone()
+    // Avoid cloning the entire children map; just collect the next nodes to traverse.
+    let mut nexts: Vec<(IntermediateTrie3EdgeKey, IntermediatePrecomputeNode3Index)> = Vec::new();
+    if let Some(guard) = node_idx.read(god) {
+        for (edge_key, dest_map) in guard.children().iter() {
+            match edge_key {
+                IntermediateTrie3EdgeKey::CheckLLM(_) | IntermediateTrie3EdgeKey::NoOp => {
+                    for (child_idx, _) in dest_map.iter() {
+                        nexts.push((edge_key.clone(), *child_idx));
+                    }
+                }
+                IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_) => {
+                    // These edges break "true" cycles, so we don't traverse them.
+                }
+            }
+        }
     } else {
         recursion_stack.remove(&node_idx);
         path.pop();
         return None;
-    };
-
-    for (edge_key, dest_map) in children_to_visit.iter() {
-        match edge_key {
-            IntermediateTrie3EdgeKey::CheckLLM(_) | IntermediateTrie3EdgeKey::NoOp => {
-                for (child_idx, _) in dest_map.iter() {
-                    if let Some(report) = detect_true_cycle_recursive_intermediate_trie3(
-                        *child_idx,
-                        Some(edge_key.clone()),
-                        god,
-                        recursion_stack,
-                        visited,
-                        path,
-                    ) {
-                        return Some(report);
-                    }
-                }
-            }
-            IntermediateTrie3EdgeKey::Pop(_, _) | IntermediateTrie3EdgeKey::Push(_) => {
-                // These edges break "true" cycles, so we don't traverse them.
-            }
-        }
     }
 
+    for (ek, child_idx) in nexts {
+        if let Some(report) =
+            detect_true_cycle_recursive_intermediate_trie3(child_idx, Some(ek), god, recursion_stack, visited, path)
+        {
+            return Some(report);
+        }
+    }
 
     recursion_stack.remove(&node_idx);
     visited.insert(node_idx);
