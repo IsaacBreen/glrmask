@@ -121,15 +121,15 @@ def main():
                 minimal_vocab = test_vocab
                 removed_in_pass = True
                 print(f" REMOVED. New size: {len(minimal_vocab)}")
-                if len(rest) < 10:
-                    print(rest)
+                if len(excluded_vocab) < 10:
+                    print(excluded_vocab)
                 # Restart the scan for this chunk size, as the list has changed
                 start_index = 0
             else:
                 # Mismatch disappeared, this chunk is essential. Move to the next one.
                 print(" KEPT (essential).")
-                if len(rest) < 10:
-                    print(rest)
+                if len(excluded_vocab) < 10:
+                    print(excluded_vocab)
                 start_index = end_index
 
         # If we completed a full pass for this chunk size without removing anything,
