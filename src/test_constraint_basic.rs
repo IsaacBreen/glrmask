@@ -1645,9 +1645,7 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
         program ::= 'x' ;
 
         // --- Lexical Grammar (Minimal) ---
-        IGNORE ::= ( ' ' | MULTI_LINE_COMMENT )+ ;
-        WS ::= ' ' ;
-        MULTI_LINE_COMMENT ::= '/*' ;
+        IGNORE ::= ( ' ' | '/*' )+ ;
     "#};
 
     // 2. Parse and compile the grammar
