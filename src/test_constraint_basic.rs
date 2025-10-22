@@ -1707,6 +1707,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     // 2. Parse and compile the grammar
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+    println!("Grammar: {}", grammar_definition);
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Parser: {}", compiled_grammar.glr_parser);
 
