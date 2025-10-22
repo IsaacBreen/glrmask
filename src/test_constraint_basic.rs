@@ -1705,6 +1705,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
     state.commit_bytes(b"X");
+    state.print_gss();
     let mask2 = state.get_mask();
 
     // 8. Assert the state is inactive and the mask is empty
