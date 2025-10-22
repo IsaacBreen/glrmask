@@ -27,7 +27,7 @@ use crate::constraint_precompute2_utils;
 use crate::constraint_precompute2_utils::optimize_trie2_size;
 pub use crate::constraint_precompute2_utils::Trie2Config;
 use crate::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
-use crate::constraint_precompute3_intermediate_utils::optimize_intermediate_trie3;
+use crate::constraint_precompute3_intermediate_utils::{optimize_intermediate_trie3, IntermediateTrie3Config};
 pub use crate::constraint_precompute3_utils::Trie3Config;
 use crate::constraint_precompute3_utils::{clone_trie3_graph, optimize_trie3_size};
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
@@ -657,6 +657,8 @@ pub struct GrammarConstraintConfig {
     pub trie1: Trie1Config,
     pub trie2: Trie2Config,
     pub trie3: Trie3Config,
+    pub intermediate_trie3_templates: IntermediateTrie3Config,
+    pub intermediate_trie3_main: IntermediateTrie3Config,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -668,6 +670,8 @@ impl Default for GrammarConstraintConfig {
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::off(),
+            intermediate_trie3_templates: IntermediateTrie3Config::default(),
+            intermediate_trie3_main: IntermediateTrie3Config::default(),
         }
     }
 }
@@ -681,6 +685,8 @@ impl GrammarConstraintConfig {
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::off(),
+            intermediate_trie3_templates: IntermediateTrie3Config::off(),
+            intermediate_trie3_main: IntermediateTrie3Config::off(),
         }
     }
 }
@@ -1205,7 +1211,7 @@ impl GrammarConstraint {
             &precomputed1,
             &trie1_god,
             &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
-            &config.trie3,
+            config,
             &mut precompute3_vocab,
         );
 
@@ -1459,7 +1465,7 @@ impl GrammarConstraint {
             &precomputed1,
             &trie1_god,
             &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
-            &config.trie3,
+            config,
             &mut precompute3_vocab,
         );
 
@@ -1811,6 +1817,7 @@ impl GrammarConstraint {
         parser: &GLRParser,
         trie3_god: &IntermediateTrie3GodWrapper,
         internal_max_llm_token: usize,
+        config: &IntermediateTrie3Config,
     ) -> BTreeMap<TerminalID, (IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index)> {
         let mut out = BTreeMap::new();
         // Iterate terminals deterministically by ID
@@ -1830,6 +1837,7 @@ impl GrammarConstraint {
             &template_roots,
             trie3_god,
             |_, node| node.value.end,
+            config,
         );
 
         // Update the start nodes in the template map
@@ -1970,8 +1978,8 @@ impl GrammarConstraint {
         internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
-        possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-        config: &Trie3Config,
+        _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+        config: &GrammarConstraintConfig,
         stage_vocab: &mut StageVocab,
     ) -> (Precomputed3, Trie3GodWrapper) {
         crate::debug!(2, "Precomputing Trie 3 (template-driven)...");
@@ -1981,7 +1989,7 @@ impl GrammarConstraint {
         let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
 
         // Build per-terminal template subgraphs once in this arena.
-        let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token);
+        let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
 
         if is_debug_level_enabled(2) {
             println!("\n--- Intermediate Trie3 Template Statistics ---");
@@ -2209,6 +2217,7 @@ impl GrammarConstraint {
             &intermediate_roots,
             &intermediate_trie3_god,
             |_, node| node.value.end,
+            &config.intermediate_trie3_main,
         );
 
         // Update the roots in the map after optimization
@@ -2252,7 +2261,7 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+        optimize_trie3_size(&mut precomputed3, &trie3_god, &config.trie3, max_state_id, internal_max_llm_token, stage_vocab);
         (precomputed3, trie3_god)
     }
 
