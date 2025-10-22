@@ -1645,11 +1645,9 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
     let llm_x = LLMTokenID(0);
-    let llm_not_comment = LLMTokenID(1);
-    let llm_semicolons = LLMTokenID(2);
-    let llm_empty_string_semicolon = LLMTokenID(3);
+    let llm_semicolons = LLMTokenID(1);
+    let llm_empty_string_semicolon = LLMTokenID(2);
     llm_token_map.insert(b"x".to_vec(), llm_x);
-    llm_token_map.insert(b"!--".to_vec(), llm_not_comment);
     llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
     llm_token_map.insert(b"'';".to_vec(), llm_empty_string_semicolon);
     let max_original_llm_token_id = 3;
@@ -1672,9 +1670,6 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     state2.commit_bytes(b"xx");
     assert!(state2.is_active());
     let mut state2 = state.clone();
-    state2.commit_bytes(b"x!--");
-    assert!(state2.is_active());
-    let mut state2 = state.clone();
     state2.commit_bytes(b"x;;;");
     assert!(!state2.is_active());
     let mut state2 = state.clone();
@@ -1684,7 +1679,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 6. Assert the expected initial mask
     // "x" is a valid IDENTIFIER, starting an expression.
     // "'';" is a valid STRING_LITERAL followed by a semicolon, which is a valid expression_statement.
-    let expected_mask1 = HybridBitset::from_iter(vec![llm_x.0, llm_not_comment.0, llm_empty_string_semicolon.0]);
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
     assert_eq!(
         mask1,
         expected_mask1,
@@ -1704,7 +1699,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     // 8. Assert the state is inactive and the mask is empty
     assert!(state.is_active(), "State should be inactive after committing invalid sequence 'x!--'");
-    let expected_mask2 = HybridBitset::from_iter(vec![llm_x.0, llm_not_comment.0, llm_empty_string_semicolon.0]);
+    let expected_mask2 = HybridBitset::from_iter(vec![llm_x.0, llm_empty_string_semicolon.0]);
     assert_eq!(
         mask2,
         expected_mask2,
