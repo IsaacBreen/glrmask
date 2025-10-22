@@ -1674,8 +1674,10 @@ fn test_js_like_grammar_initial_mask0() -> Result<(), Box<dyn std::error::Error>
 fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar
     let ebnf_grammar = indoc! {r#"
-        program ::= unary_expression ';'? unary_expression ';'? '$';
-        unary_expression ::= '!' unary_expression | 'X' ;
+        program ::= unary_expression unary_expression '$';
+        unary_expression ::= ( '!' unary_expression | 'X' ) ';'?;
+        // program ::= unary_expression ';'? unary_expression ';'? '$';
+        // unary_expression ::= '!' unary_expression | 'X' ;
     "#};
 
     // 2. Parse and compile the grammar
