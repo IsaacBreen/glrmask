@@ -857,10 +857,11 @@ mod tests {
                     }
                     IntermediateTrie3EdgeKey::Pop(n, s) => {
                         pop_pos += n;
-                        pops.entry(pop_pos)
-                            .or_insert_with(StateIDBV::max_ones)
-                            .bitand_assign(&s);
-                        pop_pos += 1;
+                        if !s.is_all() {
+                            pops.entry(pop_pos)
+                                .or_insert_with(StateIDBV::max_ones)
+                                .bitand_assign(&s);
+                        }
                     }
                     IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::NoOp => {
                         // ignore
