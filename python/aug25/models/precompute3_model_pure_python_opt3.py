@@ -1,3 +1,4 @@
+ 
 from __future__ import annotations
 
 import collections
@@ -60,6 +61,7 @@ RangeSet.intersection = _patched_intersection
 class ArenaOptimizeParams:
     depth_weight: int = 1024
     pop_weight: int = 1
+    end_distance_weight: int = 4096
     penalty_llm_overlap: int = 512
     penalty_state_overlap: int = 256
     penalty_same_dest: int = 192
@@ -142,6 +144,7 @@ class MergeByPopVariation(VariationBase):
         # 3. Replace the model's arena and re-initialize accelerators
         model.arena = new_arena
         model._compute_edge_accelerators()
+        model._compute_dist_to_end()
         model.optimize_traversal()
 
 # Type Aliases
@@ -149,6 +152,34 @@ NodeID = int
 LLMTokenSet = RangeSet
 StateIDSet = RangeSetStates
 TerminalIdSet = RangeSet
+
+# A large sentinel value for "unreachable" distance to any end node.
+INF_DIST = 1 << 30
+
+def _compute_end_distance_from_intermediate(
+    intermediate_arena: Dict[NodeID, IntermediateArenaNode]
+) -> Dict[NodeID, int]:
+    rev_adj: Dict[NodeID, Set[NodeID]] = defaultdict(set)
+    nodes: Set[NodeID] = set(intermediate_arena.keys())
+    for uid, node in intermediate_arena.items():
+        for edge in node.children:
+            v = int(edge.dests.dest_idx)
+            rev_adj[v].add(uid)
+            nodes.add(v)
+    dist = {n: INF_DIST for n in nodes}
+    q = collections.deque()
+    for uid, node in intermediate_arena.items():
+        if node.clean_end:
+            dist[uid] = 0
+            q.append(uid)
+    while q:
+        u = q.popleft()
+        nd = dist[u] + 1
+        for p in rev_adj.get(u, ()):
+            if dist[p] > nd:
+                dist[p] = nd
+                q.append(p)
+    return dist
 
 def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
     """
@@ -322,9 +353,34 @@ class ArenaNode:
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
 
+def _compute_end_distance_from_final(arena: Dict[NodeID, ArenaNode]) -> Dict[NodeID, int]:
+    rev_adj: Dict[NodeID, Set[NodeID]] = defaultdict(set)
+    nodes: Set[NodeID] = set(arena.keys())
+    for uid, node in arena.items():
+        for e in node.children:
+            for d in e.dests:
+                v = int(d.dest_idx)
+                rev_adj[v].add(uid)
+                nodes.add(v)
+    dist = {n: INF_DIST for n in nodes}
+    q = collections.deque()
+    for uid, node in arena.items():
+        if node.clean_end:
+            dist[uid] = 0
+            q.append(uid)
+    while q:
+        u = q.popleft()
+        nd = dist[u] + 1
+        for p in rev_adj.get(u, ()):
+            if dist[p] > nd:
+                dist[p] = nd
+                q.append(p)
+    return dist
+
 def _optimize_intermediate_arena(
     intermediate_arena: Dict[NodeID, IntermediateArenaNode],
     max_depth: Dict[NodeID, int],
+    dist_to_end: Dict[NodeID, int],
     params: Optional[ArenaOptimizeParams] = None,
 ):
     if params is None:
@@ -346,20 +402,22 @@ def _optimize_intermediate_arena(
 
         # Safety net for extreme fan-out: keep the very fast original ordering.
         if n > params.fallback_fanout_threshold:
-            edges.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
+            edges.sort(key=lambda e: (dist_to_end.get(int(e.dests.dest_idx), INF_DIST), -max_depth.get(int(e.dests.dest_idx), 0), e.pop))
             continue
 
         # Tunable weights (chosen so that depth is a major factor, but
         # overlap penalties are also significant).
         DEPTH_WEIGHT = params.depth_weight
         POP_WEIGHT = params.pop_weight
+        END_WEIGHT = params.end_distance_weight
         PENALTY_LLM_OVERLAP = params.penalty_llm_overlap
         PENALTY_STATE_OVERLAP = params.penalty_state_overlap
         PENALTY_SAME_DEST = params.penalty_same_dest
 
         # Precompute depth and base score for each edge
         depths = [max_depth.get(int(e.dests.dest_idx), 0) for e in edges]
-        base_scores = [DEPTH_WEIGHT * depths[i] - POP_WEIGHT * edges[i].pop for i in range(n)]
+        distances = [dist_to_end.get(int(e.dests.dest_idx), INF_DIST) for e in edges]
+        base_scores = [DEPTH_WEIGHT * depths[i] - POP_WEIGHT * edges[i].pop - END_WEIGHT * distances[i] for i in range(n)]
 
         # Greedy selection state
         remaining = list(range(n))
@@ -470,7 +528,9 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
 def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Dict[NodeID, ArenaNode]:
     """Orchestrates the full conversion from loaded data to the final arena format."""
     intermediate_arena = _load_and_flatten_arena(loaded_arena)
-    _optimize_intermediate_arena(intermediate_arena, max_depth, None)
+    # Distance-aware reordering: compute min distance to any end node first.
+    dist_to_end = _compute_end_distance_from_intermediate(intermediate_arena)
+    _optimize_intermediate_arena(intermediate_arena, max_depth, dist_to_end, None)
     final_arena = _merge_and_finalize_arena(intermediate_arena)
     return final_arena
 
@@ -540,6 +600,7 @@ class Model(GraphProvider):
     gm_max_edges: int = 1
     gm_max_dests: int = 1
     last_get_mask_cost: int = 0
+    dist_to_end: Dict[NodeID, int] = field(default_factory=dict)
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
     suppress_stats_report: bool = True
 
@@ -624,6 +685,8 @@ class Model(GraphProvider):
             ignore_terminal_id=parser_data.get('ignore_terminal_id'),
             state={tokenizer.initial_state_id(): initial_gss},
         )
+        # Compute scheduling heuristic after structure is ready
+        model._compute_dist_to_end()
         model._compute_edge_accelerators()
         model.optimize_traversal()
         return model
@@ -667,6 +730,12 @@ class Model(GraphProvider):
                 edge.llm_bv_not = all_ones.difference(edge.llm_bv)
         stats.stop('accelerators.compute_edge_complements')
 
+    def _compute_dist_to_end(self) -> None:
+        """Compute and cache the min distance to any end node (clean_end) ignoring token/state constraints."""
+        self.dist_to_end = _compute_end_distance_from_final(self.arena)
+        # Optional: could print or record a stat about unreachable nodes
+        # Stats.get().counts['get_mask.dist_to_end.computed'] = len(self.dist_to_end)
+
     def optimize_traversal(self) -> None:
         for node in tqdm(self.arena.values(), desc="Optimizing traversal"):
             for edge in node.children:
@@ -696,10 +765,12 @@ class Model(GraphProvider):
         """Re-optimize arena in-place using diversity-first ordering with tunable params."""
         # Convert current arena -> intermediate, reorder, then rebuild final arena
         inter = self.to_intermediate_arena()
-        _optimize_intermediate_arena(inter, self.max_depth, params)
+        dist_to_end = _compute_end_distance_from_intermediate(inter)
+        _optimize_intermediate_arena(inter, self.max_depth, dist_to_end, params)
         final_arena = _merge_and_finalize_arena(inter)
         self.arena = final_arena
         self._compute_edge_accelerators()
+        self._compute_dist_to_end()
         self.optimize_traversal()
 
     # ------------- Variations and selection -------------
@@ -929,8 +1000,14 @@ class Model(GraphProvider):
         def enqueue(node_id: NodeID, gss: GSS, depth: int, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
             if gss.is_empty():
                 return
+            # Prune nodes that cannot reach any end node in the connectivity graph.
+            dist = self.dist_to_end.get(node_id, INF_DIST)
+            if dist >= INF_DIST:
+                stats.inc('get_mask.traversal.pruned_unreachable_to_end')
+                return
             stats.inc('get_mask.traversal.enqueues')
-            priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
+            # Prioritize nodes that are closer (by connectivity) to any end node.
+            priority = (dist, depth, edge_idx, dest_idx)
             item = WorkItem(
                 priority=priority,
                 node_id=node_id,
@@ -972,6 +1049,10 @@ class Model(GraphProvider):
         print("[get_mask] Starting main traversal loop...")
         remaining_mask = all_ones
         while work_heap:
+            # Early exit if we've already saturated the mask (no new tokens can be added).
+            if remaining_mask.is_empty():
+                stats.inc('get_mask.early_exit_full_mask')
+                break
             if time.time() - last_progress_time > progress_interval_sec:
                 last_progress_time = time.time()
                 print(f"[get_mask] Progress: {len(work_heap)} items in heap, "
@@ -996,6 +1077,9 @@ class Model(GraphProvider):
                 final_mask |= gss_acc.llm_mask
                 stats.stop('get_mask.main_loop.end_node.final_mask_union')
                 remaining_mask = all_ones.difference(final_mask)
+                if remaining_mask.is_empty():
+                    stats.inc('get_mask.early_exit_full_mask')
+                    break
 
             a_node = self.arena.get(node)
             if not a_node:
