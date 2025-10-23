@@ -18,8 +18,8 @@ class Model:
         # constraint.dump_precomputed3()
         constraint_state = ffi.GrammarConstraintState(constraint)
         s = ffi.GrammarConstraintState(constraint)
-        s.commit_bytes(b"x")
-        print(f"MASK 2: {s.get_mask()}")
+        # s.commit_bytes(b"x")
+        # print(f"MASK 2: {s.get_mask()}")
         return Model(constraint_state)
 
     def get_mask(self) -> RangeSet:
