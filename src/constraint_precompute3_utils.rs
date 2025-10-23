@@ -2518,36 +2518,51 @@ fn compress_unary_chains_trie3(
             // and add/union V mapping with SIDs intersection S(P->U) ∧ S(U->V).
             if let Some(mut pw) = p_idx.write(trie3_god) {
                 let (in_pop, in_llm) = in_key.clone();
-                if let Some(dm) = pw.children_mut().get_mut(&(in_pop, in_llm.clone())) {
-                    if let Some(s_pu_actual) = dm.remove(&u_idx) {
-                        // Compose SIDs
-                        let s_comp = &s_pu_actual & &s_uv;
-                        // Compose key for the new edge
-                        let (new_pop, new_llm) = if keys_match {
-                            (in_pop, in_llm.clone())
-                        } else {
-                            // Both pop=0; compose LLM masks by intersection
-                            (0, &in_llm & &out_key.1)
-                        };
-                        // If either the composed LLM or SIDs are empty, we still remove the
-                        // P->U mapping (since U had only one outgoing), but we don't add a new one.
-                        if !new_llm.is_empty() && !s_comp.is_empty() {
-                            let entry = pw.children_mut().entry((new_pop, new_llm)).or_insert_with(OrderedHashMap::new);
-                            entry.entry(v_idx)
-                                .and_modify(|e| *e |= &s_comp)
-                                .or_insert(s_comp);
-                        }
-                        if dm.is_empty() {
-                            pw.children_mut().remove(&(in_pop, in_llm.clone()));
-                        }
-                        // Recompute live tokens as union of outgoing LLM masks for robustness.
-                        let mut new_live = LLMTokenBV::zeros();
-                        for ((_, llm_bv), _) in pw.children() {
-                            new_live |= llm_bv;
-                        }
-                        pw.value.live_tokens = new_live;
-                        rewired_this_iter += 1;
+                let s_pu_actual_opt;
+                let dm_became_empty;
+
+                // Scope to limit mutable borrow of pw.children_mut()
+                {
+                    if let Some(dm) = pw.children_mut().get_mut(&(in_pop, in_llm.clone())) {
+                        s_pu_actual_opt = dm.remove(&u_idx);
+                        dm_became_empty = dm.is_empty();
+                    } else {
+                        s_pu_actual_opt = None;
+                        dm_became_empty = false;
                     }
+                }
+
+                if let Some(s_pu_actual) = s_pu_actual_opt {
+                    // Compose SIDs
+                    let s_comp = &s_pu_actual & &s_uv;
+                    // Compose key for the new edge
+                    let (new_pop, new_llm) = if keys_match {
+                        (in_pop, in_llm.clone())
+                    } else {
+                        // Both pop=0; compose LLM masks by intersection
+                        (0, &in_llm & &out_key.1)
+                    };
+
+                    // If either the composed LLM or SIDs are empty, we still remove the
+                    // P->U mapping (since U had only one outgoing), but we don't add a new one.
+                    if !new_llm.is_empty() && !s_comp.is_empty() {
+                        let entry = pw.children_mut().entry((new_pop, new_llm)).or_default();
+                        entry.entry(v_idx)
+                            .and_modify(|e| *e |= &s_comp)
+                            .or_insert(s_comp);
+                    }
+
+                    if dm_became_empty {
+                        pw.children_mut().remove(&(in_pop, in_llm.clone()));
+                    }
+
+                    // Recompute live tokens as union of outgoing LLM masks for robustness.
+                    let mut new_live = LLMTokenBV::zeros();
+                    for ((_, llm_bv), _) in pw.children() {
+                        new_live |= llm_bv;
+                    }
+                    pw.value.live_tokens = new_live;
+                    rewired_this_iter += 1;
                 }
             }
         }
