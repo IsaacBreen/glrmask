@@ -1462,9 +1462,38 @@ mod tests {
 
         let paths_before = get_normalized_paths(&roots, &god);
 
+        let options =
+            crate::datastructures::trie::PrettyPrintOptions::default()
+                .display_edge_keys_only()
+                .omit_depth();
+        eprintln!("Full graph before:");
+        eprintln!(
+            "{}",
+            Trie::pretty_print_with_options(
+                &god,
+                roots.values().cloned().collect::<Vec<_>>().as_slice(),
+                &options
+            )
+        );
+
         eliminate_pushes_and_pops(&mut roots, &god);
 
         let paths_after = get_normalized_paths(&roots, &god);
+
+        let options =
+            crate::datastructures::trie::PrettyPrintOptions::default()
+                .display_edge_keys_only()
+                .omit_depth();
+        eprintln!("Full graph after:");
+        eprintln!(
+            "{}",
+            Trie::pretty_print_with_options(
+                &god,
+                roots.values().cloned().collect::<Vec<_>>().as_slice(),
+                &options
+            )
+        );
+
         assert_paths_eq(&paths_before, &paths_after);
 
         assert_no_pops_reachable_from_pushes(&roots, &god);
