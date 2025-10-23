@@ -124,7 +124,6 @@ pub struct Trie3Config {
     pub factor_common_destinations: bool,
     pub stochastic_equivalence_check: bool,
     pub debug_remove_pop_gt_0: bool,
-    pub eliminate_pop0_edges: bool,
     pub assert_pop0_edges_only_at_start: bool,
     pub assert_pop0_paths_to_end_are_short: bool,
 }
@@ -148,7 +147,6 @@ impl Default for Trie3Config {
             factor_common_destinations: true,
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
-            eliminate_pop0_edges: true,
             assert_pop0_edges_only_at_start: false,
             assert_pop0_paths_to_end_are_short: false,
         }
@@ -174,7 +172,6 @@ impl Trie3Config {
             factor_common_destinations: false,
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
-            eliminate_pop0_edges: false,
             assert_pop0_edges_only_at_start: false,
             assert_pop0_paths_to_end_are_short: false,
         }
@@ -350,12 +347,6 @@ pub fn optimize_trie3_size(
         if config.factor_common_destinations {
             run_pass!("Factoring common destinations", {
                 factor_common_destinations_trie3(roots, trie3_god, max_llm_token_id, max_state_id);
-            });
-        }
-
-        if config.eliminate_pop0_edges {
-            run_pass!("Eliminating pop=0 edges (epsilon elimination)", {
-                eliminate_pop0_edges_trie3(roots, trie3_god);
             });
         }
 

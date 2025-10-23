@@ -2717,7 +2717,6 @@ local_system:
           pub factor_common_destinations: bool,
           pub stochastic_equivalence_check: bool,
           pub debug_remove_pop_gt_0: bool,
-          pub eliminate_pop0_edges: bool,
           pub assert_pop0_edges_only_at_start: bool,
           pub assert_pop0_paths_to_end_are_short: bool,
       }
@@ -2741,7 +2740,6 @@ local_system:
                   factor_common_destinations: true,
                   stochastic_equivalence_check: false,
                   debug_remove_pop_gt_0: false,
-                  eliminate_pop0_edges: true,
                   assert_pop0_edges_only_at_start: false,
                   assert_pop0_paths_to_end_are_short: false,
               }
@@ -2767,7 +2765,6 @@ local_system:
                   factor_common_destinations: false,
                   stochastic_equivalence_check: false,
                   debug_remove_pop_gt_0: false,
-                  eliminate_pop0_edges: false,
                   assert_pop0_edges_only_at_start: false,
                   assert_pop0_paths_to_end_are_short: false,
               }
@@ -2943,12 +2940,6 @@ local_system:
               if config.factor_common_destinations {
                   run_pass!("Factoring common destinations", {
                       factor_common_destinations_trie3(roots, trie3_god, max_llm_token_id, max_state_id);
-                  });
-              }
-
-              if config.eliminate_pop0_edges {
-                  run_pass!("Eliminating pop=0 edges (epsilon elimination)", {
-                      eliminate_pop0_edges_trie3(roots, trie3_god);
                   });
               }
 
@@ -8585,5 +8576,101 @@ messages:
     metadata:
   - user: 'Changes committed with message: "fix: Revert pop=0 edge elimination and
       add assertion for pop=0 edges only at start"'
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      error[E0425]: cannot find function `eliminate_pop0_edges_trie3` in this scope
+         --> src/constraint_precompute3_utils.rs:358:17
+          |
+      358 |                 eliminate_pop0_edges_trie3(roots, trie3_god);
+          |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+    metadata:
+  - user: Where'd it go?
+    metadata:
+  - assistant: |-
+      You are right to point out the error, and my apologies. The previous patch was incorrect; it removed the `eliminate_pop0_edges_trie3` function but failed to remove the configuration flag and the code that calls the function, leading to the compile error.
+
+      I will now provide the correct patch to fix this inconsistency. The changes will remove the dangling call and the now-unused `eliminate_pop0_edges` configuration flag, leaving only the correct logic for asserting that `pop=0` edges appear only at the start.
+
+      ### Step-by-step Instructions
+
+      1.  **Remove the `eliminate_pop0_edges` flag from `Trie3Config`**:
+          *   In `src/constraint_precompute3_utils.rs`, find the `Trie3Config` struct.
+          *   Delete the line: `pub eliminate_pop0_edges: bool,`.
+
+      2.  **Remove the flag from `Trie3Config::default()`**:
+          *   In the `impl Default for Trie3Config` block.
+          *   Delete the line: `eliminate_pop0_edges: true,`.
+
+      3.  **Remove the flag from `Trie3Config::off()`**:
+          *   In the `Trie3Config::off()` function.
+          *   Delete the line: `eliminate_pop0_edges: false,`.
+
+      4.  **Remove the call to the deleted function**:
+          *   In the `optimize_trie3_size` function.
+          *   Delete the entire `run_pass!` block that calls `eliminate_pop0_edges_trie3`.
+
+      ### Git Diff
+
+      ```diff
+      --- a/src/constraint_precompute3_utils.rs
+      +++ b/src/constraint_precompute3_utils.rs
+      @@ -78,7 +78,6 @@
+           pub factor_common_destinations: bool,
+           pub stochastic_equivalence_check: bool,
+           pub debug_remove_pop_gt_0: bool,
+      -    pub eliminate_pop0_edges: bool,
+           pub assert_pop0_edges_only_at_start: bool,
+           pub assert_pop0_paths_to_end_are_short: bool,
+       }
+      @@ -98,7 +97,6 @@
+                   factor_common_destinations: true,
+                   stochastic_equivalence_check: false,
+                   debug_remove_pop_gt_0: false,
+      -            eliminate_pop0_edges: true,
+                   assert_pop0_edges_only_at_start: false,
+                   assert_pop0_paths_to_end_are_short: false,
+               }
+      @@ -122,7 +120,6 @@
+                   factor_common_destinations: false,
+                   stochastic_equivalence_check: false,
+                   debug_remove_pop_gt_0: false,
+      -            eliminate_pop0_edges: false,
+                   assert_pop0_edges_only_at_start: false,
+                   assert_pop0_paths_to_end_are_short: false,
+               }
+      @@ -233,12 +230,6 @@
+                   });
+               }
+       
+      -        if config.eliminate_pop0_edges {
+      -            run_pass!("Eliminating pop=0 edges (epsilon elimination)", {
+      -                eliminate_pop0_edges_trie3(roots, trie3_god);
+      -            });
+      -        }
+      -
+               if config.compress_edges {
+                   run_pass!("Compressing edges + unary chains", {
+                       compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_utils.rs
+      Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
+    metadata:
+  - user: 'Changes committed with message: "refactor: Remove failed pop=0 edge elimination
+      pass and keep start-only assertion"'
     metadata:
 ...
