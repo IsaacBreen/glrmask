@@ -1280,6 +1280,8 @@ class Model(GraphProvider):
                     stats.inc('get_mask.main_loop.edge.pop_cache_hits')
                 else:
                     # Pop stacks
+                    if pop == 0:
+                        stats.inc('get_mask.main_loop.edge.popn n==0')
                     stats.start('get_mask.main_loop.edge.popn')
                     popped: GSS = gss_node.popn(pop)
                     stats.stop('get_mask.main_loop.edge.popn')
