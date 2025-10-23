@@ -1,0 +1,1041 @@
+from __future__ import annotations
+
+import collections
+import copy
+import heapq
+import itertools
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+from collections import defaultdict
+import numpy as np
+
+import _sep1 as ffi
+from tqdm import tqdm
+
+# from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+# from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
+# from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
+from python.gss_tester.implementations.leveled_rs_impl import LeveledRSGSS as GSS
+from ..common_interface import GraphProvider
+from ..stats import Stats
+from ..range_set import FFIRangeSet as RangeSet
+from ..range_set import SetRangeSet as RangeSetOut
+from ..range_set import SetRangeSet as RangeSetStates
+
+# --- Variation framework and arena optimization params ---
+
+@dataclass(frozen=True)
+class ArenaOptimizeParams:
+    depth_weight: int = 1024
+    pop_weight: int = 1
+    end_distance_weight: int = 4096
+    penalty_llm_overlap: int = 512
+    penalty_state_overlap: int = 256
+    penalty_same_dest: int = 192
+    fallback_fanout_threshold: int = 256
+
+@dataclass
+class VariationBase:
+    name: str
+
+    def describe(self) -> str:
+        return self.name
+
+    def __call__(self, model: "Model") -> None:
+        pass
+
+@dataclass
+class TraversalBudgetVariation(VariationBase):
+    max_edges: int = 1
+    max_dests: int = 1
+
+    def __call__(self, model: "Model") -> None:
+        model.gm_max_edges = self.max_edges
+        model.gm_max_dests = self.max_dests
+
+@dataclass
+class ArenaReorderVariation(VariationBase):
+    params: ArenaOptimizeParams = field(default_factory=ArenaOptimizeParams)
+
+    def __call__(self, model: "Model") -> None:
+        model.optimize_arena(self.params)
+
+@dataclass
+class MergeByPopVariation(VariationBase):
+    """Dramatically restructure the arena by merging all edges with the same pop value."""
+    def __call__(self, model: "Model") -> None:
+
+        # 1. Convert to intermediate arena to get a flat list of edges per node
+        intermediate_arena = model.to_intermediate_arena()
+        new_arena: Dict[NodeID, ArenaNode] = {}
+
+        # 2. Rebuild each node with the new merging strategy
+        for uid, inter_node in tqdm(intermediate_arena.items(), desc="[MergeByPop] Rebuilding arena"):
+            if not inter_node.children:
+                new_arena[uid] = ArenaNode(children=[], llm_bv_union=RangeSet.empty(), clean_end=inter_node.clean_end)
+                continue
+
+            # Group all flattened edges by their pop value
+            grouped_by_pop: Dict[int, List[IntermediateArenaEdge]] = collections.defaultdict(list)
+            for edge in inter_node.children:
+                grouped_by_pop[edge.pop].append(edge)
+
+            new_children: List[ArenaEdge] = []
+            node_llm_union = RangeSet.empty()
+
+            # For each pop value, create one single merged edge
+            for pop, edges_to_merge in sorted(grouped_by_pop.items()):
+                merged_llm_bv = RangeSet.empty()
+                merged_dests: List[ArenaEdgeDest] = []
+                dest_states_union = RangeSetStates.empty()
+
+                for edge in edges_to_merge:
+                    merged_llm_bv |= edge.llm_bv
+                    dest = ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv)
+                    merged_dests.append(dest)
+                    dest_states_union |= dest.state_bv
+
+                node_llm_union |= merged_llm_bv
+                new_children.append(ArenaEdge(
+                    pop=pop,
+                    llm_bv=merged_llm_bv,
+                    dests=merged_dests,
+                    dest_states_union=dest_states_union,
+                ))
+
+            new_arena[uid] = ArenaNode(children=new_children, llm_bv_union=node_llm_union, clean_end=inter_node.clean_end)
+
+        # 3. Replace the model's arena and re-initialize accelerators
+        model.arena = new_arena
+        model._compute_edge_accelerators()
+        model._compute_dist_to_end()
+        model.optimize_traversal()
+
+# Type Aliases
+NodeID = int
+LLMTokenSet = RangeSet
+StateIDSet = RangeSetStates
+TerminalIdSet = RangeSet
+
+# A large sentinel value for "unreachable" distance to any end node.
+INF_DIST = 1 << 30
+
+def _compute_end_distance_from_intermediate(
+    intermediate_arena: Dict[NodeID, IntermediateArenaNode]
+) -> Dict[NodeID, int]:
+    rev_adj: Dict[NodeID, Set[NodeID]] = defaultdict(set)
+    nodes: Set[NodeID] = set(intermediate_arena.keys())
+    for uid, node in intermediate_arena.items():
+        for edge in node.children:
+            v = int(edge.dests.dest_idx)
+            rev_adj[v].add(uid)
+            nodes.add(v)
+    dist = {n: INF_DIST for n in nodes}
+    q = collections.deque()
+    for uid, node in intermediate_arena.items():
+        if node.clean_end:
+            dist[uid] = 0
+            q.append(uid)
+    while q:
+        u = q.popleft()
+        nd = dist[u] + 1
+        for p in rev_adj.get(u, ()):
+            if dist[p] > nd:
+                dist[p] = nd
+                q.append(p)
+    return dist
+
+def _acc_memoize(use_value_cache: bool = True):
+    """
+    Per-invocation memoization for PyAcc transformers.
+    - Caches by id(acc) (including None results).
+    - Caches by value (acc) for non-None results, if use_value_cache is True.
+    """
+    def decorator(fn):
+        id_memo = {}
+        val_memo = {}
+        def wrapper(acc):
+            # Identity-based fast path
+            if id(acc) in id_memo:
+                return id_memo[id(acc)]
+
+            if use_value_cache:
+                # Structural equality-based cache (only non-None results are useful here)
+                cached = val_memo.get(acc)
+                if cached is not None:
+                    id_memo[id(acc)] = cached
+                    return cached
+            result = fn(acc)
+            id_memo[id(acc)] = result
+            if use_value_cache:
+                val_memo[acc] = result
+            return result
+        return wrapper
+    return decorator
+
+@dataclass(frozen=True)
+class DFAState:
+    transitions: Dict[int, int]
+    finalizers: Set[int]
+    possible_future_group_ids: Set[int]
+
+
+@dataclass(frozen=True)
+class PyTokenizer:
+    states: List[DFAState]
+    start_state: int
+    non_greedy_finalizers: Set[int]
+
+    def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+        current_state = state_id
+        matches = {}
+        done = False
+
+        # Check for initial matches (epsilon)
+        for group_id in self.states[current_state].finalizers:
+            if group_id in self.non_greedy_finalizers:
+                matches.setdefault(group_id, 0)
+            else:
+                matches[group_id] = 0
+
+        for i, byte in enumerate(text):
+            state_data = self.states[current_state]
+            next_state = state_data.transitions.get(byte)
+
+            if next_state is None:
+                done = True
+                break
+
+            current_state = next_state
+            for group_id in self.states[current_state].finalizers:
+                if group_id in self.non_greedy_finalizers:
+                    matches.setdefault(group_id, i + 1)
+                else:
+                    matches[group_id] = i + 1
+
+        end_state = None if done else current_state
+        return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
+
+    def tokens_accessible_from_state(self, state_id: int) -> List[int]:
+        return list(self.states[state_id].possible_future_group_ids)
+
+    def initial_state_id(self) -> int:
+        return self.start_state
+
+    def max_state(self) -> int:
+        return len(self.states)
+
+@dataclass(frozen=True)
+class Reduce:
+    nonterminal_id: int
+    len: int
+    production_ids: Tuple[int, ...]
+
+@dataclass(frozen=True)
+class Split:
+    shift: Optional[int]
+    reduces: Dict[int, Dict[int, Tuple[int, ...]]]
+
+Action = Union[int, Reduce, Split]
+
+@dataclass
+class Row:
+    actions: Dict[int, Action] = field(default_factory=dict)
+    gotos: Dict[int, int] = field(default_factory=dict)
+
+@dataclass
+class ParserTable:
+    start_state_id: int
+    table: Dict[int, Row]
+
+@dataclass
+class ArenaEdgeDest:
+    dest_idx: NodeID
+    state_bv: StateIDSet
+
+@dataclass
+class LoadedArenaEdgeDest:
+    dest_idx: NodeID
+    state_bv: StateIDSet
+
+@dataclass
+class LoadedArenaEdge:
+    pop: int
+    llm_bv: LLMTokenSet
+    dests: List[LoadedArenaEdgeDest]
+
+@dataclass
+class LoadedArenaNode:
+    children: List[LoadedArenaEdge]
+    clean_end: bool
+
+@dataclass
+class IntermediateArenaEdgeDest:
+    dest_idx: NodeID
+    state_bv: StateIDSet
+
+@dataclass
+class IntermediateArenaEdge:
+    pop: int
+    llm_bv: LLMTokenSet
+    dests: IntermediateArenaEdgeDest
+
+@dataclass
+class IntermediateArenaNode:
+    children: List[IntermediateArenaEdge]
+    clean_end: bool
+
+@dataclass
+class ArenaEdge:
+    pop: int
+    llm_bv: LLMTokenSet
+    dests: List[ArenaEdgeDest] = field(default_factory=list)
+    dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
+    llm_bv_not: Optional[LLMTokenSet] = None
+    state_to_dest: Optional[Dict[int, List[int]]] = None
+
+    def ensure_index(self) -> None:
+        if self.state_to_dest is not None:
+            return
+
+        mapping: Dict[int, List[int]] = collections.defaultdict(list)
+        for j, dest in enumerate(self.dests):
+            for sid in dest.state_bv.iter_indices():
+                mapping[sid].append(j)
+        self.state_to_dest = dict(mapping)
+
+@dataclass
+class ArenaNode:
+    children: List[ArenaEdge] = field(default_factory=list)
+    llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
+    clean_end: bool = False
+
+def _compute_end_distance_from_final(arena: Dict[NodeID, ArenaNode]) -> Dict[NodeID, int]:
+    rev_adj: Dict[NodeID, Set[NodeID]] = defaultdict(set)
+    nodes: Set[NodeID] = set(arena.keys())
+    for uid, node in arena.items():
+        for e in node.children:
+            for d in e.dests:
+                v = int(d.dest_idx)
+                rev_adj[v].add(uid)
+                nodes.add(v)
+    dist = {n: INF_DIST for n in nodes}
+    q = collections.deque()
+    for uid, node in arena.items():
+        if node.clean_end:
+            dist[uid] = 0
+            q.append(uid)
+    while q:
+        u = q.popleft()
+        nd = dist[u] + 1
+        for p in rev_adj.get(u, ()):
+            if dist[p] > nd:
+                dist[p] = nd
+                q.append(p)
+    return dist
+
+def _optimize_intermediate_arena(
+    intermediate_arena: Dict[NodeID, IntermediateArenaNode],
+    max_depth: Dict[NodeID, int],
+    dist_to_end: Dict[NodeID, int],
+    params: Optional[ArenaOptimizeParams] = None,
+):
+    if params is None:
+        params = ArenaOptimizeParams()
+    for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
+        if not node.children:
+            continue
+        # Greedy "diversity-first" ordering:
+        # - Build the order one edge at a time.
+        # - Score candidates by a combination of destination depth and
+        #   similarity penalties against already-chosen edges.
+        # - Similarity is measured via overlaps in LLM token set, state set,
+        #   and destination id reuse.
+        #
+        # To keep this fast on worst-case very high-fan-out nodes, fall back
+        # to the original simple sort when the number of edges is large.
+        edges = node.children
+        n = len(edges)
+
+        # Safety net for extreme fan-out: keep the very fast original ordering.
+        if n > params.fallback_fanout_threshold:
+            edges.sort(key=lambda e: (dist_to_end.get(int(e.dests.dest_idx), INF_DIST), -max_depth.get(int(e.dests.dest_idx), 0), e.pop))
+            continue
+
+        # Tunable weights (chosen so that depth is a major factor, but
+        # overlap penalties are also significant).
+        DEPTH_WEIGHT = params.depth_weight
+        POP_WEIGHT = params.pop_weight
+        END_WEIGHT = params.end_distance_weight
+        PENALTY_LLM_OVERLAP = params.penalty_llm_overlap
+        PENALTY_STATE_OVERLAP = params.penalty_state_overlap
+        PENALTY_SAME_DEST = params.penalty_same_dest
+
+        # Precompute depth and base score for each edge
+        depths = [max_depth.get(int(e.dests.dest_idx), 0) for e in edges]
+        distances = [dist_to_end.get(int(e.dests.dest_idx), INF_DIST) for e in edges]
+        base_scores = [DEPTH_WEIGHT * depths[i] - POP_WEIGHT * edges[i].pop - END_WEIGHT * distances[i] for i in range(n)]
+
+        # Greedy selection state
+        remaining = list(range(n))
+        ordered_indices = []
+        union_llm = RangeSet.empty()
+        union_states = RangeSetStates.empty()
+        chosen_dest_ids: Set[int] = set()
+
+        # Seed with the best base score (prefer deeper, then smaller pop on ties)
+        first_idx = max(remaining, key=lambda i: (base_scores[i], depths[i], -edges[i].pop))
+        ordered_indices.append(first_idx)
+        remaining.remove(first_idx)
+        union_llm |= edges[first_idx].llm_bv
+        union_states |= edges[first_idx].dests.state_bv
+        chosen_dest_ids.add(int(edges[first_idx].dests.dest_idx))
+
+        # Iteratively pick the next best edge considering diversity penalties
+        while remaining:
+            best_idx = None
+            best_key = None
+            for i in remaining:
+                score = base_scores[i]
+                # Prefer diversity by penalizing overlaps with already-chosen coverage
+                if not edges[i].llm_bv.isdisjoint(union_llm):
+                    score -= PENALTY_LLM_OVERLAP
+                if not edges[i].dests.state_bv.isdisjoint(union_states):
+                    score -= PENALTY_STATE_OVERLAP
+                if int(edges[i].dests.dest_idx) in chosen_dest_ids:
+                    score -= PENALTY_SAME_DEST
+                # Tie-break: deeper first, then smaller pop
+                key = (score, depths[i], -edges[i].pop)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_idx = i
+            ordered_indices.append(best_idx)
+            remaining.remove(best_idx)
+            # Update unions and chosen sets with the selected edge
+            union_llm |= edges[best_idx].llm_bv
+            union_states |= edges[best_idx].dests.state_bv
+            chosen_dest_ids.add(int(edges[best_idx].dests.dest_idx))
+
+        # Reorder node edges
+        node.children = [edges[i] for i in ordered_indices]
+
+def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, IntermediateArenaNode]:
+    """Stage 1: Convert from the loaded format to a flattened intermediate format."""
+    intermediate_arena: Dict[NodeID, IntermediateArenaNode] = {}
+    for uid, loaded_node in tqdm(loaded_arena.items(), desc="Stage 1: Loading and flattening arena"):
+        intermediate_children: List[IntermediateArenaEdge] = []
+        for loaded_edge in loaded_node.children:
+            for d in loaded_edge.dests:
+                intermediate_children.append(IntermediateArenaEdge(
+                    pop=loaded_edge.pop,
+                    llm_bv=loaded_edge.llm_bv,
+                    dests=IntermediateArenaEdgeDest(d.dest_idx, d.state_bv),
+                ))
+        intermediate_arena[uid] = IntermediateArenaNode(
+            children=intermediate_children,
+            clean_end=loaded_node.clean_end,
+        )
+    return intermediate_arena
+
+def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
+    """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
+    arena: Dict[NodeID, ArenaNode] = {}
+    for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
+        new_children: List[ArenaEdge] = []
+        llm_bv_union = RangeSet.empty()
+
+        if not intermediate_node.children:
+            arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
+            continue
+
+        children_it = iter(intermediate_node.children)
+        first = next(children_it)
+        edge_dests = []
+        prev_pop = first.pop
+        prev_llm_bv = first.llm_bv
+        edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
+        def flush() -> None:
+            nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
+            dest_states_union = RangeSetStates.empty()
+            for d in edge_dests:
+                dest_states_union |= d.state_bv
+            llm_bv_union |= prev_llm_bv
+            new_children.append(ArenaEdge(
+                pop=prev_pop,
+                llm_bv=prev_llm_bv,
+                dests=edge_dests,
+                dest_states_union=dest_states_union,
+            ))
+        for edge in children_it:
+            if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
+                flush()
+                prev_pop = edge.pop
+                prev_llm_bv = edge.llm_bv
+                edge_dests = []
+            edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
+        flush()
+
+        arena[uid] = ArenaNode(
+            children=new_children,
+            llm_bv_union=llm_bv_union,
+            clean_end=intermediate_node.clean_end,
+        )
+    return arena
+
+def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Dict[NodeID, ArenaNode]:
+    """Orchestrates the full conversion from loaded data to the final arena format."""
+    intermediate_arena = _load_and_flatten_arena(loaded_arena)
+    # Distance-aware reordering: compute min distance to any end node first.
+    dist_to_end = _compute_end_distance_from_intermediate(intermediate_arena)
+    _optimize_intermediate_arena(intermediate_arena, max_depth, dist_to_end, None)
+    final_arena = _merge_and_finalize_arena(intermediate_arena)
+    return final_arena
+
+@dataclass(frozen=True, eq=False)
+class PyAcc:
+    terminals_union: Dict[int, TerminalIdSet]
+    llm_mask: LLMTokenSet
+
+    def __eq__(self, other):
+        if not isinstance(other, PyAcc):
+            return NotImplemented
+        return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+
+    def __hash__(self):
+        # Correctly hash the dictionary content for memoization
+        return hash((len(self.terminals_union), self.llm_mask))
+
+    def merge(self, other: "PyAcc") -> "PyAcc":
+        new_terminals_union = self.terminals_union.copy()
+        for k, v in other.terminals_union.items():
+            if k in new_terminals_union:
+                new_terminals_union[k] = new_terminals_union[k].union(v)
+            else:
+                new_terminals_union[k] = v
+        return PyAcc(
+            terminals_union=new_terminals_union,
+            llm_mask=self.llm_mask.union(other.llm_mask),
+        )
+
+    def is_empty(self):
+        return self.llm_mask.is_empty()
+
+@dataclass
+class WorkItem:
+    priority: Tuple[int, int, int]
+    node_id: NodeID
+    gss: GSS
+    edge_idx: int
+    dest_idx: int
+    pop_cache: Dict
+    depth: int
+
+    def __lt__(self, other: 'WorkItem') -> bool:
+        if not isinstance(other, WorkItem):
+            return NotImplemented
+        return self.priority < other.priority
+
+@dataclass
+class Model(GraphProvider):
+    stats = Stats.get()
+
+    arena: Dict[NodeID, ArenaNode]
+    roots_map: Dict[int, NodeID]
+    max_depth: Dict[NodeID, int]
+    parser_table: ParserTable
+    tokenizer: PyTokenizer
+    tokenizer_initial_state: int
+    possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
+    id_to_token: Dict[int, bytes]
+    internal_to_original_map: Dict[int, RangeSetOut]
+    all_internal_llm_tokens_bitset: LLMTokenSet
+    ignore_terminal_id: Optional[int]
+    state: Dict[int, GSS]
+    # Runtime tunables and results
+    gm_max_edges: int = 1
+    gm_max_dests: int = 1
+    dist_to_end: Dict[NodeID, int] = field(default_factory=dict)
+
+    # ------------- Construction and structure management -------------
+
+    @staticmethod
+    def from_json_string(s: str) -> 'Model':
+        Stats.get().reset()
+        data = json.loads(s)
+
+        # Arena
+        roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
+        arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
+        max_depth: Dict[NodeID, int] = {}
+        dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
+
+        loaded_arena: Dict[NodeID, LoadedArenaNode] = {}
+        for uid, node_data in tqdm(arena_dict.items(), desc="Loading trie3 nodes"):
+            max_depth[uid] = int(node_data.get("max_depth", 0) or 0)
+            children_data = node_data.get("children") or []
+
+            loaded_children: List[LoadedArenaEdge] = []
+            for (pop, llm_json), dest_map_json in children_data:
+                llm_bv = RangeSet.from_ranges(bs_from_json(dumps(llm_json)).to_ranges())
+                dests: List[ArenaEdgeDest] = []
+                for dest_idx, state_json in dest_map_json:
+                    state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
+                    dests.append(LoadedArenaEdgeDest(int(dest_idx), state_bv))
+                loaded_children.append(LoadedArenaEdge(int(pop), llm_bv, dests))
+
+            clean_end = node_data.get("value", {}).get("clean_end", False)
+            loaded_arena[uid] = LoadedArenaNode(children=loaded_children, clean_end=clean_end)
+
+        arena = _convert_arena(loaded_arena, max_depth)
+        # Tokenizer
+        dfa_data = data['tokenizer']['dfa']
+        dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
+        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+
+        # Parser Table
+        parser_data = data['parser']
+        py_table: Dict[int, Row] = {}
+        for state_id_str, row_data in tqdm(parser_data['stage_7_table'], desc="Loading parser table"):
+            state_id, py_row = int(state_id_str), Row()
+            for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                term_id, variant = int(term_id_str), action_data['variant']
+                if variant == 'Shift': py_row.actions[term_id] = action_data['state_id']
+                elif variant == 'Reduce': py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                elif variant == 'Split':
+                    reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
+                    py_row.actions[term_id] = Split(action_data['shift'], reduces)
+            py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+            py_table[state_id] = py_row
+        parser_table = ParserTable(parser_data['start_state_id'], py_table)
+
+        # Misc data
+        pmc_json = data['possible_matches']
+        possible_matches_cache = {}
+        for tsid_json, term_map_json in pmc_json:
+            tsid = int(tsid_json)
+            term_map = {}
+            for term_id_json, bv_json in term_map_json:
+                term_id = int(term_id_json)
+                bv = RangeSet.from_ranges(bs_from_json(dumps(bv_json)).to_ranges())
+                term_map[term_id] = bv
+            possible_matches_cache[tsid] = term_map
+
+        vocab = data['precompute3_vocab']
+        all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
+
+        # Initial state
+        initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
+        initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+
+        model = Model(
+            arena=arena, roots_map=roots_map, max_depth=max_depth, parser_table=parser_table,
+            tokenizer=tokenizer, tokenizer_initial_state=tokenizer.initial_state_id(),
+            possible_matches_cache=possible_matches_cache,
+            id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
+            internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
+            all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+            ignore_terminal_id=parser_data.get('ignore_terminal_id'),
+            state={tokenizer.initial_state_id(): initial_gss},
+        )
+        # Compute scheduling heuristic after structure is ready
+        model._compute_dist_to_end()
+        model._compute_edge_accelerators()
+        model.optimize_traversal()
+        return model
+
+    def make_initial_state(self) -> Dict[int, GSS]:
+        """Create a fresh initial state without reloading models."""
+        initial_acc = PyAcc({}, self.all_internal_llm_tokens_bitset)
+        initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
+        return {self.tokenizer_initial_state: initial_gss}
+
+    def reset_state(self) -> None:
+        """Reset to initial state (does not alter arena or other structures)."""
+        self.state = self.make_initial_state()
+
+    def clone_sharing_structure(self) -> "Model":
+        """Create a new Model instance sharing static structures and with a fresh initial state."""
+        return Model(
+            arena=self.arena,
+            roots_map=self.roots_map,
+            max_depth=self.max_depth,
+            parser_table=self.parser_table,
+            tokenizer=self.tokenizer,
+            tokenizer_initial_state=self.tokenizer_initial_state,
+            possible_matches_cache=self.possible_matches_cache,
+            id_to_token=self.id_to_token,
+            internal_to_original_map=self.internal_to_original_map,
+            all_internal_llm_tokens_bitset=self.all_internal_llm_tokens_bitset,
+            ignore_terminal_id=self.ignore_terminal_id,
+            state=self.make_initial_state(),
+            gm_max_edges=self.gm_max_edges,
+            gm_max_dests=self.gm_max_dests,
+        )
+
+    def _compute_edge_accelerators(self) -> None:
+        all_ones = self.all_internal_llm_tokens_bitset
+        for node in tqdm(self.arena.values(), desc="Computing edge accelerators"):
+            for edge in node.children:
+                edge.llm_bv_not = all_ones.difference(edge.llm_bv)
+
+    def _compute_dist_to_end(self) -> None:
+        """Compute and cache the min distance to any end node (clean_end) ignoring token/state constraints."""
+        self.dist_to_end = _compute_end_distance_from_final(self.arena)
+
+    def optimize_traversal(self) -> None:
+        for node in tqdm(self.arena.values(), desc="Optimizing traversal"):
+            for edge in node.children:
+                edge.ensure_index()
+
+    # ------------- Arena conversion and optimization -------------
+
+    def to_intermediate_arena(self) -> Dict[NodeID, IntermediateArenaNode]:
+        """Convert the current final arena back to the flattened intermediate format."""
+        intermediate_arena: Dict[NodeID, IntermediateArenaNode] = {}
+        for uid, node in self.arena.items():
+            inter_children: List[IntermediateArenaEdge] = []
+            for e in node.children:
+                for d in e.dests:
+                    inter_children.append(IntermediateArenaEdge(
+                        pop=e.pop,
+                        llm_bv=e.llm_bv,
+                        dests=IntermediateArenaEdgeDest(dest_idx=d.dest_idx, state_bv=d.state_bv),
+                    ))
+            intermediate_arena[uid] = IntermediateArenaNode(
+                children=inter_children,
+                clean_end=node.clean_end,
+            )
+        return intermediate_arena
+
+    def optimize_arena(self, params: Optional[ArenaOptimizeParams] = None) -> None:
+        """Re-optimize arena in-place using diversity-first ordering with tunable params."""
+        # Convert current arena -> intermediate, reorder, then rebuild final arena
+        inter = self.to_intermediate_arena()
+        dist_to_end = _compute_end_distance_from_intermediate(inter)
+        _optimize_intermediate_arena(inter, self.max_depth, dist_to_end, params)
+        final_arena = _merge_and_finalize_arena(inter)
+        self.arena = final_arena
+        self._compute_edge_accelerators()
+        self._compute_dist_to_end()
+        self.optimize_traversal()
+
+    # ------------- Variations and selection -------------
+
+    def default_variations(self) -> List[VariationBase]:
+        """Return a default set of variations to try."""
+        vars: List[VariationBase] = []
+        vars.append(TraversalBudgetVariation(name="budget_1x", max_edges=1, max_dests=1))
+        vars.append(TraversalBudgetVariation(name="budget_4x", max_edges=4, max_dests=256))
+        vars.append(TraversalBudgetVariation(name="budget_8x", max_edges=8, max_dests=1024))
+        vars.append(TraversalBudgetVariation(name="budget_16x", max_edges=16, max_dests=4096))
+        vars.append(ArenaReorderVariation(name="arena_diversity_default", params=ArenaOptimizeParams()))
+        vars.append(ArenaReorderVariation(name="arena_diversity_more_depth", params=ArenaOptimizeParams(depth_weight=2048)))
+        vars.append(ArenaReorderVariation(name="arena_diversity_less_overlap_penalty", params=ArenaOptimizeParams(penalty_llm_overlap=256, penalty_state_overlap=128)))
+        vars.append(MergeByPopVariation(name="arena_merge_by_pop"))
+        return vars
+
+    def get_benchmark_config(self) -> Dict:
+        """Provides configuration to the optimizer script for benchmarking variations."""
+        return {}
+
+    def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+        term_rs = RangeSet.from_indices([terminal_id])
+        @_acc_memoize(use_value_cache=False)
+        def apply_disallow(acc: PyAcc) -> PyAcc:
+            current = acc.terminals_union.get(state_id, RangeSet.empty())
+            if current.contains(terminal_id): return acc
+            new_map = acc.terminals_union.copy()
+            new_map[state_id] = current.union(term_rs)
+            return PyAcc(new_map, acc.llm_mask)
+        return gss.apply(apply_disallow)
+
+    def get_root(self, state_id: int) -> NodeID: return self.roots_map[int(state_id)]
+    def is_end(self, node: NodeID) -> bool: return self.arena[node].clean_end
+
+    def select_hot_steps(self, aggregated_costs: List[float], k: int = 1) -> List[int]:
+        """Select top-k step indices by aggregated cost (higher is worse)."""
+        if not aggregated_costs:
+            return []
+        indexed = list(enumerate(aggregated_costs))
+        indexed.sort(key=lambda x: x[1], reverse=True)
+        return [i for i, _ in indexed[:k]]
+
+    def iter_edges(self, node: NodeID, token: int):
+        a_node = self.arena.get(node)
+        if not a_node: return
+        for edge in a_node.children:
+            if edge.llm_bv.contains(token):
+                for dest in edge.dests:
+                    for start, end in dest.state_bv.to_ranges():
+                        for sid in range(start, end + 1):
+                            yield (edge.pop, sid, dest.dest_idx)
+
+    def commit(self, token_id: int) -> Optional[Dict]:
+        stats = Stats.get()
+        stats.start('commit')
+        token_bytes = self.id_to_token[token_id]
+
+        terminals_map, state_map = {}, {}
+        for tsid in self.state:
+            end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
+            if end_state is not None: state_map[tsid] = end_state
+            terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
+
+        @_acc_memoize()
+        def mutator(acc: PyAcc) -> Optional[PyAcc]:
+            for tsid, matched in terminals_map.items():
+                if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched): return None
+            new_bvs = collections.defaultdict(RangeSet.empty)
+            for old, new in state_map.items():
+                if old in acc.terminals_union: new_bvs[new] |= acc.terminals_union[old]
+            return PyAcc(dict(new_bvs), acc.llm_mask)
+
+        # Share a memo cache across GSSes for this transformation to avoid redundant work
+        cache = {}
+        current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in self.state.items()}
+        current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
+
+        new_states = collections.defaultdict(list)
+        work = {(0, tsid): gss for tsid, gss in current.items()}
+        q = collections.deque(work.keys())
+
+        while q:
+            offset, tsid = q.popleft()
+            gss = work.pop((offset, tsid))
+            end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
+
+            for term_id, width in matches:
+                proc_gss = self._process_token(gss, term_id)
+                if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
+                    proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
+                if not proc_gss.is_empty():
+                    new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
+                    if new_offset == len(token_bytes): new_states[next_tsid].append(proc_gss)
+                    else:
+                        key = (new_offset, next_tsid)
+                        if key in work: work[key] = work[key].merge(proc_gss)
+                        else:
+                            work[key] = proc_gss
+                            q.append(key)
+            if end_state is not None: new_states[end_state].append(gss)
+
+        merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
+        merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
+
+        self.state = merged
+        stats.stop('commit')
+
+        return {
+            "type": "timed_output",
+            "time_sec": stats.times.get('commit', 0.0),
+        }
+
+    def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+        if self.ignore_terminal_id == terminal_id:
+            return gss
+
+        heads_by_state = collections.defaultdict(list)
+        for state_id in gss.peek(): heads_by_state[state_id].append(gss.isolate(state_id))
+
+        shifted = []
+        while heads_by_state:
+            state_id, gss_list = heads_by_state.popitem()
+            state_gss = GSS.merge_many(gss_list)
+            row = self.parser_table.table.get(state_id)
+            if not row: continue
+            action = row.actions.get(terminal_id)
+            if action is None: continue
+
+            if isinstance(action, int):
+                shifted.append(state_gss.push(action))
+            elif isinstance(action, Reduce):
+                popped = state_gss.popn(action.len)
+                for from_id in popped.peek():
+                    goto_id = self.parser_table.table[from_id].gotos[action.nonterminal_id]
+                    heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+            elif isinstance(action, Split):
+                if action.shift is not None:
+                    shifted.append(state_gss.push(action.shift))
+                for length, nts in action.reduces.items():
+                    popped = state_gss.popn(length)
+                    for nt_id in nts:
+                        for from_id in popped.peek():
+                            goto_id = self.parser_table.table[from_id].gotos[nt_id]
+                            heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+        result = GSS.merge_many(shifted)
+        return result
+
+    def get_mask(self) -> Union[RangeSetOut, Dict]:
+        stats = Stats.get()
+        stats.start('get_mask')
+
+        all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
+        work_heap = []
+
+        def enqueue(node_id: NodeID, gss: GSS, depth: int, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
+            if gss.is_empty():
+                return
+            # Prune nodes that cannot reach any end node in the connectivity graph.
+            dist = self.dist_to_end.get(node_id, INF_DIST)
+            if dist >= INF_DIST:
+                return
+            # Prioritize nodes that are closer (by connectivity) to any end node.
+            priority = (dist, depth, edge_idx, dest_idx)
+            item = WorkItem(
+                priority=priority,
+                node_id=node_id,
+                gss=gss,
+                edge_idx=edge_idx,
+                dest_idx=dest_idx,
+                pop_cache=pop_cache if pop_cache is not None else {},
+                depth=depth,
+            )
+            heapq.heappush(work_heap, item)
+
+        def dequeue() -> Tuple[NodeID, GSS, int, int, Dict, int]:
+            item = heapq.heappop(work_heap)
+            return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache, item.depth
+
+        @_acc_memoize(use_value_cache=False)
+        def initialize_acc(acc: PyAcc) -> PyAcc:
+            disallowed = RangeSet.empty()
+            for tsid, terms in acc.terminals_union.items():
+                if tsid in self.possible_matches_cache:
+                    term_map = self.possible_matches_cache[tsid]
+                    for term_id in terms.iter_indices():
+                        if term_id in term_map: disallowed |= term_map[term_id]
+            return PyAcc({}, all_ones.difference(disallowed))
+
+        init_cache = {}
+        for sid, gss in self.state.items():
+            r = self.roots_map[int(sid)]
+            gss_init = gss.apply(initialize_acc, init_cache)
+            enqueue(r, gss_init, 0)
+
+        remaining_mask = all_ones
+        while work_heap:
+            # Early exit if we've already saturated the mask (no new tokens can be added).
+            if remaining_mask.is_empty():
+                break
+            node, gss_node, start_edge, start_dest, pop_cache, depth = dequeue()
+
+            gss_acc = gss_node.reduce_acc()
+            gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
+
+            if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
+                final_mask |= gss_acc.llm_mask
+                remaining_mask = all_ones.difference(final_mask)
+                if remaining_mask.is_empty():
+                    break
+
+            a_node = self.arena.get(node)
+            if not a_node:
+                continue
+
+            if a_node.llm_bv_union.isdisjoint(remaining_mask):
+                continue
+
+            potential_new = a_node.llm_bv_union.intersection(remaining_mask)
+            if gss_acc and gss_mask.isdisjoint(potential_new):
+                continue
+
+            # Per-model traversal budgets (tunable by variations)
+            max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
+            edges_proc, dests_proc = 0, 0
+            peek0_rs = None
+
+            for edge_i in range(start_edge, len(a_node.children)):
+                edge = a_node.children[edge_i]
+                if edge.llm_bv.isdisjoint(remaining_mask):
+                    continue
+                if edge.llm_bv.isdisjoint(gss_mask):
+                    continue
+
+                if edge.pop == 0:
+                    if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
+                    if edge.dest_states_union.isdisjoint(peek0_rs):
+                        continue
+
+                if edge.pop in pop_cache:
+                    popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+                else:
+                    popped = gss_node.popn(edge.pop)
+                    if popped.is_empty():
+                        pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+                        continue
+                    popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
+                    if not popped_acc or popped_acc.llm_mask.is_empty():
+                        pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                        continue
+                    # Avoid double-peek: call once and reuse both list and RangeSetStates
+                    peeked = popped.peek()
+                    peek_rs = RangeSetStates.from_indices(peeked)
+                    pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+
+                if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
+                    continue
+
+                if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
+                    if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
+                    @_acc_memoize(use_value_cache=False)
+                    def intersect(acc: PyAcc):
+                        new_mask = acc.llm_mask.intersection(edge.llm_bv)
+                        return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                    popped = popped.apply_and_prune(intersect)
+                    if popped.is_empty(): continue
+                if not peeked: continue
+
+                current_start_dest = start_dest if edge_i == start_edge else 0
+
+                grouped: Dict[int, List[int]] = {}
+                m = edge.state_to_dest
+                for sid in peeked:
+                    dest_list = m.get(sid)
+                    if not dest_list: continue
+                    for dest_j in dest_list:
+                        if dest_j < current_start_dest: continue
+                        lst = grouped.get(dest_j)
+                        if lst is None: grouped[dest_j] = [sid]
+                        else: lst.append(sid)
+
+                # Iterate grouped dests in ascending order for locality
+                for dest_j in sorted(grouped.keys()):
+                    if dests_proc >= max_dests:
+                        enqueue(node, gss_node, depth, edge_i, dest_j, pop_cache)
+                        edges_proc = max_edges
+                        break
+                    dest = edge.dests[dest_j]
+                    values_to_keep = grouped[dest_j]
+                    # If all heads survive, reuse popped directly
+                    if len(values_to_keep) == len(peeked):
+                        child_gss = popped
+                    else:
+                        child_gss = popped.isolate_many(values_to_keep)
+                    if child_gss.is_empty(): continue
+                    d: NodeID = int(dest.dest_idx)
+                    enqueue(d, child_gss, depth + 1)
+                    dests_proc += 1
+
+                if edges_proc >= max_edges: break
+                edges_proc += 1
+
+
+                if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
+                    enqueue(node, gss_node, depth, edge_i + 1, 0, pop_cache)
+                    break
+
+        original_indices = RangeSetOut.empty()
+        for i in final_mask.iter_indices():
+            if i in self.internal_to_original_map:
+                original_indices |= self.internal_to_original_map[i]
+
+        stats.stop('get_mask')
+
+        return {
+            "type": "timed_output",
+            "output": original_indices,
+            "time_sec": stats.times.get('get_mask', 0.0),
+        }
