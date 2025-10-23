@@ -747,6 +747,7 @@ local_system:
           use crate::tokenizer::TokenizerStateID;
           use std::collections::{BTreeMap, HashMap};
           use std::collections::BTreeSet;
+          use std::ops::BitAndAssign;
 
           #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
           struct NormalizedPath {
@@ -762,7 +763,11 @@ local_system:
                       if !first {
                           write!(f, ", ")?;
                       }
-                      write!(f, "{}: {}", pos, bv)?;
+                      if bv.is_all() {
+                          write!(f, "{}: [ALL]", pos)?;
+                      } else {
+                          write!(f, "{}: {}", pos, bv)?;
+                      }
                       first = false;
                   }
                   write!(f, "}} }}")
@@ -813,7 +818,6 @@ local_system:
                       if s_push.is_disjoint(&s_pop) {
                           return false;
                       }
-                      path_keys[push_idx] = IntermediateTrie3EdgeKey::Push(s_push & s_pop);
                       path_keys.remove(pop_idx);
                   } else if n == 1 {
                       if s_push.is_disjoint(&s_pop) {
@@ -841,7 +845,7 @@ local_system:
 
               let mut normalized_set = BTreeSet::new();
 
-              for (_root_val, path_edges) in all_paths {
+              'outer: for (_root_val, path_edges) in all_paths {
                   let mut path_keys: Vec<IntermediateTrie3EdgeKey> =
                       path_edges.into_iter().map(|(ek, _, _)| ek).collect();
 
@@ -860,10 +864,14 @@ local_system:
                           }
                           IntermediateTrie3EdgeKey::Pop(n, s) => {
                               pop_pos += n;
-                              pops.entry(pop_pos)
-                                  .or_insert_with(StateIDBV::max_ones)
-                                  .intersects(&s);
-                              pop_pos += 1;
+                              if !s.is_all() {
+                                  pops.entry(pop_pos)
+                                      .or_insert_with(StateIDBV::max_ones)
+                                      .bitand_assign(&s);
+                                  if pops.get(&pop_pos).unwrap().is_empty() {
+                                      continue 'outer;
+                                  }
+                              }
                           }
                           IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::NoOp => {
                               // ignore
@@ -877,6 +885,36 @@ local_system:
               }
 
               normalized_set
+          }
+
+          fn assert_paths_eq(
+              paths_before: &BTreeSet<NormalizedPath>,
+              paths_after: &BTreeSet<NormalizedPath>,
+          ) {
+              if paths_before == paths_after {
+                  return;
+              }
+
+              let missing_paths: Vec<_> = paths_before.difference(paths_after).collect();
+              let extra_paths: Vec<_> = paths_after.difference(paths_before).collect();
+
+              let mut error_msg = String::new();
+              error_msg.push_str("Normalized paths do not match after elimination.\n");
+
+              if !missing_paths.is_empty() {
+                  error_msg.push_str("\n--- Missing Paths (present before, but not after) ---\n");
+                  for path in missing_paths {
+                      error_msg.push_str(&format!("- {}\n", path));
+                  }
+              }
+
+              if !extra_paths.is_empty() {
+                  error_msg.push_str("\n--- Extra Paths (present after, but not before) ---\n");
+                  for path in extra_paths {
+                      error_msg.push_str(&format!("+ {}\n", path));
+                  }
+              }
+              panic!("{}", error_msg);
           }
 
           #[test]
@@ -915,7 +953,7 @@ local_system:
               eliminate_pushes_and_pops(&mut roots, &god);
 
               let paths_after = get_normalized_paths(&roots, &god);
-              assert_eq!(paths_before, paths_after);
+              assert_paths_eq(&paths_before, &paths_after);
 
               // This assertion should now pass.
               assert_no_pops_reachable_from_pushes(&roots, &god);
@@ -960,7 +998,7 @@ local_system:
               eliminate_pushes_and_pops(&mut roots, &god);
 
               let paths_after = get_normalized_paths(&roots, &god);
-              assert_eq!(paths_before, paths_after);
+              assert_paths_eq(&paths_before, &paths_after);
 
               assert_no_pops_reachable_from_pushes(&roots, &god);
           }
@@ -1436,10 +1474,39 @@ local_system:
 
               let paths_before = get_normalized_paths(&roots, &god);
 
+              let options =
+                  crate::datastructures::trie::PrettyPrintOptions::default()
+                      .display_edge_keys_only()
+                      .omit_depth();
+              eprintln!("Full graph before:");
+              eprintln!(
+                  "{}",
+                  Trie::pretty_print_with_options(
+                      &god,
+                      roots.values().cloned().collect::<Vec<_>>().as_slice(),
+                      &options
+                  )
+              );
+
               eliminate_pushes_and_pops(&mut roots, &god);
 
               let paths_after = get_normalized_paths(&roots, &god);
-              assert_eq!(paths_before, paths_after);
+
+              let options =
+                  crate::datastructures::trie::PrettyPrintOptions::default()
+                      .display_edge_keys_only()
+                      .omit_depth();
+              eprintln!("Full graph after:");
+              eprintln!(
+                  "{}",
+                  Trie::pretty_print_with_options(
+                      &god,
+                      roots.values().cloned().collect::<Vec<_>>().as_slice(),
+                      &options
+                  )
+              );
+
+              assert_paths_eq(&paths_before, &paths_after);
 
               assert_no_pops_reachable_from_pushes(&roots, &god);
           }
@@ -2188,6 +2255,7 @@ local_system:
           use crate::tokenizer::TokenizerStateID;
           use std::collections::{BTreeMap, HashMap};
           use std::collections::BTreeSet;
+          use std::ops::BitAndAssign;
 
           #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
           struct NormalizedPath {
@@ -2276,16 +2344,19 @@ local_system:
           fn get_normalized_paths(
               roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
               god: &IntermediateTrie3GodWrapper,
-          ) -> BTreeSet<NormalizedPath> {
+          ) -> BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>> {
               let all_paths = Trie::get_all_paths(
                   god,
                   &roots.values().cloned().collect::<Vec<_>>(),
                   |_, node| node.value.end,
               );
 
-              let mut normalized_set = BTreeSet::new();
+              let mut normalized_map = BTreeMap::new();
 
-              for (_root_val, path_edges) in all_paths {
+              'outer: for (_root_val, path_edges) in all_paths {
+                  let original_path_keys: Vec<IntermediateTrie3EdgeKey> =
+                      path_edges.iter().map(|(ek, _, _)| ek.clone()).collect();
+
                   let mut path_keys: Vec<IntermediateTrie3EdgeKey> =
                       path_edges.into_iter().map(|(ek, _, _)| ek).collect();
 
@@ -2304,10 +2375,14 @@ local_system:
                           }
                           IntermediateTrie3EdgeKey::Pop(n, s) => {
                               pop_pos += n;
-                              pops.entry(pop_pos)
-                                  .or_insert_with(StateIDBV::max_ones)
-                                  .intersects(&s);
-                              pop_pos += 1;
+                              if !s.is_all() {
+                                  pops.entry(pop_pos)
+                                      .or_insert_with(StateIDBV::max_ones)
+                                      .bitand_assign(&s);
+                                  if pops.get(&pop_pos).unwrap().is_empty() {
+                                      continue 'outer;
+                                  }
+                              }
                           }
                           IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::NoOp => {
                               // ignore
@@ -2316,23 +2391,30 @@ local_system:
                   }
 
                   if !llm_bv.is_empty() {
-                      normalized_set.insert(NormalizedPath { llm_bv, pops });
+                      let normalized_path = NormalizedPath { llm_bv, pops };
+                      normalized_map
+                          .entry(normalized_path)
+                          .or_default()
+                          .push(original_path_keys);
                   }
               }
 
-              normalized_set
+              normalized_map
           }
 
           fn assert_paths_eq(
-              paths_before: &BTreeSet<NormalizedPath>,
-              paths_after: &BTreeSet<NormalizedPath>,
+              paths_before: &BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>>,
+              paths_after: &BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>>,
           ) {
-              if paths_before == paths_after {
+              let keys_before: BTreeSet<_> = paths_before.keys().cloned().collect();
+              let keys_after: BTreeSet<_> = paths_after.keys().cloned().collect();
+
+              if keys_before == keys_after {
                   return;
               }
 
-              let missing_paths: Vec<_> = paths_before.difference(paths_after).collect();
-              let extra_paths: Vec<_> = paths_after.difference(paths_before).collect();
+              let missing_paths: Vec<_> = keys_before.difference(&keys_after).collect();
+              let extra_paths: Vec<_> = keys_after.difference(&keys_before).collect();
 
               let mut error_msg = String::new();
               error_msg.push_str("Normalized paths do not match after elimination.\n");
@@ -2341,6 +2423,14 @@ local_system:
                   error_msg.push_str("\n--- Missing Paths (present before, but not after) ---\n");
                   for path in missing_paths {
                       error_msg.push_str(&format!("- {}\n", path));
+                      if let Some(originals) = paths_before.get(path) {
+                          error_msg.push_str("  Original paths (before):\n");
+                          for original_path in originals {
+                              let path_str: Vec<String> =
+                                  original_path.iter().map(|k| format!("{}", k)).collect();
+                              error_msg.push_str(&format!("  - [{}]\n", path_str.join(", ")));
+                          }
+                      }
                   }
               }
 
@@ -2348,6 +2438,14 @@ local_system:
                   error_msg.push_str("\n--- Extra Paths (present after, but not before) ---\n");
                   for path in extra_paths {
                       error_msg.push_str(&format!("+ {}\n", path));
+                      if let Some(originals) = paths_after.get(path) {
+                          error_msg.push_str("  Original paths (after):\n");
+                          for original_path in originals {
+                              let path_str: Vec<String> =
+                                  original_path.iter().map(|k| format!("{}", k)).collect();
+                              error_msg.push_str(&format!("  - [{}]\n", path_str.join(", ")));
+                          }
+                      }
                   }
               }
               panic!("{}", error_msg);
@@ -2910,9 +3008,38 @@ local_system:
 
               let paths_before = get_normalized_paths(&roots, &god);
 
+              let options =
+                  crate::datastructures::trie::PrettyPrintOptions::default()
+                      .display_edge_keys_only()
+                      .omit_depth();
+              eprintln!("Full graph before:");
+              eprintln!(
+                  "{}",
+                  Trie::pretty_print_with_options(
+                      &god,
+                      roots.values().cloned().collect::<Vec<_>>().as_slice(),
+                      &options
+                  )
+              );
+
               eliminate_pushes_and_pops(&mut roots, &god);
 
               let paths_after = get_normalized_paths(&roots, &god);
+
+              let options =
+                  crate::datastructures::trie::PrettyPrintOptions::default()
+                      .display_edge_keys_only()
+                      .omit_depth();
+              eprintln!("Full graph after:");
+              eprintln!(
+                  "{}",
+                  Trie::pretty_print_with_options(
+                      &god,
+                      roots.values().cloned().collect::<Vec<_>>().as_slice(),
+                      &options
+                  )
+              );
+
               assert_paths_eq(&paths_before, &paths_after);
 
               assert_no_pops_reachable_from_pushes(&roots, &god);
@@ -3704,6 +3831,7 @@ messages:
           use crate::tokenizer::TokenizerStateID;
           use std::collections::{BTreeMap, HashMap};
           use std::collections::BTreeSet;
+          use std::ops::BitAndAssign;
 
           #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
           struct NormalizedPath {
@@ -3719,7 +3847,11 @@ messages:
                       if !first {
                           write!(f, ", ")?;
                       }
-                      write!(f, "{}: {}", pos, bv)?;
+                      if bv.is_all() {
+                          write!(f, "{}: [ALL]", pos)?;
+                      } else {
+                          write!(f, "{}: {}", pos, bv)?;
+                      }
                       first = false;
                   }
                   write!(f, "}} }}")
@@ -3770,7 +3902,6 @@ messages:
                       if s_push.is_disjoint(&s_pop) {
                           return false;
                       }
-                      path_keys[push_idx] = IntermediateTrie3EdgeKey::Push(s_push & s_pop);
                       path_keys.remove(pop_idx);
                   } else if n == 1 {
                       if s_push.is_disjoint(&s_pop) {
@@ -3798,7 +3929,7 @@ messages:
 
               let mut normalized_set = BTreeSet::new();
 
-              for (_root_val, path_edges) in all_paths {
+              'outer: for (_root_val, path_edges) in all_paths {
                   let mut path_keys: Vec<IntermediateTrie3EdgeKey> =
                       path_edges.into_iter().map(|(ek, _, _)| ek).collect();
 
@@ -3817,10 +3948,14 @@ messages:
                           }
                           IntermediateTrie3EdgeKey::Pop(n, s) => {
                               pop_pos += n;
-                              pops.entry(pop_pos)
-                                  .or_insert_with(StateIDBV::max_ones)
-                                  .intersects(&s);
-                              pop_pos += 1;
+                              if !s.is_all() {
+                                  pops.entry(pop_pos)
+                                      .or_insert_with(StateIDBV::max_ones)
+                                      .bitand_assign(&s);
+                                  if pops.get(&pop_pos).unwrap().is_empty() {
+                                      continue 'outer;
+                                  }
+                              }
                           }
                           IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::NoOp => {
                               // ignore
@@ -3834,6 +3969,36 @@ messages:
               }
 
               normalized_set
+          }
+
+          fn assert_paths_eq(
+              paths_before: &BTreeSet<NormalizedPath>,
+              paths_after: &BTreeSet<NormalizedPath>,
+          ) {
+              if paths_before == paths_after {
+                  return;
+              }
+
+              let missing_paths: Vec<_> = paths_before.difference(paths_after).collect();
+              let extra_paths: Vec<_> = paths_after.difference(paths_before).collect();
+
+              let mut error_msg = String::new();
+              error_msg.push_str("Normalized paths do not match after elimination.\n");
+
+              if !missing_paths.is_empty() {
+                  error_msg.push_str("\n--- Missing Paths (present before, but not after) ---\n");
+                  for path in missing_paths {
+                      error_msg.push_str(&format!("- {}\n", path));
+                  }
+              }
+
+              if !extra_paths.is_empty() {
+                  error_msg.push_str("\n--- Extra Paths (present after, but not before) ---\n");
+                  for path in extra_paths {
+                      error_msg.push_str(&format!("+ {}\n", path));
+                  }
+              }
+              panic!("{}", error_msg);
           }
 
           #[test]
@@ -3872,7 +4037,7 @@ messages:
               eliminate_pushes_and_pops(&mut roots, &god);
 
               let paths_after = get_normalized_paths(&roots, &god);
-              assert_eq!(paths_before, paths_after);
+              assert_paths_eq(&paths_before, &paths_after);
 
               // This assertion should now pass.
               assert_no_pops_reachable_from_pushes(&roots, &god);
@@ -3917,7 +4082,7 @@ messages:
               eliminate_pushes_and_pops(&mut roots, &god);
 
               let paths_after = get_normalized_paths(&roots, &god);
-              assert_eq!(paths_before, paths_after);
+              assert_paths_eq(&paths_before, &paths_after);
 
               assert_no_pops_reachable_from_pushes(&roots, &god);
           }
@@ -4393,10 +4558,39 @@ messages:
 
               let paths_before = get_normalized_paths(&roots, &god);
 
+              let options =
+                  crate::datastructures::trie::PrettyPrintOptions::default()
+                      .display_edge_keys_only()
+                      .omit_depth();
+              eprintln!("Full graph before:");
+              eprintln!(
+                  "{}",
+                  Trie::pretty_print_with_options(
+                      &god,
+                      roots.values().cloned().collect::<Vec<_>>().as_slice(),
+                      &options
+                  )
+              );
+
               eliminate_pushes_and_pops(&mut roots, &god);
 
               let paths_after = get_normalized_paths(&roots, &god);
-              assert_eq!(paths_before, paths_after);
+
+              let options =
+                  crate::datastructures::trie::PrettyPrintOptions::default()
+                      .display_edge_keys_only()
+                      .omit_depth();
+              eprintln!("Full graph after:");
+              eprintln!(
+                  "{}",
+                  Trie::pretty_print_with_options(
+                      &god,
+                      roots.values().cloned().collect::<Vec<_>>().as_slice(),
+                      &options
+                  )
+              );
+
+              assert_paths_eq(&paths_before, &paths_after);
 
               assert_no_pops_reachable_from_pushes(&roots, &god);
           }
@@ -4405,39 +4599,8 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_challenge_elimination.rs
-  - user: |-
-      Starting push/pop elimination... nodes: 53
-      Intermediate graph node count: 53
-      Finished elimination. Final intermediate nodes: 39
-      Final graph node count: 39
-
-
-      thread 'constraint_precompute3_challenge_elimination::tests::test_eliminate_complex_trie_from_prompt' (18430603) panicked at src/constraint_precompute3_challenge_elimination.rs:1435:9:
-      assertion `left == right` failed
-        left: {NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 2: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 2: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 2: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 2: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 2: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 2: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615], 25: [0..18446744073709551615], 26: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615], 25: [0..18446744073709551615], 26: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615], 25: [0..18446744073709551615], 26: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615], 25: [0..18446744073709551615], 26: [0..18446744073709551615], 28: [0..18446744073709551615], 29: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615], 26: [0..18446744073709551615], 27: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615], 26: [0..18446744073709551615], 27: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615], 24: [0..18446744073709551615], 25: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 20: [0..18446744073709551615], 21: [0..18446744073709551615], 23: [0..18446744073709551615], 24: [0..18446744073709551615], 26: [0..18446744073709551615], 27: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 18: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615], 24: [0..18446744073709551615], 25: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 18: [0..18446744073709551615], 19: [0..18446744073709551615], 21: [0..18446744073709551615], 22: [0..18446744073709551615], 24: [0..18446744073709551615], 25: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615], 19: [0..18446744073709551615], 20: [0..18446744073709551615], 22: [0..18446744073709551615], 23: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 15: [0..18446744073709551615], 16: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }}
-       right: {NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 2: [0..18446744073709551615], 3: [0..18446744073709551615], 5: [0..18446744073709551615], 6: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 10: [0..18446744073709551615], 12: [0..18446744073709551615], 13: [0..18446744073709551615], 14: [0..18446744073709551615], 16: [0..18446744073709551615], 17: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 5: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 9: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [0], pops: {0: [0..18446744073709551615], 3: [0..18446744073709551615], 4: [0..18446744073709551615], 6: [0..18446744073709551615], 7: [0..18446744073709551615], 8: [0..18446744073709551615], 10: [0..18446744073709551615], 11: [0..18446744073709551615], 12: [0..18446744073709551615], 14: [0..18446744073709551615], 15: [0..18446744073709551615]} }, NormalizedPath { llm_bv: [1], pops: {0: [0..18446744073709551615], 1: [0..18446744073709551615]} }}
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::constraint_precompute3_challenge_elimination::tests::test_eliminate_complex_trie_from_prompt
-                   at ./src/constraint_precompute3_challenge_elimination.rs:1435:9
-         5: sep1::constraint_precompute3_challenge_elimination::tests::test_eliminate_complex_trie_from_prompt::{{closure}}
-                   at ./src/constraint_precompute3_challenge_elimination.rs:962:49
-         6: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         7: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-
-
-      Still not very pretty.
+  - user: Show which unnormalized paths each of the mismatching normalized paths comes
+      from.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4456,58 +4619,48 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The default test assertion output for large, complex data structures is often unreadable. I'll help you fix that by implementing a custom comparison that provides a clean, line-by-line diff of the differing paths. This will make debugging the underlying logic error much easier.
-
-      Here are the step-by-step instructions to improve the test output.
+      Of course. Here are the step-by-step instructions to modify your test helpers for better debugging output, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      All changes will be in the file `src/constraint_precompute3_challenge_elimination.rs`.
+      I will update the test utility functions `get_normalized_paths` and `assert_paths_eq` to track and display the original, unnormalized paths that lead to any discrepancies found during testing. This will make it easier to debug issues in the `eliminate_pushes_and_pops` logic.
 
-      1.  **Improve `NormalizedPath` Display Formatting:**
-          In the `tests` module, locate the `impl fmt::Display for NormalizedPath` block. We will modify it to print `[ALL]` for `StateIDBV` instances that cover the entire range, which makes the output cleaner.
+      1.  **File: `src/constraint_precompute3_challenge_elimination.rs`**
 
-          *   **File:** `src/constraint_precompute3_challenge_elimination.rs`
-          *   **Around line 1108:** Replace the existing `Display` implementation for `NormalizedPath` with the following code:
+          a.  **Modify `get_normalized_paths` function:**
+              -   Locate the `get_normalized_paths` function inside the `tests` module.
+              -   Change its return type from `BTreeSet<NormalizedPath>` to `BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>>`. This will allow us to store the original paths for each normalized path.
+              -   Rename the `normalized_set` variable to `normalized_map` and initialize it as a `BTreeMap`.
+              -   At the beginning of the `for` loop over `all_paths`, add the following code to clone the original path before it gets modified:
+                  ```rust
+                  let original_path_keys: Vec<IntermediateTrie3EdgeKey> =
+                      path_edges.iter().map(|(ek, _, _)| ek.clone()).collect();
+                  ```
+              -   In the same loop, replace the line `normalized_set.insert(...)` with the following code to store the original path along with its normalized version:
+                  ```rust
+                  let normalized_path = NormalizedPath { llm_bv, pops };
+                  normalized_map
+                      .entry(normalized_path)
+                      .or_default()
+                      .push(original_path_keys);
+                  ```
+              -   Update the function's return statement to return `normalized_map`.
 
-          ```rust
-          impl fmt::Display for NormalizedPath {
-              fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                  write!(f, "NormalizedPath {{ llm_bv: {}, pops: {{", self.llm_bv)?;
-                  let mut first = true;
-                  for (pos, bv) in &self.pops {
-                      if !first {
-                          write!(f, ", ")?;
-                      }
-                      if bv.is_all() {
-                          write!(f, "{}: [ALL]", pos)?;
-                      } else {
-                          write!(f, "{}: {}", pos, bv)?;
-                      }
-                      first = false;
-                  }
-                  write!(f, "}} }}")
-              }
-          }
-          ```
+          b.  **Update `assert_paths_eq` function:**
+              -   Find the `assert_paths_eq` function within the `tests` module.
+              -   Change the type of its `paths_before` and `paths_after` parameters from `&BTreeSet<NormalizedPath>` to `&BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>>`.
+              -   Replace the entire body of the function with the new implementation below. This version compares the keys of the input maps and, for any differences, prints both the normalized path and the list of original unnormalized paths that produced it.
 
-      2.  **Add a Custom Assertion Helper Function:**
-          To avoid repeating the diffing logic in every test, we'll add a helper function inside the `tests` module. This function will compare two sets of paths and panic with a nicely formatted message if they differ.
+              ```rust
+              let keys_before: BTreeSet<_> = paths_before.keys().cloned().collect();
+              let keys_after: BTreeSet<_> = paths_after.keys().cloned().collect();
 
-          *   **File:** `src/constraint_precompute3_challenge_elimination.rs`
-          *   **Around line 1196 (after `get_normalized_paths`):** Insert the following function:
-
-          ```rust
-          fn assert_paths_eq(
-              paths_before: &BTreeSet<NormalizedPath>,
-              paths_after: &BTreeSet<NormalizedPath>,
-          ) {
-              if paths_before == paths_after {
+              if keys_before == keys_after {
                   return;
               }
 
-              let missing_paths: Vec<_> = paths_before.difference(paths_after).collect();
-              let extra_paths: Vec<_> = paths_after.difference(paths_before).collect();
+              let missing_paths: Vec<_> = keys_before.difference(&keys_after).collect();
+              let extra_paths: Vec<_> = keys_after.difference(&keys_before).collect();
 
               let mut error_msg = String::new();
               error_msg.push_str("Normalized paths do not match after elimination.\n");
@@ -4516,6 +4669,14 @@ messages:
                   error_msg.push_str("\n--- Missing Paths (present before, but not after) ---\n");
                   for path in missing_paths {
                       error_msg.push_str(&format!("- {}\n", path));
+                      if let Some(originals) = paths_before.get(path) {
+                          error_msg.push_str("  Original paths (before):\n");
+                          for original_path in originals {
+                              let path_str: Vec<String> =
+                                  original_path.iter().map(|k| format!("{}", k)).collect();
+                              error_msg.push_str(&format!("  - [{}]\n", path_str.join(", ")));
+                          }
+                      }
                   }
               }
 
@@ -4523,128 +4684,148 @@ messages:
                   error_msg.push_str("\n--- Extra Paths (present after, but not before) ---\n");
                   for path in extra_paths {
                       error_msg.push_str(&format!("+ {}\n", path));
+                      if let Some(originals) = paths_after.get(path) {
+                          error_msg.push_str("  Original paths (after):\n");
+                          for original_path in originals {
+                              let path_str: Vec<String> =
+                                  original_path.iter().map(|k| format!("{}", k)).collect();
+                              error_msg.push_str(&format!("  - [{}]\n", path_str.join(", ")));
+                          }
+                      }
                   }
               }
               panic!("{}", error_msg);
-          }
-          ```
-
-      3.  **Update Tests to Use the New Assertion Helper:**
-          Now, we'll replace the `assert_eq!` calls in all three test functions with our new `assert_paths_eq` helper.
-
-          *   In `test_eliminate_push_pop_failure_case` (around line 1240), change:
-              ```rust
-              assert_eq!(paths_before, paths_after);
-              ```
-              to:
-              ```rust
-              assert_paths_eq(&paths_before, &paths_after);
               ```
 
-          *   In `test_eliminate_push_noop_pop_failure_case` (around line 1274), change:
-              ```rust
-              assert_eq!(paths_before, paths_after);
-              ```
-              to:
-              ```rust
-              assert_paths_eq(&paths_before, &paths_after);
-              ```
-
-          *   In `test_eliminate_complex_trie_from_prompt` (around line 1435), change:
-              ```rust
-              assert_eq!(paths_before, paths_after);
-              ```
-              to:
-              ```rust
-              assert_paths_eq(&paths_before, &paths_after);
-              ```
+      The calls to these functions within your existing tests will automatically adapt to these new types due to Rust's type inference, so no further changes are needed.
 
       ### Git Diff
 
-      Here is the git patch that applies all the changes described above.
+      Here is the git patch to apply these changes:
 
       ```diff
       diff --git a/src/constraint_precompute3_challenge_elimination.rs b/src/constraint_precompute3_challenge_elimination.rs
+      index 1111111..2222222 100644
       --- a/src/constraint_precompute3_challenge_elimination.rs
       +++ b/src/constraint_precompute3_challenge_elimination.rs
-      @@ -1108,7 +1108,11 @@
-                   for (pos, bv) in &self.pops {
-                       if !first {
-                           write!(f, ", ")?;
-                       }
-      -                write!(f, "{}: {}", pos, bv)?;
-      +                if bv.is_all() {
-      +                    write!(f, "{}: [ALL]", pos)?;
-      +                } else {
-      +                    write!(f, "{}: {}", pos, bv)?;
-      +                }
-                       first = false;
+      @@ -710,20 +710,25 @@
+           fn get_normalized_paths(
+               roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+               god: &IntermediateTrie3GodWrapper,
+      -    ) -> BTreeSet<NormalizedPath> {
+      +    ) -> BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>> {
+               let all_paths = Trie::get_all_paths(
+                   god,
+                   &roots.values().cloned().collect::<Vec<_>>(),
+                   |_, node| node.value.end,
+               );
+       
+      -        let mut normalized_set = BTreeSet::new();
+      +        let mut normalized_map = BTreeMap::new();
+       
+               'outer: for (_root_val, path_edges) in all_paths {
+      +            let original_path_keys: Vec<IntermediateTrie3EdgeKey> =
+      +                path_edges.iter().map(|(ek, _, _)| ek.clone()).collect();
+      +
+                   let mut path_keys: Vec<IntermediateTrie3EdgeKey> =
+                       path_edges.into_iter().map(|(ek, _, _)| ek).collect();
+       
+                   if !normalize_path_challenges(&mut path_keys) {
+                       continue; // Invalid path
                    }
-                   write!(f, "}} }}")
-      @@ -1193,6 +1197,36 @@
-               normalized_set
+       
+                   let mut llm_bv = LLMTokenBV::max_ones();
+                   let mut pops = BTreeMap::new();
+                   let mut pop_pos = 0;
+       
+                   for key in path_keys {
+                       match key {
+                           IntermediateTrie3EdgeKey::CheckLLM(bv) => {
+                               llm_bv &= &bv;
+                           }
+                           IntermediateTrie3EdgeKey::Pop(n, s) => {
+                               pop_pos += n;
+                               if !s.is_all() {
+                                   pops.entry(pop_pos)
+                                       .or_insert_with(StateIDBV::max_ones)
+                                       .bitand_assign(&s);
+                                   if pops.get(&pop_pos).unwrap().is_empty() {
+                                       continue 'outer;
+                                   }
+                               }
+                           }
+                           IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::NoOp => {
+                               // ignore
+                           }
+                       }
+                   }
+       
+                   if !llm_bv.is_empty() {
+      -                normalized_set.insert(NormalizedPath { llm_bv, pops });
+      +                let normalized_path = NormalizedPath { llm_bv, pops };
+      +                normalized_map
+      +                    .entry(normalized_path)
+      +                    .or_default()
+      +                    .push(original_path_keys);
+                   }
+               }
+       
+      -        normalized_set
+      +        normalized_map
            }
        
-      +    fn assert_paths_eq(
-      +        paths_before: &BTreeSet<NormalizedPath>,
-      +        paths_after: &BTreeSet<NormalizedPath>,
-      +    ) {
-      +        if paths_before == paths_after {
-      +            return;
-      +        }
+           fn assert_paths_eq(
+      -        paths_before: &BTreeSet<NormalizedPath>,
+      -        paths_after: &BTreeSet<NormalizedPath>,
+      +        paths_before: &BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>>,
+      +        paths_after: &BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>>,
+           ) {
+      -        if paths_before == paths_after {
+      +        let keys_before: BTreeSet<_> = paths_before.keys().cloned().collect();
+      +        let keys_after: BTreeSet<_> = paths_after.keys().cloned().collect();
       +
-      +        let missing_paths: Vec<_> = paths_before.difference(paths_after).collect();
-      +        let extra_paths: Vec<_> = paths_after.difference(paths_before).collect();
-      +
-      +        let mut error_msg = String::new();
-      +        error_msg.push_str("Normalized paths do not match after elimination.\n");
-      +
-      +        if !missing_paths.is_empty() {
-      +            error_msg.push_str("\n--- Missing Paths (present before, but not after) ---\n");
-      +            for path in missing_paths {
-      +                error_msg.push_str(&format!("- {}\n", path));
-      +            }
-      +        }
-      +
-      +        if !extra_paths.is_empty() {
-      +            error_msg.push_str("\n--- Extra Paths (present after, but not before) ---\n");
-      +            for path in extra_paths {
-      +                error_msg.push_str(&format!("+ {}\n", path));
-      +            }
-      +        }
-      +        panic!("{}", error_msg);
-      +    }
-      +
-           #[test]
-           fn test_eliminate_push_pop_failure_case() {
-               let god = IntermediateTrie3GodWrapper::new();
-      @@ -1224,7 +1258,7 @@
-               eliminate_pushes_and_pops(&mut roots, &god);
+      +        if keys_before == keys_after {
+                   return;
+               }
        
-               let paths_after = get_normalized_paths(&roots, &god);
-      -        assert_eq!(paths_before, paths_after);
-      +        assert_paths_eq(&paths_before, &paths_after);
+      -        let missing_paths: Vec<_> = paths_before.difference(paths_after).collect();
+      -        let extra_paths: Vec<_> = paths_after.difference(paths_before).collect();
+      +        let missing_paths: Vec<_> = keys_before.difference(&keys_after).collect();
+      +        let extra_paths: Vec<_> = keys_after.difference(&keys_before).collect();
        
-               // This assertion should now pass.
-               assert_no_pops_reachable_from_pushes(&roots, &god);
-      @@ -1259,7 +1293,7 @@
-               eliminate_pushes_and_pops(&mut roots, &god);
+               let mut error_msg = String::new();
+               error_msg.push_str("Normalized paths do not match after elimination.\n");
        
-               let paths_after = get_normalized_paths(&roots, &god);
-      -        assert_eq!(paths_before, paths_after);
-      +        assert_paths_eq(&paths_before, &paths_after);
+               if !missing_paths.is_empty() {
+                   error_msg.push_str("\n--- Missing Paths (present before, but not after) ---\n");
+                   for path in missing_paths {
+                       error_msg.push_str(&format!("- {}\n", path));
+      +                if let Some(originals) = paths_before.get(path) {
+      +                    error_msg.push_str("  Original paths (before):\n");
+      +                    for original_path in originals {
+      +                        let path_str: Vec<String> =
+      +                            original_path.iter().map(|k| format!("{}", k)).collect();
+      +                        error_msg.push_str(&format!("  - [{}]\n", path_str.join(", ")));
+      +                    }
+      +                }
+                   }
+               }
        
-               assert_no_pops_reachable_from_pushes(&roots, &god);
-           }
-      @@ -1431,7 +1465,7 @@
-               eliminate_pushes_and_pops(&mut roots, &god);
-       
-               let paths_after = get_normalized_paths(&roots, &god);
-      -        assert_eq!(paths_before, paths_after);
-      +        assert_paths_eq(&paths_before, &paths_after);
-       
-               assert_no_pops_reachable_from_pushes(&roots, &god);
-           }
+               if !extra_paths.is_empty() {
+                   error_msg.push_str("\n--- Extra Paths (present after, but not before) ---\n");
+                   for path in extra_paths {
+                       error_msg.push_str(&format!("+ {}\n", path));
+      +                if let Some(originals) = paths_after.get(path) {
+      +                    error_msg.push_str("  Original paths (after):\n");
+      +                    for original_path in originals {
+      +                        let path_str: Vec<String> =
+      +                            original_path.iter().map(|k| format!("{}", k)).collect();
+      +                        error_msg.push_str(&format!("  - [{}]\n", path_str.join(", ")));
+      +                    }
+      +                }
+                   }
+               }
+               panic!("{}", error_msg);
 
       ```
     metadata:
@@ -4657,8 +4838,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_challenge_elimination.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_challenge_elimination.rs.
     metadata:
-  - user: 'Changes committed with message: "Improve test assertion output with custom
-      path comparison, update NormalizedPath display, and remove redundant logic in
-      push/pop elimination."'
+  - user: 'Changes committed with message: "Enhance path debugging by tracking and
+      displaying original paths in precompute tests"'
     metadata:
 ...

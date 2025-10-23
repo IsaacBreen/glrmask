@@ -829,16 +829,19 @@ mod tests {
     fn get_normalized_paths(
         roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
         god: &IntermediateTrie3GodWrapper,
-    ) -> BTreeSet<NormalizedPath> {
+    ) -> BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>> {
         let all_paths = Trie::get_all_paths(
             god,
             &roots.values().cloned().collect::<Vec<_>>(),
             |_, node| node.value.end,
         );
 
-        let mut normalized_set = BTreeSet::new();
+        let mut normalized_map: BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>> = BTreeMap::new();
 
         'outer: for (_root_val, path_edges) in all_paths {
+            let original_path_keys: Vec<IntermediateTrie3EdgeKey> =
+                path_edges.iter().map(|(ek, _, _)| ek.clone()).collect();
+
             let mut path_keys: Vec<IntermediateTrie3EdgeKey> =
                 path_edges.into_iter().map(|(ek, _, _)| ek).collect();
 
@@ -873,23 +876,30 @@ mod tests {
             }
 
             if !llm_bv.is_empty() {
-                normalized_set.insert(NormalizedPath { llm_bv, pops });
+                let normalized_path = NormalizedPath { llm_bv, pops };
+                normalized_map
+                    .entry(normalized_path)
+                    .or_default()
+                    .push(original_path_keys);
             }
         }
 
-        normalized_set
+        normalized_map
     }
 
     fn assert_paths_eq(
-        paths_before: &BTreeSet<NormalizedPath>,
-        paths_after: &BTreeSet<NormalizedPath>,
+        paths_before: &BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>>,
+        paths_after: &BTreeMap<NormalizedPath, Vec<Vec<IntermediateTrie3EdgeKey>>>,
     ) {
-        if paths_before == paths_after {
+        let keys_before: BTreeSet<_> = paths_before.keys().cloned().collect();
+        let keys_after: BTreeSet<_> = paths_after.keys().cloned().collect();
+
+        if keys_before == keys_after {
             return;
         }
 
-        let missing_paths: Vec<_> = paths_before.difference(paths_after).collect();
-        let extra_paths: Vec<_> = paths_after.difference(paths_before).collect();
+        let missing_paths: Vec<_> = keys_before.difference(&keys_after).collect();
+        let extra_paths: Vec<_> = keys_after.difference(&keys_before).collect();
 
         let mut error_msg = String::new();
         error_msg.push_str("Normalized paths do not match after elimination.\n");
@@ -898,6 +908,14 @@ mod tests {
             error_msg.push_str("\n--- Missing Paths (present before, but not after) ---\n");
             for path in missing_paths {
                 error_msg.push_str(&format!("- {}\n", path));
+                if let Some(originals) = paths_before.get(path) {
+                    error_msg.push_str("  Original paths (before):\n");
+                    for original_path in originals {
+                        let path_str: Vec<String> =
+                            original_path.iter().map(|k| format!("{}", k)).collect();
+                        error_msg.push_str(&format!("  - [{}]\n", path_str.join(", ")));
+                    }
+                }
             }
         }
 
@@ -905,6 +923,14 @@ mod tests {
             error_msg.push_str("\n--- Extra Paths (present after, but not before) ---\n");
             for path in extra_paths {
                 error_msg.push_str(&format!("+ {}\n", path));
+                if let Some(originals) = paths_after.get(path) {
+                    error_msg.push_str("  Original paths (after):\n");
+                    for original_path in originals {
+                        let path_str: Vec<String> =
+                            original_path.iter().map(|k| format!("{}", k)).collect();
+                        error_msg.push_str(&format!("  - [{}]\n", path_str.join(", ")));
+                    }
+                }
             }
         }
         panic!("{}", error_msg);
