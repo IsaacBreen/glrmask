@@ -136,7 +136,7 @@ impl Default for Trie3Config {
     fn default() -> Self {
         Self {
             enabled: true,
-            num_passes: 1,
+            num_passes: 3,
             eliminate_pop0_edges: true,
             assert_no_pop0_nonroot_edges: true,
             merge_equivalent_llm_tokens: true,
