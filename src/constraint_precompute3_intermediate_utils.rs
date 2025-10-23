@@ -19,7 +19,6 @@ pub struct IntermediateTrie3Config {
     pub contract_noop_chains: bool,
     pub normalize_checkllm_edges: bool,
     pub contract_checkllm_chains: bool,
-    pub contract_pop_chains: bool,
     pub structural_deduplication: bool,
     pub gc: bool,
 }
@@ -33,7 +32,6 @@ impl Default for IntermediateTrie3Config {
             contract_noop_chains: true,
             normalize_checkllm_edges: true,
             contract_checkllm_chains: true,
-            contract_pop_chains: true,
             structural_deduplication: true,
             gc: true,
         }
@@ -49,7 +47,6 @@ impl IntermediateTrie3Config {
             contract_noop_chains: false,
             normalize_checkllm_edges: false,
             contract_checkllm_chains: false,
-            contract_pop_chains: false,
             structural_deduplication: false,
             gc: false,
         }
@@ -296,15 +293,6 @@ struct CheckLLMChainTask {
     dst: IntermediatePrecomputeNode3Index,
 }
 
-#[derive(Debug, Clone)]
-struct PopChainTask {
-    src: IntermediatePrecomputeNode3Index,
-    src_ek: IntermediateTrie3EdgeKey, // Pop(n1, A1)
-    mid: IntermediatePrecomputeNode3Index,
-    new_ek: Option<IntermediateTrie3EdgeKey>, // Pop(n', A'), or None for remove-only
-    dst: IntermediatePrecomputeNode3Index,
-}
-
 /// Contract simple linear chains of consecutive CheckLLM checks:
 ///   src --[CheckLLM(bv1)]--> mid --[CheckLLM(bv2)]--> dst
 /// with constraints:
@@ -392,147 +380,6 @@ fn contract_checkllm_chains(
         }
         *indeg.entry(t.dst).or_insert(0) += 1;
     }
-    changed
-}
-
-/// Contract simple linear chains of Pop edges by applying the following rules:
-///   1) Pop(n, A) followed by Pop(0, B)  => Pop(n, A ∩ B)
-///   2) Pop(n, [ALL]) followed by Pop(m, B) => Pop(n + m, B)
-///
-/// Constraints (mirroring other chain contractions for safety):
-///   - 'mid' has in-degree == 1,
-///   - 'mid' is not an end node,
-///   - each step has a single destination (no branching along this chain).
-fn contract_pop_chains(
-    roots: &[IntermediatePrecomputeNode3Index],
-    god: &IntermediateTrie3GodWrapper,
-) -> bool {
-    let reachable = Trie::all_nodes(god, roots);
-    if reachable.is_empty() {
-        return false;
-    }
-    let mut indeg = compute_in_degrees(roots, god);
-    let mut tasks: Vec<PopChainTask> = Vec::new();
-
-    for src in &reachable {
-        let Some(rsrc) = src.read(god) else { continue };
-        for (ek1, dm1) in rsrc.children().iter() {
-            let (n1, a1) = match ek1 {
-                IntermediateTrie3EdgeKey::Pop(n, a) => (*n, a.clone()),
-                _ => continue,
-            };
-            if dm1.len() != 1 {
-                continue;
-            }
-            let (&mid, _) = dm1.iter().next().unwrap();
-            if indeg.get(&mid).copied().unwrap_or(0) != 1 {
-                continue;
-            }
-            let Some(rmid) = mid.read(god) else { continue };
-            if rmid.value.end {
-                continue; // cannot bypass acceptance point
-            }
-            if rmid.children().len() != 1 {
-                continue;
-            }
-            let (ek2, dm2) = rmid.children().iter().next().unwrap();
-            let (n2, a2) = match ek2 {
-                IntermediateTrie3EdgeKey::Pop(n, a) => (*n, a.clone()),
-                _ => continue,
-            };
-            if dm2.len() != 1 {
-                continue;
-            }
-            let (&dst, _) = dm2.iter().next().unwrap();
-
-            // Apply the two simplification rules.
-            // Rule 1: Pop(n1, A1) then Pop(0, B) -> Pop(n1, A1 ∩ B)
-            // Rule 2: Pop(n1, [ALL]) then Pop(n2, B) -> Pop(n1 + n2, B)
-            let mut new_edge_key_opt: Option<IntermediateTrie3EdgeKey> = None;
-            let mut removal_only = false;
-
-            if n2 == 0 {
-                // Intersection A1 ∩ A2
-                let mut inter = a1.clone();
-                inter &= a2.clone();
-                // If intersection is empty, prefer removal-only (no unsatisfiable edges).
-                if inter.is_empty() {
-                    removal_only = true;
-                    new_edge_key_opt = None;
-                } else {
-                    new_edge_key_opt = Some(IntermediateTrie3EdgeKey::Pop(n1, inter));
-                }
-            } else {
-                // Check if A1 == [ALL]
-                if a1 == LLMTokenBV::max_ones() {
-                    // If B is empty, removal-only is better than inserting Pop with empty BV.
-                    if a2.is_empty() {
-                        removal_only = true;
-                        new_edge_key_opt = None;
-                    } else {
-                        new_edge_key_opt =
-                            Some(IntermediateTrie3EdgeKey::Pop(n1 + n2, a2.clone()));
-                    }
-                }
-            }
-
-            match new_edge_key_opt {
-                Some(new_ek) => {
-                    // If this would be a no-op (same edge back to the same node), skip.
-                    if dst == mid && new_ek == *ek1 {
-                        continue;
-                    }
-                    tasks.push(PopChainTask {
-                        src: *src,
-                        src_ek: ek1.clone(),
-                        mid,
-                        new_ek: Some(new_ek),
-                        dst,
-                    });
-                }
-                None => {
-                    if removal_only {
-                        // Remove-only task (unsatisfiable chain).
-                        tasks.push(PopChainTask {
-                            src: *src,
-                            src_ek: ek1.clone(),
-                            mid,
-                            new_ek: None,
-                            dst,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    if tasks.is_empty() {
-        return false;
-    }
-
-    let mut changed = false;
-    for t in tasks {
-        if let Some(mut wsrc) = t.src.write(god) {
-            if let Some(dm) = wsrc.get_mut(&t.src_ek) {
-                if dm.remove(&t.mid).is_some() {
-                    changed = true;
-                }
-                if dm.is_empty() {
-                    wsrc.children_mut().remove(&t.src_ek);
-                }
-            }
-            if let Some(new_ek) = t.new_ek.clone() {
-                wsrc.children_mut().entry(new_ek).or_default().insert(t.dst, ());
-            }
-        }
-        if let Some(v) = indeg.get_mut(&t.mid) {
-            *v = v.saturating_sub(1);
-        }
-        if t.new_ek.is_some() {
-            *indeg.entry(t.dst).or_insert(0) += 1;
-        }
-    }
-
     changed
 }
 
@@ -1023,35 +870,6 @@ pub fn optimize_intermediate_trie3(
         if config.gc {
             gc_preserving_ends(god, roots);
             print_graph("GC after CheckLLM Ops");
-        }
-    }
-    if config.verbose { has_true_cycle_intermediate_trie3(god, roots); }
-
-    // Pass C: contract Pop chains using the provided simplification rules.
-    if config.contract_pop_chains {
-        if config.verbose { println!("[optimize_intermediate_trie3] Contracting Pop chains..."); }
-        let mut chain_passes = 0usize;
-        let mut contracted_chains = false;
-        while contract_pop_chains(roots, god) {
-            chain_passes += 1;
-            contracted_chains = true;
-            if config.verbose {
-                println!(
-                    "[optimize_intermediate_trie3] Pop chain contraction pass {} complete.",
-                    chain_passes
-                );
-            }
-            if chain_passes > 15 {
-                if config.verbose { println!("[optimize_intermediate_trie3] WARN: Pop chain contraction took too many passes, breaking."); }
-                break;
-            }
-        }
-        if contracted_chains {
-            print_graph("Contract Pop Chains");
-            if config.gc {
-                gc_preserving_ends(god, roots);
-                print_graph("GC after Pop Contraction");
-            }
         }
     }
     if config.verbose { has_true_cycle_intermediate_trie3(god, roots); }
