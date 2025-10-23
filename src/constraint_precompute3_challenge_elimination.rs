@@ -739,6 +739,116 @@ mod tests {
     use crate::datastructures::trie::Trie;
     use crate::tokenizer::TokenizerStateID;
     use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeSet;
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct NormalizedPath {
+        llm_bv: LLMTokenBV,
+        pops: BTreeMap<usize, StateIDBV>,
+    }
+
+    fn normalize_path_challenges(path_keys: &mut Vec<IntermediateTrie3EdgeKey>) -> bool {
+        loop {
+            let last_push_idx =
+                path_keys.iter().rposition(|k| matches!(k, IntermediateTrie3EdgeKey::Push(_)));
+
+            if last_push_idx.is_none() {
+                return true; // No more pushes, done.
+            }
+            let push_idx = last_push_idx.unwrap();
+
+            let first_pop_after_push_idx = path_keys
+                .iter()
+                .skip(push_idx + 1)
+                .position(|k| matches!(k, IntermediateTrie3EdgeKey::Pop(_, _)));
+
+            if first_pop_after_push_idx.is_none() {
+                // This push and any subsequent ones have no following pops.
+                // The path is as reduced as it can be.
+                return true;
+            }
+            let pop_idx = push_idx + 1 + first_pop_after_push_idx.unwrap();
+
+            let push_key = path_keys[push_idx].clone();
+            let pop_key = path_keys[pop_idx].clone();
+
+            let s_push = match push_key {
+                IntermediateTrie3EdgeKey::Push(s) => s,
+                _ => unreachable!(),
+            };
+            let (n, s_pop) = match pop_key {
+                IntermediateTrie3EdgeKey::Pop(n, s) => (n, s),
+                _ => unreachable!(),
+            };
+
+            if n == 0 {
+                if s_push.is_disjoint(&s_pop) {
+                    return false;
+                }
+                path_keys.remove(pop_idx);
+            } else if n == 1 {
+                if s_push.is_disjoint(&s_pop) {
+                    return false;
+                }
+                path_keys.remove(pop_idx);
+                path_keys.remove(push_idx);
+            } else {
+                // n > 1
+                path_keys.remove(push_idx);
+                path_keys[pop_idx - 1] = IntermediateTrie3EdgeKey::Pop(n - 1, s_pop);
+            }
+        }
+    }
+
+    fn get_normalized_paths(
+        roots: &BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
+        god: &IntermediateTrie3GodWrapper,
+    ) -> BTreeSet<NormalizedPath> {
+        let all_paths = Trie::get_all_paths(
+            god,
+            &roots.values().cloned().collect::<Vec<_>>(),
+            |_, node| node.value.end,
+        );
+
+        let mut normalized_set = BTreeSet::new();
+
+        for (_root_val, path_edges) in all_paths {
+            let mut path_keys: Vec<IntermediateTrie3EdgeKey> =
+                path_edges.into_iter().map(|(ek, _, _)| ek).collect();
+
+            if !normalize_path_challenges(&mut path_keys) {
+                continue; // Invalid path
+            }
+
+            let mut llm_bv = LLMTokenBV::max_ones();
+            let mut pops = BTreeMap::new();
+            let mut pop_pos = 0;
+
+            for key in path_keys {
+                match key {
+                    IntermediateTrie3EdgeKey::CheckLLM(bv) => {
+                        llm_bv &= &bv;
+                    }
+                    IntermediateTrie3EdgeKey::Pop(n, s) => {
+                        pop_pos += n;
+                        pops.entry(pop_pos)
+                            .or_insert_with(StateIDBV::max_ones)
+                            .intersects(&s);
+                        pop_pos += 1;
+                    }
+                    IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::NoOp => {
+                        // ignore
+                    }
+                }
+            }
+
+            if !llm_bv.is_empty() {
+                normalized_set.insert(NormalizedPath { llm_bv, pops });
+            }
+        }
+
+        normalized_set
+    }
 
     #[test]
     fn test_eliminate_push_pop_failure_case() {
@@ -771,7 +881,12 @@ mod tests {
         let mut roots = BTreeMap::new();
         roots.insert(TokenizerStateID(0), n(13));
 
+        let paths_before = get_normalized_paths(&roots, &god);
+
         eliminate_pushes_and_pops(&mut roots, &god);
+
+        let paths_after = get_normalized_paths(&roots, &god);
+        assert_eq!(paths_before, paths_after);
 
         // This assertion should now pass.
         assert_no_pops_reachable_from_pushes(&roots, &god);
@@ -811,7 +926,13 @@ mod tests {
         let mut roots = BTreeMap::new();
         roots.insert(TokenizerStateID(0), n(101));
 
+        let paths_before = get_normalized_paths(&roots, &god);
+
         eliminate_pushes_and_pops(&mut roots, &god);
+
+        let paths_after = get_normalized_paths(&roots, &god);
+        assert_eq!(paths_before, paths_after);
+
         assert_no_pops_reachable_from_pushes(&roots, &god);
     }
 
@@ -1284,7 +1405,13 @@ mod tests {
         let mut roots = BTreeMap::new();
         roots.insert(TokenizerStateID(0), n(202));
 
+        let paths_before = get_normalized_paths(&roots, &god);
+
         eliminate_pushes_and_pops(&mut roots, &god);
+
+        let paths_after = get_normalized_paths(&roots, &god);
+        assert_eq!(paths_before, paths_after);
+
         assert_no_pops_reachable_from_pushes(&roots, &god);
     }
 }
