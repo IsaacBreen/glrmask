@@ -106,29 +106,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.precompute0_only = true;
     }
 
-    // let grammar_constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
-    //     compiled_grammar.tokenizer,
-    //     compiled_grammar.glr_parser,
-    //     llm_token_map,
-    //     compiled_grammar.definition.terminal_to_group_id().clone(),
-    //     max_original_llm_token_id,
-    //     &config,
-    //     loaded_pc0,
-    // );
-    // 4. Create the GrammarConstraint
-    let grammar_constraint = GrammarConstraint::from_compiled_grammar(
-        compiled_grammar.clone(),
-        llm_token_map.clone(),
-        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+    let grammar_constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
+        compiled_grammar.tokenizer,
+        compiled_grammar.glr_parser,
+        llm_token_map,
+        compiled_grammar.definition.terminal_to_group_id().clone(),
         max_original_llm_token_id,
+        &config,
+        loaded_pc0,
     );
-    let mut s = grammar_constraint.init();
-    s.commit_bytes(b"x");
-    println!("HERE!!");
-    println!("{}", compiled_grammar);
-    dbg!(&llm_token_map);
-    dbg!(&max_original_llm_token_id);
-    println!("MASK: {:?}", s.get_mask());
 
     println!("GrammarConstraint constructed successfully.");
     if let Some(path) = args.save_precompute0.as_ref() {
@@ -155,10 +141,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         encoder.finish()?;
         println!("Successfully saved constraint to {:?}", output_path);
     }
-
-    let mut s = grammar_constraint.init();
-    s.commit_bytes(b"x");
-    println!("MASK: {:?}", s.get_mask());
 
     Ok(())
 }
