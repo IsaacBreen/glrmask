@@ -679,7 +679,7 @@ impl Default for GrammarConstraintConfig {
             trie1: Trie1Config::default(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::default(),
-            intermediate_trie3_templates: IntermediateTrie3Config::off(),
+            intermediate_trie3_templates: IntermediateTrie3Config::default(),
             intermediate_trie3_main: IntermediateTrie3Config::default(),
         }
     }
@@ -2231,15 +2231,6 @@ impl GrammarConstraint {
             }
         }
 
-        println!("Intermediate trie3 before optimizing:");
-        let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-            .display_edge_keys_only()
-            .display_nodes()
-            .omit_depth()
-            ;
-        println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
-
         // --- New: Optimize intermediate trie before path processing ---
         crate::debug!(2, "Optimizing intermediate trie3...");
         let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
@@ -2257,13 +2248,13 @@ impl GrammarConstraint {
             }
         }
 
-        println!("Intermediate trie3 before eliminating negative pops:");
-        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-            .display_edge_keys_only()
-            .display_nodes()
-            .omit_depth()
-            ;
-        println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+        // println!("Intermediate trie3 before eliminating negative pops:");
+        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+        //     .display_edge_keys_only()
+        //     .display_nodes()
+        //     .omit_depth()
+        //     ;
+        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
