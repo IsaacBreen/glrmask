@@ -2306,16 +2306,26 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
     crate::debug!(2, "Finished compressing Trie3 edges.");
 }
 
-/// Contract unary chains where a node U has exactly one incoming edge and one outgoing edge,
-/// both under the same (pop, LLMTokenBV) key, U is not an end node or a root, and the outgoing
-/// edge maps to exactly one destination. The rewrite composes SIDs as intersection and rewires
-/// the predecessor P to the child V, deleting the P->U entry. This preserves semantics and is
-/// cycle-safe (may reduce multi-node cycles to a self-loop with intersected SIDs).
+/// Contract unary chains where a node U has exactly one outgoing edge to a single destination V
+/// (across all (pop, LLMTokenBV) keys), U is not an end node and not a root. We do not require
+/// indegree(U) == 1 and we do not require matching keys on both sides.
+///
+/// For each predecessor P --[popPU, llmPU, sPU]--> U and U --[popUV, llmUV, sUV]--> V,
+/// we compose a direct edge P --[popPU + popUV, llmPU ∩ llmUV, sPU ∧ sUV]--> V, then remove
+/// P --[... ]--> U. If multiple predecessors exist, we rewrite all of them. We skip cases
+/// where the composed token or state sets are empty, when U is a root or an end node, and
+/// when U’s only outgoing edge is a self-loop.
+///
+/// This preserves semantics:
+/// - Pops compose additively (path checker sums them).
+/// - Tokens and states compose by intersection (sequential gating).
+/// - We never widen tokens or states; we only remove a pass-through node.
+/// The transformation is cycle-safe and may shorten existing zero-pop cycles without creating new ones.
 fn compress_unary_chains_trie3(
     roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
 ) {
-    crate::debug!(2, "Contracting unary chains in Trie3...");
+    crate::debug!(2, "Contracting unary chains in Trie3 (generalized composition)...");
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
@@ -2329,100 +2339,115 @@ fn compress_unary_chains_trie3(
     let mut total_rewired = 0usize;
     let max_outer_iters = 8usize;
     for _iter in 0..max_outer_iters {
-        // Build indegree counts and track unique predecessor + edge-key for nodes with indegree == 1.
-        let mut indegree: HashMap<PrecomputeNode3Index, usize> = HashMap::new();
-        let mut unique_parent: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, (isize, LLMTokenBV))> = HashMap::new();
+        // Build incoming edges map: U -> Vec<(P, in_key, sids(P->U))>
+        let mut incoming: HashMap<
+            PrecomputeNode3Index,
+            Vec<(PrecomputeNode3Index, (isize, LLMTokenBV), StateIDBV)>
+        > = HashMap::new();
 
-        for src in &all_nodes {
-            if let Some(g) = src.read(trie3_god) {
-                for (ek, dm) in g.children() {
-                    for (dst, _sid) in dm {
-                        let cnt = indegree.entry(*dst).or_insert(0);
-                        *cnt += 1;
-                        if *cnt == 1 {
-                            unique_parent.insert(*dst, (*src, ek.clone()));
-                        } else {
-                            // More than one distinct incoming, not a unique-predecessor case.
-                            unique_parent.remove(dst);
-                        }
-                    }
-                }
-            }
-        }
-
-        // For outdegree, record nodes that have exactly one outgoing destination overall
-        // (across all keys combined) and are not end nodes; also capture that single edge.
+        // For each node U, if outdegree(U) == 1 (counting total destinations across all keys),
+        // capture the unique (out_key, V, sids(U->V)).
         let mut out_info: HashMap<
             PrecomputeNode3Index,
             ((isize, LLMTokenBV), PrecomputeNode3Index, StateIDBV)
         > = HashMap::new();
 
-        for u in &all_nodes {
-            if let Some(g) = u.read(trie3_god) {
-                if g.value.end {
-                    continue; // Don't contract through accept nodes.
-                }
-                let mut total_dests = 0usize;
-                let mut only_key: Option<(isize, LLMTokenBV)> = None;
-                let mut only_dst: Option<PrecomputeNode3Index> = None;
-                let mut only_sid: Option<StateIDBV> = None;
-
+        for src in &all_nodes {
+            if let Some(g) = src.read(trie3_god) {
+                // Accumulate incoming entries
                 for (ek, dm) in g.children() {
                     for (dst, sid) in dm {
-                        total_dests += 1;
-                        if total_dests == 1 {
-                            only_key = Some(ek.clone());
-                            only_dst = Some(*dst);
-                            only_sid = Some(sid.clone());
-                        }
+                        incoming.entry(*dst)
+                            .or_default()
+                            .push((*src, ek.clone(), sid.clone()));
                     }
                 }
-                if total_dests == 1 {
-                    out_info.insert(*u, (only_key.unwrap(), only_dst.unwrap(), only_sid.unwrap()));
+
+                // Record single outgoing destination (if any)
+                if !g.value.end {
+                    let mut total_dests = 0usize;
+                    let mut only_key: Option<(isize, LLMTokenBV)> = None;
+                    let mut only_dst: Option<PrecomputeNode3Index> = None;
+                    let mut only_sid: Option<StateIDBV> = None;
+
+                    'scan: for (ek, dm) in g.children() {
+                        for (dst, sid) in dm {
+                            total_dests += 1;
+                            if total_dests == 1 {
+                                only_key = Some(ek.clone());
+                                only_dst = Some(*dst);
+                                only_sid = Some(sid.clone());
+                            } else {
+                                // More than one outgoing destination overall; not a unary chain.
+                                break 'scan;
+                            }
+                        }
+                    }
+                    if total_dests == 1 {
+                        // Skip if the only outgoing is a self-loop (doesn't reduce structure).
+                        if let (Some(k), Some(d), Some(s)) = (only_key, only_dst, only_sid) {
+                            if d != *src {
+                                out_info.insert(*src, (k, d, s));
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Find candidates: nodes with indegree==1, outdegree==1, not roots, and matching keys on both sides.
+        // Rewire all predecessors of unary-out nodes.
         let mut rewired_this_iter = 0usize;
-        for u in &all_nodes {
-            let u_idx = *u;
+        for (u_idx, (out_key, v_idx, s_uv)) in out_info.into_iter() {
             if roots_set.contains(&u_idx) {
                 continue; // Never rewire through a root.
             }
-            let Some((out_key, v_idx, s_uv)) = out_info.get(&u_idx).cloned() else { continue };
-            let Some((p_idx, in_key)) = unique_parent.get(&u_idx).cloned() else { continue };
-            if p_idx == u_idx {
-                continue; // Avoid attempting to rewire a pure self-loop through itself.
-            }
-            // Only contract if the incoming and outgoing (pop, LLMTokenBV) keys match exactly.
-            if in_key != out_key {
-                continue;
-            }
+            let Some(preds) = incoming.get(&u_idx) else { continue };
 
-            // Perform the rewrite: in parent P, remove the U mapping under in_key,
-            // and add/union V mapping with SIDs intersection S(P->U) ∧ S(U->V).
-            if let Some(mut pw) = p_idx.write(trie3_god) {
-                let (pop, llm) = in_key.clone();
-                if let Some(dm) = pw.children_mut().get_mut(&(pop, llm.clone())) {
-                    if let Some(s_pu_actual) = dm.remove(&u_idx) {
-                        let s_comp = &s_pu_actual & &s_uv;
-                        if !s_comp.is_empty() {
-                            dm.entry(v_idx)
-                                .and_modify(|e| *e |= &s_comp)
-                                .or_insert(s_comp);
-                        }
+            for (p_idx, in_key, s_pu) in preds.iter().cloned() {
+                // Avoid attempting to rewire a pure self-loop through itself.
+                if p_idx == u_idx {
+                    continue;
+                }
+
+                // Compose pop and masks
+                let new_pop = match in_key.0.checked_add(out_key.0) {
+                    Some(v) => v,
+                    None => continue, // extremely unlikely; skip if it happens
+                };
+                let new_llm = &in_key.1 & &out_key.1;
+                if new_llm.is_empty() {
+                    continue;
+                }
+                let new_sids = &s_pu & &s_uv;
+                if new_sids.is_empty() {
+                    continue;
+                }
+
+                if let Some(mut pw) = p_idx.write(trie3_god) {
+                    // Remove P -> U under in_key (if still present)
+                    if let Some(dm) = pw.children_mut().get_mut(&in_key) {
+                        dm.remove(&u_idx);
                         if dm.is_empty() {
-                            pw.children_mut().remove(&(pop, llm.clone()));
+                            pw.children_mut().remove(&in_key);
                         }
-                        // Recompute live tokens as union of outgoing LLM masks for robustness.
-                        let mut new_live = LLMTokenBV::zeros();
-                        for ((_, llm_bv), _) in pw.children() {
-                            new_live |= llm_bv;
-                        }
-                        pw.value.live_tokens = new_live;
-                        rewired_this_iter += 1;
                     }
+
+                    // Add/union P -> V under composed key
+                    let entry = pw.children_mut()
+                        .entry((new_pop, new_llm))
+                        .or_insert_with(OrderedHashMap::new);
+                    entry.entry(v_idx)
+                        .and_modify(|e| *e |= &new_sids)
+                        .or_insert(new_sids);
+
+                    // Recompute live tokens for parent P
+                    let mut new_live = LLMTokenBV::zeros();
+                    for ((_, llm_bv), _) in pw.children() {
+                        new_live |= llm_bv;
+                    }
+                    pw.value.live_tokens = new_live;
+
+                    rewired_this_iter += 1;
                 }
             }
         }
@@ -2433,5 +2458,6 @@ fn compress_unary_chains_trie3(
         }
     }
 
-    crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
+    crate::debug!(2, "Unary-chain contraction (generalized) rewired {} edges.", total_rewired);
 }
+
