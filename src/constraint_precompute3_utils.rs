@@ -144,7 +144,7 @@ impl Default for Trie3Config {
             simplify_llm_token_bvs: false,
             factor_common_destinations: true,
             stochastic_equivalence_check: false,
-            debug_remove_pop_gt_0: true,
+            debug_remove_pop_gt_0: false,
         }
     }
 }
