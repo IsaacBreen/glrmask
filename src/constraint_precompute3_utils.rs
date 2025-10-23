@@ -2529,40 +2529,22 @@ fn compress_unary_chains_trie3_pop_sum(
 
             if let Some(mut pw) = p_idx.write(trie3_god) {
                 let (pop_in, llm_toks) = in_key.clone();
-                let mut s_comp_opt: Option<StateIDBV> = None;
-                let mut should_remove_old_key = false;
-
-                { // Scoping the mutable borrow of dm_in
-                    if let Some(dm_in) = pw.children_mut().get_mut(&(pop_in, llm_toks.clone())) {
-                        if let Some(s_pu_actual) = dm_in.remove(&u_idx) {
-                            let s_comp = &s_pu_actual & &s_uv;
-                            if !s_comp.is_empty() {
-                                s_comp_opt = Some(s_comp);
-                            }
-                            if dm_in.is_empty() {
-                                should_remove_old_key = true;
-                            }
+                if pw.children().get(&(pop_in, llm_toks.clone())).is_some() {
+                    if let Some(s_pu_actual) = pw.children_mut().get_mut(&(pop_in, llm_toks.clone())).unwrap().remove(&u_idx) {
+                        let s_comp = &s_pu_actual & &s_uv;
+                        if !s_comp.is_empty() {
+                            let entry = pw.children_mut().entry((pop_new, llm_toks.clone())).or_insert_with(OrderedHashMap::new);
+                            entry.entry(v_idx)
+                                .and_modify(|e| *e |= &s_comp)
+                                .or_insert(s_comp);
                         }
-                    }
-                }
-
-                if let Some(s_comp) = s_comp_opt {
-                    let entry = pw.children_mut().entry((pop_new, llm_toks.clone())).or_insert_with(OrderedHashMap::new);
-                    entry.entry(v_idx)
-                        .and_modify(|e| *e |= &s_comp)
-                        .or_insert(s_comp);
-                }
-
-                if should_remove_old_key {
-                    pw.children_mut().remove(&(pop_in, llm_toks.clone()));
-                }
-
-                if s_comp_opt.is_some() || should_remove_old_key {
-                    // Recompute live tokens
-                    let mut new_live = LLMTokenBV::zeros();
-                    for ((_, llm_bv), _) in pw.children() { new_live |= llm_bv; }
-                    pw.value.live_tokens = new_live;
-                    if s_comp_opt.is_some() {
+                        if pw.children_mut().get_mut(&(pop_in, llm_toks.clone())).unwrap().is_empty() {
+                            pw.children_mut().remove(&(pop_in, llm_toks.clone()));
+                        }
+                        // Recompute live tokens
+                        let mut new_live = LLMTokenBV::zeros();
+                        for ((_, llm_bv), _) in pw.children() { new_live |= llm_bv; }
+                        pw.value.live_tokens = new_live;
                         rewired_this_iter += 1;
                     }
                 }
