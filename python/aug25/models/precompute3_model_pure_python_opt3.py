@@ -582,7 +582,7 @@ class Model(GraphProvider):
         # Parser Table
         parser_data = data['parser']
         py_table: Dict[int, Row] = {}
-        for state_id_str, row_data in parser_data['stage_7_table']:
+        for state_id_str, row_data in tqdm(parser_data['stage_7_table'], desc="Loading parser table"):
             state_id, py_row = int(state_id_str), Row()
             for term_id_str, action_data in row_data['shifts_and_reduces_full']:
                 term_id, variant = int(term_id_str), action_data['variant']
@@ -662,13 +662,13 @@ class Model(GraphProvider):
         stats = Stats.get()
         stats.start('accelerators.compute_edge_complements')
         all_ones = self.all_internal_llm_tokens_bitset
-        for node in self.arena.values():
+        for node in tqdm(self.arena.values(), desc="Computing edge accelerators"):
             for edge in node.children:
                 edge.llm_bv_not = all_ones.difference(edge.llm_bv)
         stats.stop('accelerators.compute_edge_complements')
 
     def optimize_traversal(self) -> None:
-        for node in self.arena.values():
+        for node in tqdm(self.arena.values(), desc="Optimizing traversal"):
             for edge in node.children:
                 edge.ensure_index()
 
