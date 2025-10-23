@@ -8,15 +8,11 @@ from pathlib import Path
 import requests
 
 # --- Helper Functions ---
-def get_vocab(url: str | None, path: Path | None, vocab_list: list[str] | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
+def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
     """
-    Loads a vocabulary from a local path, a URL, or a direct list of strings.
+    Loads a vocabulary from a local path or a URL.
     The vocabulary can be a JSON dictionary (token -> id) or a JSON list of strings.
     """
-    if vocab_list:
-        print(f"Loading vocabulary from command-line list ({len(vocab_list)} tokens).")
-        return {token: i for i, token in enumerate(vocab_list)}
-
     if not url and not path:
         raise ValueError("Either --vocab-url or --vocab-path must be provided.")
     if url and path:
@@ -241,11 +237,11 @@ Examples:
     )
     parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the EBNF grammar file.")
     parser.add_argument("-o", "--output", type=Path, help="Path for the output compressed constraint file (.json.gz).")
-    
-    vocab_group = parser.add_mutually_exclusive_group(required=True)
-    vocab_group.add_argument("--vocab-url", type=str, help="URL of the JSON vocabulary file to download.")
-    vocab_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
-    vocab_group.add_argument("--vocab-list", type=str, nargs='+', help="A list of strings to use as the vocabulary.")
+
+    vocab_source_group = parser.add_mutually_exclusive_group()
+    vocab_source_group.add_argument("--vocab-url", type=str, help="URL of the JSON vocabulary file to download.")
+    vocab_source_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
+    parser.add_argument("--vocab-list", type=str, nargs='+', help="A list of strings to use as the vocabulary. Can be combined with --vocab-url/--vocab-path.")
 
     parser.add_argument("--cache-dir", type=Path, default=Path(".cache/vocabs"), help="Directory to cache downloaded vocabularies.")
     parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
@@ -272,17 +268,34 @@ Examples:
         parser.error("--output is required unless --precompute0-only is specified")
     if args.from_precompute0 and not args.from_precompute0.exists():
         parser.error(f"The path specified for --from-precompute0 does not exist: {args.from_precompute0}")
+    if not args.vocab_url and not args.vocab_path and not args.vocab_list:
+        parser.error("At least one of --vocab-url, --vocab-path, or --vocab-list must be provided.")
+    if args.token_len and not (args.vocab_url or args.vocab_path):
+        parser.error("--token-len can only be used with --vocab-url or --vocab-path.")
 
-    # 1. Get the vocabulary
-    vocab = get_vocab(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
+    # 1. Get the base vocabulary from a file/URL if provided
+    base_vocab = {}
+    if args.vocab_url or args.vocab_path:
+        base_vocab = get_vocab(args.vocab_url, args.vocab_path, args.cache_dir, args.force_download)
 
-    # 2. Apply filters
+    # 2. Apply filters to the base vocabulary
     try:
         allowed_lengths, min_len_unbounded = parse_len_ranges(args.token_len)
     except ValueError as e:
         parser.error(f"Invalid --token-len value: {e}")
 
-    modified_vocab = filter_vocab(vocab, allowed_lengths, min_len_unbounded)
+    modified_vocab = filter_vocab(base_vocab, allowed_lengths, min_len_unbounded)
+
+    # 3. Add tokens from vocab-list (filters do not apply to these)
+    if args.vocab_list:
+        print(f"Adding {len(args.vocab_list)} tokens from --vocab-list.")
+        max_id = -1
+        if modified_vocab:
+            max_id = max(modified_vocab.values())
+        for token in args.vocab_list:
+            if token not in modified_vocab:
+                max_id += 1
+                modified_vocab[token] = max_id
 
     # Print vocabulary if it's small (less than 1000 tokens)
     if len(modified_vocab) < 1000:
@@ -293,14 +306,14 @@ Examples:
         print(json.dumps(printable_vocab, indent=2, ensure_ascii=False))
         print("\n-----------------------------------------\n")
 
-    # 3. Write the (potentially modified) vocab to a temporary file
+    # 4. Write the (potentially modified) vocab to a temporary file
     with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json", encoding='utf-8') as tmp_vocab_file:
         json.dump(modified_vocab, tmp_vocab_file)
         tmp_vocab_path = Path(tmp_vocab_file.name)
 
     print(f"Temporary vocabulary saved to: {tmp_vocab_path}")
 
-    # 4. Run the Rust compiler
+    # 5. Run the Rust compiler
     try:
         run_compiler(
             args.compiler_path,
@@ -314,7 +327,7 @@ Examples:
             pc0_only=args.precompute0_only,
         )
     finally:
-        # 5. Clean up the temporary file
+        # 6. Clean up the temporary file
         tmp_vocab_path.unlink()
         print(f"Cleaned up temporary vocabulary file.")
 if __name__ == "__main__":
