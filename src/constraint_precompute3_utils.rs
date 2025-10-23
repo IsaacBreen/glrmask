@@ -632,44 +632,90 @@ fn assert_pop0_paths_to_end_are_short(
     roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
 ) {
-    crate::debug!(2, "Asserting that all pop=0 paths to an end node are of length <= 1.");
+    crate::debug!(2, "Asserting that all pop=0 paths to an end node are of length <= 1, or are redundant.");
 
     for root_node in roots.values() {
-        // For each root, check its children connected by pop=0 edges.
+        // 1. Find all short pop=0 paths from this root and collect their semantics.
+        let mut short_path_semantics: Vec<(LLMTokenBV, StateIDBV)> = Vec::new();
         let r = root_node.read(trie3_god).expect("root must exist");
-        for ((pop, _), dm) in r.children() {
+        for ((pop, llm_bv), dm) in r.children() {
             if *pop == 0 {
-                for (dest, _) in dm {
-                    // We have a path root -> dest of length 1.
-                    // If `dest` is an end node, this path is valid.
-                    // If `dest` is NOT an end node, it must not be able to reach any
-                    // end node via a path of pop=0 edges, as that would create a
-                    // total path from root of length > 1.
+                for (dest, sids_bv) in dm {
+                    if dest.read(trie3_god).expect("dest must exist").value.end {
+                        short_path_semantics.push((llm_bv.clone(), sids_bv.clone()));
+                    }
+                }
+            }
+        }
 
-                    let dest_guard = dest.read(trie3_god).expect("dest must exist");
-                    if !dest_guard.value.end {
-                        // `dest` is not an end node. Check for pop=0 reachability to any end node.
-                        let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
-                        let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
+        // 2. Find all long pop=0 paths and check if they are covered.
+        // A long path starts with a pop=0 edge from the root to a non-end node.
+        for ((pop, llm_bv1), dm) in r.children() {
+            if *pop == 0 {
+                for (dest, sids_bv1) in dm {
+                    if dest.read(trie3_god).expect("dest must exist").value.end {
+                        continue; // This is a short path, which is fine.
+                    }
 
-                        q.push_back(*dest);
-                        visited.insert(*dest);
+                    // This is the start of a potential long path from root -> dest.
+                    // Find all pop=0 paths from `dest` to any end node.
+                    let mut q: VecDeque<(PrecomputeNode3Index, LLMTokenBV, StateIDBV, Vec<PrecomputeNode3Index>)> = VecDeque::new();
+                    
+                    q.push_back((*dest, llm_bv1.clone(), sids_bv1.clone(), vec![*root_node, *dest]));
 
-                        while let Some(curr) = q.pop_front() {
-                            let curr_guard = curr.read(trie3_god).expect("node must exist");
-                            if curr_guard.value.end {
-                                panic!(
-                                    "Found a pop=0 path of length > 1 to an end node. Path starts with root {} -> {}, and continues to end node {}",
-                                    root_node, dest, curr
-                                );
+                    while let Some((curr, path_llm, path_sids, path_nodes)) = q.pop_front() {
+                        let curr_guard = curr.read(trie3_god).expect("node must exist");
+
+                        if curr_guard.value.end {
+                            // We found a long path. Check if it's covered.
+                            let long_llm = path_llm;
+                            let long_sids = path_sids;
+
+                            if long_llm.is_empty() || long_sids.is_empty() {
+                                continue; // Path is not actually traversable.
                             }
 
-                            for ((pop2, _), dm2) in curr_guard.children() {
-                                if *pop2 == 0 {
-                                    for (next, _) in dm2 {
-                                        if visited.insert(*next) {
-                                            q.push_back(*next);
+                            // Check coverage for every token in long_llm
+                            for t in long_llm.iter() {
+                                let mut sids_covered_for_t = StateIDBV::zeros();
+                                for (short_llm, short_sids) in &short_path_semantics {
+                                    if short_llm.contains(t) {
+                                        sids_covered_for_t |= short_sids;
+                                    }
+                                }
+
+                                if !long_sids.is_subset(&sids_covered_for_t) {
+                                    let violating_sids = &long_sids - &sids_covered_for_t;
+                                    let first_violating_sid = violating_sids.iter().next().unwrap();
+                                    let path_str = path_nodes.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" -> ");
+                                    panic!(
+                                        "Found a non-redundant pop=0 path of length > 1 to an end node.\n\
+                                        Path: {}\n\
+                                        The pair (llm_token={}, state_id={}) is accepted by this long path, \
+                                        but not by any short (length=1) pop=0 path from the same root.",
+                                        path_str, t, first_violating_sid
+                                    );
+                                }
+                            }
+                            // This long path is covered. Don't traverse further from an end node.
+                            continue;
+                        }
+
+                        // Continue traversal
+                        for ((pop2, llm_bv2), dm2) in curr_guard.children() {
+                            if *pop2 == 0 {
+                                for (next, sids_bv2) in dm2 {
+                                    let next_path_llm = &path_llm & llm_bv2;
+                                    let next_path_sids = &path_sids & sids_bv2;
+
+                                    if !next_path_llm.is_empty() && !next_path_sids.is_empty() {
+                                        // Simple cycle check on the current path being explored.
+                                        if path_nodes.contains(next) {
+                                            continue;
                                         }
+                                        let mut next_path_nodes = path_nodes.clone();
+                                        next_path_nodes.push(*next);
+                                        q.push_back((*next, next_path_llm, next_path_sids, next_path_nodes));
                                     }
                                 }
                             }
