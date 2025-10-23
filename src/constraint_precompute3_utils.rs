@@ -127,6 +127,7 @@ pub struct Trie3Config {
     pub refine_token_atoms_exact: bool,
     pub refine_token_atoms_max_blocks: usize,
     pub factor_common_destinations: bool,
+    pub factor_common_destinations_min_incoming: usize,
     pub stochastic_equivalence_check: bool,
     pub debug_remove_pop_gt_0: bool,
     pub assert_pop0_paths_to_end_are_short: bool,
@@ -154,6 +155,7 @@ impl Default for Trie3Config {
             refine_token_atoms_exact: true,
             refine_token_atoms_max_blocks: 2048,
             factor_common_destinations: true,
+            factor_common_destinations_min_incoming: 12,
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
             assert_pop0_paths_to_end_are_short: false,
@@ -182,6 +184,7 @@ impl Trie3Config {
             refine_token_atoms_exact: false,
             refine_token_atoms_max_blocks: 0,
             // keep these off for the .off() preset
+            factor_common_destinations_min_incoming: 0,
             // eliminate_pop0_edges/assert_no_pop0_nonroot_edges already set above
             simplify_llm_token_bvs: false,
             factor_common_destinations: false,
@@ -360,7 +363,7 @@ pub fn optimize_trie3_size(
 
         if config.factor_common_destinations {
             run_pass!("Factoring common destinations", {
-                factor_common_destinations_trie3(roots, trie3_god, max_llm_token_id, max_state_id);
+                factor_common_destinations_trie3(roots, trie3_god, max_llm_token_id, max_state_id, config.factor_common_destinations_min_incoming);
             });
         }
 
@@ -511,6 +514,60 @@ pub fn optimize_trie3_size(
                         &trie3_god,
                         max_llm_token_id,
                         max_state_id
+                    );
+                });
+            }
+            // NEW: Immediately minimize after pop0 elimination to collapse the explosion.
+            if config.prune_dead_paths {
+                run_pass!("Pruning dead paths (post-pop0-elim)", {
+                    prune_dead_paths_trie3(roots, &trie3_god);
+                });
+            }
+            if config.gc {
+                run_pass!("Garbage collection (post-pop0-elim)", {
+                    Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+                });
+            }
+            if config.merge_nodes_structural {
+                run_pass!("Merging nodes (structural, post-pop0-elim)", {
+                    merge_nodes_trie3_structural(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
+                });
+                if config.compress_edges {
+                    run_pass!("Compressing edges + unary chains (post-pop0-struct-merge)", {
+                        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                        compress_unary_chains_trie3(roots, &trie3_god);
+                    });
+                }
+            }
+            if config.merge_nodes_exact.enabled {
+                run_pass!("Merging nodes (exact, post-pop0-elim)", {
+                    merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
+                });
+            }
+            if config.prune_nodes_not_reaching_end {
+                run_pass!("Pruning nodes that do not reach end (post-pop0-elim)", {
+                    prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+                });
+            }
+            if config.compress_edges {
+                run_pass!("Compressing edges + unary chains (post-pop0-elim-merge)", {
+                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                    compress_unary_chains_trie3(roots, &trie3_god);
+                });
+            }
+            if config.refine_token_atoms {
+                run_pass!("Refining token-set atoms (post-pop0-elim-merge)", {
+                    refine_edges_to_token_atoms_trie3(
+                        roots, &trie3_god,
+                        max_llm_token_id, max_state_id,
+                        config.refine_token_atoms_max_blocks);
+                });
+            }
+            if config.refine_token_atoms_exact {
+                run_pass!("Refining token-set atoms (exact, post-pop0-elim-merge)", {
+                    refine_edges_to_token_atoms_trie3_exact(
+                        roots, &trie3_god,
+                        max_llm_token_id, max_state_id
                     );
                 });
             }
@@ -1569,10 +1626,10 @@ fn factor_common_destinations_trie3(
     trie3_god: &Trie3GodWrapper,
     max_llm_token_id: usize,
     max_state_id: usize,
+    min_incoming: usize,
 ) {
     crate::debug!(2, "Factoring out common destinations in Trie3.");
-    const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
-
+    // use dynamic threshold provided by config via min_incoming
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
     if all_nodes.is_empty() { return; }
@@ -1608,7 +1665,7 @@ fn factor_common_destinations_trie3(
     for (dest_idx, edges_by_key) in incoming_map {
         for (edge_key, sources_by_sids) in edges_by_key {
             for (sids_bv, sources) in sources_by_sids {
-                if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
+                if sources.len() >= min_incoming {
                     // Create intermediate node
                     let intermediate_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::internal())));
 
