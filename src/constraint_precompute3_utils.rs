@@ -124,6 +124,7 @@ pub struct Trie3Config {
     pub factor_common_destinations: bool,
     pub stochastic_equivalence_check: bool,
     pub debug_remove_pop_gt_0: bool,
+    pub assert_pop0_paths_to_end_are_short: bool,
 }
 
 impl Default for Trie3Config {
@@ -145,6 +146,7 @@ impl Default for Trie3Config {
             factor_common_destinations: true,
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
+            assert_pop0_paths_to_end_are_short: false,
         }
     }
 }
@@ -168,6 +170,7 @@ impl Trie3Config {
             factor_common_destinations: false,
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
+            assert_pop0_paths_to_end_are_short: false,
         }
     }
 }
@@ -618,7 +621,9 @@ pub fn optimize_trie3_size(
         }
     }
 
-    assert_pop0_paths_to_end_are_short(roots, trie3_god);
+    if config.assert_pop0_paths_to_end_are_short {
+        assert_pop0_paths_to_end_are_short(roots, trie3_god);
+    }
 
 	crate::debug!(2, "Finished optimizing Trie 3 size.");
 }

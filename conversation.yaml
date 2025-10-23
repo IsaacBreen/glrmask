@@ -4,7 +4,7 @@ local_system:
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/constraint_precompute3_utils.rs: |+
+    src/constraint_precompute3_utils.rs: |
       use crate::constraint::LLMTokenBV;
       use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, PrecomputeNode3Index, PrecomputedNodeContents, StageVocab, StateIDBV, Trie3GodWrapper};
       use crate::constraint_extra::{calculate_final_stats3, print_precompute_stats3, PrecomputeStats};
@@ -405,20 +405,6 @@ local_system:
                   run_pass!("Compressing edges + unary chains (post-merge)", {
                       compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
                       // Final contraction pass to remove any last unary runs.
-                      compress_unary_chains_trie3(roots, &trie3_god);
-                  });
-              }
-
-              // Flatten zero-pop closures from roots to guarantee there are no pop=0 chains
-              // from any root to an end node longer than one hop, while preserving semantics
-              // by lifting effects and composing masks/SIDs.
-              run_pass!("Flattening pop=0 closure from roots", {
-                  flatten_root_pop0_closure_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
-              });
-              // Quickly compress again to coalesce any fragmentation introduced by flattening.
-              if config.compress_edges {
-                  run_pass!("Compressing edges + unary chains (post-flatten)", {
-                      compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
                       compress_unary_chains_trie3(roots, &trie3_god);
                   });
               }
@@ -2512,64 +2498,34 @@ local_system:
                   if p_idx == u_idx {
                       continue; // Avoid attempting to rewire a pure self-loop through itself.
                   }
-                  // Contract if:
-                  // - The incoming and outgoing keys are identical (original case), OR
-                  // - Both are pop=0 (epsilon-like), in which case we compose masks/SIDs.
-                  let keys_match = in_key == out_key;
-                  let can_compose_pop0 = in_key.0 == 0 && out_key.0 == 0;
-                  if !keys_match && !can_compose_pop0 {
+                  // Only contract if the incoming and outgoing (pop, LLMTokenBV) keys match exactly.
+                  if in_key != out_key {
                       continue;
                   }
 
                   // Perform the rewrite: in parent P, remove the U mapping under in_key,
                   // and add/union V mapping with SIDs intersection S(P->U) ∧ S(U->V).
                   if let Some(mut pw) = p_idx.write(trie3_god) {
-                      let (in_pop, in_llm) = in_key.clone();
-                      let s_pu_actual_opt;
-                      let dm_became_empty;
-
-                      // Scope to limit mutable borrow of pw.children_mut()
-                      {
-                          if let Some(dm) = pw.children_mut().get_mut(&(in_pop, in_llm.clone())) {
-                              s_pu_actual_opt = dm.remove(&u_idx);
-                              dm_became_empty = dm.is_empty();
-                          } else {
-                              s_pu_actual_opt = None;
-                              dm_became_empty = false;
+                      let (pop, llm) = in_key.clone();
+                      if let Some(dm) = pw.children_mut().get_mut(&(pop, llm.clone())) {
+                          if let Some(s_pu_actual) = dm.remove(&u_idx) {
+                              let s_comp = &s_pu_actual & &s_uv;
+                              if !s_comp.is_empty() {
+                                  dm.entry(v_idx)
+                                      .and_modify(|e| *e |= &s_comp)
+                                      .or_insert(s_comp);
+                              }
+                              if dm.is_empty() {
+                                  pw.children_mut().remove(&(pop, llm.clone()));
+                              }
+                              // Recompute live tokens as union of outgoing LLM masks for robustness.
+                              let mut new_live = LLMTokenBV::zeros();
+                              for ((_, llm_bv), _) in pw.children() {
+                                  new_live |= llm_bv;
+                              }
+                              pw.value.live_tokens = new_live;
+                              rewired_this_iter += 1;
                           }
-                      }
-
-                      if let Some(s_pu_actual) = s_pu_actual_opt {
-                          // Compose SIDs
-                          let s_comp = &s_pu_actual & &s_uv;
-                          // Compose key for the new edge
-                          let (new_pop, new_llm) = if keys_match {
-                              (in_pop, in_llm.clone())
-                          } else {
-                              // Both pop=0; compose LLM masks by intersection
-                              (0, &in_llm & &out_key.1)
-                          };
-
-                          // If either the composed LLM or SIDs are empty, we still remove the
-                          // P->U mapping (since U had only one outgoing), but we don't add a new one.
-                          if !new_llm.is_empty() && !s_comp.is_empty() {
-                              let entry = pw.children_mut().entry((new_pop, new_llm)).or_default();
-                              entry.entry(v_idx)
-                                  .and_modify(|e| *e |= &s_comp)
-                                  .or_insert(s_comp);
-                          }
-
-                          if dm_became_empty {
-                              pw.children_mut().remove(&(in_pop, in_llm.clone()));
-                          }
-
-                          // Recompute live tokens as union of outgoing LLM masks for robustness.
-                          let mut new_live = LLMTokenBV::zeros();
-                          for ((_, llm_bv), _) in pw.children() {
-                              new_live |= llm_bv;
-                          }
-                          pw.value.live_tokens = new_live;
-                          rewired_this_iter += 1;
                       }
                   }
               }
@@ -2582,121 +2538,8 @@ local_system:
 
           crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
       }
-
-      /// Flatten pop=0 closures starting from each root. This eliminates all root->(non-end) pop=0 edges by
-      /// lifting their reachable effects (direct root->end and root->(pop!=0) edges) with correctly composed
-      /// LLMTokenBV and StateIDBV. This preserves semantics while guaranteeing that any pop=0 path from a root
-      /// to an end node has length <= 1 (i.e., root->end directly).
-      fn flatten_root_pop0_closure_trie3(
-          roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-          trie3_god: &Trie3GodWrapper,
-          max_llm_token_id: usize,
-          max_state_id: usize,
-      ){
-          crate::debug!(2, "Flattening pop=0 closure from roots in Trie3...");
-          use std::collections::VecDeque;
-
-          for root_idx in roots.values() {
-              // 1) Snapshot root edges and split into nonzero-pop (kept) and zero-pop (seeds).
-              let (nonzero_edges, seeds): (
-                  BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>>,
-                  Vec<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)>
-              ) = {
-                  let r = root_idx.read(trie3_god).expect("read root");
-                  let mut nonzero = BTreeMap::new();
-                  let mut seed_vec = Vec::new();
-                  for ((pop, llm_bv), dm) in r.children() {
-                      if *pop == 0 {
-                          // For each destination, seed BFS with composed masks from root->dest.
-                          for (dst, sids) in dm {
-                              let mut llm0 = llm_bv.clone();
-                              llm0.constrain(max_llm_token_id);
-                              let mut sids0 = sids.clone();
-                              sids0.constrain(max_state_id);
-                              if !llm0.is_empty() && !sids0.is_empty() {
-                                  seed_vec.push((*dst, llm0, sids0));
-                              }
-                          }
-                      } else {
-                          // Keep non-zero-pop edges as-is (they are not part of zero-closure).
-                          let entry = nonzero.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
-                          for (dst, sids) in dm {
-                              entry.entry(*dst)
-                                  .and_modify(|e| *e |= sids)
-                                  .or_insert(sids.clone());
-                          }
-                      }
-                  }
-                  (nonzero, seed_vec)
-              };
-
-              // If there are no zero-pop seeds, nothing to flatten for this root.
-              if seeds.is_empty() {
-                  continue;
-              }
-
-              // 2) Aggregate new children for the root: start from existing nonzero-pop edges and
-              //    add direct root->end (pop=0) and root->(pop!=0) edges discovered via zero-closure.
-              let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = nonzero_edges;
-              let mut q: VecDeque<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)> = VecDeque::from(seeds);
-
-              while let Some((u, acc_llm, acc_sids)) = q.pop_front() {
-                  // If this node itself is an end, add a direct root->u (pop=0) edge with composed masks.
-                  if let Some(ug) = u.read(trie3_god) {
-                      if ug.value.end {
-                          let key = (0, acc_llm.clone());
-                          let dm = new_children.entry(key).or_insert_with(OrderedHashMap::new);
-                          dm.entry(u)
-                              .and_modify(|e| *e |= &acc_sids)
-                              .or_insert(acc_sids.clone());
-                      }
-
-                      // Explore its outgoing edges.
-                      for ((pop, llm_bv), dm) in ug.children() {
-                          let mut next_llm = &acc_llm & llm_bv;
-                          next_llm.constrain(max_llm_token_id);
-                          if next_llm.is_empty() {
-                              continue;
-                          }
-                          for (v, sids) in dm {
-                              let mut next_sids = &acc_sids & sids;
-                              next_sids.constrain(max_state_id);
-                              if next_sids.is_empty() {
-                                  continue;
-                              }
-                              if *pop == 0 {
-                                  // Continue along zero-pop closure
-                                  q.push_back((*v, next_llm.clone(), next_sids));
-                              } else {
-                                  // Lift this non-zero edge to the root.
-                                  let k = (*pop, next_llm.clone());
-                                  let dests = new_children.entry(k).or_insert_with(OrderedHashMap::new);
-                                  dests.entry(*v)
-                                      .and_modify(|e| *e |= &next_sids)
-                                      .or_insert(next_sids);
-                              }
-                          }
-                      }
-                  }
-              }
-
-              // 3) Write back: replace root's children with new aggregate (which contains no pop=0 edges
-              //    to non-end nodes).
-              if let Some(mut w) = root_idx.write(trie3_god) {
-                  *w.children_mut() = new_children;
-                  // Recompute live tokens as union of outgoing LLM masks.
-                  let mut new_live = LLMTokenBV::zeros();
-                  for ((_, llm_bv), _) in w.children() {
-                      new_live |= llm_bv;
-                  }
-                  w.value.live_tokens = new_live;
-              }
-          }
-          crate::debug!(2, "Finished flattening pop=0 closures from roots.");
-      }
-
   prev_file_contents:
-    src/constraint_precompute3_utils.rs: |+
+    src/constraint_precompute3_utils.rs: |
       use crate::constraint::LLMTokenBV;
       use crate::constraint::{IntermediatePrecomputeNode3, IntermediatePrecomputeNode3Index, IntermediateTrie3EdgeKey, IntermediateTrie3GodWrapper, PrecomputeNode3Index, PrecomputedNodeContents, StageVocab, StateIDBV, Trie3GodWrapper};
       use crate::constraint_extra::{calculate_final_stats3, print_precompute_stats3, PrecomputeStats};
@@ -2823,6 +2666,7 @@ local_system:
           pub factor_common_destinations: bool,
           pub stochastic_equivalence_check: bool,
           pub debug_remove_pop_gt_0: bool,
+          pub assert_pop0_paths_to_end_are_short: bool,
       }
 
       impl Default for Trie3Config {
@@ -2844,6 +2688,7 @@ local_system:
                   factor_common_destinations: true,
                   stochastic_equivalence_check: false,
                   debug_remove_pop_gt_0: false,
+                  assert_pop0_paths_to_end_are_short: false,
               }
           }
       }
@@ -2867,6 +2712,7 @@ local_system:
                   factor_common_destinations: false,
                   stochastic_equivalence_check: false,
                   debug_remove_pop_gt_0: false,
+                  assert_pop0_paths_to_end_are_short: false,
               }
           }
       }
@@ -3101,20 +2947,6 @@ local_system:
                   });
               }
 
-              // Flatten zero-pop closures from roots to guarantee there are no pop=0 chains
-              // from any root to an end node longer than one hop, while preserving semantics
-              // by lifting effects and composing masks/SIDs.
-              run_pass!("Flattening pop=0 closure from roots", {
-                  flatten_root_pop0_closure_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
-              });
-              // Quickly compress again to coalesce any fragmentation introduced by flattening.
-              if config.compress_edges {
-                  run_pass!("Compressing edges + unary chains (post-flatten)", {
-                      compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                      compress_unary_chains_trie3(roots, &trie3_god);
-                  });
-              }
-
               if config.merge_nodes_exact.enabled {
                   run_pass!("Merging nodes (post-compress)", {
                       merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
@@ -3331,7 +3163,9 @@ local_system:
               }
           }
 
-          assert_pop0_paths_to_end_are_short(roots, trie3_god);
+          if config.assert_pop0_paths_to_end_are_short {
+              assert_pop0_paths_to_end_are_short(roots, trie3_god);
+          }
 
       	crate::debug!(2, "Finished optimizing Trie 3 size.");
       }
@@ -5134,9 +4968,10 @@ local_system:
 
           let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
 
-          // Iterate until no more rewrites are possible.
+          // Iterate a few times until no more rewrites are possible.
           let mut total_rewired = 0usize;
-          loop {
+          let max_outer_iters = 8usize;
+          for _iter in 0..max_outer_iters {
               // Build indegree counts and track unique predecessor + edge-key for nodes with indegree == 1.
               let mut indegree: HashMap<PrecomputeNode3Index, usize> = HashMap::new();
               let mut unique_parent: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, (isize, LLMTokenBV))> = HashMap::new();
@@ -5192,7 +5027,7 @@ local_system:
               }
 
               // Find candidates: nodes with indegree==1, outdegree==1, not roots, and matching keys on both sides.
-              let mut rewired_this_loop = false;
+              let mut rewired_this_iter = 0usize;
               for u in &all_nodes {
                   let u_idx = *u;
                   if roots_set.contains(&u_idx) {
@@ -5203,190 +5038,46 @@ local_system:
                   if p_idx == u_idx {
                       continue; // Avoid attempting to rewire a pure self-loop through itself.
                   }
-                  // Contract if:
-                  // - The incoming and outgoing keys are identical (original case), OR
-                  // - Both are pop=0 (epsilon-like), in which case we compose masks/SIDs.
-                  let keys_match = in_key == out_key;
-                  let can_compose_pop0 = in_key.0 == 0 && out_key.0 == 0;
-                  if !keys_match && !can_compose_pop0 {
+                  // Only contract if the incoming and outgoing (pop, LLMTokenBV) keys match exactly.
+                  if in_key != out_key {
                       continue;
                   }
 
                   // Perform the rewrite: in parent P, remove the U mapping under in_key,
                   // and add/union V mapping with SIDs intersection S(P->U) ∧ S(U->V).
                   if let Some(mut pw) = p_idx.write(trie3_god) {
-                      let (in_pop, in_llm) = in_key.clone();
-                      let s_pu_actual_opt;
-                      let dm_became_empty;
-
-                      // Scope to limit mutable borrow of pw.children_mut()
-                      {
-                          if let Some(dm) = pw.children_mut().get_mut(&(in_pop, in_llm.clone())) {
-                              s_pu_actual_opt = dm.remove(&u_idx);
-                              dm_became_empty = dm.is_empty();
-                          } else {
-                              s_pu_actual_opt = None;
-                              dm_became_empty = false;
+                      let (pop, llm) = in_key.clone();
+                      if let Some(dm) = pw.children_mut().get_mut(&(pop, llm.clone())) {
+                          if let Some(s_pu_actual) = dm.remove(&u_idx) {
+                              let s_comp = &s_pu_actual & &s_uv;
+                              if !s_comp.is_empty() {
+                                  dm.entry(v_idx)
+                                      .and_modify(|e| *e |= &s_comp)
+                                      .or_insert(s_comp);
+                              }
+                              if dm.is_empty() {
+                                  pw.children_mut().remove(&(pop, llm.clone()));
+                              }
+                              // Recompute live tokens as union of outgoing LLM masks for robustness.
+                              let mut new_live = LLMTokenBV::zeros();
+                              for ((_, llm_bv), _) in pw.children() {
+                                  new_live |= llm_bv;
+                              }
+                              pw.value.live_tokens = new_live;
+                              rewired_this_iter += 1;
                           }
-                      }
-
-                      if let Some(s_pu_actual) = s_pu_actual_opt {
-                          // Compose SIDs
-                          let s_comp = &s_pu_actual & &s_uv;
-                          // Compose key for the new edge
-                          let (new_pop, new_llm) = if keys_match {
-                              (in_pop, in_llm.clone())
-                          } else {
-                              // Both pop=0; compose LLM masks by intersection
-                              (0, &in_llm & &out_key.1)
-                          };
-
-                          // If either the composed LLM or SIDs are empty, we still remove the
-                          // P->U mapping (since U had only one outgoing), but we don't add a new one.
-                          if !new_llm.is_empty() && !s_comp.is_empty() {
-                              let entry = pw.children_mut().entry((new_pop, new_llm)).or_default();
-                              entry.entry(v_idx)
-                                  .and_modify(|e| *e |= &s_comp)
-                                  .or_insert(s_comp);
-                          }
-
-                          if dm_became_empty {
-                              pw.children_mut().remove(&(in_pop, in_llm.clone()));
-                          }
-
-                          // Recompute live tokens as union of outgoing LLM masks for robustness.
-                          let mut new_live = LLMTokenBV::zeros();
-                          for ((_, llm_bv), _) in pw.children() {
-                              new_live |= llm_bv;
-                          }
-                          pw.value.live_tokens = new_live;
-                          total_rewired += 1;
-                          rewired_this_loop = true;
-                          break; // Restart the process with updated graph properties
                       }
                   }
               }
 
-              if !rewired_this_loop {
-                  break; // No changes in a full pass, fixed point reached.
+              total_rewired += rewired_this_iter;
+              if rewired_this_iter == 0 {
+                  break;
               }
           }
 
           crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
       }
-
-      /// Flatten pop=0 closures starting from each root. This eliminates all root->(non-end) pop=0 edges by
-      /// lifting their reachable effects (direct root->end and root->(pop!=0) edges) with correctly composed
-      /// LLMTokenBV and StateIDBV. This preserves semantics while guaranteeing that any pop=0 path from a root
-      /// to an end node has length <= 1 (i.e., root->end directly).
-      fn flatten_root_pop0_closure_trie3(
-          roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-          trie3_god: &Trie3GodWrapper,
-          max_llm_token_id: usize,
-          max_state_id: usize,
-      ){
-          crate::debug!(2, "Flattening pop=0 closure from roots in Trie3...");
-          use std::collections::VecDeque;
-
-          for root_idx in roots.values() {
-              // 1) Snapshot root edges and split into nonzero-pop (kept) and zero-pop (seeds).
-              let (nonzero_edges, seeds): (
-                  BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>>,
-                  Vec<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)>
-              ) = {
-                  let r = root_idx.read(trie3_god).expect("read root");
-                  let mut nonzero = BTreeMap::new();
-                  let mut seed_vec = Vec::new();
-                  for ((pop, llm_bv), dm) in r.children() {
-                      if *pop == 0 {
-                          // For each destination, seed BFS with composed masks from root->dest.
-                          for (dst, sids) in dm {
-                              let mut llm0 = llm_bv.clone();
-                              llm0.constrain(max_llm_token_id);
-                              let mut sids0 = sids.clone();
-                              sids0.constrain(max_state_id);
-                              if !llm0.is_empty() && !sids0.is_empty() {
-                                  seed_vec.push((*dst, llm0, sids0));
-                              }
-                          }
-                      } else {
-                          // Keep non-zero-pop edges as-is (they are not part of zero-closure).
-                          let entry = nonzero.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
-                          for (dst, sids) in dm {
-                              entry.entry(*dst)
-                                  .and_modify(|e| *e |= sids)
-                                  .or_insert(sids.clone());
-                          }
-                      }
-                  }
-                  (nonzero, seed_vec)
-              };
-
-              // If there are no zero-pop seeds, nothing to flatten for this root.
-              if seeds.is_empty() {
-                  continue;
-              }
-
-              // 2) Aggregate new children for the root: start from existing nonzero-pop edges and
-              //    add direct root->end (pop=0) and root->(pop!=0) edges discovered via zero-closure.
-              let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = nonzero_edges;
-              let mut q: VecDeque<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)> = VecDeque::from(seeds);
-
-              while let Some((u, acc_llm, acc_sids)) = q.pop_front() {
-                  // If this node itself is an end, add a direct root->u (pop=0) edge with composed masks.
-                  if let Some(ug) = u.read(trie3_god) {
-                      if ug.value.end {
-                          let key = (0, acc_llm.clone());
-                          let dm = new_children.entry(key).or_insert_with(OrderedHashMap::new);
-                          dm.entry(u)
-                              .and_modify(|e| *e |= &acc_sids)
-                              .or_insert(acc_sids.clone());
-                      }
-
-                      // Explore its outgoing edges.
-                      for ((pop, llm_bv), dm) in ug.children() {
-                          let mut next_llm = &acc_llm & llm_bv;
-                          next_llm.constrain(max_llm_token_id);
-                          if next_llm.is_empty() {
-                              continue;
-                          }
-                          for (v, sids) in dm {
-                              let mut next_sids = &acc_sids & sids;
-                              next_sids.constrain(max_state_id);
-                              if next_sids.is_empty() {
-                                  continue;
-                              }
-                              if *pop == 0 {
-                                  // Continue along zero-pop closure
-                                  q.push_back((*v, next_llm.clone(), next_sids));
-                              } else {
-                                  // Lift this non-zero edge to the root.
-                                  let k = (*pop, next_llm.clone());
-                                  let dests = new_children.entry(k).or_insert_with(OrderedHashMap::new);
-                                  dests.entry(*v)
-                                      .and_modify(|e| *e |= &next_sids)
-                                      .or_insert(next_sids);
-                              }
-                          }
-                      }
-                  }
-              }
-
-              // 3) Write back: replace root's children with new aggregate (which contains no pop=0 edges
-              //    to non-end nodes).
-              if let Some(mut w) = root_idx.write(trie3_god) {
-                  *w.children_mut() = new_children;
-                  // Recompute live tokens as union of outgoing LLM masks.
-                  let mut new_live = LLMTokenBV::zeros();
-                  for ((_, llm_bv), _) in w.children() {
-                      new_live |= llm_bv;
-                  }
-                  w.value.live_tokens = new_live;
-              }
-          }
-          crate::debug!(2, "Finished flattening pop=0 closures from roots.");
-      }
-
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -5398,7 +5089,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -5835,20 +5526,6 @@ messages:
                   });
               }
 
-              // Flatten zero-pop closures from roots to guarantee there are no pop=0 chains
-              // from any root to an end node longer than one hop, while preserving semantics
-              // by lifting effects and composing masks/SIDs.
-              run_pass!("Flattening pop=0 closure from roots", {
-                  flatten_root_pop0_closure_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
-              });
-              // Quickly compress again to coalesce any fragmentation introduced by flattening.
-              if config.compress_edges {
-                  run_pass!("Compressing edges + unary chains (post-flatten)", {
-                      compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                      compress_unary_chains_trie3(roots, &trie3_god);
-                  });
-              }
-
               if config.merge_nodes_exact.enabled {
                   run_pass!("Merging nodes (post-compress)", {
                       merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
@@ -7938,64 +7615,34 @@ messages:
                   if p_idx == u_idx {
                       continue; // Avoid attempting to rewire a pure self-loop through itself.
                   }
-                  // Contract if:
-                  // - The incoming and outgoing keys are identical (original case), OR
-                  // - Both are pop=0 (epsilon-like), in which case we compose masks/SIDs.
-                  let keys_match = in_key == out_key;
-                  let can_compose_pop0 = in_key.0 == 0 && out_key.0 == 0;
-                  if !keys_match && !can_compose_pop0 {
+                  // Only contract if the incoming and outgoing (pop, LLMTokenBV) keys match exactly.
+                  if in_key != out_key {
                       continue;
                   }
 
                   // Perform the rewrite: in parent P, remove the U mapping under in_key,
                   // and add/union V mapping with SIDs intersection S(P->U) ∧ S(U->V).
                   if let Some(mut pw) = p_idx.write(trie3_god) {
-                      let (in_pop, in_llm) = in_key.clone();
-                      let s_pu_actual_opt;
-                      let dm_became_empty;
-
-                      // Scope to limit mutable borrow of pw.children_mut()
-                      {
-                          if let Some(dm) = pw.children_mut().get_mut(&(in_pop, in_llm.clone())) {
-                              s_pu_actual_opt = dm.remove(&u_idx);
-                              dm_became_empty = dm.is_empty();
-                          } else {
-                              s_pu_actual_opt = None;
-                              dm_became_empty = false;
+                      let (pop, llm) = in_key.clone();
+                      if let Some(dm) = pw.children_mut().get_mut(&(pop, llm.clone())) {
+                          if let Some(s_pu_actual) = dm.remove(&u_idx) {
+                              let s_comp = &s_pu_actual & &s_uv;
+                              if !s_comp.is_empty() {
+                                  dm.entry(v_idx)
+                                      .and_modify(|e| *e |= &s_comp)
+                                      .or_insert(s_comp);
+                              }
+                              if dm.is_empty() {
+                                  pw.children_mut().remove(&(pop, llm.clone()));
+                              }
+                              // Recompute live tokens as union of outgoing LLM masks for robustness.
+                              let mut new_live = LLMTokenBV::zeros();
+                              for ((_, llm_bv), _) in pw.children() {
+                                  new_live |= llm_bv;
+                              }
+                              pw.value.live_tokens = new_live;
+                              rewired_this_iter += 1;
                           }
-                      }
-
-                      if let Some(s_pu_actual) = s_pu_actual_opt {
-                          // Compose SIDs
-                          let s_comp = &s_pu_actual & &s_uv;
-                          // Compose key for the new edge
-                          let (new_pop, new_llm) = if keys_match {
-                              (in_pop, in_llm.clone())
-                          } else {
-                              // Both pop=0; compose LLM masks by intersection
-                              (0, &in_llm & &out_key.1)
-                          };
-
-                          // If either the composed LLM or SIDs are empty, we still remove the
-                          // P->U mapping (since U had only one outgoing), but we don't add a new one.
-                          if !new_llm.is_empty() && !s_comp.is_empty() {
-                              let entry = pw.children_mut().entry((new_pop, new_llm)).or_default();
-                              entry.entry(v_idx)
-                                  .and_modify(|e| *e |= &s_comp)
-                                  .or_insert(s_comp);
-                          }
-
-                          if dm_became_empty {
-                              pw.children_mut().remove(&(in_pop, in_llm.clone()));
-                          }
-
-                          // Recompute live tokens as union of outgoing LLM masks for robustness.
-                          let mut new_live = LLMTokenBV::zeros();
-                          for ((_, llm_bv), _) in pw.children() {
-                              new_live |= llm_bv;
-                          }
-                          pw.value.live_tokens = new_live;
-                          rewired_this_iter += 1;
                       }
                   }
               }
@@ -8009,260 +7656,11 @@ messages:
           crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
       }
 
-      /// Flatten pop=0 closures starting from each root. This eliminates all root->(non-end) pop=0 edges by
-      /// lifting their reachable effects (direct root->end and root->(pop!=0) edges) with correctly composed
-      /// LLMTokenBV and StateIDBV. This preserves semantics while guaranteeing that any pop=0 path from a root
-      /// to an end node has length <= 1 (i.e., root->end directly).
-      fn flatten_root_pop0_closure_trie3(
-          roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-          trie3_god: &Trie3GodWrapper,
-          max_llm_token_id: usize,
-          max_state_id: usize,
-      ){
-          crate::debug!(2, "Flattening pop=0 closure from roots in Trie3...");
-          use std::collections::VecDeque;
-
-          for root_idx in roots.values() {
-              // 1) Snapshot root edges and split into nonzero-pop (kept) and zero-pop (seeds).
-              let (nonzero_edges, seeds): (
-                  BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>>,
-                  Vec<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)>
-              ) = {
-                  let r = root_idx.read(trie3_god).expect("read root");
-                  let mut nonzero = BTreeMap::new();
-                  let mut seed_vec = Vec::new();
-                  for ((pop, llm_bv), dm) in r.children() {
-                      if *pop == 0 {
-                          // For each destination, seed BFS with composed masks from root->dest.
-                          for (dst, sids) in dm {
-                              let mut llm0 = llm_bv.clone();
-                              llm0.constrain(max_llm_token_id);
-                              let mut sids0 = sids.clone();
-                              sids0.constrain(max_state_id);
-                              if !llm0.is_empty() && !sids0.is_empty() {
-                                  seed_vec.push((*dst, llm0, sids0));
-                              }
-                          }
-                      } else {
-                          // Keep non-zero-pop edges as-is (they are not part of zero-closure).
-                          let entry = nonzero.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
-                          for (dst, sids) in dm {
-                              entry.entry(*dst)
-                                  .and_modify(|e| *e |= sids)
-                                  .or_insert(sids.clone());
-                          }
-                      }
-                  }
-                  (nonzero, seed_vec)
-              };
-
-              // If there are no zero-pop seeds, nothing to flatten for this root.
-              if seeds.is_empty() {
-                  continue;
-              }
-
-              // 2) Aggregate new children for the root: start from existing nonzero-pop edges and
-              //    add direct root->end (pop=0) and root->(pop!=0) edges discovered via zero-closure.
-              let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = nonzero_edges;
-              let mut q: VecDeque<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)> = VecDeque::from(seeds);
-
-              while let Some((u, acc_llm, acc_sids)) = q.pop_front() {
-                  // If this node itself is an end, add a direct root->u (pop=0) edge with composed masks.
-                  if let Some(ug) = u.read(trie3_god) {
-                      if ug.value.end {
-                          let key = (0, acc_llm.clone());
-                          let dm = new_children.entry(key).or_insert_with(OrderedHashMap::new);
-                          dm.entry(u)
-                              .and_modify(|e| *e |= &acc_sids)
-                              .or_insert(acc_sids.clone());
-                      }
-
-                      // Explore its outgoing edges.
-                      for ((pop, llm_bv), dm) in ug.children() {
-                          let mut next_llm = &acc_llm & llm_bv;
-                          next_llm.constrain(max_llm_token_id);
-                          if next_llm.is_empty() {
-                              continue;
-                          }
-                          for (v, sids) in dm {
-                              let mut next_sids = &acc_sids & sids;
-                              next_sids.constrain(max_state_id);
-                              if next_sids.is_empty() {
-                                  continue;
-                              }
-                              if *pop == 0 {
-                                  // Continue along zero-pop closure
-                                  q.push_back((*v, next_llm.clone(), next_sids));
-                              } else {
-                                  // Lift this non-zero edge to the root.
-                                  let k = (*pop, next_llm.clone());
-                                  let dests = new_children.entry(k).or_insert_with(OrderedHashMap::new);
-                                  dests.entry(*v)
-                                      .and_modify(|e| *e |= &next_sids)
-                                      .or_insert(next_sids);
-                              }
-                          }
-                      }
-                  }
-              }
-
-              // 3) Write back: replace root's children with new aggregate (which contains no pop=0 edges
-              //    to non-end nodes).
-              if let Some(mut w) = root_idx.write(trie3_god) {
-                  *w.children_mut() = new_children;
-                  // Recompute live tokens as union of outgoing LLM masks.
-                  let mut new_live = LLMTokenBV::zeros();
-                  for ((_, llm_bv), _) in w.children() {
-                      new_live |= llm_bv;
-                  }
-                  w.value.live_tokens = new_live;
-              }
-          }
-          crate::debug!(2, "Finished flattening pop=0 closures from roots.");
-      }
-
-
       ```
     metadata:
       filename: src/constraint_precompute3_utils.rs
-  - user: |-
-      Excellent, the previous issue is resolved and the tests are now passing the `pop=0` assertion. However, a new test, `test_trivial`, is failing with an assertion error:
-
-      ```
-      thread 'test_constraint_basic::test_trivial' (19080653) panicked at src/test_constraint_basic.rs:81:5:
-      assertion `left == right` failed
-        left: HybridBitset { inner:  }
-       right: HybridBitset { inner: 0..=0 }
-      ```
-
-      This indicates that for a simple grammar (`S -> A EOF`), the constraint is incorrectly calculating that no tokens are allowed, when it should allow token `A`.
-
-      ### Root Cause Analysis
-
-      Looking at the detailed logs, the optimizer is being overly aggressive and is destroying the graph structure for this simple case.
-
-      1.  **Initial State:** The graph for this grammar is a simple chain: `root -> node_A -> node_EOF -> END`.
-      2.  **Problematic Pass:** The `compress_unary_chains_trie3` pass is the culprit. It identifies both `node_A` and `node_EOF` as intermediate nodes in a unary chain.
-      3.  **The Bug:** The pass calculates graph properties (like which node is a unique parent of another) once at the beginning of an iteration. It then loops through all nodes and performs rewrites. When it rewrites the chain around `node_A` (making `root` point directly to `node_EOF`), it immediately continues its loop. When it then processes `node_EOF`, it uses stale information about its parent (still thinking its parent is `node_A`, which is now disconnected) and performs a second, incorrect rewrite. This cascade breaks the chain, disconnecting the path to the end node. The graph is effectively deleted.
-
-      The fix is to ensure that after every single contraction, we restart the process of finding candidates on the newly modified graph. This prevents the use of stale data and ensures each contraction is valid.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file:**
-          `src/constraint_precompute3_utils.rs`
-
-      2.  **Locate the function:**
-          Find the function `compress_unary_chains_trie3`.
-
-      3.  **Refactor the iteration logic:**
-          We will change the main loop from a fixed number of iterations (`for _iter in 0..max_outer_iters`) to a `loop` that continues until a full pass over all nodes results in no changes. If a change is made, we will immediately `break` the inner loop to restart the outer one, forcing a recalculation of graph properties.
-
-          Replace this block:
-          ```rust
-              // Iterate a few times until no more rewrites are possible.
-              let mut total_rewired = 0usize;
-              let max_outer_iters = 8usize;
-              for _iter in 0..max_outer_iters {
-                  // ... (indegree and out_info calculation) ...
-          
-                  // Find candidates...
-                  let mut rewired_this_iter = 0usize;
-                  for u in &all_nodes {
-                      // ... (candidate check and rewrite logic) ...
-                      if rewrite_was_performed {
-                          // ...
-                          rewired_this_iter += 1;
-                      }
-                  }
-          
-                  total_rewired += rewired_this_iter;
-                  if rewired_this_iter == 0 {
-                      break;
-                  }
-              }
-          ```
-
-          With this corrected fixed-point iteration logic:
-          ```rust
-              // Iterate until no more rewrites are possible.
-              let mut total_rewired = 0usize;
-              loop {
-                  // ... (indegree and out_info calculation remains here) ...
-          
-                  // Find candidates...
-                  let mut rewired_this_loop = false;
-                  for u in &all_nodes {
-                      // ... (candidate check and rewrite logic) ...
-                      if rewrite_was_performed {
-                          // ...
-                          total_rewired += 1;
-                          rewired_this_loop = true;
-                          break; // Restart the process with updated graph properties
-                      }
-                  }
-          
-                  if !rewired_this_loop {
-                      break; // No changes in a full pass, fixed point reached.
-                  }
-              }
-          ```
-
-      This change ensures that the graph properties are always up-to-date before a contraction decision is made, fixing the bug.
-
-      ### Git Diff
-
-      Here is the git patch to apply the fix.
-
-      ```diff
-      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
-      index 789abcd..ef01234 100644
-      --- a/src/constraint_precompute3_utils.rs
-      +++ b/src/constraint_precompute3_utils.rs
-      @@ -2439,10 +2439,8 @@
-           let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
-       
-           // Iterate a few times until no more rewrites are possible.
-           let mut total_rewired = 0usize;
-      -    let max_outer_iters = 8usize;
-      -    for _iter in 0..max_outer_iters {
-      +    loop {
-               // Build indegree counts and track unique predecessor + edge-key for nodes with indegree == 1.
-               let mut indegree: HashMap<PrecomputeNode3Index, usize> = HashMap::new();
-               let mut unique_parent: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, (isize, LLMTokenBV))> = HashMap::new();
-      @@ -2501,7 +2499,7 @@
-               }
-       
-               // Find candidates: nodes with indegree==1, outdegree==1, not roots, and matching keys on both sides.
-      -        let mut rewired_this_iter = 0usize;
-      +        let mut rewired_this_loop = false;
-               for u in &all_nodes {
-                   let u_idx = *u;
-                   if roots_set.contains(&u_idx) {
-      @@ -2570,16 +2568,15 @@
-                               }
-                               pw.value.live_tokens = new_live;
-      -                        rewired_this_iter += 1;
-      +                        total_rewired += 1;
-      +                        rewired_this_loop = true;
-      +                        break; // Restart the process with updated graph properties
-                           }
-                       }
-                   }
-               }
-       
-      -        total_rewired += rewired_this_iter;
-      -        if rewired_this_iter == 0 {
-      +        if !rewired_this_loop {
-                   break;
-               }
-           }
-       
-
-      ```
-    metadata:
-  - user: Apply the above diff. Note that the diff isn't exactly correct. You'll need
-      to rewrite it correctly.
+  - user: Make it so whether assert_pop0_paths_to_end_are_short is run is controlled
+      by a field in the config. Off by default.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8282,128 +7680,120 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with bugs caused by stale state during iteration is a classic problem. Restarting the process after each mutation is a robust way to ensure correctness. Here are the step-by-step instructions and the corresponding git diff to fix the issue.
+      This change introduces a new field `assert_pop0_paths_to_end_are_short` to `Trie3Config`, defaulting to `false`, and uses it to control the execution of the corresponding assertion function within `optimize_trie3_size`.
 
-      ### Step-by-step Instructions
+      Here are the step-by-step instructions:
 
-      1.  **Open the file:**
-          `src/constraint_precompute3_utils.rs`
+      ### `src/constraint_precompute3_utils.rs`
 
-      2.  **Navigate to the `compress_unary_chains_trie3` function.**
+      1.  **Update `Trie3Config` struct:**
+          Add the new field `assert_pop0_paths_to_end_are_short` to the `Trie3Config` struct definition around line 143.
 
-      3.  **Modify the main iteration loop:**
-          The current loop iterates a fixed number of times. We will change this to a fixed-point iteration loop that continues until a full pass over all nodes results in no changes.
+          ```rust
+          // In src/constraint_precompute3_utils.rs, around line 143
+          pub struct Trie3Config {
+              // ... existing fields ...
+              pub factor_common_destinations: bool,
+              pub stochastic_equivalence_check: bool,
+              pub debug_remove_pop_gt_0: bool,
+              pub assert_pop0_paths_to_end_are_short: bool, // <-- ADD THIS LINE
+          }
+          ```
 
-          *   **Delete** the following lines (around line 2441):
-              ```rust
-              let max_outer_iters = 8usize;
-              for _iter in 0..max_outer_iters {
-              ```
-          *   **Replace** them with a single line:
-              ```rust
-              loop {
-              ```
-          *   Optionally, you can also update the comment just above to be more accurate:
-              *   **Change:** `// Iterate a few times until no more rewrites are possible.`
-              *   **To:** `// Iterate until no more rewrites are possible.`
+      2.  **Update `Trie3Config::default()` implementation:**
+          Set the new field to `false` in the `Default` implementation for `Trie3Config` around line 170.
 
-      4.  **Update the inner loop's control variable:**
-          *   Around line 2502, **change** this line:
-              ```rust
-              let mut rewired_this_iter = 0usize;
-              ```
-          *   **To:**
-              ```rust
-              let mut rewired_this_loop = false;
-              ```
-
-      5.  **Change the logic for when a rewrite occurs:**
-          When a chain is successfully contracted, we need to increment the total counter, set our flag, and immediately break from the inner loop to force recalculation of graph properties.
-
-          *   Around line 2571, **replace** this line:
-              ```rust
-              rewired_this_iter += 1;
-              ```
-          *   **With** these three lines:
-              ```rust
-              total_rewired += 1;
-              rewired_this_loop = true;
-              break; // Restart the process with updated graph properties
-              ```
-
-      6.  **Update the outer loop's exit condition:**
-          Finally, we adjust the check at the end of the loop to use our new boolean flag.
-
-          *   **Delete** the following block (around line 2576):
-              ```rust
-              total_rewired += rewired_this_iter;
-              if rewired_this_iter == 0 {
-                  break;
+          ```rust
+          // In src/constraint_precompute3_utils.rs, around line 170
+          impl Default for Trie3Config {
+              fn default() -> Self {
+                  Self {
+                      // ... existing fields ...
+                      factor_common_destinations: true,
+                      stochastic_equivalence_check: false,
+                      debug_remove_pop_gt_0: false,
+                      assert_pop0_paths_to_end_are_short: false, // <-- ADD THIS LINE
+                  }
               }
-              ```
-          *   **Replace** it with this new condition:
-              ```rust
-              if !rewired_this_loop {
-                  break; // No changes in a full pass, fixed point reached.
+          }
+          ```
+
+      3.  **Update `Trie3Config::off()` implementation:**
+          Set the new field to `false` in the `off()` method for `Trie3Config` around line 200.
+
+          ```rust
+          // In src/constraint_precompute3_utils.rs, around line 200
+          impl Trie3Config {
+              pub fn off() -> Self {
+                  Self {
+                      // ... existing fields ...
+                      factor_common_destinations: false,
+                      stochastic_equivalence_check: false,
+                      debug_remove_pop_gt_0: false,
+                      assert_pop0_paths_to_end_are_short: false, // <-- ADD THIS LINE
+                  }
               }
-              ```
+          }
+          ```
 
-      These changes will ensure that the graph analysis is always performed on the most up-to-date data, preventing the incorrect cascading contractions.
+      4.  **Update `optimize_trie3_size` function:**
+          Wrap the call to `assert_pop0_paths_to_end_are_short` with a check against the new config field around line 610.
 
-      ### Git Diff
+          ```rust
+          // In src/constraint_precompute3_utils.rs, around line 610
+          // ...
+              }
+          }
 
-      Here is the git patch that applies the changes described above.
+          if config.assert_pop0_paths_to_end_are_short { // <-- ADD THIS LINE
+              assert_pop0_paths_to_end_are_short(roots, trie3_god);
+          } // <-- ADD THIS LINE
+
+      	crate::debug!(2, "Finished optimizing Trie 3 size.");
+          // ...
+          ```
+
+      Here is the git diff for the changes:
 
       ```diff
       diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
-      index 789e581..c50b007 100644
       --- a/src/constraint_precompute3_utils.rs
       +++ b/src/constraint_precompute3_utils.rs
-      @@ -2438,10 +2438,8 @@
+      @@ -140,6 +140,7 @@
+           pub factor_common_destinations: bool,
+           pub stochastic_equivalence_check: bool,
+           pub debug_remove_pop_gt_0: bool,
+      +    pub assert_pop0_paths_to_end_are_short: bool,
+       }
        
-           let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
-       
-      -    // Iterate a few times until no more rewrites are possible.
-      +    // Iterate until no more rewrites are possible.
-           let mut total_rewired = 0usize;
-      -    let max_outer_iters = 8usize;
-      -    for _iter in 0..max_outer_iters {
-      +    loop {
-               // Build indegree counts and track unique predecessor + edge-key for nodes with indegree == 1.
-               let mut indegree: HashMap<PrecomputeNode3Index, usize> = HashMap::new();
-               let mut unique_parent: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, (isize, LLMTokenBV))> = HashMap::new();
-      @@ -2501,7 +2499,7 @@
+       impl Default for Trie3Config {
+      @@ -158,6 +159,7 @@
+                   factor_common_destinations: true,
+                   stochastic_equivalence_check: false,
+                   debug_remove_pop_gt_0: false,
+      +            assert_pop0_paths_to_end_are_short: false,
                }
-       
-               // Find candidates: nodes with indegree==1, outdegree==1, not roots, and matching keys on both sides.
-      -        let mut rewired_this_iter = 0usize;
-      +        let mut rewired_this_loop = false;
-               for u in &all_nodes {
-                   let u_idx = *u;
-                   if roots_set.contains(&u_idx) {
-      @@ -2570,16 +2568,15 @@
-                               new_live |= llm_bv;
-                           }
-                           pw.value.live_tokens = new_live;
-      -                    rewired_this_iter += 1;
-      +                    total_rewired += 1;
-      +                    rewired_this_loop = true;
-      +                    break; // Restart the process with updated graph properties
-                       }
-                   }
+           }
+       }
+      @@ -178,6 +180,7 @@
+                   factor_common_destinations: false,
+                   stochastic_equivalence_check: false,
+                   debug_remove_pop_gt_0: false,
+      +            assert_pop0_paths_to_end_are_short: false,
                }
-       
-      -        total_rewired += rewired_this_iter;
-      -        if rewired_this_iter == 0 {
-      -            break;
-      -        }
-      +        if !rewired_this_loop {
-      +            break; // No changes in a full pass, fixed point reached.
-      +        }
+           }
+       }
+      @@ -607,7 +610,9 @@
+               }
            }
        
-           crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
-
+      -    assert_pop0_paths_to_end_are_short(roots, trie3_god);
+      +    if config.assert_pop0_paths_to_end_are_short {
+      +        assert_pop0_paths_to_end_are_short(roots, trie3_god);
+      +    }
+       
+       	crate::debug!(2, "Finished optimizing Trie 3 size.");
+       }
       ```
     metadata:
   - user: |
@@ -8415,7 +7805,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor compress_unary_chains_trie3 to
-      use fixed-point iteration that restarts on change"'
+  - user: 'Changes committed with message: "Config: Make assert_pop0_paths_to_end_are_short
+      check configurable in Trie3Config"'
     metadata:
 ...
