@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use rand::prelude::*;
 use crate::datastructures::trie::PathComparison;
-use crate::glr::parser::GLRParser;
+use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 
@@ -122,6 +122,7 @@ pub struct Trie3Config {
     pub merge_nodes_structural: bool,
     pub merge_nodes_ultrafast: bool,
     pub prune_nodes_not_reaching_end: bool,
+    pub generalize_sids: bool,
     pub simplify_llm_token_bvs: bool,
     pub refine_token_atoms: bool,
     pub refine_token_atoms_exact: bool,
@@ -150,6 +151,7 @@ impl Default for Trie3Config {
             merge_nodes_structural: true,
             merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: true,
+            generalize_sids: true,
             simplify_llm_token_bvs: false,
             refine_token_atoms: true,
             refine_token_atoms_exact: true,
@@ -180,6 +182,7 @@ impl Trie3Config {
             merge_nodes_structural: false,
             merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: false,
+            generalize_sids: false,
             refine_token_atoms: false,
             refine_token_atoms_exact: false,
             refine_token_atoms_max_blocks: 0,
@@ -248,6 +251,110 @@ fn debug_remove_pop_gt_0_edges_trie3(
         }
         w.value.live_tokens = new_live;
         *w.children_mut() = new_children;
+    }
+}
+
+fn propagate_and_generalize_sids_trie3(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+    parser: &GLRParser,
+    max_state_id: usize,
+) {
+    crate::debug!(2, "Propagating possible states to generalize StateIDBVs in Trie3...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    // Part A: Pre-computation
+    let one_step_back_map = parser.build_one_step_back_map();
+
+    let mut max_pop = 0;
+    for node_idx in &all_nodes {
+        let r = node_idx.read(trie3_god).expect("read");
+        for ((pop, _), _) in r.children() {
+            if *pop > 0 {
+                max_pop = max_pop.max(*pop as usize);
+            }
+        }
+    }
+
+    if max_pop == 0 {
+        crate::debug!(2, "No pop > 0 edges found, skipping SID generalization.");
+        return;
+    }
+
+    let num_levels = (max_pop as f64).log2().ceil() as usize + 1;
+    let mut two_power_back_maps: Vec<BTreeMap<StateID, StateIDBV>> = Vec::with_capacity(num_levels);
+    two_power_back_maps.push(one_step_back_map);
+
+    for i in 1..num_levels {
+        let prev_map = &two_power_back_maps[i - 1];
+        let mut next_map: BTreeMap<StateID, StateIDBV> = BTreeMap::new();
+        for (&state_id, preds1) in prev_map {
+            let mut preds2 = StateIDBV::zeros();
+            for pred1_val in preds1.iter() {
+                if let Some(preds_of_pred) = prev_map.get(&StateID(pred1_val)) {
+                    preds2 |= preds_of_pred;
+                }
+            }
+            if !preds2.is_empty() {
+                next_map.insert(state_id, preds2);
+            }
+        }
+        two_power_back_maps.push(next_map);
+    }
+
+    // Helper for T_n(S)
+    let apply_n_step_back = |s: &StateIDBV, n: usize| -> StateIDBV {
+        let mut current_s = s.clone();
+        for k in 0..two_power_back_maps.len() {
+            if (n >> k) & 1 == 1 {
+                let map_k = &two_power_back_maps[k];
+                let mut next_s = StateIDBV::zeros();
+                for state_id_val in current_s.iter() {
+                    let state_id = StateID(state_id_val);
+                    if let Some(preds) = map_k.get(&state_id) {
+                        next_s |= preds;
+                    }
+                }
+                current_s = next_s;
+            }
+        }
+        current_s
+    };
+
+    // Part B: Fixed-point iteration
+    let mut possible_states: HashMap<PrecomputeNode3Index, StateIDBV> = HashMap::new();
+    let mut worklist: VecDeque<PrecomputeNode3Index> = VecDeque::new();
+
+    let all_states_bv = StateIDBV::ones(max_state_id + 1);
+    for root_idx in roots.values() {
+        possible_states.insert(*root_idx, all_states_bv.clone());
+        worklist.push_back(*root_idx);
+    }
+
+    while let Some(u_idx) = worklist.pop_front() {
+        let s_u = possible_states.get(&u_idx).cloned().unwrap_or_else(StateIDBV::zeros);
+        if s_u.is_empty() { continue; }
+
+        let u_guard = u_idx.read(trie3_god).expect("read");
+        for ((pop, _), dest_map) in u_guard.children() {
+            let s_u_popped = if *pop > 0 { apply_n_step_back(&s_u, *pop as usize) } else { s_u.clone() };
+
+            for (v_idx, sids_uv) in dest_map {
+                let s_transmitted = &s_u_popped & sids_uv;
+                if s_transmitted.is_empty() { continue; }
+
+                let s_v_old = possible_states.entry(*v_idx).or_default();
+                let old_len = s_v_old.len();
+                *s_v_old |= &s_transmitted;
+                if s_v_old.len() > old_len {
+                    worklist.push_back(*v_idx);
+                }
+            }
+        }
     }
 }
 
@@ -349,6 +456,12 @@ pub fn optimize_trie3_size(
             let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
             run_pass!("Constraining bitvectors", {
                 constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
+            });
+        }
+
+        if config.generalize_sids {
+            run_pass!("Generalizing StateID bitvectors", {
+                propagate_and_generalize_sids_trie3(roots, trie3_god, parser, max_state_id);
             });
         }
 

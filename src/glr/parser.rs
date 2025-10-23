@@ -2934,6 +2934,83 @@ impl GLRParser {
         self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
     }
 
+    /// Builds a map from each state to the set of states that can immediately precede it on the parse stack.
+    /// This is used for backward analysis of the state machine.
+    pub fn build_one_step_back_map(&self) -> BTreeMap<StateID, StateIDBV> {
+        let mut one_step_back_map: BTreeMap<StateID, StateIDBV> = BTreeMap::new();
+
+        let mut add_predecessor = |from_sid: StateID, to_sid: StateID| {
+            one_step_back_map.entry(to_sid).or_default().insert(from_sid.0);
+        };
+
+        // From parser.table
+        for (&from_sid, row) in &self.table {
+            // Shifts
+            for &to_sid in row.shifts_and_reduces_full.values().filter_map(|action| match action {
+                Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(sid),
+                Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
+                _ => None,
+            }) {
+                add_predecessor(from_sid, to_sid);
+            }
+            // Gotos
+            for goto in row.gotos.values() {
+                if let Some(to_sid) = goto.state_id {
+                    add_predecessor(from_sid, to_sid);
+                }
+            }
+        }
+
+        // From parser.combined_rows
+        for (&from_sid, row) in &self.combined_rows {
+            // Shifts
+            for actions in row.shifts_and_reduces.values() {
+                for (action, _) in actions {
+                    if let Some(to_sid) = match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
+                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
+                        _ => None,
+                    } {
+                        add_predecessor(from_sid, to_sid);
+                    }
+                }
+            }
+            // Gotos
+            for gotos in row.gotos.values() {
+                for (goto, _) in gotos {
+                    if let Some(to_sid) = goto.state_id {
+                        add_predecessor(from_sid, to_sid);
+                    }
+                }
+            }
+        }
+
+        // From parser.hallucinated_row
+        let from_sid = self.hallucinated_state_id;
+        // Shifts
+        for actions in self.hallucinated_row.shifts_and_reduces.values() {
+            for (action, _) in actions {
+                if let Some(to_sid) = match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
+                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
+                    _ => None,
+                } {
+                    add_predecessor(from_sid, to_sid);
+                }
+            }
+        }
+        // Gotos
+        for gotos in self.hallucinated_row.gotos.values() {
+            for (goto, _) in gotos {
+                if let Some(to_sid) = goto.state_id {
+                    add_predecessor(from_sid, to_sid);
+                }
+            }
+        }
+
+        one_step_back_map
+    }
+
     fn print_numeric_stats_summary<T>(
         &self,
         label: &str,
