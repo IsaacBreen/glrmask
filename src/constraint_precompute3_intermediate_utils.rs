@@ -301,7 +301,7 @@ struct PopChainTask {
     src: IntermediatePrecomputeNode3Index,
     src_ek: IntermediateTrie3EdgeKey, // Pop(n1, A1)
     mid: IntermediatePrecomputeNode3Index,
-    new_ek: IntermediateTrie3EdgeKey, // Pop(n', A')
+    new_ek: Option<IntermediateTrie3EdgeKey>, // Pop(n', A'), or None for remove-only
     dst: IntermediatePrecomputeNode3Index,
 }
 
@@ -449,32 +449,59 @@ fn contract_pop_chains(
             // Rule 1: Pop(n1, A1) then Pop(0, B) -> Pop(n1, A1 ∩ B)
             // Rule 2: Pop(n1, [ALL]) then Pop(n2, B) -> Pop(n1 + n2, B)
             let mut new_edge_key_opt: Option<IntermediateTrie3EdgeKey> = None;
+            let mut removal_only = false;
 
             if n2 == 0 {
                 // Intersection A1 ∩ A2
                 let mut inter = a1.clone();
                 inter &= a2.clone();
-                new_edge_key_opt = Some(IntermediateTrie3EdgeKey::Pop(n1, inter));
+                // If intersection is empty, prefer removal-only (no unsatisfiable edges).
+                if inter.is_empty() {
+                    removal_only = true;
+                    new_edge_key_opt = None;
+                } else {
+                    new_edge_key_opt = Some(IntermediateTrie3EdgeKey::Pop(n1, inter));
+                }
             } else {
                 // Check if A1 == [ALL]
                 if a1 == LLMTokenBV::max_ones() {
-                    new_edge_key_opt =
-                        Some(IntermediateTrie3EdgeKey::Pop(n1 + n2, a2.clone()));
+                    // If B is empty, removal-only is better than inserting Pop with empty BV.
+                    if a2.is_empty() {
+                        removal_only = true;
+                        new_edge_key_opt = None;
+                    } else {
+                        new_edge_key_opt =
+                            Some(IntermediateTrie3EdgeKey::Pop(n1 + n2, a2.clone()));
+                    }
                 }
             }
 
-            if let Some(new_ek) = new_edge_key_opt {
-                // If this would be a no-op (same edge back to the same node), skip.
-                if dst == mid && new_ek == *ek1 {
-                    continue;
+            match new_edge_key_opt {
+                Some(new_ek) => {
+                    // If this would be a no-op (same edge back to the same node), skip.
+                    if dst == mid && new_ek == *ek1 {
+                        continue;
+                    }
+                    tasks.push(PopChainTask {
+                        src: *src,
+                        src_ek: ek1.clone(),
+                        mid,
+                        new_ek: Some(new_ek),
+                        dst,
+                    });
                 }
-                tasks.push(PopChainTask {
-                    src: *src,
-                    src_ek: ek1.clone(),
-                    mid,
-                    new_ek,
-                    dst,
-                });
+                None => {
+                    if removal_only {
+                        // Remove-only task (unsatisfiable chain).
+                        tasks.push(PopChainTask {
+                            src: *src,
+                            src_ek: ek1.clone(),
+                            mid,
+                            new_ek: None,
+                            dst,
+                        });
+                    }
+                }
             }
         }
     }
@@ -494,12 +521,16 @@ fn contract_pop_chains(
                     wsrc.children_mut().remove(&t.src_ek);
                 }
             }
-            wsrc.children_mut().entry(t.new_ek).or_default().insert(t.dst, ());
+            if let Some(new_ek) = t.new_ek.clone() {
+                wsrc.children_mut().entry(new_ek).or_default().insert(t.dst, ());
+            }
         }
         if let Some(v) = indeg.get_mut(&t.mid) {
             *v = v.saturating_sub(1);
         }
-        *indeg.entry(t.dst).or_insert(0) += 1;
+        if t.new_ek.is_some() {
+            *indeg.entry(t.dst).or_insert(0) += 1;
+        }
     }
 
     changed
