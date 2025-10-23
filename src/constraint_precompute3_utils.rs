@@ -148,8 +148,8 @@ impl Default for Trie3Config {
             factor_common_destinations: true,
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
-            eliminate_pop0_edges: false,
-            assert_pop0_edges_only_at_start: false,
+            eliminate_pop0_edges: true,
+            assert_pop0_edges_only_at_start: true,
             assert_pop0_paths_to_end_are_short: false,
         }
     }
