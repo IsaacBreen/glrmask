@@ -740,6 +740,7 @@ mod tests {
     use crate::tokenizer::TokenizerStateID;
     use std::collections::{BTreeMap, HashMap};
     use std::collections::BTreeSet;
+    use std::ops::BitAndAssign;
 
     #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
     struct NormalizedPath {
@@ -858,7 +859,7 @@ mod tests {
                         pop_pos += n;
                         pops.entry(pop_pos)
                             .or_insert_with(StateIDBV::max_ones)
-                            .intersects(&s);
+                            .bitand_assign(&s);
                         pop_pos += 1;
                     }
                     IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::NoOp => {
