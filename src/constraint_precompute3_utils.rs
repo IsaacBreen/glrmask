@@ -1368,7 +1368,7 @@ pub fn collapse_pop0_closure_trie3(
                     let l_new = l0 & l1;
                     if l_new.is_empty() { continue; }
                     for (dst2, s1) in dm {
-                        let s_new = &s0 & s1;
+                        let s_new = s0 & s1;
                         if s_new.is_empty() { continue; }
                         if insert_edge_summary(&mut summary[c], *p, &l_new, *dst2, &s_new, max_llm, max_sid) {
                             changed = true;
