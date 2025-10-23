@@ -2626,7 +2626,7 @@ pub fn eliminate_pop0_edges_except_from_roots_trie3(
     let end_node = all_nodes_initial.iter().find(|n| n.read(trie3_god).unwrap().value.end)
         .cloned()
         .unwrap_or_else(|| {
-            let node = Trie::new(PrecomputedNodeContents::end());
+            let node = Trie::new(PrecomputedNodeContents::leaf());
             PrecomputeNode3Index::new(trie3_god.insert(node))
         });
 
@@ -2637,8 +2637,8 @@ pub fn eliminate_pop0_edges_except_from_roots_trie3(
         let mut changed = false;
         let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
-        let mut to_add = HashMap::new(); // Node B -> new edges to add
-        let mut pop0_edges_to_remove = HashMap::new(); // Node B -> set of destination nodes C to disconnect from
+        let mut to_add: HashMap<PrecomputeNode3Index, BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>>> = HashMap::new(); // Node B -> new edges to add
+        let mut pop0_edges_to_remove: HashMap<PrecomputeNode3Index, HashSet<PrecomputeNode3Index>> = HashMap::new(); // Node B -> set of destination nodes C to disconnect from
 
         for b_idx in &all_nodes {
             if roots_set.contains(b_idx) { continue; }
