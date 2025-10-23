@@ -2422,6 +2422,7 @@ fn compress_unary_chains_trie3(
                 if new_sids.is_empty() {
                     continue;
                 }
+                let remainder_llm = &in_key.1 - &new_llm;
 
                 if let Some(mut pw) = p_idx.write(trie3_god) {
                     // Remove P -> U under in_key (if still present)
@@ -2434,11 +2435,21 @@ fn compress_unary_chains_trie3(
 
                     // Add/union P -> V under composed key
                     let entry = pw.children_mut()
-                        .entry((new_pop, new_llm))
+                        .entry((new_pop, new_llm.clone()))
                         .or_insert_with(OrderedHashMap::new);
                     entry.entry(v_idx)
                         .and_modify(|e| *e |= &new_sids)
-                        .or_insert(new_sids);
+                        .or_insert(new_sids.clone());
+
+                    // Preserve the remainder of tokens for the original P->U path, if any.
+                    if !remainder_llm.is_empty() {
+                        let entry_rem = pw.children_mut()
+                            .entry((in_key.0, remainder_llm.clone()))
+                            .or_insert_with(OrderedHashMap::new);
+                        entry_rem.entry(u_idx)
+                            .and_modify(|e| *e |= &s_pu)
+                            .or_insert(s_pu.clone());
+                    }
 
                     // Recompute live tokens for parent P
                     let mut new_live = LLMTokenBV::zeros();
