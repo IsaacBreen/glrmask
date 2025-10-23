@@ -618,7 +618,62 @@ pub fn optimize_trie3_size(
         }
     }
 
+    assert_pop0_paths_to_end_are_short(roots, trie3_god);
+
 	crate::debug!(2, "Finished optimizing Trie 3 size.");
+}
+
+fn assert_pop0_paths_to_end_are_short(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+) {
+    crate::debug!(2, "Asserting that all pop=0 paths to an end node are of length <= 1.");
+
+    for root_node in roots.values() {
+        // For each root, check its children connected by pop=0 edges.
+        let r = root_node.read(trie3_god).expect("root must exist");
+        for ((pop, _), dm) in r.children() {
+            if *pop == 0 {
+                for (dest, _) in dm {
+                    // We have a path root -> dest of length 1.
+                    // If `dest` is an end node, this path is valid.
+                    // If `dest` is NOT an end node, it must not be able to reach any
+                    // end node via a path of pop=0 edges, as that would create a
+                    // total path from root of length > 1.
+
+                    let dest_guard = dest.read(trie3_god).expect("dest must exist");
+                    if !dest_guard.value.end {
+                        // `dest` is not an end node. Check for pop=0 reachability to any end node.
+                        let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
+                        let mut visited: HashSet<PrecomputeNode3Index> = HashSet::new();
+
+                        q.push_back(*dest);
+                        visited.insert(*dest);
+
+                        while let Some(curr) = q.pop_front() {
+                            let curr_guard = curr.read(trie3_god).expect("node must exist");
+                            if curr_guard.value.end {
+                                panic!(
+                                    "Found a pop=0 path of length > 1 to an end node. Path starts with root {} -> {}, and continues to end node {}",
+                                    root_node, dest, curr
+                                );
+                            }
+
+                            for ((pop2, _), dm2) in curr_guard.children() {
+                                if *pop2 == 0 {
+                                    for (next, _) in dm2 {
+                                        if visited.insert(*next) {
+                                            q.push_back(*next);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn has_true_cycle_trie3(
