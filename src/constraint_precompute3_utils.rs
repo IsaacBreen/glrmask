@@ -2681,7 +2681,7 @@ pub fn eliminate_pop0_edges_except_roots_trie3(
                 for (ek, dm) in r.children() {
                     for (dst, sids) in dm {
                         incoming.entry(*dst).or_default().push((*src, (ek.0, ek.1.clone()), sids.clone()));
-                        if *pop_is_zero(ek) {
+                        if pop_is_zero(ek) {
                             pop0_edges.push((*src, ek.1.clone(), *dst, sids.clone()));
                         }
                     }
@@ -2704,11 +2704,11 @@ pub fn eliminate_pop0_edges_except_roots_trie3(
             if let Some(preds) = incoming.get(&b) {
                 for (a, (p_ab, llm_ab), s_ab) in preds {
                     // Compose constraints at the same position (pop=0 does not advance position)
-                    let new_llm = &llm_ab & &llm_bc;
+                    let new_llm = llm_ab & &llm_bc;
                     if new_llm.is_empty() {
                         continue;
                     }
-                    let new_sids = &s_ab & &s_bc;
+                    let new_sids = s_ab & &s_bc;
                     if new_sids.is_empty() {
                         continue;
                     }
