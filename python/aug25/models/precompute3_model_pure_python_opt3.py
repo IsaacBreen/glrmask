@@ -55,6 +55,10 @@ RangeSet.union = _patched_union
 RangeSet.intersection = _patched_intersection
 # --- End of monkey-patch ---
 
+# --- Global Toggles ---
+VERBOSE_GET_MASK = False
+# --- End Global Toggles ---
+
 # --- Variation framework and arena optimization params ---
 
 @dataclass(frozen=True)
@@ -985,7 +989,8 @@ class Model(GraphProvider):
         return result
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
-        print("[get_mask] ENTERED")
+        if VERBOSE_GET_MASK:
+            print("[get_mask] ENTERED")
         stats = Stats.get()
         stats.start('get_mask')
         stats.counts['get_mask.traversal.max_depth'] = 0
@@ -1019,12 +1024,9 @@ class Model(GraphProvider):
             )
             heapq.heappush(work_heap, item)
 
-        def dequeue() -> Tuple[NodeID, GSS, int, int, Dict, int]:
-            item = heapq.heappop(work_heap)
-            return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache, item.depth
-
         stats.start('get_mask.seeding')
-        print("[get_mask] Starting seeding phase...")
+        if VERBOSE_GET_MASK:
+            print("[get_mask] Starting seeding phase...")
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
             disallowed = RangeSet.empty()
@@ -1038,15 +1040,18 @@ class Model(GraphProvider):
         init_cache = {}
         num_states = len(self.state)
         for i, (sid, gss) in enumerate(self.state.items()):
-            print(f"[get_mask] Seeding progress: processing state {i+1}/{num_states} (sid={sid})")
+            if VERBOSE_GET_MASK:
+                print(f"[get_mask] Seeding progress: processing state {i+1}/{num_states} (sid={sid})")
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
             enqueue(r, gss_init, 0)
         stats.stop('get_mask.seeding')
-        print(f"[get_mask] Seeding complete. Heap size: {len(work_heap)}")
+        if VERBOSE_GET_MASK:
+            print(f"[get_mask] Seeding complete. Heap size: {len(work_heap)}")
 
         stats.start('get_mask.main_loop')
-        print("[get_mask] Starting main traversal loop...")
+        if VERBOSE_GET_MASK:
+            print("[get_mask] Starting main traversal loop...")
         remaining_mask = all_ones
         while work_heap:
             # Early exit if we've already saturated the mask (no new tokens can be added).
@@ -1055,11 +1060,12 @@ class Model(GraphProvider):
                 break
             if time.time() - last_progress_time > progress_interval_sec:
                 last_progress_time = time.time()
-                print(f"[get_mask] Progress: {len(work_heap)} items in heap, "
-                      f"{stats.counts.get('get_mask.traversal.nodes_processed', 0)} nodes processed, "
-                      f"{stats.counts.get('get_mask.traversal.edges_traversed', 0)} edges traversed, "
-                      f"max_depth={stats.counts.get('get_mask.traversal.max_depth', 0)}, "
-                      f"remaining_tokens={len(remaining_mask)}")
+                if VERBOSE_GET_MASK:
+                    print(f"[get_mask] Progress: {len(work_heap)} items in heap, "
+                          f"{stats.counts.get('get_mask.traversal.nodes_processed', 0)} nodes processed, "
+                          f"{stats.counts.get('get_mask.traversal.edges_traversed', 0)} edges traversed, "
+                          f"max_depth={stats.counts.get('get_mask.traversal.max_depth', 0)}, "
+                          f"remaining_tokens={len(remaining_mask)}")
             stats.inc('get_mask.traversal.depth_heap.pops')
             stats.inc('get_mask.traversal.nodes_processed')
             node, gss_node, start_edge, start_dest, pop_cache, depth = dequeue()
@@ -1200,16 +1206,19 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                     break
         stats.stop('get_mask.main_loop')
-        print("[get_mask] Main traversal loop finished.")
+        if VERBOSE_GET_MASK:
+            print("[get_mask] Main traversal loop finished.")
 
         stats.start('get_mask.final_conversion')
-        print("[get_mask] Starting final mask conversion...")
+        if VERBOSE_GET_MASK:
+            print("[get_mask] Starting final mask conversion...")
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
         stats.stop('get_mask.final_conversion')
-        print("[get_mask] Final conversion complete.")
+        if VERBOSE_GET_MASK:
+            print("[get_mask] Final conversion complete.")
 
         stats.stop('get_mask')
 
@@ -1229,7 +1238,8 @@ class Model(GraphProvider):
             if stats.times['get_mask.main_loop']*1000 > 1:
                 stats.report()
 
-        print("[get_mask] EXITING")
+        if VERBOSE_GET_MASK:
+            print("[get_mask] EXITING")
         return {
             "type": "timed_output",
             "output": original_indices,
