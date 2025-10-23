@@ -838,7 +838,7 @@ mod tests {
 
         let mut normalized_set = BTreeSet::new();
 
-        for (_root_val, path_edges) in all_paths {
+        'outer: for (_root_val, path_edges) in all_paths {
             let mut path_keys: Vec<IntermediateTrie3EdgeKey> =
                 path_edges.into_iter().map(|(ek, _, _)| ek).collect();
 
@@ -861,6 +861,9 @@ mod tests {
                             pops.entry(pop_pos)
                                 .or_insert_with(StateIDBV::max_ones)
                                 .bitand_assign(&s);
+                            if pops.get(&pop_pos).unwrap().is_empty() {
+                                continue 'outer;
+                            }
                         }
                     }
                     IntermediateTrie3EdgeKey::Push(_) | IntermediateTrie3EdgeKey::NoOp => {
