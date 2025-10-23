@@ -125,8 +125,6 @@ pub struct Trie3Config {
     pub stochastic_equivalence_check: bool,
     pub debug_remove_pop_gt_0: bool,
     pub assert_pop0_paths_to_end_are_short: bool,
-    pub eliminate_pop0_edges_except_roots: bool,
-    pub assert_no_pop0_edges_except_roots: bool,
 }
 
 impl Default for Trie3Config {
@@ -149,8 +147,6 @@ impl Default for Trie3Config {
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
             assert_pop0_paths_to_end_are_short: false,
-            eliminate_pop0_edges_except_roots: true,
-            assert_no_pop0_edges_except_roots: true,
         }
     }
 }
@@ -175,8 +171,6 @@ impl Trie3Config {
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
             assert_pop0_paths_to_end_are_short: false,
-            eliminate_pop0_edges_except_roots: false,
-            assert_no_pop0_edges_except_roots: false,
         }
     }
 }
@@ -406,7 +400,7 @@ pub fn optimize_trie3_size(
         if config.compress_edges {
             run_pass!("Compressing edges + unary chains (post-merge)", {
                 compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                // Re-run chain contraction now that structure may have simplified.
+                // Final contraction pass to remove any last unary runs.
                 compress_unary_chains_trie3(roots, &trie3_god);
             });
         }
@@ -415,24 +409,6 @@ pub fn optimize_trie3_size(
             run_pass!("Merging nodes (post-compress)", {
                 merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
             });
-        }
-
-        if config.eliminate_pop0_edges_except_roots {
-            run_pass!("Eliminating pop=0 edges (except roots)", {
-                eliminate_pop0_edges_except_from_roots_trie3(roots, &trie3_god);
-            });
-            // New edges may be mergeable; compress again if enabled.
-            if config.compress_edges {
-                run_pass!("Compressing edges + unary chains (post-pop0-elim)", {
-                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                    compress_unary_chains_trie3(roots, &trie3_god);
-                });
-            }
-            if config.assert_no_pop0_edges_except_roots {
-                run_pass!("Asserting: no internal pop=0 edges remain", {
-                    assert_no_pop0_edges_except_roots_trie3(roots, &trie3_god);
-                });
-            }
         }
 
         // --- Phase 4: Final Cleanup and Polish ---
@@ -2605,156 +2581,4 @@ fn compress_unary_chains_trie3(
     }
 
     crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
-}
-
-/// Rewire away all pop=0 edges from non-root nodes by composing them with their incoming edges.
-/// For each B --(0, L2)--> C and each incoming A --(p, L1)--> B with SIDs SAB and SBC, add
-/// A --(p, L1∧L2)--> C with SIDs SAB∧SBC, then remove B's pop=0 edges. Repeat until stable.
-pub fn eliminate_pop0_edges_except_from_roots_trie3(
-    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-    trie3_god: &Trie3GodWrapper,
-) {
-    crate::debug!(2, "Eliminating pop=0 edges (except from roots) in Trie3 via backward propagation...");
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    if roots_vec.is_empty() {
-        return;
-    }
-    let roots_set: HashSet<_> = roots_vec.iter().cloned().collect();
-
-    // Find or create a canonical end node to consolidate paths that lead to a successful parse.
-    let all_nodes_initial = Trie::all_nodes(trie3_god, &roots_vec);
-    let end_node = all_nodes_initial.iter().find(|n| n.read(trie3_god).unwrap().value.end)
-        .cloned()
-        .unwrap_or_else(|| {
-            let node = Trie::new(PrecomputedNodeContents::leaf());
-            PrecomputeNode3Index::new(trie3_god.insert(node))
-        });
-
-    let mut iter_count: usize = 0;
-    let mut total_rewired = 0;
-    loop {
-        iter_count += 1;
-        let mut changed = false;
-        let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-
-        let mut to_add: HashMap<PrecomputeNode3Index, BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>>> = HashMap::new(); // Node B -> new edges to add
-        let mut pop0_edges_to_remove: HashMap<PrecomputeNode3Index, HashSet<PrecomputeNode3Index>> = HashMap::new(); // Node B -> set of destination nodes C to disconnect from
-
-        for b_idx in &all_nodes {
-            if roots_set.contains(b_idx) { continue; }
-
-            let b_children = b_idx.read(trie3_god).unwrap().children().clone();
-
-            for ((pop, l_bc), dm_bc) in &b_children {
-                if *pop != 0 { continue; }
-
-                for (c_idx, sids_bc) in dm_bc {
-                    // This is a pop=0 edge B->C. Mark it for removal.
-                    pop0_edges_to_remove.entry(*b_idx).or_default().insert(*c_idx);
-                    changed = true;
-
-                    let c_guard = c_idx.read(trie3_god).unwrap();
-                    
-                    // 1. Propagate C's children to B
-                    for ((q, l_cd), dm_cd) in c_guard.children() {
-                        for (d_idx, sids_cd) in dm_cd {
-                            let new_pop = *q;
-                            let new_llm = l_bc & l_cd;
-                            if new_llm.is_empty() { continue; }
-                            let new_sids = sids_bc & sids_cd;
-                            if new_sids.is_empty() { continue; }
-                            
-                            let b_adds = to_add.entry(*b_idx).or_default();
-                            let dm_out = b_adds.entry((new_pop, new_llm)).or_default();
-                            dm_out.entry(*d_idx).and_modify(|e| *e |= &new_sids).or_insert(new_sids);
-                        }
-                    }
-
-                    // 2. Propagate C's end status to B by adding an edge to the canonical end node
-                    if c_guard.value.end {
-                        let b_adds = to_add.entry(*b_idx).or_default();
-                        let dm_out = b_adds.entry((0, l_bc.clone())).or_default();
-                        dm_out.entry(end_node).and_modify(|e| *e |= sids_bc).or_insert(sids_bc.clone());
-                    }
-                }
-            }
-        }
-
-        if !changed {
-            break;
-        }
-
-        // Apply all collected changes
-        let affected_nodes: HashSet<_> = to_add.keys().chain(pop0_edges_to_remove.keys()).cloned().collect();
-        total_rewired += affected_nodes.len();
-
-        for b_idx in affected_nodes {
-            let mut w = b_idx.write(trie3_god).unwrap();
-            
-            // Remove the old pop=0 edges that have been propagated
-            if let Some(to_remove_cs) = pop0_edges_to_remove.get(&b_idx) {
-                let old_children = std::mem::take(w.children_mut());
-                let mut new_children = BTreeMap::new();
-                for (ek, dm) in old_children {
-                    if ek.0 == 0 {
-                        let new_dm: OrderedHashMap<_,_> = dm.into_iter().filter(|(c, _)| !to_remove_cs.contains(c)).collect();
-                        if !new_dm.is_empty() {
-                            new_children.insert(ek, new_dm);
-                        }
-                    } else {
-                        new_children.insert(ek, dm);
-                    }
-                }
-                *w.children_mut() = new_children;
-            }
-
-            // Add the new propagated edges
-            if let Some(edges_to_add) = to_add.get(&b_idx) {
-                for (ek, dm_add) in edges_to_add {
-                    let entry = w.children_mut().entry(ek.clone()).or_default();
-                    for (dst, sids) in dm_add {
-                        entry.entry(*dst).and_modify(|e| *e |= sids).or_insert(sids.clone());
-                    }
-                }
-            }
-            
-            // Recompute live tokens for the modified node
-            let mut new_live = LLMTokenBV::zeros();
-            for ((_, llm_bv), _) in w.children() {
-                new_live |= llm_bv;
-            }
-            w.value.live_tokens = new_live;
-        }
-    }
-    crate::debug!(2, "Finished eliminating pop=0 edges (non-roots) after {} iterations ({} nodes rewired).", iter_count, total_rewired);
-}
-
-/// Assert that there are no pop=0 edges from non-root nodes.
-pub fn assert_no_pop0_edges_except_roots_trie3(
-    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-    trie3_god: &Trie3GodWrapper,
-) {
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-    if all_nodes.is_empty() { return; }
-    let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
-
-    for n in all_nodes {
-        let is_root = roots_set.contains(&n);
-        let g = n.read(trie3_god).expect("read");
-        for ((pop, llm_bv), dm) in g.children() {
-            if *pop == 0 && !is_root {
-                // Try to produce a helpful example
-                let tok_example = llm_bv.iter().next();
-                let sid_example = dm.values().next().and_then(|s| s.iter().next());
-                panic!(
-                    "Invariant violated: found internal pop=0 edge at node {}. Example token={:?}, example state={:?}.",
-                    n,
-                    tok_example,
-                    sid_example
-                );
-            }
-        }
-    }
-    crate::debug!(2, "Assertion passed: no pop=0 edges from non-root nodes.");
 }
