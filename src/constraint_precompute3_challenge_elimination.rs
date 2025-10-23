@@ -741,10 +741,31 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::collections::BTreeSet;
 
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
     struct NormalizedPath {
         llm_bv: LLMTokenBV,
         pops: BTreeMap<usize, StateIDBV>,
+    }
+
+    impl fmt::Display for NormalizedPath {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "NormalizedPath {{ llm_bv: {}, pops: {{", self.llm_bv)?;
+            let mut first = true;
+            for (pos, bv) in &self.pops {
+                if !first {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}: {}", pos, bv)?;
+                first = false;
+            }
+            write!(f, "}} }}")
+        }
+    }
+
+    impl fmt::Debug for NormalizedPath {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self)
+        }
     }
 
     fn normalize_path_challenges(path_keys: &mut Vec<IntermediateTrie3EdgeKey>) -> bool {
@@ -785,6 +806,7 @@ mod tests {
                 if s_push.is_disjoint(&s_pop) {
                     return false;
                 }
+                path_keys[push_idx] = IntermediateTrie3EdgeKey::Push(s_push & s_pop);
                 path_keys.remove(pop_idx);
             } else if n == 1 {
                 if s_push.is_disjoint(&s_pop) {
