@@ -125,6 +125,7 @@ pub struct Trie3Config {
     pub stochastic_equivalence_check: bool,
     pub debug_remove_pop_gt_0: bool,
     pub eliminate_pop0_edges: bool,
+    pub assert_pop0_edges_only_at_start: bool,
     pub assert_pop0_paths_to_end_are_short: bool,
 }
 
@@ -148,6 +149,7 @@ impl Default for Trie3Config {
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
             eliminate_pop0_edges: false,
+            assert_pop0_edges_only_at_start: false,
             assert_pop0_paths_to_end_are_short: false,
         }
     }
@@ -173,6 +175,7 @@ impl Trie3Config {
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
             eliminate_pop0_edges: false,
+            assert_pop0_edges_only_at_start: false,
             assert_pop0_paths_to_end_are_short: false,
         }
     }
@@ -448,6 +451,12 @@ pub fn optimize_trie3_size(
 
 	crate::debug!(2, "Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+
+    if config.assert_pop0_edges_only_at_start {
+        // This is a final check, run it outside the pass loop.
+        crate::debug!(2, "Running final assertion: pop=0 edges only at start...");
+        assert_pop0_edges_only_at_start_trie3(roots, trie3_god);
+    }
 
 
     has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
@@ -2593,30 +2602,66 @@ fn compress_unary_chains_trie3(
     crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
 }
 
-fn assert_no_pop0_edges_trie3(
+/// Panics if any node reachable after a pop>0 edge has an outgoing pop=0 edge.
+fn assert_pop0_edges_only_at_start_trie3(
     roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
 ) {
-    crate::debug!(2, "Asserting that no pop=0 edges exist in Trie3...");
+    crate::debug!(2, "Asserting that pop=0 edges only appear at the start of paths...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
     if all_nodes.is_empty() {
         return;
     }
 
-    for node_idx in all_nodes {
+    // 1. Find all nodes that are reachable *after* a pop > 0 edge has been taken.
+    let mut post_pop_gt_0_nodes = HashSet::new();
+    let mut q = VecDeque::new();
+
+    // Seed the queue with initial destinations of pop > 0 edges from all nodes.
+    // This correctly handles cases where roots themselves might have pop>0 edges.
+    for node_idx in &all_nodes {
+        if let Some(g) = node_idx.read(trie3_god) {
+            for ((pop, _), dm) in g.children() {
+                if *pop > 0 {
+                    for (dest, _) in dm {
+                        if post_pop_gt_0_nodes.insert(*dest) {
+                            q.push_back(*dest);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Traverse from these seeds to find the full set of reachable nodes.
+    while let Some(node_idx) = q.pop_front() {
+        if let Some(g) = node_idx.read(trie3_god) {
+            for (_, dm) in g.children() {
+                for (dest, _) in dm {
+                    if post_pop_gt_0_nodes.insert(*dest) {
+                        q.push_back(*dest);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Assert that no node in this set has an outgoing pop=0 edge.
+    for node_idx in &post_pop_gt_0_nodes {
         if let Some(g) = node_idx.read(trie3_god) {
             for ((pop, _), _) in g.children() {
                 if *pop == 0 {
                     panic!(
-                        "Assertion failed: Found a pop=0 edge on node {}. This should not happen after the eliminate_pop0_edges pass.",
+                        "Assertion failed: Found a pop=0 edge on node {}, which is reachable after a pop>0 edge.",
                         node_idx
                     );
                 }
             }
         }
     }
-    crate::debug!(2, "Assertion passed: No pop=0 edges found.");
+
+    crate::debug!(2, "Assertion passed: pop=0 edges only appear at the start.");
 }
 
 /// Eliminate pop=0 edges by composing them into the first subsequent pop>0 transitions.
