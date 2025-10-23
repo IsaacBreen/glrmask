@@ -916,7 +916,7 @@ impl GrammarConstraint {
         tokenizer: &Regex,
     ) -> BTreeMap<usize, usize>
     {
-        return original_llm_token_map.iter().map(|(bytes, id)| (id.0, id.0)).collect(); // TEMP
+        // return original_llm_token_map.iter().map(|(bytes, id)| (id.0, id.0)).collect(); // TEMP
         // 1. Prepare inputs for equivalence analysis.
         // We sort the tokens by their byte representation to ensure determinism.
         let mut sorted_tokens: Vec<_> = original_llm_token_map.iter().collect();
@@ -2000,17 +2000,17 @@ impl GrammarConstraint {
 
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
-        for (tid, (start, end)) in &terminal_templates {
-            let terminal = token_name_map.get_by_right(&tid.0).unwrap();
-            println!("\n--- Intermediate Trie3 Template for terminal {}: ---", terminal);
-            println!("End node: {:?}", end);
-            let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-                .display_edge_keys_only()
-                .display_nodes()
-                .omit_depth()
-                ;
-            println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &options));
-        }
+        // for (tid, (start, end)) in &terminal_templates {
+        //     let terminal = token_name_map.get_by_right(&tid.0).unwrap();
+        //     println!("\n--- Intermediate Trie3 Template for terminal {}: ---", terminal);
+        //     println!("End node: {:?}", end);
+        //     let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+        //         .display_edge_keys_only()
+        //         .display_nodes()
+        //         .omit_depth()
+        //         ;
+        //     println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &options));
+        // }
 
         if is_debug_level_enabled(2) {
             println!("\n--- Intermediate Trie3 Template Statistics ---");
@@ -2249,13 +2249,13 @@ impl GrammarConstraint {
             }
         }
 
-        println!("Intermediate trie3 before eliminating negative pops:");
-        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-            .display_edge_keys_only()
-            .display_nodes()
-            .omit_depth()
-            ;
-        println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+        // println!("Intermediate trie3 before eliminating negative pops:");
+        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+        //     .display_edge_keys_only()
+        //     .display_nodes()
+        //     .omit_depth()
+        //     ;
+        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
 
         // --- New: Path extraction, elimination, and trie rebuilding ---
         crate::debug!(2, "Processing and rebuilding trie3 paths...");
@@ -2265,13 +2265,13 @@ impl GrammarConstraint {
         );
         intermediate_roots = intermediate_precomputed3.values().cloned().collect();
 
-        println!("Final intermediate trie3:");
-        let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-            .display_edge_keys_only()
-            .display_nodes()
-            .omit_depth()
-            ;
-        println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+        // println!("Final intermediate trie3:");
+        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+        //     .display_edge_keys_only()
+        //     .display_nodes()
+        //     .omit_depth()
+        //     ;
+        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
 
         // --- Convert intermediate trie to final Trie3 format ---
         crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");
