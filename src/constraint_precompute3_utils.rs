@@ -2614,138 +2614,119 @@ pub fn eliminate_pop0_edges_except_from_roots_trie3(
     roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
 ) {
-    crate::debug!(2, "Eliminating pop=0 edges (except from roots) in Trie3...");
+    crate::debug!(2, "Eliminating pop=0 edges (except from roots) in Trie3 via backward propagation...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-    if all_nodes.is_empty() {
+    if roots_vec.is_empty() {
         return;
     }
-    let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
+    let roots_set: HashSet<_> = roots_vec.iter().cloned().collect();
 
-    let mut total_added_edges: usize = 0;
-    let mut total_removed_entries: usize = 0;
+    // Find or create a canonical end node to consolidate paths that lead to a successful parse.
+    let all_nodes_initial = Trie::all_nodes(trie3_god, &roots_vec);
+    let end_node = all_nodes_initial.iter().find(|n| n.read(trie3_god).unwrap().value.end)
+        .cloned()
+        .unwrap_or_else(|| {
+            let node = Trie::new(PrecomputedNodeContents::end());
+            PrecomputeNode3Index::new(trie3_god.insert(node))
+        });
+
     let mut iter_count: usize = 0;
-
+    let mut total_rewired = 0;
     loop {
         iter_count += 1;
+        let mut changed = false;
+        let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
-        // Build incoming map: dest -> Vec<(src, (pop, llm_bv), sids)>
-        let mut incoming: HashMap<
-            PrecomputeNode3Index,
-            Vec<(PrecomputeNode3Index, (isize, LLMTokenBV), StateIDBV)>
-        > = HashMap::new();
-        for src in &all_nodes {
-            let g = src.read(trie3_god).expect("read");
-            for (ek, dm) in g.children() {
-                for (dst, sids) in dm {
-                    incoming.entry(*dst)
-                        .or_default()
-                        .push((*src, (ek.0, ek.1.clone()), sids.clone()));
-                }
-            }
-        }
+        let mut to_add = HashMap::new(); // Node B -> new edges to add
+        let mut pop0_edges_to_remove = HashMap::new(); // Node B -> set of destination nodes C to disconnect from
 
-        // Accumulate new edges per parent A.
-        let mut to_add: HashMap<
-            PrecomputeNode3Index,
-            BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>>
-        > = HashMap::new();
-        // Track which nodes should have their pop=0 edges removed in this round.
-        let mut strip_pop0_from: HashSet<PrecomputeNode3Index> = HashSet::new();
+        for b_idx in &all_nodes {
+            if roots_set.contains(b_idx) { continue; }
 
-        let mut added_this_iter = 0usize;
-        let mut removed_entries_this_iter = 0usize;
+            let b_children = b_idx.read(trie3_god).unwrap().children().clone();
 
-        // For each non-root node B, rewire pop=0 edges B->C backward to A->C.
-        for b in &all_nodes {
-            let b_idx = *b;
-            if roots_set.contains(&b_idx) {
-                continue; // leave root pop=0 edges alone
-            }
-            let g = if let Some(gg) = b.read(trie3_god) { gg } else { continue };
+            for ((pop, l_bc), dm_bc) in &b_children {
+                if *pop != 0 { continue; }
 
-            // Do we have any incoming to B? If not, removing pop=0 edges just disconnects B->..., which is fine.
-            let incoming_list_opt = incoming.get(&b_idx);
-
-            for ((pop, l2), dm_bc) in g.children() {
-                if *pop != 0 {
-                    continue;
-                }
-                strip_pop0_from.insert(b_idx);
-                // If no one reaches B, no rewiring to perform for this B->C edge.
-                let Some(incoming_list) = incoming_list_opt else { continue };
-
-                // For each destination C with its SIDs from B->C
                 for (c_idx, sids_bc) in dm_bc {
-                    // For each incoming A->B under (p, l1) with SIDs sids_ab
-                    for (a_idx, (p, l1), sids_ab) in incoming_list {
-                        let llm_new = l1 & l2;
-                        if llm_new.is_empty() {
-                            continue;
+                    // This is a pop=0 edge B->C. Mark it for removal.
+                    pop0_edges_to_remove.entry(*b_idx).or_default().insert(*c_idx);
+                    changed = true;
+
+                    let c_guard = c_idx.read(trie3_god).unwrap();
+                    
+                    // 1. Propagate C's children to B
+                    for ((q, l_cd), dm_cd) in c_guard.children() {
+                        for (d_idx, sids_cd) in dm_cd {
+                            let new_pop = *q;
+                            let new_llm = l_bc & l_cd;
+                            if new_llm.is_empty() { continue; }
+                            let new_sids = sids_bc & sids_cd;
+                            if new_sids.is_empty() { continue; }
+                            
+                            let b_adds = to_add.entry(*b_idx).or_default();
+                            let dm_out = b_adds.entry((new_pop, new_llm)).or_default();
+                            dm_out.entry(*d_idx).and_modify(|e| *e |= &new_sids).or_insert(new_sids);
                         }
-                        let sids_new = sids_ab & sids_bc;
-                        if sids_new.is_empty() {
-                            continue;
-                        }
-                        let entry_for_a = to_add.entry(*a_idx).or_insert_with(BTreeMap::new);
-                        let dm_out = entry_for_a.entry((*p, llm_new.clone())).or_insert_with(OrderedHashMap::new);
-                        dm_out.entry(*c_idx)
-                            .and_modify(|e| *e |= &sids_new)
-                            .or_insert(sids_new);
-                        added_this_iter += 1;
+                    }
+
+                    // 2. Propagate C's end status to B by adding an edge to the canonical end node
+                    if c_guard.value.end {
+                        let b_adds = to_add.entry(*b_idx).or_default();
+                        let dm_out = b_adds.entry((0, l_bc.clone())).or_default();
+                        dm_out.entry(end_node).and_modify(|e| *e |= sids_bc).or_insert(sids_bc.clone());
                     }
                 }
             }
         }
 
-        // Apply additions to parents A
-        for (a_idx, edges_by_key) in to_add {
-            let mut w = a_idx.write(trie3_god).expect("write");
-            let mut children = std::mem::take(w.children_mut());
-            for (ek, dm_add) in edges_by_key {
-                let entry = children.entry(ek).or_insert_with(OrderedHashMap::new);
-                for (dst, sids) in dm_add {
-                    entry.entry(dst)
-                        .and_modify(|e| *e |= &sids)
-                        .or_insert(sids);
-                }
-            }
-            // Recompute live tokens
-            let mut new_live = LLMTokenBV::zeros();
-            for ((_, llm_bv), _) in &children {
-                new_live |= llm_bv;
-            }
-            w.value.live_tokens = new_live;
-            *w.children_mut() = children;
-        }
-
-        // Remove all pop=0 edges from the selected non-root nodes
-        for b_idx in strip_pop0_from.iter() {
-            let mut w = b_idx.write(trie3_god).expect("write");
-            let old_children = std::mem::take(w.children_mut());
-            let mut new_children = BTreeMap::new();
-            for ((pop, bv), dm) in old_children {
-                if pop == 0 {
-                    removed_entries_this_iter += 1;
-                    continue;
-                }
-                new_children.insert((pop, bv), dm);
-            }
-            let mut new_live = LLMTokenBV::zeros();
-            for ((_, llm_bv), _) in &new_children {
-                new_live |= llm_bv;
-            }
-            w.value.live_tokens = new_live;
-            *w.children_mut() = new_children;
-        }
-
-        if added_this_iter == 0 && removed_entries_this_iter == 0 {
+        if !changed {
             break;
         }
-        total_added_edges += added_this_iter;
-        total_removed_entries += removed_entries_this_iter;
+
+        // Apply all collected changes
+        let affected_nodes: HashSet<_> = to_add.keys().chain(pop0_edges_to_remove.keys()).cloned().collect();
+        total_rewired += affected_nodes.len();
+
+        for b_idx in affected_nodes {
+            let mut w = b_idx.write(trie3_god).unwrap();
+            
+            // Remove the old pop=0 edges that have been propagated
+            if let Some(to_remove_cs) = pop0_edges_to_remove.get(&b_idx) {
+                let old_children = std::mem::take(w.children_mut());
+                let mut new_children = BTreeMap::new();
+                for (ek, dm) in old_children {
+                    if ek.0 == 0 {
+                        let new_dm: OrderedHashMap<_,_> = dm.into_iter().filter(|(c, _)| !to_remove_cs.contains(c)).collect();
+                        if !new_dm.is_empty() {
+                            new_children.insert(ek, new_dm);
+                        }
+                    } else {
+                        new_children.insert(ek, dm);
+                    }
+                }
+                *w.children_mut() = new_children;
+            }
+
+            // Add the new propagated edges
+            if let Some(edges_to_add) = to_add.get(&b_idx) {
+                for (ek, dm_add) in edges_to_add {
+                    let entry = w.children_mut().entry(ek.clone()).or_default();
+                    for (dst, sids) in dm_add {
+                        entry.entry(*dst).and_modify(|e| *e |= sids).or_insert(sids.clone());
+                    }
+                }
+            }
+            
+            // Recompute live tokens for the modified node
+            let mut new_live = LLMTokenBV::zeros();
+            for ((_, llm_bv), _) in w.children() {
+                new_live |= llm_bv;
+            }
+            w.value.live_tokens = new_live;
+        }
     }
-    crate::debug!(2, "Finished eliminating pop=0 edges (non-roots). Iterations={}, additions={}, removals={}", iter_count, total_added_edges, total_removed_entries);
+    crate::debug!(2, "Finished eliminating pop=0 edges (non-roots) after {} iterations ({} nodes rewired).", iter_count, total_rewired);
 }
 
 /// Assert that there are no pop=0 edges from non-root nodes.
