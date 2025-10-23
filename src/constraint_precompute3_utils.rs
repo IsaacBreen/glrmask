@@ -123,6 +123,8 @@ pub struct Trie3Config {
     pub merge_nodes_ultrafast: bool,
     pub prune_nodes_not_reaching_end: bool,
     pub simplify_llm_token_bvs: bool,
+    pub refine_token_atoms: bool,
+    pub refine_token_atoms_max_blocks: usize,
     pub factor_common_destinations: bool,
     pub stochastic_equivalence_check: bool,
     pub debug_remove_pop_gt_0: bool,
@@ -147,6 +149,8 @@ impl Default for Trie3Config {
             merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: true,
             simplify_llm_token_bvs: false,
+            refine_token_atoms: true,
+            refine_token_atoms_max_blocks: 2048,
             factor_common_destinations: true,
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
@@ -172,6 +176,8 @@ impl Trie3Config {
             merge_nodes_structural: false,
             merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: false,
+            refine_token_atoms: false,
+            refine_token_atoms_max_blocks: 0,
             // keep these off for the .off() preset
             // eliminate_pop0_edges/assert_no_pop0_nonroot_edges already set above
             simplify_llm_token_bvs: false,
@@ -363,6 +369,16 @@ pub fn optimize_trie3_size(
             });
         }
 
+        // Refine token-sets to semantic atoms per node/pop to maximally coalesce behaviorally identical tokens.
+        if config.refine_token_atoms {
+            run_pass!("Refining token-set atoms", {
+                refine_edges_to_token_atoms_trie3(
+                    roots, &trie3_god,
+                    max_llm_token_id, max_state_id,
+                    config.refine_token_atoms_max_blocks);
+            });
+        }
+
         // After compression, prune and GC before the expensive merge.
         if config.prune_dead_paths {
             run_pass!("Pruning dead paths (post-compress)", {
@@ -411,6 +427,15 @@ pub fn optimize_trie3_size(
                 // Final contraction pass to remove any last unary runs.
                 compress_unary_chains_trie3(roots, &trie3_god);
             });
+        }
+        if config.refine_token_atoms {
+            run_pass!("Refining token-set atoms (post-merge)", {
+                refine_edges_to_token_atoms_trie3(
+                    roots,
+                    &trie3_god,
+                    max_llm_token_id,
+                    max_state_id,
+                    config.refine_token_atoms_max_blocks);
         }
 
         if config.merge_nodes_exact.enabled {
@@ -465,8 +490,18 @@ pub fn optimize_trie3_size(
                     compress_unary_chains_trie3(roots, &trie3_god);
                 });
             }
+            if config.refine_token_atoms {
+                run_pass!("Refining token-set atoms (post-structural)", {
+                    refine_edges_to_token_atoms_trie3(
+                        roots,
+                        &trie3_god,
+                        max_llm_token_id,
+                        max_state_id,
+                        config.refine_token_atoms_max_blocks);
+                });
+            }
         }
-    }
+
 
 	crate::debug!(2, "Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
@@ -2369,6 +2404,222 @@ pub fn merge_nodes_trie3_ultrafast(
     let final_roots_vec: Vec<_> = roots.values().cloned().collect();
     Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
     crate::debug!(2, "Ultrafast merge completed: representatives kept = {}", rep_set.len());
+}
+
+/// Behaviorally minimize per-node/per-pop edges by refining tokens into "semantic atoms".
+/// For each node U and each pop P, consider the family of LLM masks {L_i} attached to the
+/// outgoing edges and the corresponding destination maps D_i (dest -> SIDs). For a token t,
+/// the one-step behavior is F_t(dest) = union over i: t ∈ L_i of D_i(dest). We:
+///  - Partition the token universe U = ⋃_i L_i into atoms by iteratively splitting by each L_i.
+///  - For each atom B, compute F_B(dest) = ⋃_{i: B ∩ L_i ≠ ∅} D_i(dest).
+///  - Merge atoms with identical F_B (canonical dest->SIDs vector) and union their token-sets.
+///  - Emit the resulting minimal set of edges for pop P.
+/// We only rewrite when it improves a local size metric (sum of LLM range-counts + dest entries).
+fn refine_edges_to_token_atoms_trie3(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+    max_llm_token_id: usize,
+    max_state_id: usize,
+    max_blocks: usize,
+) {
+    crate::debug!(2, "Refining token-sets to semantic atoms in Trie3 (cap = {} blocks)...", max_blocks);
+    if max_blocks == 0 {
+        crate::debug!(3, "Refinement disabled due to max_blocks=0.");
+        return;
+    }
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    // Helper: compute range-count for a mask (bounded and constrained for safety).
+    #[inline]
+    fn ranges_len_bounded(m: &LLMTokenBV, max_id: usize) -> usize {
+        let mut c = m.clone();
+        c.constrain(max_id);
+        c.inner().ranges_len()
+    }
+
+    let mut nodes_changed = 0usize;
+    let mut total_improvement = 0isize;
+
+    for node_idx in &all_nodes {
+        let mut w = if let Some(guard) = node_idx.write(trie3_god) { guard } else { continue };
+        if w.children().is_empty() {
+            continue;
+        }
+
+        // Take ownership of children for processing.
+        let old_children = std::mem::take(w.children_mut());
+
+        // Group by pop.
+        use std::collections::BTreeMap as BTM;
+        let mut by_pop: BTM<isize, Vec<(LLMTokenBV, OrderedHashMap<PrecomputeNode3Index, StateIDBV>)>> = BTM::new();
+        for ((pop, llm_bv), dm) in old_children {
+            // Constrain to avoid spurious universe bits; drop empty.
+            let mut l = llm_bv.clone();
+            l.constrain(max_llm_token_id);
+            if l.is_empty() { continue; }
+            // Constrain SIDs in the map and drop empties
+            let mut dm2: OrderedHashMap<PrecomputeNode3Index, StateIDBV> = OrderedHashMap::new();
+            for (dst, mut sids) in dm {
+                sids.constrain(max_state_id);
+                if !sids.is_empty() {
+                    dm2.insert(dst, sids);
+                }
+            }
+            if dm2.is_empty() { continue; }
+            by_pop.entry(pop).or_default().push((l, dm2));
+        }
+
+        // Build new children here
+        let mut new_children: BTM<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTM::new();
+        let mut changed_locally = false;
+        let mut local_improvement = 0isize;
+
+        for (pop, mut entries) in by_pop {
+            if entries.is_empty() {
+                continue;
+            }
+            if entries.len() == 1 {
+                // Nothing to refine; forward as is.
+                let (l, dm) = entries.pop().unwrap();
+                new_children.insert((pop, l), dm);
+                continue;
+            }
+
+            // Universe U
+            let mut universe = LLMTokenBV::zeros();
+            for (l, _) in &entries {
+                universe |= l;
+            }
+            universe.constrain(max_llm_token_id);
+            if universe.is_empty() {
+                continue;
+            }
+
+            // Atomization: iteratively split by each L_i
+            let mut blocks: Vec<LLMTokenBV> = vec![universe.clone()];
+            let mut aborted = false;
+            for (l, _) in &entries {
+                let mut next_blocks: Vec<LLMTokenBV> = Vec::with_capacity(blocks.len().saturating_mul(2));
+                for b in blocks.into_iter() {
+                    let inter = &b & l;
+                    if !inter.is_empty() {
+                        next_blocks.push(inter);
+                    }
+                    let diff = &b - l;
+                    if !diff.is_empty() {
+                        next_blocks.push(diff);
+                    }
+                }
+                if next_blocks.len() > max_blocks {
+                    aborted = true;
+                    break;
+                }
+                blocks = next_blocks;
+                if blocks.is_empty() {
+                    break;
+                }
+            }
+
+            // Local size metric before:
+            let mut old_cost_ranges = 0usize;
+            let mut old_cost_dests = 0usize;
+            for (l, dm) in &entries {
+                old_cost_ranges += ranges_len_bounded(l, max_llm_token_id);
+                old_cost_dests += dm.len();
+            }
+            let old_cost = (old_cost_ranges + old_cost_dests) as isize;
+
+            if aborted || blocks.is_empty() {
+                // Fallback: keep original entries
+                for (l, dm) in entries {
+                    new_children.insert((pop, l), dm);
+                }
+                continue;
+            }
+
+            // For each block, compute unioned dest->SIDs, then group by identical canonical dest-vector.
+            use std::collections::HashMap as HM;
+            let mut grouped: HM<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV> = HM::new();
+
+            for b in blocks.into_iter() {
+                let mut dest_agg: BTM<PrecomputeNode3Index, StateIDBV> = BTM::new();
+                for (l, dm) in &entries {
+                    if (&b & l).is_empty() {
+                        continue;
+                    }
+                    for (dst, sids) in dm {
+                        dest_agg.entry(*dst)
+                            .and_modify(|e| *e |= sids)
+                            .or_insert_with(|| sids.clone());
+                    }
+                }
+                if dest_agg.is_empty() {
+                    continue;
+                }
+                let dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dest_agg.into_iter().collect();
+                let entry = grouped.entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
+                *entry |= &b;
+            }
+
+            // Compute new cost
+            let mut new_cost_ranges = 0usize;
+            let mut new_cost_dests = 0usize;
+            for (dest_vec, lnew) in &grouped {
+                let mut ln = lnew.clone();
+                ln.constrain(max_llm_token_id);
+                if ln.is_empty() {
+                    continue;
+                }
+                new_cost_ranges += ranges_len_bounded(&ln, max_llm_token_id);
+                new_cost_dests += dest_vec.len();
+            }
+            let new_cost = (new_cost_ranges + new_cost_dests) as isize;
+
+            if new_cost < old_cost {
+                changed_locally = true;
+                local_improvement += old_cost - new_cost;
+                // Emit refined edges
+                for (dest_vec, lnew) in grouped {
+                    let mut ln = lnew.clone();
+                    ln.constrain(max_llm_token_id);
+                    if ln.is_empty() {
+                        continue;
+                    }
+                    let mut dm_out: OrderedHashMap<PrecomputeNode3Index, StateIDBV> = OrderedHashMap::new();
+                    for (dst, sids) in dest_vec {
+                        if !sids.is_empty() {
+                            dm_out.insert(dst, sids);
+                        }
+                    }
+                    if !dm_out.is_empty() {
+                        new_children.insert((pop, ln), dm_out);
+                    }
+                }
+            } else {
+                // Keep originals (no improvement)
+                for (l, dm) in entries {
+                    new_children.insert((pop, l), dm);
+                }
+            }
+        }
+
+        // Recompute live tokens as union of all outgoing LLM masks at this node.
+        let mut new_live = LLMTokenBV::zeros();
+        for ((_, l), _) in &new_children {
+            new_live |= l;
+        }
+        w.value.live_tokens = new_live;
+        *w.children_mut() = new_children;
+
+        if changed_locally {
+            nodes_changed += 1;
+            total_improvement += local_improvement;
+        }
+    }
+
+    crate::debug!(2, "Refine token-atoms: nodes_changed={}, total_improvement(metric)={}", nodes_changed, total_improvement);
 }
 
 pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_llm_token_id: usize, max_state_id: usize) {
