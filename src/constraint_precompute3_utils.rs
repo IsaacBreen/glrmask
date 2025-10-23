@@ -123,6 +123,7 @@ pub struct Trie3Config {
     pub simplify_llm_token_bvs: bool,
     pub factor_common_destinations: bool,
     pub stochastic_equivalence_check: bool,
+    pub debug_remove_pop_gt_0: bool,
 }
 
 impl Default for Trie3Config {
@@ -143,6 +144,7 @@ impl Default for Trie3Config {
             simplify_llm_token_bvs: false,
             factor_common_destinations: true,
             stochastic_equivalence_check: false,
+            debug_remove_pop_gt_0: true,
         }
     }
 }
@@ -165,6 +167,7 @@ impl Trie3Config {
             simplify_llm_token_bvs: false,
             factor_common_destinations: false,
             stochastic_equivalence_check: false,
+            debug_remove_pop_gt_0: false,
         }
     }
 }
@@ -191,6 +194,38 @@ fn compute_and_print_precompute_stats3(
     let mut stats = PrecomputeStats::default();
     calculate_final_stats3(roots, &mut stats, trie3_god);
     print_precompute_stats3(&stats, trie3_god);
+}
+
+fn debug_remove_pop_gt_0_edges_trie3(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+) {
+    crate::debug!(2, "DEBUG: Removing all edges with pop > 0 from Trie3.");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    for node_idx in all_nodes {
+        let mut w = node_idx.write(trie3_god).expect("write");
+
+        let old_children = std::mem::take(w.children_mut());
+        let mut new_children = BTreeMap::new();
+
+        for ((pop, llm_bv), dest_map) in old_children {
+            if pop <= 0 {
+                new_children.insert((pop, llm_bv), dest_map);
+            }
+        }
+
+        let mut new_live = LLMTokenBV::zeros();
+        for ((_, llm_bv), _) in &new_children {
+            new_live |= llm_bv;
+        }
+        w.value.live_tokens = new_live;
+        *w.children_mut() = new_children;
+    }
 }
 
 pub fn optimize_trie3_size(
@@ -242,6 +277,12 @@ pub fn optimize_trie3_size(
                 compute_and_print_precompute_stats3(roots, trie3_god);
                 step_counter += 1;
             };
+        }
+
+        if config.debug_remove_pop_gt_0 {
+            run_pass!("DEBUG: Removing pop > 0 edges", {
+                debug_remove_pop_gt_0_edges_trie3(roots, trie3_god);
+            });
         }
 
         // --- Phase 1: Initial Pruning & Vocab Reduction ---
