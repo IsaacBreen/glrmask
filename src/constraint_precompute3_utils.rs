@@ -306,7 +306,6 @@ pub fn optimize_trie3_size(
         if config.compress_edges {
             run_pass!("Compressing edges + unary chains", {
                 compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                compress_unary_chains_trie3_pop_sum(roots, &trie3_god);
                 // Contract simple linear chains where (pop, tokens) are identical across the hop.
                 compress_unary_chains_trie3(roots, &trie3_god);
             });
@@ -333,7 +332,6 @@ pub fn optimize_trie3_size(
             if config.compress_edges {
                 run_pass!("Compressing edges + unary chains (post-structural)", {
                     compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                    compress_unary_chains_trie3_pop_sum(roots, &trie3_god);
                     // Re-run chain contraction now that structure may have simplified.
                     compress_unary_chains_trie3(roots, &trie3_god);
                 });
@@ -358,7 +356,6 @@ pub fn optimize_trie3_size(
         if config.compress_edges {
             run_pass!("Compressing edges + unary chains (post-merge)", {
                 compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                compress_unary_chains_trie3_pop_sum(roots, &trie3_god);
                 // Final contraction pass to remove any last unary runs.
                 compress_unary_chains_trie3(roots, &trie3_god);
             });
@@ -1338,14 +1335,14 @@ fn factor_common_destinations_trie3(
     max_state_id: usize,
 ) {
     crate::debug!(2, "Factoring out common destinations in Trie3.");
-    const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 2;
+    const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
     if all_nodes.is_empty() { return; }
 
-    let _all_llm_bv = LLMTokenBV::ones(max_llm_token_id + 1);
-    let _all_sids_bv = StateIDBV::ones(max_state_id + 1);
+    let all_llm_bv = LLMTokenBV::ones(max_llm_token_id + 1);
+    let all_sids_bv = StateIDBV::ones(max_state_id + 1);
 
     // Map: dest -> { (pop, llm_bv) -> { state_id_bv -> [sources] } }
     let mut incoming_map: HashMap<
@@ -1374,9 +1371,6 @@ fn factor_common_destinations_trie3(
 
     for (dest_idx, edges_by_key) in incoming_map {
         for (edge_key, sources_by_sids) in edges_by_key {
-            // Skip factoring for pop==0 edges to avoid proliferating 0-pop hops.
-            if edge_key.0 == 0 { continue; }
-
             for (sids_bv, sources) in sources_by_sids {
                 if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
                     // Create intermediate node
@@ -1403,12 +1397,11 @@ fn factor_common_destinations_trie3(
                         }
 
                         // Add new edge to intermediate node. This is a "None-like" edge.
-                        // pop=0, original llm tokens (edge_key.1), and original sids_bv.
-                        let none_like_edge_key = (0, edge_key.1.clone());
+                        // pop=0, all llm tokens, all state ids.
+                        let none_like_edge_key = (0, all_llm_bv.clone());
                         let dest_map = src_guard.children_mut().entry(none_like_edge_key).or_default();
-                        dest_map.entry(intermediate_node)
-                            .and_modify(|e| *e |= &sids_bv)
-                            .or_insert(sids_bv.clone());
+                        dest_map.insert(intermediate_node, all_sids_bv.clone());
+                        // Recompute live tokens from scratch after modifying edges.
                         let mut new_live = LLMTokenBV::zeros();
                         for ((_, llm_bv), _) in src_guard.children() {
                             new_live |= llm_bv;
@@ -2441,117 +2434,4 @@ fn compress_unary_chains_trie3(
     }
 
     crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
-}
-
-/// Contract unary chains by summing pops when tokens are identical across the hop:
-/// P --(pop_in, T, S_pu)--> U --(pop_out, T, S_uv)--> V  =>
-/// P --(pop_in + pop_out, T, S_pu ∧ S_uv)--> V
-/// Conditions:
-/// - U has exactly one incoming edge and one outgoing destination overall.
-/// - Incoming and outgoing token bitvectors are equal.
-/// - U is not an END node and not a root.
-/// This preserves semantics and aggressively removes "relay" nodes that only shift pop
-/// while checking the same token set.
-fn compress_unary_chains_trie3_pop_sum(
-    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-    trie3_god: &Trie3GodWrapper,
-) {
-    crate::debug!(2, "Contracting unary chains (pop-sum) in Trie3...");
-
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-    if all_nodes.is_empty() {
-        return;
-    }
-    let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
-
-    let mut total_rewired = 0usize;
-    let max_outer_iters = 8usize;
-    for _ in 0..max_outer_iters {
-        // Build indegree and remember unique parent + incoming key for nodes with indegree==1
-        let mut indegree: HashMap<PrecomputeNode3Index, usize> = HashMap::new();
-        let mut unique_parent: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, (isize, LLMTokenBV))> = HashMap::new();
-
-        for src in &all_nodes {
-            if let Some(g) = src.read(trie3_god) {
-                for (ek, dm) in g.children() {
-                    for (dst, _sid) in dm {
-                        let cnt = indegree.entry(*dst).or_insert(0);
-                        *cnt += 1;
-                        if *cnt == 1 {
-                            unique_parent.insert(*dst, (*src, ek.clone()));
-                        } else {
-                            unique_parent.remove(dst);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Gather nodes with exactly one outgoing destination overall and capture that edge.
-        let mut out_info: HashMap<
-            PrecomputeNode3Index,
-            ((isize, LLMTokenBV), PrecomputeNode3Index, StateIDBV)
-        > = HashMap::new();
-        for u in &all_nodes {
-            if let Some(g) = u.read(trie3_god) {
-                if g.value.end { continue; }
-                let mut total_dests = 0usize;
-                let mut only_key: Option<(isize, LLMTokenBV)> = None;
-                let mut only_dst: Option<PrecomputeNode3Index> = None;
-                let mut only_sid: Option<StateIDBV> = None;
-                for (ek, dm) in g.children() {
-                    for (dst, sid) in dm {
-                        total_dests += 1;
-                        if total_dests == 1 {
-                            only_key = Some(ek.clone());
-                            only_dst = Some(*dst);
-                            only_sid = Some(sid.clone());
-                        }
-                    }
-                }
-                if total_dests == 1 {
-                    out_info.insert(*u, (only_key.unwrap(), only_dst.unwrap(), only_sid.unwrap()));
-                }
-            }
-        }
-
-        let mut rewired_this_iter = 0usize;
-        for u in &all_nodes {
-            let u_idx = *u;
-            if roots_set.contains(&u_idx) { continue; }
-            let Some((p_idx, in_key)) = unique_parent.get(&u_idx).cloned() else { continue };
-            let Some((out_key, v_idx, s_uv)) = out_info.get(&u_idx).cloned() else { continue };
-            // Require equal token bitvectors across the hop.
-            if in_key.1 != out_key.1 { continue; }
-            // Compose pop
-            let pop_new = in_key.0.saturating_add(out_key.0);
-
-            if let Some(mut pw) = p_idx.write(trie3_god) {
-                let (pop_in, llm_toks) = in_key.clone();
-                if pw.children().get(&(pop_in, llm_toks.clone())).is_some() {
-                    if let Some(s_pu_actual) = pw.children_mut().get_mut(&(pop_in, llm_toks.clone())).unwrap().remove(&u_idx) {
-                        let s_comp = &s_pu_actual & &s_uv;
-                        if !s_comp.is_empty() {
-                            let entry = pw.children_mut().entry((pop_new, llm_toks.clone())).or_insert_with(OrderedHashMap::new);
-                            entry.entry(v_idx)
-                                .and_modify(|e| *e |= &s_comp)
-                                .or_insert(s_comp);
-                        }
-                        if pw.children_mut().get_mut(&(pop_in, llm_toks.clone())).unwrap().is_empty() {
-                            pw.children_mut().remove(&(pop_in, llm_toks.clone()));
-                        }
-                        // Recompute live tokens
-                        let mut new_live = LLMTokenBV::zeros();
-                        for ((_, llm_bv), _) in pw.children() { new_live |= llm_bv; }
-                        pw.value.live_tokens = new_live;
-                        rewired_this_iter += 1;
-                    }
-                }
-            }
-        }
-        total_rewired += rewired_this_iter;
-        if rewired_this_iter == 0 { break; }
-    }
-    crate::debug!(2, "Unary-chain (pop-sum) contraction rewired {} edges.", total_rewired);
 }
