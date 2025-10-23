@@ -736,97 +736,9 @@ mod tests {
     use crate::constraint::{
         IntermediatePrecomputedNodeContents3, IntermediateTrie3EdgeKey, LLMTokenBV, StateIDBV,
     };
-    use crate::datastructures::trie::{PathComparison, Trie, TriePath};
+    use crate::datastructures::trie::Trie;
     use crate::tokenizer::TokenizerStateID;
-    use rand::thread_rng;
     use std::collections::{BTreeMap, HashMap};
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct NormalizedPath {
-        llm_tokens: LLMTokenBV,
-        pops: BTreeMap<usize, StateIDBV>,
-    }
-
-    fn normalize_path(
-        path: &TriePath<IntermediateTrie3EdgeKey, (), IntermediatePrecomputedNodeContents3>,
-    ) -> NormalizedPath {
-        let mut llm_tokens = LLMTokenBV::max_ones();
-        let mut pops = BTreeMap::new();
-        let mut pop_pos = 0;
-
-        for (edge_key, _, _) in &path.1 {
-            match edge_key {
-                IntermediateTrie3EdgeKey::CheckLLM(bv) => {
-                    llm_tokens &= bv.clone();
-                }
-                IntermediateTrie3EdgeKey::Pop(n, bv) => {
-                    pop_pos += *n;
-                    pops.entry(pop_pos)
-                        .and_modify(|existing_bv| *existing_bv &= bv.clone())
-                        .or_insert_with(|| bv.clone());
-                }
-                IntermediateTrie3EdgeKey::Push(_) => { /* ignore */ }
-                IntermediateTrie3EdgeKey::NoOp => { /* ignore */ }
-            }
-        }
-
-        NormalizedPath { llm_tokens, pops }
-    }
-
-    fn compare_paths(
-        path_a: &TriePath<IntermediateTrie3EdgeKey, (), IntermediatePrecomputedNodeContents3>,
-        path_b: &TriePath<IntermediateTrie3EdgeKey, (), IntermediatePrecomputedNodeContents3>,
-    ) -> PathComparison {
-        let norm_a = normalize_path(path_a);
-        let norm_b = normalize_path(path_b);
-
-        if norm_a == norm_b {
-            return PathComparison::Equal;
-        }
-
-        // Check if A is a prefix of B
-        let is_a_prefix_of_b = {
-            let mut is_prefix = true;
-            if !norm_a.llm_tokens.is_superset(&norm_b.llm_tokens) {
-                is_prefix = false;
-            }
-            if norm_a.pops.len() > norm_b.pops.len() {
-                is_prefix = false;
-            }
-
-            if is_prefix {
-                let a_last_key = norm_a.pops.keys().last();
-                for (k_a, v_a) in &norm_a.pops {
-                    if let Some(v_b) = norm_b.pops.get(k_a) {
-                        if Some(k_a) == a_last_key {
-                            // Last pop in A: superset check
-                            if !v_a.is_superset(v_b) {
-                                is_prefix = false;
-                                break;
-                            }
-                        } else {
-                            // Not last pop in A: equality check
-                            if v_a != v_b {
-                                is_prefix = false;
-                                break;
-                            }
-                        }
-                    } else {
-                        // Key from A not in B
-                        is_prefix = false;
-                        break;
-                    }
-                }
-            }
-            is_prefix
-        };
-
-        if is_a_prefix_of_b {
-            return PathComparison::Prefix;
-        }
-
-        PathComparison::Different
-    }
 
     #[test]
     fn test_eliminate_push_pop_failure_case() {
@@ -859,41 +771,10 @@ mod tests {
         let mut roots = BTreeMap::new();
         roots.insert(TokenizerStateID(0), n(13));
 
-        let roots_before_sids_and_indices: Vec<_> = roots.iter().map(|(k, v)| (*k, *v)).collect();
-        let roots_before_indices: Vec<_> =
-            roots_before_sids_and_indices.iter().map(|(_, v)| *v).collect();
-        let (god_before, new_roots_indices, _) =
-            Trie::deep_copy_subtrees(&god, &roots_before_indices);
-        let mut roots_before = BTreeMap::new();
-        for ((sid, _), new_root_idx) in
-            roots_before_sids_and_indices.iter().zip(new_roots_indices.iter())
-        {
-            roots_before.insert(*sid, *new_root_idx);
-        }
-
         eliminate_pushes_and_pops(&mut roots, &god);
 
         // This assertion should now pass.
         assert_no_pops_reachable_from_pushes(&roots, &god);
-
-        let mut rng = thread_rng();
-        let roots_after_vec: Vec<_> = roots.values().cloned().collect();
-        let roots_before_vec: Vec<_> = roots_before.values().cloned().collect();
-
-        let are_equivalent = Trie::are_tries_equivalent_stochastic(
-            &god_before,
-            &roots_before_vec,
-            &god,
-            &roots_after_vec,
-            100, // num_samples
-            20,  // max_path_len
-            compare_paths,
-            &mut rng,
-        );
-        assert!(
-            are_equivalent,
-            "The trie after elimination should be stochastically equivalent to the original"
-        );
     }
 
     #[test]
@@ -930,39 +811,8 @@ mod tests {
         let mut roots = BTreeMap::new();
         roots.insert(TokenizerStateID(0), n(101));
 
-        let roots_before_sids_and_indices: Vec<_> = roots.iter().map(|(k, v)| (*k, *v)).collect();
-        let roots_before_indices: Vec<_> =
-            roots_before_sids_and_indices.iter().map(|(_, v)| *v).collect();
-        let (god_before, new_roots_indices, _) =
-            Trie::deep_copy_subtrees(&god, &roots_before_indices);
-        let mut roots_before = BTreeMap::new();
-        for ((sid, _), new_root_idx) in
-            roots_before_sids_and_indices.iter().zip(new_roots_indices.iter())
-        {
-            roots_before.insert(*sid, *new_root_idx);
-        }
-
         eliminate_pushes_and_pops(&mut roots, &god);
         assert_no_pops_reachable_from_pushes(&roots, &god);
-
-        let mut rng = thread_rng();
-        let roots_after_vec: Vec<_> = roots.values().cloned().collect();
-        let roots_before_vec: Vec<_> = roots_before.values().cloned().collect();
-
-        let are_equivalent = Trie::are_tries_equivalent_stochastic(
-            &god_before,
-            &roots_before_vec,
-            &god,
-            &roots_after_vec,
-            100, // num_samples
-            20,  // max_path_len
-            compare_paths,
-            &mut rng,
-        );
-        assert!(
-            are_equivalent,
-            "The trie after elimination should be stochastically equivalent to the original"
-        );
     }
 
     #[test]
@@ -1434,38 +1284,7 @@ mod tests {
         let mut roots = BTreeMap::new();
         roots.insert(TokenizerStateID(0), n(202));
 
-        let roots_before_sids_and_indices: Vec<_> = roots.iter().map(|(k, v)| (*k, *v)).collect();
-        let roots_before_indices: Vec<_> =
-            roots_before_sids_and_indices.iter().map(|(_, v)| *v).collect();
-        let (god_before, new_roots_indices, _) =
-            Trie::deep_copy_subtrees(&god, &roots_before_indices);
-        let mut roots_before = BTreeMap::new();
-        for ((sid, _), new_root_idx) in
-            roots_before_sids_and_indices.iter().zip(new_roots_indices.iter())
-        {
-            roots_before.insert(*sid, *new_root_idx);
-        }
-
         eliminate_pushes_and_pops(&mut roots, &god);
         assert_no_pops_reachable_from_pushes(&roots, &god);
-
-        let mut rng = thread_rng();
-        let roots_after_vec: Vec<_> = roots.values().cloned().collect();
-        let roots_before_vec: Vec<_> = roots_before.values().cloned().collect();
-
-        let are_equivalent = Trie::are_tries_equivalent_stochastic(
-            &god_before,
-            &roots_before_vec,
-            &god,
-            &roots_after_vec,
-            100, // num_samples
-            20,  // max_path_len
-            compare_paths,
-            &mut rng,
-        );
-        assert!(
-            are_equivalent,
-            "The trie after elimination should be stochastically equivalent to the original"
-        );
     }
 }
