@@ -450,10 +450,6 @@ pub fn optimize_trie3_size(
 
         // --- Phase 4: Final Cleanup and Polish ---
 
-        }
-
-        // --- Phase 4: Final Cleanup and Polish ---
-
         if config.prune_dead_paths {
             run_pass!("Pruning dead paths (final)", {
                 prune_dead_paths_trie3(roots, &trie3_god);
@@ -519,7 +515,7 @@ pub fn optimize_trie3_size(
                 });
             }
         }
-
+    }
 
 	crate::debug!(2, "Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
@@ -1974,6 +1970,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
     let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
 
     let mut it: usize = 0;
+    loop {
         // Signature is (end_flag, aggregated edges keyed by (pop, llm_bv, dest_class)).
         // Including the LLMTokenBV ensures we don't merge nodes that differ on token distributions.
         type SignatureStructural3 = (bool, Vec<((isize, LLMTokenBV, usize), StateIDBV)>);
