@@ -2680,7 +2680,7 @@ pub fn eliminate_pop0_edges_trie3(
                                 continue;
                             }
                             entry.push((llm2.clone(), sids2.clone()));
-                            q.push_back((*dst, llm2, sids2));
+                            q.push_back((*dst, llm2.clone(), sids2));
                         } else {
                             // First positive-pop transition from the current zero-pop frontier.
                             let entry = new_children_vec[i]
