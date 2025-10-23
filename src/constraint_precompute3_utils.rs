@@ -146,7 +146,7 @@ impl Default for Trie3Config {
             factor_common_destinations: true,
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
-            assert_pop0_paths_to_end_are_short: false,
+            assert_pop0_paths_to_end_are_short: true,
         }
     }
 }
