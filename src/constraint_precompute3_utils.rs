@@ -1362,16 +1362,32 @@ pub fn collapse_pop0_closure_trie3(
         while changed {
             changed = false;
             for (l0, dst_c, s0) in &edges0 {
-                let succ_sum = if *dst_c == c { &summary[c] } else { &summary[*dst_c] };
-                for ((p, l1), dm) in succ_sum.iter() {
-                    if *p == 0 { continue; } // by construction summaries have pop!=0 but keep safety
-                    let l_new = l0 & l1;
-                    if l_new.is_empty() { continue; }
-                    for (dst2, s1) in dm {
-                        let s_new = s0 & s1;
-                        if s_new.is_empty() { continue; }
-                        if insert_edge_summary(&mut summary[c], *p, &l_new, *dst2, &s_new, max_llm, max_sid) {
-                            changed = true;
+                if *dst_c == c {
+                    let succ_sum_clone = summary[c].clone();
+                    for ((p, l1), dm) in succ_sum_clone.iter() {
+                        if *p == 0 { continue; } // by construction summaries have pop!=0 but keep safety
+                        let l_new = l0 & l1;
+                        if l_new.is_empty() { continue; }
+                        for (dst2, s1) in dm {
+                            let s_new = s0 & s1;
+                            if s_new.is_empty() { continue; }
+                            if insert_edge_summary(&mut summary[c], *p, &l_new, *dst2, &s_new, max_llm, max_sid) {
+                                changed = true;
+                            }
+                        }
+                    }
+                } else {
+                    let succ_sum = &summary[*dst_c];
+                    for ((p, l1), dm) in succ_sum.iter() {
+                        if *p == 0 { continue; } // by construction summaries have pop!=0 but keep safety
+                        let l_new = l0 & l1;
+                        if l_new.is_empty() { continue; }
+                        for (dst2, s1) in dm {
+                            let s_new = s0 & s1;
+                            if s_new.is_empty() { continue; }
+                            if insert_edge_summary(&mut summary[c], *p, &l_new, *dst2, &s_new, max_llm, max_sid) {
+                                changed = true;
+                            }
                         }
                     }
                 }
