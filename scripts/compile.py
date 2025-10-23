@@ -284,6 +284,15 @@ Examples:
 
     modified_vocab = filter_vocab(vocab, allowed_lengths, min_len_unbounded)
 
+    # Print vocabulary if it's small (less than 1000 tokens)
+    if len(modified_vocab) < 1000:
+        print("\n--- Small Vocabulary (< 1000 tokens) ---\n")
+        # Sort by token ID for consistent output
+        sorted_vocab = sorted(modified_vocab.items(), key=lambda item: item[1])
+        printable_vocab = {token: id for token, id in sorted_vocab}
+        print(json.dumps(printable_vocab, indent=2, ensure_ascii=False))
+        print("\n-----------------------------------------\n")
+
     # 3. Write the (potentially modified) vocab to a temporary file
     with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json", encoding='utf-8') as tmp_vocab_file:
         json.dump(modified_vocab, tmp_vocab_file)

@@ -64,20 +64,75 @@ local_system:
 
           return _load_and_process_vocab(cache_path)
 
-      def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
+      def parse_len_ranges(ranges: list[str] | None) -> tuple[set[int], int | None]:
           """
-          Applies filters to the vocabulary. Currently supports filtering by max token length.
+          Parses a list of string representations of integer ranges.
+          e.g., ["1", "3-5", "8-"] -> ({1, 3, 4, 5}, 8)
           """
-          if max_len is None:
+          if not ranges:
+              return set(), None
+          
+          allowed_lengths = set()
+          min_len_unbounded = None
+
+          for r in ranges:
+              if '-' in r:
+                  parts = r.split('-', 1)
+                  if len(parts) != 2:
+                      raise ValueError(f"Invalid range format: {r}")
+                  start_str, end_str = parts
+                  
+                  if not start_str:
+                      raise ValueError(f"Invalid range format: {r}. Start must be specified.")
+
+                  try:
+                      start = int(start_str)
+                  except ValueError:
+                      raise ValueError(f"Invalid start of range in '{r}'")
+
+                  if not end_str: # e.g. "8-"
+                      if min_len_unbounded is not None:
+                          min_len_unbounded = min(min_len_unbounded, start)
+                      else:
+                          min_len_unbounded = start
+                  else: # e.g. "3-5"
+                      try:
+                          end = int(end_str)
+                      except ValueError:
+                          raise ValueError(f"Invalid end of range in '{r}'")
+                      if start > end:
+                          raise ValueError(f"Invalid range: start ({start}) > end ({end}) in '{r}'")
+                      allowed_lengths.update(range(start, end + 1))
+              else:
+                  try:
+                      allowed_lengths.add(int(r))
+                  except ValueError:
+                      raise ValueError(f"Invalid length value: {r}")
+                  
+          return allowed_lengths, min_len_unbounded
+
+      def filter_vocab(vocab: dict[str, int], allowed_lengths: set[int], min_len_unbounded: int | None) -> dict[str, int]:
+          """
+          Applies filters to the vocabulary based on token byte length.
+          """
+          if not allowed_lengths and min_len_unbounded is None:
               return vocab
 
-          print(f"Filtering vocabulary to keep tokens with byte length <= {max_len}...")
+          print(f"Filtering vocabulary by token byte length...")
           
           filtered = {}
           for token_str, token_id in vocab.items():
               # This processing matches the logic in the Rust tests
               processed_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n")
-              if len(processed_str.encode('utf-8')) <= max_len:
+              token_len = len(processed_str.encode('utf-8'))
+              
+              keep = False
+              if token_len in allowed_lengths:
+                  keep = True
+              elif min_len_unbounded is not None and token_len >= min_len_unbounded:
+                  keep = True
+                  
+              if keep:
                   filtered[token_str] = token_id
                   
           print(f"  -> Filtered vocabulary from {len(vocab)} to {len(filtered)} tokens.")
@@ -179,6 +234,12 @@ local_system:
         python scripts/compile.py \\
           -g src/js.ebnf -o .cache/constraints/js_simple.json.gz \\
           --vocab-list '{' '}' '[' ']' ',"' '":' ' "' 'true' 'false' 'null' '123'
+
+        # 5. Filter vocabulary to include only tokens of certain byte lengths
+        python scripts/compile.py \\
+          -g src/js.ebnf -o .cache/constraints/js_gpt2_filtered.json.gz \\
+          --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \\
+          --token-len 1 3-5 8-
       """
           parser = argparse.ArgumentParser(
               description="A helper script to compile a grammar constraint file.",
@@ -205,7 +266,7 @@ local_system:
           parser.add_argument("--precompute0-only", action="store_true", help="Only generate the precompute0 cache. Requires --save-precompute0.")
 
           # Filtering options
-          parser.add_argument("--max-token-len", type=int, help="Filter vocabulary to only include tokens with a byte length less than or equal to this value.")
+          parser.add_argument("--token-len", type=str, nargs='+', help="Filter vocabulary to include tokens with specific byte lengths or ranges. E.g., '1' '3-5' '8-'.")
 
           args = parser.parse_args()
 
@@ -223,7 +284,12 @@ local_system:
           vocab = get_vocab(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
 
           # 2. Apply filters
-          modified_vocab = filter_vocab(vocab, args.max_token_len)
+          try:
+              allowed_lengths, min_len_unbounded = parse_len_ranges(args.token_len)
+          except ValueError as e:
+              parser.error(f"Invalid --token-len value: {e}")
+
+          modified_vocab = filter_vocab(vocab, allowed_lengths, min_len_unbounded)
 
           # 3. Write the (potentially modified) vocab to a temporary file
           with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json", encoding='utf-8') as tmp_vocab_file:
@@ -539,6 +605,15 @@ local_system:
 
           modified_vocab = filter_vocab(vocab, allowed_lengths, min_len_unbounded)
 
+          # Print vocabulary if it's small (less than 1000 tokens)
+          if len(modified_vocab) < 1000:
+              print("\n--- Small Vocabulary (< 1000 tokens) ---\n")
+              # Sort by token ID for consistent output
+              sorted_vocab = sorted(modified_vocab.items(), key=lambda item: item[1])
+              printable_vocab = {token: id for token, id in sorted_vocab}
+              print(json.dumps(printable_vocab, indent=2, ensure_ascii=False))
+              print("\n-----------------------------------------\n")
+
           # 3. Write the (potentially modified) vocab to a temporary file
           with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json", encoding='utf-8') as tmp_vocab_file:
               json.dump(modified_vocab, tmp_vocab_file)
@@ -576,7 +651,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -668,20 +743,75 @@ messages:
 
           return _load_and_process_vocab(cache_path)
 
-      def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
+      def parse_len_ranges(ranges: list[str] | None) -> tuple[set[int], int | None]:
           """
-          Applies filters to the vocabulary. Currently supports filtering by max token length.
+          Parses a list of string representations of integer ranges.
+          e.g., ["1", "3-5", "8-"] -> ({1, 3, 4, 5}, 8)
           """
-          if max_len is None:
+          if not ranges:
+              return set(), None
+          
+          allowed_lengths = set()
+          min_len_unbounded = None
+
+          for r in ranges:
+              if '-' in r:
+                  parts = r.split('-', 1)
+                  if len(parts) != 2:
+                      raise ValueError(f"Invalid range format: {r}")
+                  start_str, end_str = parts
+                  
+                  if not start_str:
+                      raise ValueError(f"Invalid range format: {r}. Start must be specified.")
+
+                  try:
+                      start = int(start_str)
+                  except ValueError:
+                      raise ValueError(f"Invalid start of range in '{r}'")
+
+                  if not end_str: # e.g. "8-"
+                      if min_len_unbounded is not None:
+                          min_len_unbounded = min(min_len_unbounded, start)
+                      else:
+                          min_len_unbounded = start
+                  else: # e.g. "3-5"
+                      try:
+                          end = int(end_str)
+                      except ValueError:
+                          raise ValueError(f"Invalid end of range in '{r}'")
+                      if start > end:
+                          raise ValueError(f"Invalid range: start ({start}) > end ({end}) in '{r}'")
+                      allowed_lengths.update(range(start, end + 1))
+              else:
+                  try:
+                      allowed_lengths.add(int(r))
+                  except ValueError:
+                      raise ValueError(f"Invalid length value: {r}")
+                  
+          return allowed_lengths, min_len_unbounded
+
+      def filter_vocab(vocab: dict[str, int], allowed_lengths: set[int], min_len_unbounded: int | None) -> dict[str, int]:
+          """
+          Applies filters to the vocabulary based on token byte length.
+          """
+          if not allowed_lengths and min_len_unbounded is None:
               return vocab
 
-          print(f"Filtering vocabulary to keep tokens with byte length <= {max_len}...")
+          print(f"Filtering vocabulary by token byte length...")
           
           filtered = {}
           for token_str, token_id in vocab.items():
               # This processing matches the logic in the Rust tests
               processed_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n")
-              if len(processed_str.encode('utf-8')) <= max_len:
+              token_len = len(processed_str.encode('utf-8'))
+              
+              keep = False
+              if token_len in allowed_lengths:
+                  keep = True
+              elif min_len_unbounded is not None and token_len >= min_len_unbounded:
+                  keep = True
+                  
+              if keep:
                   filtered[token_str] = token_id
                   
           print(f"  -> Filtered vocabulary from {len(vocab)} to {len(filtered)} tokens.")
@@ -783,6 +913,12 @@ messages:
         python scripts/compile.py \\
           -g src/js.ebnf -o .cache/constraints/js_simple.json.gz \\
           --vocab-list '{' '}' '[' ']' ',"' '":' ' "' 'true' 'false' 'null' '123'
+
+        # 5. Filter vocabulary to include only tokens of certain byte lengths
+        python scripts/compile.py \\
+          -g src/js.ebnf -o .cache/constraints/js_gpt2_filtered.json.gz \\
+          --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \\
+          --token-len 1 3-5 8-
       """
           parser = argparse.ArgumentParser(
               description="A helper script to compile a grammar constraint file.",
@@ -809,7 +945,7 @@ messages:
           parser.add_argument("--precompute0-only", action="store_true", help="Only generate the precompute0 cache. Requires --save-precompute0.")
 
           # Filtering options
-          parser.add_argument("--max-token-len", type=int, help="Filter vocabulary to only include tokens with a byte length less than or equal to this value.")
+          parser.add_argument("--token-len", type=str, nargs='+', help="Filter vocabulary to include tokens with specific byte lengths or ranges. E.g., '1' '3-5' '8-'.")
 
           args = parser.parse_args()
 
@@ -827,7 +963,12 @@ messages:
           vocab = get_vocab(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
 
           # 2. Apply filters
-          modified_vocab = filter_vocab(vocab, args.max_token_len)
+          try:
+              allowed_lengths, min_len_unbounded = parse_len_ranges(args.token_len)
+          except ValueError as e:
+              parser.error(f"Invalid --token-len value: {e}")
+
+          modified_vocab = filter_vocab(vocab, allowed_lengths, min_len_unbounded)
 
           # 3. Write the (potentially modified) vocab to a temporary file
           with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json", encoding='utf-8') as tmp_vocab_file:
@@ -859,8 +1000,7 @@ messages:
       ```
     metadata:
       filename: scripts/compile.py
-  - user: Make it possible to specify arbitrary ranges of token lengths. e.g. I want
-      tokens of length 1 AND 3 to 5 AND 8 upwards.
+  - user: If the vocab is <1000 tokens, print it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -879,151 +1019,52 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! Here are the step-by-step instructions and the corresponding git diff to allow filtering vocabulary tokens by arbitrary length ranges.
+      The following steps will modify `scripts/compile.py` to print the vocabulary in a pretty-printed JSON format if the number of tokens is less than 1000 after filtering.
 
       ### Step-by-step Instructions
 
-      Here are the edits for `scripts/compile.py`:
+      In the file `scripts/compile.py`:
 
-      1.  **Add a Range Parsing Function**: Insert the new helper function `parse_len_ranges` right before the `filter_vocab` function. This function will be responsible for parsing the new range format.
+      1.  Locate the `main()` function.
+      2.  Find the line where the vocabulary is filtered (around line 265):
+          ```python
+          modified_vocab = filter_vocab(vocab, allowed_lengths, min_len_unbounded)
+          ```
+      3.  Insert the following block of code immediately after that line and before the section that writes the vocabulary to a temporary file:
 
-      2.  **Update `filter_vocab`**: Replace the existing `filter_vocab` function with the new version that accepts the parsed ranges and filters tokens based on them.
-
-      3.  **Update the `main` function**:
-          *   In the `epilog` string, add a new example demonstrating how to use the new token length filtering.
-          *   In the `argparse` setup, replace the `--max-token-len` argument with the new `--token-len` argument which can accept multiple range strings.
-          *   After parsing arguments, call the new `parse_len_ranges` function and then pass its output to the updated `filter_vocab` function.
-
-      These changes will replace the simple max-length filter with a more powerful range-based filter.
+          ```python
+          # Print vocabulary if it's small (less than 1000 tokens)
+          if len(modified_vocab) < 1000:
+              print("\n--- Small Vocabulary (< 1000 tokens) ---\n")
+              # Sort by token ID for consistent output
+              sorted_vocab = sorted(modified_vocab.items(), key=lambda item: item[1])
+              printable_vocab = {token: id for token, id in sorted_vocab}
+              print(json.dumps(printable_vocab, indent=2, ensure_ascii=False))
+              print("\n-----------------------------------------\n")
+          ```
 
       ### Git Diff
-
-      Here is the git diff to apply these changes to `scripts/compile.py`.
 
       ```diff
       diff --git a/scripts/compile.py b/scripts/compile.py
       --- a/scripts/compile.py
       +++ b/scripts/compile.py
-      @@ -81,25 +81,61 @@
+      @@ -265,6 +265,14 @@
        
-           return _load_and_process_vocab(cache_path)
+           modified_vocab = filter_vocab(vocab, allowed_lengths, min_len_unbounded)
        
-      -def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
-      +def parse_len_ranges(ranges: list[str] | None) -> tuple[set[int], int | None]:
-           """
-      -    Applies filters to the vocabulary. Currently supports filtering by max token length.
-      +    Parses a list of string representations of integer ranges.
-      +    e.g., ["1", "3-5", "8-"] -> ({1, 3, 4, 5}, 8)
-           """
-      -    if max_len is None:
-      +    if not ranges:
-      +        return set(), None
-      +    
-      +    allowed_lengths = set()
-      +    min_len_unbounded = None
+      +    # Print vocabulary if it's small (less than 1000 tokens)
+      +    if len(modified_vocab) < 1000:
+      +        print("\n--- Small Vocabulary (< 1000 tokens) ---\n")
+      +        # Sort by token ID for consistent output
+      +        sorted_vocab = sorted(modified_vocab.items(), key=lambda item: item[1])
+      +        printable_vocab = {token: id for token, id in sorted_vocab}
+      +        print(json.dumps(printable_vocab, indent=2, ensure_ascii=False))
+      +        print("\n-----------------------------------------\n")
       +
-      +    for r in ranges:
-      +        if '-' in r:
-      +            parts = r.split('-', 1)
-      +            if len(parts) != 2:
-      +                raise ValueError(f"Invalid range format: {r}")
-      +            start_str, end_str = parts
-      +            
-      +            if not start_str:
-      +                raise ValueError(f"Invalid range format: {r}. Start must be specified.")
-      +
-      +            try:
-      +                start = int(start_str)
-      +            except ValueError:
-      +                raise ValueError(f"Invalid start of range in '{r}'")
-      +
-      +            if not end_str: # e.g. "8-"
-      +                if min_len_unbounded is not None:
-      +                    min_len_unbounded = min(min_len_unbounded, start)
-      +                else:
-      +                    min_len_unbounded = start
-      +            else: # e.g. "3-5"
-      +                try:
-      +                    end = int(end_str)
-      +                except ValueError:
-      +                    raise ValueError(f"Invalid end of range in '{r}'")
-      +                if start > end:
-      +                    raise ValueError(f"Invalid range: start ({start}) > end ({end}) in '{r}'")
-      +                allowed_lengths.update(range(start, end + 1))
-      +        else:
-      +            try:
-      +                allowed_lengths.add(int(r))
-      +            except ValueError:
-      +                raise ValueError(f"Invalid length value: {r}")
-      +            
-      +    return allowed_lengths, min_len_unbounded
-      +
-      +def filter_vocab(vocab: dict[str, int], allowed_lengths: set[int], min_len_unbounded: int | None) -> dict[str, int]:
-      +    """
-      +    Applies filters to the vocabulary based on token byte length.
-      +    """
-      +    if not allowed_lengths and min_len_unbounded is None:
-               return vocab
-       
-      -    print(f"Filtering vocabulary to keep tokens with byte length <= {max_len}...")
-      +    print(f"Filtering vocabulary by token byte length...")
-           
-           filtered = {}
-           for token_str, token_id in vocab.items():
-               # This processing matches the logic in the Rust tests
-               processed_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n")
-      -        if len(processed_str.encode('utf-8')) <= max_len:
-      +        token_len = len(processed_str.encode('utf-8'))
-      +        
-      +        keep = False
-      +        if token_len in allowed_lengths:
-      +            keep = True
-      +        elif min_len_unbounded is not None and token_len >= min_len_unbounded:
-      +            keep = True
-      +            
-      +        if keep:
-                   filtered[token_str] = token_id
-                   
-           print(f"  -> Filtered vocabulary from {len(vocab)} to {len(filtered)} tokens.")
-      @@ -204,7 +240,14 @@
-         python scripts/compile.py \\
-           -g src/js.ebnf -o .cache/constraints/js_simple.json.gz \\
-           --vocab-list '{' '}' '[' ']' ',"' '":' ' "' 'true' 'false' 'null' '123'
-      -"""
-      +
-      +  # 5. Filter vocabulary to include only tokens of certain byte lengths
-      +  python scripts/compile.py \\
-      +    -g src/js.ebnf -o .cache/constraints/js_gpt2_filtered.json.gz \\
-      +    --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \\
-      +    --token-len 1 3-5 8-
-      +"""
-           parser = argparse.ArgumentParser(
-               description="A helper script to compile a grammar constraint file.",
-               formatter_class=argparse.RawDescriptionHelpFormatter,
-      @@ -228,7 +271,7 @@
-           parser.add_argument("--precompute0-only", action="store_true", help="Only generate the precompute0 cache. Requires --save-precompute0.")
-       
-           # Filtering options
-      -    parser.add_argument("--max-token-len", type=int, help="Filter vocabulary to only include tokens with a byte length less than or equal to this value.")
-      +    parser.add_argument("--token-len", type=str, nargs='+', help="Filter vocabulary to include tokens with specific byte lengths or ranges. E.g., '1' '3-5' '8-'.")
-       
-           args = parser.parse_args()
-       
-      @@ -245,7 +288,12 @@
-           vocab = get_vocab(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
-       
-           # 2. Apply filters
-      -    modified_vocab = filter_vocab(vocab, args.max_token_len)
-      +    try:
-      +        allowed_lengths, min_len_unbounded = parse_len_ranges(args.token_len)
-      +    except ValueError as e:
-      +        parser.error(f"Invalid --token-len value: {e}")
-      +
-      +    modified_vocab = filter_vocab(vocab, allowed_lengths, min_len_unbounded)
-       
            # 3. Write the (potentially modified) vocab to a temporary file
            with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json", encoding='utf-8') as tmp_vocab_file:
-
+               json.dump(modified_vocab, tmp_vocab_file)
       ```
     metadata:
   - user: |
@@ -1035,7 +1076,7 @@ messages:
       Applying patch to 'scripts/compile.py' using custom patcher...
       Successfully applied patch and wrote to scripts/compile.py.
     metadata:
-  - user: 'Changes committed with message: "Feat: Allow filtering vocabulary by arbitrary
-      token byte length ranges via --token-len"'
+  - user: 'Changes committed with message: "Feature: Print vocabulary if it has less
+      than 1000 tokens after filtering"'
     metadata:
 ...
