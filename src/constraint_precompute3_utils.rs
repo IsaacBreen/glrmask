@@ -444,6 +444,8 @@ pub fn optimize_trie3_size(
                 eliminate_pop0_edges_trie3(roots, trie3_god);
             });
         }
+    }
+
 	crate::debug!(2, "Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
