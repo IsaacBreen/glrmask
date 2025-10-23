@@ -775,25 +775,22 @@ mod tests {
 
     fn normalize_path_challenges(path_keys: &mut Vec<IntermediateTrie3EdgeKey>) -> bool {
         loop {
-            let last_push_idx =
-                path_keys.iter().rposition(|k| matches!(k, IntermediateTrie3EdgeKey::Push(_)));
+            // Find an innermost push-pop pair. This is the last push that has a pop after it.
+            let last_push_with_following_pop = (0..path_keys.len()).rev()
+                .filter(|&i| matches!(path_keys[i], IntermediateTrie3EdgeKey::Push(_)))
+                .find(|&i| {
+                    path_keys[i+1..].iter().any(|k| matches!(k, IntermediateTrie3EdgeKey::Pop(_, _)))
+                });
 
-            if last_push_idx.is_none() {
-                return true; // No more pushes, done.
+            if last_push_with_following_pop.is_none() {
+                return true; // No more push-pop pairs to reduce.
             }
-            let push_idx = last_push_idx.unwrap();
+            let push_idx = last_push_with_following_pop.unwrap();
 
-            let first_pop_after_push_idx = path_keys
-                .iter()
-                .skip(push_idx + 1)
-                .position(|k| matches!(k, IntermediateTrie3EdgeKey::Pop(_, _)));
-
-            if first_pop_after_push_idx.is_none() {
-                // This push and any subsequent ones have no following pops.
-                // The path is as reduced as it can be.
-                return true;
-            }
-            let pop_idx = push_idx + 1 + first_pop_after_push_idx.unwrap();
+            let pop_offset = path_keys[push_idx+1..].iter()
+                .position(|k| matches!(k, IntermediateTrie3EdgeKey::Pop(_, _)))
+                .unwrap();
+            let pop_idx = push_idx + 1 + pop_offset;
 
             let push_key = path_keys[push_idx].clone();
             let pop_key = path_keys[pop_idx].clone();
