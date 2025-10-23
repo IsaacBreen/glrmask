@@ -7,7 +7,7 @@ use range_set_blaze::RangeSetBlaze;
 // Import RangeSetBlaze
 use std::cmp::Ordering;
 use std::convert::TryInto;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 // Added
 use std::iter::FromIterator;
@@ -104,6 +104,30 @@ impl Debug for HybridBitset {
                 },
             )
             .finish()
+    }
+}
+
+impl Display for HybridBitset {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[")?;
+
+        let mut ranges = self.inner.ranges().peekable();
+        while let Some(range) = ranges.next() {
+            let start = *range.start();
+            let end = *range.end();
+
+            if start == end {
+                write!(f, "{}", start)?;
+            } else {
+                write!(f, "{}..{}", start, end)?;
+            }
+
+            if ranges.peek().is_some() {
+                write!(f, ", ")?;
+            }
+        }
+
+        write!(f, "]")
     }
 }
 
@@ -1396,4 +1420,23 @@ mod tests {
         let expected_large: BTreeSet<usize> = (0..10).chain(15..20).collect();
         assert_eq!(large_set.iter_indices().collect::<BTreeSet<_>>(), expected_large);
     }
+
+    #[test]
+    fn test_display_format() {
+        let set1 = HybridBitset::from_iter(vec![0, 1, 2, 3, 4, 7, 9, 10, 11]);
+        assert_eq!(format!("{}", set1), "[0..4, 7, 9..11]");
+
+        let set2 = HybridBitset::zeros();
+        assert_eq!(format!("{}", set2), "[]");
+
+        let set3 = HybridBitset::from_iter(vec![42]);
+        assert_eq!(format!("{}", set3), "[42]");
+
+        let set4 = HybridBitset::from_iter(vec![10, 12, 14]);
+        assert_eq!(format!("{}", set4), "[10, 12, 14]");
+
+        let set5 = HybridBitset::ones(5); // 0..=4
+        assert_eq!(format!("{}", set5), "[0..4]");
+    }
 }
+
