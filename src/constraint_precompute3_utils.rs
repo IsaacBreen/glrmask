@@ -279,25 +279,25 @@ pub fn optimize_trie3_size(
 	crate::debug!(2, "Initial stats:");
 	compute_and_print_precompute_stats3(roots, trie3_god);
 
+    let mut step_counter = 1;
+    macro_rules! run_pass {
+        ($name:expr, $code:block) => {
+            crate::debug!(2, "Running optimization pass {}: {}...", step_counter, $name);
+            let start = Instant::now();
+            $code
+            let duration = start.elapsed();
+            crate::debug!(2, "Pass {} ('{}') finished in {:?}", step_counter, $name, duration);
+            crate::debug!(2, "Stats after pass {}:", step_counter);
+            compute_and_print_precompute_stats3(roots, trie3_god);
+            step_counter += 1;
+        };
+    }
+
 	for pass_num in 0..config.num_passes {
         if config.num_passes > 1 {
             crate::debug!(2, "--- Starting optimization super-pass {}/{} ---", pass_num + 1, config.num_passes);
         }
 
-        let mut step_counter = 1;
-
-        macro_rules! run_pass {
-            ($name:expr, $code:block) => {
-                crate::debug!(2, "Running optimization pass {}: {}...", step_counter, $name);
-                let start = Instant::now();
-                $code
-                let duration = start.elapsed();
-                crate::debug!(2, "Pass {} ('{}') finished in {:?}", step_counter, $name, duration);
-                crate::debug!(2, "Stats after pass {}:", step_counter);
-                compute_and_print_precompute_stats3(roots, trie3_god);
-                step_counter += 1;
-            };
-        }
 
         if config.debug_remove_pop_gt_0 {
             run_pass!("DEBUG: Removing pop > 0 edges", {
@@ -2534,12 +2534,12 @@ fn refine_edges_to_token_atoms_trie3(
             let mut aborted = false;
             for (l, _) in &entries {
                 let mut next_blocks: Vec<LLMTokenBV> = Vec::with_capacity(blocks.len().saturating_mul(2));
-                for b in blocks.into_iter() {
-                    let inter = &b & l;
+                for b in blocks.iter() {
+                    let inter = b & l;
                     if !inter.is_empty() {
                         next_blocks.push(inter);
                     }
-                    let diff = &b - l;
+                    let diff = b - l;
                     if !diff.is_empty() {
                         next_blocks.push(diff);
                     }
@@ -2575,10 +2575,10 @@ fn refine_edges_to_token_atoms_trie3(
             use std::collections::HashMap as HM;
             let mut grouped: HM<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV> = HM::new();
 
-            for b in blocks.into_iter() {
+            for b in blocks.iter() {
                 let mut dest_agg: BTM<PrecomputeNode3Index, StateIDBV> = BTM::new();
                 for (l, dm) in &entries {
-                    if (&b & l).is_empty() {
+                    if (b & l).is_empty() {
                         continue;
                     }
                     for (dst, sids) in dm {
@@ -2592,7 +2592,7 @@ fn refine_edges_to_token_atoms_trie3(
                 }
                 let dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dest_agg.into_iter().collect();
                 let entry = grouped.entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
-                *entry |= &b;
+                *entry |= b;
             }
 
             // Compute new cost
