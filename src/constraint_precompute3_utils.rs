@@ -589,6 +589,27 @@ pub fn optimize_trie3_size(
         });
     }
 
+    // Final pop=0 elimination pass to be sure.
+    if config.eliminate_pop0_edges {
+        run_pass!("Eliminating pop=0 edges (final cleanup)", {
+            eliminate_pop0_edges_except_roots_trie3(roots, trie3_god);
+            if config.assert_no_pop0_nonroot_edges {
+                assert_no_pop0_nonroot_edges_trie3(roots, trie3_god);
+            }
+        });
+        if config.compress_edges {
+            run_pass!("Compressing edges (post-final-pop0-elim)", {
+                compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                compress_unary_chains_trie3(roots, &trie3_god);
+            });
+        }
+        if config.merge_nodes_exact.enabled {
+            run_pass!("Merging nodes (post-final-pop0-elim)", {
+                merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
+            });
+        }
+    }
+
     if let (Some(original_arena), Some(original_roots)) = (original_arena, original_roots) {
         crate::debug!(2, "Running stochastic equivalence check...");
 
