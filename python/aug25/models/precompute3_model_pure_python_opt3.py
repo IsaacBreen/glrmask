@@ -977,7 +977,8 @@ class Model(GraphProvider):
                 print(f"[get_mask] Progress: {len(work_heap)} items in heap, "
                       f"{stats.counts.get('get_mask.traversal.nodes_processed', 0)} nodes processed, "
                       f"{stats.counts.get('get_mask.traversal.edges_traversed', 0)} edges traversed, "
-                      f"max_depth={stats.counts.get('get_mask.traversal.max_depth', 0)}")
+                      f"max_depth={stats.counts.get('get_mask.traversal.max_depth', 0)}, "
+                      f"remaining_tokens={len(remaining_mask)}")
             stats.inc('get_mask.traversal.depth_heap.pops')
             stats.inc('get_mask.traversal.nodes_processed')
             node, gss_node, start_edge, start_dest, pop_cache, depth = dequeue()
