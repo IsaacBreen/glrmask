@@ -2240,7 +2240,6 @@ impl GrammarConstraint {
             |_, node| node.value.end,
             &config.intermediate_trie3_main,
         );
-
         // Update the roots in the map after optimization
         intermediate_roots = intermediate_roots.into_iter().map(|x| node_map.get(&x).cloned().unwrap_or(x)).collect();
         for root in intermediate_precomputed3.values_mut() {
@@ -2272,6 +2271,22 @@ impl GrammarConstraint {
         //     .omit_depth()
         //     ;
         // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+
+        crate::debug!(2, "Optimizing intermediate trie3 again...");
+        let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
+        let node_map = optimize_intermediate_trie3(
+            &intermediate_roots,
+            &intermediate_trie3_god,
+            |_, node| node.value.end,
+            &config.intermediate_trie3_main,
+        );
+        // Update the roots in the map after optimization
+        intermediate_roots = intermediate_roots.into_iter().map(|x| node_map.get(&x).cloned().unwrap_or(x)).collect();
+        for root in intermediate_precomputed3.values_mut() {
+            if let Some(new_root) = node_map.get(root) {
+                *root = new_root.clone();
+            }
+        }
 
         // --- Convert intermediate trie to final Trie3 format ---
         crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");
