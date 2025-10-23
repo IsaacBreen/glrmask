@@ -305,6 +305,31 @@ pub fn eliminate_pushes_and_pops(
         incoming_push_count.insert(*v, cnt);
     }
 
+    // Helper: recompute outgoing push stats for a node from the current graph.
+    // This keeps cached counts/flags accurate even when we insert edges that already existed.
+    let mut recompute_outgoing_stats = |idx: Intermediate2PrecomputeNode3Index| {
+        if let Some(guard) = idx.read(&god2) {
+            let mut push_cnt = 0usize;
+            let mut has_push = false;
+            let mut has_nonpush = false;
+            for (edge_key, dest_map) in guard.children() {
+                if matches!(edge_key, Intermediate2Trie3EdgeKey::Push(_)) {
+                    has_push = true;
+                    push_cnt += dest_map.len();
+                } else if !dest_map.is_empty() {
+                    has_nonpush = true;
+                }
+            }
+            outgoing_push_count.insert(idx, push_cnt);
+            has_outgoing_push.insert(idx, has_push);
+            has_outgoing_nonpush.insert(idx, has_nonpush);
+        } else {
+            outgoing_push_count.insert(idx, 0);
+            has_outgoing_push.insert(idx, false);
+            has_outgoing_nonpush.insert(idx, false);
+        }
+    };
+
     // Candidate worklist: nodes with at least one incoming Push and no outgoing Push.
     let mut queue: std::collections::VecDeque<Intermediate2PrecomputeNode3Index> =
         std::collections::VecDeque::new();
@@ -364,22 +389,6 @@ pub fn eliminate_pushes_and_pops(
                         *cnt -= 1;
                     }
                 }
-                // Update A's outgoing push count and enqueue A if it becomes a candidate.
-                if matches!(push_key, Intermediate2Trie3EdgeKey::Push(_)) {
-                    let count_a = outgoing_push_count.entry(a_idx).or_insert(0);
-                    if *count_a > 0 {
-                        *count_a -= 1;
-                    }
-                    if *count_a == 0 {
-                        has_outgoing_push.insert(a_idx, false);
-                        if !is_end.contains(&a_idx)
-                            && incoming_push_count.get(&a_idx).copied().unwrap_or(0) > 0
-                        {
-                            queue.push_back(a_idx);
-                        }
-                    }
-                }
-
                 // Compose A --Push(s)--> B --op--> C into A --new_key--> C
                 let s = match &push_key {
                     Intermediate2Trie3EdgeKey::Push(s) => s.clone(),
@@ -456,12 +465,23 @@ pub fn eliminate_pushes_and_pops(
                                     }
                                 }
                             }
-                            _ => {
-                                has_outgoing_nonpush.insert(a_idx, true);
-                            }
+                            _ => {}
                         }
                     }
                 }
+
+                // After finishing all compositions for this (a_idx, b_idx) push removal,
+                // recompute outgoing push stats for a_idx and enqueue if it becomes a candidate.
+                recompute_outgoing_stats(a_idx);
+                if !is_end.contains(&a_idx)
+                    && !has_outgoing_push.get(&a_idx).copied().unwrap_or(false)
+                    && incoming_push_count.get(&a_idx).copied().unwrap_or(0) > 0
+                {
+                    queue.push_back(a_idx);
+                }
+                // Note: we intentionally do not recompute stats for c_idx here (only used for
+                // candidate queueing when we added a new push). The existing logic to queue c_idx
+                // on insertion of a new push remains valid and efficient.
             }
         }
 
@@ -535,6 +555,9 @@ pub fn eliminate_pushes_and_pops(
             has_outgoing_nonpush.insert(b_idx, false);
             has_outgoing_push.insert(b_np_idx, false);
             has_outgoing_nonpush.insert(b_np_idx, !to_move.is_empty());
+            // Keep cached stats consistent with the new topology.
+            recompute_outgoing_stats(b_idx);
+            recompute_outgoing_stats(b_np_idx);
 
             // Duplicate all incoming edges so both b_idx (push-only) and b_np_idx (non-push-only) are reachable.
             if let Some(incoming) = reverse_adj.get(&b_idx).cloned() {
