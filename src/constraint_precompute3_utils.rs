@@ -2435,10 +2435,9 @@ fn compress_unary_chains_trie3(
 
     let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
 
-    // Iterate a few times until no more rewrites are possible.
+    // Iterate until no more rewrites are possible.
     let mut total_rewired = 0usize;
-    let max_outer_iters = 8usize;
-    for _iter in 0..max_outer_iters {
+    loop {
         // Build indegree counts and track unique predecessor + edge-key for nodes with indegree == 1.
         let mut indegree: HashMap<PrecomputeNode3Index, usize> = HashMap::new();
         let mut unique_parent: HashMap<PrecomputeNode3Index, (PrecomputeNode3Index, (isize, LLMTokenBV))> = HashMap::new();
@@ -2494,7 +2493,7 @@ fn compress_unary_chains_trie3(
         }
 
         // Find candidates: nodes with indegree==1, outdegree==1, not roots, and matching keys on both sides.
-        let mut rewired_this_iter = 0usize;
+        let mut rewired_this_loop = false;
         for u in &all_nodes {
             let u_idx = *u;
             if roots_set.contains(&u_idx) {
@@ -2562,14 +2561,15 @@ fn compress_unary_chains_trie3(
                         new_live |= llm_bv;
                     }
                     pw.value.live_tokens = new_live;
-                    rewired_this_iter += 1;
+                    total_rewired += 1;
+                    rewired_this_loop = true;
+                    break; // Restart the process with updated graph properties
                 }
             }
         }
 
-        total_rewired += rewired_this_iter;
-        if rewired_this_iter == 0 {
-            break;
+        if !rewired_this_loop {
+            break; // No changes in a full pass, fixed point reached.
         }
     }
 
