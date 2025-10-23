@@ -1377,8 +1377,8 @@ pub fn collapse_pop0_closure_trie3(
                         }
                     }
                 } else {
-                    let succ_sum = &summary[*dst_c];
-                    for ((p, l1), dm) in succ_sum.iter() {
+                    let succ_sum_clone = summary[*dst_c].clone();
+                    for ((p, l1), dm) in succ_sum_clone.iter() {
                         if *p == 0 { continue; } // by construction summaries have pop!=0 but keep safety
                         let l_new = l0 & l1;
                         if l_new.is_empty() { continue; }
