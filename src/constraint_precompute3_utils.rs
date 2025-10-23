@@ -125,7 +125,7 @@ pub struct Trie3Config {
     pub stochastic_equivalence_check: bool,
     pub debug_remove_pop_gt_0: bool,
     pub eliminate_pop0_edges: bool,
-    pub assert_no_pop0_edges: bool,
+    pub assert_pop0_edges_only_at_start: bool,
     pub assert_pop0_paths_to_end_are_short: bool,
 }
 
@@ -149,7 +149,7 @@ impl Default for Trie3Config {
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
             eliminate_pop0_edges: true,
-            assert_no_pop0_edges: true,
+            assert_pop0_edges_only_at_start: false,
             assert_pop0_paths_to_end_are_short: false,
         }
     }
@@ -175,7 +175,7 @@ impl Trie3Config {
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
             eliminate_pop0_edges: false,
-            assert_no_pop0_edges: false,
+            assert_pop0_edges_only_at_start: false,
             assert_pop0_paths_to_end_are_short: false,
         }
     }
@@ -359,12 +359,6 @@ pub fn optimize_trie3_size(
             });
         }
 
-        if config.assert_no_pop0_edges {
-            run_pass!("Asserting no pop=0 edges", {
-                assert_no_pop0_edges_trie3(roots, trie3_god);
-            });
-        }
-
         if config.compress_edges {
             run_pass!("Compressing edges + unary chains", {
                 compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
@@ -453,6 +447,12 @@ pub fn optimize_trie3_size(
                 reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
             });
         }
+    }
+
+    if config.assert_pop0_edges_only_at_start {
+        // This is a final check, run it outside the pass loop.
+        crate::debug!(2, "Running final assertion: pop=0 edges only at start...");
+        assert_pop0_edges_only_at_start_trie3(roots, trie3_god);
     }
 
 	crate::debug!(2, "Recomputing max depths...");
@@ -2601,104 +2601,30 @@ fn compress_unary_chains_trie3(
     crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
 }
 
-/// Eliminate pop=0 edges by composing them into the first subsequent pop>0 transitions.
-/// For each node U, we perform a BFS over only pop=0 edges, intersecting LLMTokenBV and
-/// StateIDBV along the path. Whenever we encounter a pop>0 edge (P, L2, S2) from some node
-/// V in the zero-pop frontier with accumulated (Lacc, Sacc), we add an edge from U to the
-/// destination with key (P, Lacc & L2) and value Sacc & S2. If an end node is reachable via
-/// only pop=0 transitions, U is marked as end as well.
-///
-/// This pass guarantees there are no remaining pop=0 edges. It preserves nonzero-pop edges
-/// and recomputes live_tokens for every node.
-pub fn eliminate_pop0_edges_trie3(
+/// Panics if any node reachable after a pop>0 edge has an outgoing pop=0 edge.
+fn assert_pop0_edges_only_at_start_trie3(
     roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
 ) {
-    crate::debug!(2, "Eliminating pop=0 edges by composing into next positive-pop transitions...");
-
+    crate::debug!(2, "Asserting that pop=0 edges only appear at the start of paths...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
     if all_nodes.is_empty() {
         return;
     }
 
-    // Dense index for stable vectors
-    let mut dense_of: HashMap<PrecomputeNode3Index, usize> = HashMap::with_capacity(all_nodes.len());
-    for (i, idx) in all_nodes.iter().enumerate() {
-        dense_of.insert(*idx, i);
-    }
+    // 1. Find all nodes that are reachable *after* a pop > 0 edge has been taken.
+    let mut post_pop_gt_0_nodes = HashSet::new();
+    let mut q = VecDeque::new();
 
-    // Storage for rebuilt children and end flags
-    let mut new_children_vec: Vec<BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>>> =
-        vec![BTreeMap::new(); all_nodes.len()];
-    let mut end_via_zero_vec: Vec<bool> = vec![false; all_nodes.len()];
-
-    #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter().enumerate(), desc = "Trie3 Eliminate pop=0", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
-    #[cfg(rustrover)]
-    let it = all_nodes.iter().enumerate();
-    for (i, src_idx) in it {
-        // BFS over zero-pop transitions, accumulating (LLM, SIDs).
-        let mut q: VecDeque<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)> = VecDeque::new();
-        let mut seen: HashMap<PrecomputeNode3Index, Vec<(LLMTokenBV, StateIDBV)>> = HashMap::new();
-
-        let start_llm = LLMTokenBV::max_ones();
-        let start_sids = StateIDBV::max_ones();
-
-        q.push_back((*src_idx, start_llm.clone(), start_sids.clone()));
-        // Seed seen so we don't loop on the start node trivially.
-        seen.insert(*src_idx, vec![(start_llm.clone(), start_sids.clone())]);
-
-        while let Some((cur, acc_llm, acc_sids)) = q.pop_front() {
-            // If this frontier node is end-reachable under a non-empty context, mark source as end.
-            if let Some(cg) = cur.read(trie3_god) {
-                if cg.value.end && !acc_llm.is_empty() && !acc_sids.is_empty() {
-                    end_via_zero_vec[i] = true;
-                }
-                // Explore outgoing edges.
-                for ((pop, llm_bv), dm) in cg.children() {
-                    let llm2 = &acc_llm & llm_bv;
-                    if llm2.is_empty() {
-                        continue;
-                    }
-                    for (dst, sids_edge) in dm {
-                        let sids2 = &acc_sids & sids_edge;
-                        if sids2.is_empty() {
-                            continue;
-                        }
-                        if *pop == 0 {
-                            // Deduplicate states using dominance: skip if existing (Lprev, Sprev)
-                            // has Lprev ⊇ llm2 and Sprev ⊇ sids2. Otherwise, remove any existing
-                            // pairs dominated by the new pair, then enqueue.
-                            let entry = seen.entry(*dst).or_insert_with(Vec::new);
-                            let mut skip = false;
-                            let mut j = 0usize;
-                            while j < entry.len() {
-                                let (ref lprev, ref sprev) = entry[j];
-                                if llm2.is_subset(lprev) && sids2.is_subset(sprev) {
-                                    skip = true;
-                                    break;
-                                }
-                                if lprev.is_subset(&llm2) && sprev.is_subset(&sids2) {
-                                    entry.remove(j);
-                                } else {
-                                    j += 1;
-                                }
-                            }
-                            if skip {
-                                continue;
-                            }
-                            entry.push((llm2.clone(), sids2.clone()));
-                            q.push_back((*dst, llm2.clone(), sids2));
-                        } else {
-                            // First positive-pop transition from the current zero-pop frontier.
-                            let entry = new_children_vec[i]
-                                .entry((*pop, llm2.clone()))
-                                .or_insert_with(OrderedHashMap::new);
-                            entry
-                                .entry(*dst)
-                                .and_modify(|e| *e |= &sids2)
-                                .or_insert(sids2.clone());
+    // Seed the queue with initial destinations of pop > 0 edges.
+    for node_idx in &all_nodes {
+        if let Some(g) = node_idx.read(trie3_god) {
+            for ((pop, _), dm) in g.children() {
+                if *pop > 0 {
+                    for (dest, _) in dm {
+                        if post_pop_gt_0_nodes.insert(*dest) {
+                            q.push_back(*dest);
                         }
                     }
                 }
@@ -2706,52 +2632,33 @@ pub fn eliminate_pop0_edges_trie3(
         }
     }
 
-    // Commit results: overwrite children with only pop>0 edges, recompute live tokens,
-    // and mark end if zero-pop closure reached an end.
-    #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter().enumerate(), desc = "Trie3 Eliminate pop=0 (Commit)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
-    #[cfg(rustrover)]
-    let it = all_nodes.iter().enumerate();
-    for (i, node_idx) in it {
-        if let Some(mut w) = node_idx.write(trie3_god) {
-            let children = &new_children_vec[i];
-            let mut new_live = LLMTokenBV::zeros();
-            for ((_, llm_bv), _) in children {
-                new_live |= llm_bv;
+    // 2. Traverse from these seeds to find all reachable nodes.
+    while let Some(node_idx) = q.pop_front() {
+        if let Some(g) = node_idx.read(trie3_god) {
+            for (_, dm) in g.children() {
+                for (dest, _) in dm {
+                    if post_pop_gt_0_nodes.insert(*dest) {
+                        q.push_back(*dest);
+                    }
+                }
             }
-            w.value.live_tokens = new_live;
-            w.value.end = w.value.end || end_via_zero_vec[i];
-            *w.children_mut() = children.clone();
         }
     }
 
-    crate::debug!(2, "Finished eliminating pop=0 edges.");
-}
-
-/// Panics if any node in the trie has an outgoing edge with pop=0.
-fn assert_no_pop0_edges_trie3(
-    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-    trie3_god: &Trie3GodWrapper,
-) {
-    crate::debug!(2, "Asserting that no pop=0 edges exist in Trie3...");
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-    if all_nodes.is_empty() {
-        return;
-    }
-
-    for node_idx in all_nodes {
+    // 3. Assert that no node in this set has an outgoing pop=0 edge.
+    for node_idx in &post_pop_gt_0_nodes {
         if let Some(g) = node_idx.read(trie3_god) {
             for ((pop, _), _) in g.children() {
                 if *pop == 0 {
                     panic!(
-                        "Assertion failed: Found a pop=0 edge on node {}. This should not happen after the eliminate_pop0_edges pass.",
+                        "Assertion failed: Found a pop=0 edge on node {}, which is reachable after a pop>0 edge.",
                         node_idx
                     );
                 }
             }
         }
     }
-    crate::debug!(2, "Assertion passed: No pop=0 edges found.");
+
+    crate::debug!(2, "Assertion passed: pop=0 edges only appear at the start.");
 }
 
