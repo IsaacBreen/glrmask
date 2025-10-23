@@ -1024,6 +1024,10 @@ class Model(GraphProvider):
             )
             heapq.heappush(work_heap, item)
 
+        def dequeue() -> Tuple[NodeID, GSS, int, int, Dict, int]:
+            item = heapq.heappop(work_heap)
+            return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache, item.depth
+
         stats.start('get_mask.seeding')
         if VERBOSE_GET_MASK:
             print("[get_mask] Starting seeding phase...")
