@@ -146,7 +146,7 @@ impl Default for Trie3Config {
             factor_common_destinations: true,
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
-            assert_pop0_paths_to_end_are_short: true,
+            assert_pop0_paths_to_end_are_short: false,
         }
     }
 }
@@ -1488,8 +1488,6 @@ fn factor_common_destinations_trie3(
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
     if all_nodes.is_empty() { return; }
 
-    let roots_set: HashSet<_> = roots.values().cloned().collect();
-
     let all_llm_bv = LLMTokenBV::ones(max_llm_token_id + 1);
     let all_sids_bv = StateIDBV::ones(max_state_id + 1);
 
@@ -1519,17 +1517,9 @@ fn factor_common_destinations_trie3(
     }
 
     for (dest_idx, edges_by_key) in incoming_map {
-        let is_dest_end = dest_idx.read(trie3_god).map_or(false, |g| g.value.end);
         for (edge_key, sources_by_sids) in edges_by_key {
             for (sids_bv, sources) in sources_by_sids {
                 if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
-                    // Do not factor if this would convert a short pop=0 path from a root to an end node into a long one.
-                    if edge_key.0 == 0 && is_dest_end {
-                        if sources.iter().any(|s| roots_set.contains(s)) {
-                            continue;
-                        }
-                    }
-
                     // Create intermediate node
                     let intermediate_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::internal())));
 
