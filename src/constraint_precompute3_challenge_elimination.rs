@@ -755,7 +755,11 @@ mod tests {
                 if !first {
                     write!(f, ", ")?;
                 }
-                write!(f, "{}: {}", pos, bv)?;
+                if bv.is_all() {
+                    write!(f, "{}: [ALL]", pos)?;
+                } else {
+                    write!(f, "{}: {}", pos, bv)?;
+                }
                 first = false;
             }
             write!(f, "}} }}")
@@ -871,6 +875,36 @@ mod tests {
         normalized_set
     }
 
+    fn assert_paths_eq(
+        paths_before: &BTreeSet<NormalizedPath>,
+        paths_after: &BTreeSet<NormalizedPath>,
+    ) {
+        if paths_before == paths_after {
+            return;
+        }
+
+        let missing_paths: Vec<_> = paths_before.difference(paths_after).collect();
+        let extra_paths: Vec<_> = paths_after.difference(paths_before).collect();
+
+        let mut error_msg = String::new();
+        error_msg.push_str("Normalized paths do not match after elimination.\n");
+
+        if !missing_paths.is_empty() {
+            error_msg.push_str("\n--- Missing Paths (present before, but not after) ---\n");
+            for path in missing_paths {
+                error_msg.push_str(&format!("- {}\n", path));
+            }
+        }
+
+        if !extra_paths.is_empty() {
+            error_msg.push_str("\n--- Extra Paths (present after, but not before) ---\n");
+            for path in extra_paths {
+                error_msg.push_str(&format!("+ {}\n", path));
+            }
+        }
+        panic!("{}", error_msg);
+    }
+
     #[test]
     fn test_eliminate_push_pop_failure_case() {
         let god = IntermediateTrie3GodWrapper::new();
@@ -907,7 +941,7 @@ mod tests {
         eliminate_pushes_and_pops(&mut roots, &god);
 
         let paths_after = get_normalized_paths(&roots, &god);
-        assert_eq!(paths_before, paths_after);
+        assert_paths_eq(&paths_before, &paths_after);
 
         // This assertion should now pass.
         assert_no_pops_reachable_from_pushes(&roots, &god);
@@ -952,7 +986,7 @@ mod tests {
         eliminate_pushes_and_pops(&mut roots, &god);
 
         let paths_after = get_normalized_paths(&roots, &god);
-        assert_eq!(paths_before, paths_after);
+        assert_paths_eq(&paths_before, &paths_after);
 
         assert_no_pops_reachable_from_pushes(&roots, &god);
     }
@@ -1431,7 +1465,7 @@ mod tests {
         eliminate_pushes_and_pops(&mut roots, &god);
 
         let paths_after = get_normalized_paths(&roots, &god);
-        assert_eq!(paths_before, paths_after);
+        assert_paths_eq(&paths_before, &paths_after);
 
         assert_no_pops_reachable_from_pushes(&roots, &god);
     }
