@@ -228,7 +228,7 @@ pub fn eliminate_pushes_and_pops(
     roots: &mut BTreeMap<TokenizerStateID, IntermediatePrecomputeNode3Index>,
     god: &IntermediateTrie3GodWrapper,
 ) {
-    const DEBUG: bool = false;
+    const DEBUG: bool = true;
     if DEBUG {
         let initial_nodes =
             IntermediatePrecomputeNode3::all_nodes(god, &roots.values().cloned().collect::<Vec<_>>())
@@ -810,6 +810,479 @@ mod tests {
 
         let mut roots = BTreeMap::new();
         roots.insert(TokenizerStateID(0), n(101));
+
+        eliminate_pushes_and_pops(&mut roots, &god);
+        assert_no_pops_reachable_from_pushes(&roots, &god);
+    }
+
+    #[test]
+    fn test_eliminate_complex_trie_from_prompt() {
+        let god = IntermediateTrie3GodWrapper::new();
+
+        let mut node_map = HashMap::new();
+        let node_ids = vec![
+            202, 204, 206, 207, 208, 209, 210, 211, 212, 213, 214, 217, 218, 219, 220, 221,
+            222, 223, 224, 225, 226, 227, 228, 229, 230, 233, 234, 235, 236, 237, 238, 239,
+            240, 241, 242, 243, 244, 245, 246, 250, 251, 252, 253, 254, 255, 256, 257, 258,
+            259, 260, 261, 262, 263,
+        ];
+        for id in node_ids {
+            let contents = if id == 204 {
+                IntermediatePrecomputedNodeContents3::leaf()
+            } else {
+                IntermediatePrecomputedNodeContents3::internal()
+            };
+            node_map.insert(id, Trie2Index::from(god.insert(Trie::new(contents))));
+        }
+
+        let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+
+        // Root
+        god.insert_edge_simple(n(202), n(206), IntermediateTrie3EdgeKey::NoOp, ());
+        god.insert_edge_simple(n(202), n(217), IntermediateTrie3EdgeKey::NoOp, ());
+
+        // Path from 206
+        god.insert_edge_simple(
+            n(206),
+            n(207),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_iter([0, 3, 7])),
+            (),
+        );
+        god.insert_edge_simple(
+            n(207),
+            n(211),
+            IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(9)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(211),
+            n(233),
+            IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(1)),
+            (),
+        );
+
+        // Path from 233
+        god.insert_edge_simple(
+            n(233),
+            n(234),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(234),
+            n(239),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(239),
+            n(237),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(7)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(237),
+            n(241),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(241),
+            n(244),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_iter([0, 3, 7])),
+            (),
+        );
+        god.insert_edge_simple(
+            n(244),
+            n(237),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(7)),
+            (),
+        ); // Cycle
+        god.insert_edge_simple(n(244), n(246), IntermediateTrie3EdgeKey::NoOp, ());
+        god.insert_edge_simple(
+            n(246),
+            n(240),
+            IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(240),
+            n(243),
+            IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(10)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(243),
+            n(250),
+            IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)),
+            (),
+        );
+
+        // Path from 250
+        god.insert_edge_simple(
+            n(250),
+            n(251),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(251),
+            n(256),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(256),
+            n(254),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(7)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(254),
+            n(258),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(258),
+            n(261),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_iter([0, 3, 7])),
+            (),
+        );
+        god.insert_edge_simple(
+            n(261),
+            n(254),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(7)),
+            (),
+        ); // Cycle
+        god.insert_edge_simple(n(261), n(263), IntermediateTrie3EdgeKey::NoOp, ());
+        god.insert_edge_simple(
+            n(263),
+            n(257),
+            IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(257),
+            n(260),
+            IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(10)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(260),
+            n(204),
+            IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)),
+            (),
+        ); // To END
+        god.insert_edge_simple(n(251), n(257), IntermediateTrie3EdgeKey::NoOp, ());
+        god.insert_edge_simple(
+            n(250),
+            n(252),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(6)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(252),
+            n(256),
+            IntermediateTrie3EdgeKey::Pop(2, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(250),
+            n(253),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(8)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(253),
+            n(258),
+            IntermediateTrie3EdgeKey::Pop(2, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(250),
+            n(254),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(9)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(250),
+            n(255),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(10)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(255),
+            n(259),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(259),
+            n(262),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(262),
+            n(256),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(243),
+            n(204),
+            IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(1)),
+            (),
+        ); // To END
+
+        // More from 234
+        god.insert_edge_simple(n(234), n(240), IntermediateTrie3EdgeKey::NoOp, ());
+
+        // More from 233
+        god.insert_edge_simple(
+            n(233),
+            n(235),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(6)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(235),
+            n(239),
+            IntermediateTrie3EdgeKey::Pop(2, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(233),
+            n(236),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(8)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(236),
+            n(241),
+            IntermediateTrie3EdgeKey::Pop(2, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(233),
+            n(237),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(9)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(233),
+            n(238),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(10)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(238),
+            n(242),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(242),
+            n(245),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(245),
+            n(239),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+
+        // More from 206
+        god.insert_edge_simple(
+            n(206),
+            n(208),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(208),
+            n(212),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(212),
+            n(214),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(3)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(214),
+            n(207),
+            IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(0)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(212),
+            n(208),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(7)),
+            (),
+        ); // Cycle
+        god.insert_edge_simple(
+            n(206),
+            n(209),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(6)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(209),
+            n(212),
+            IntermediateTrie3EdgeKey::Pop(2, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(206),
+            n(209),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(8)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(206),
+            n(208),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(9)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(206),
+            n(210),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(10)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(210),
+            n(213),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(213),
+            n(208),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)),
+            (),
+        );
+
+        // Path from 217
+        god.insert_edge_simple(
+            n(217),
+            n(218),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(218),
+            n(223),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(223),
+            n(221),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(7)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(221),
+            n(225),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(225),
+            n(228),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_iter([0, 3, 7])),
+            (),
+        );
+        god.insert_edge_simple(
+            n(228),
+            n(221),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(7)),
+            (),
+        ); // Cycle
+        god.insert_edge_simple(n(228), n(230), IntermediateTrie3EdgeKey::NoOp, ());
+        god.insert_edge_simple(
+            n(230),
+            n(224),
+            IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(224),
+            n(227),
+            IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(10)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(227),
+            n(233),
+            IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(0)),
+            (),
+        );
+        god.insert_edge_simple(n(218), n(224), IntermediateTrie3EdgeKey::NoOp, ());
+        god.insert_edge_simple(
+            n(217),
+            n(219),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(6)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(219),
+            n(223),
+            IntermediateTrie3EdgeKey::Pop(2, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(217),
+            n(220),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(8)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(220),
+            n(225),
+            IntermediateTrie3EdgeKey::Pop(2, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(217),
+            n(221),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(9)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(217),
+            n(222),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(10)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(222),
+            n(226),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+        god.insert_edge_simple(
+            n(226),
+            n(229),
+            IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)),
+            (),
+        );
+        god.insert_edge_simple(
+            n(229),
+            n(223),
+            IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()),
+            (),
+        );
+
+        let mut roots = BTreeMap::new();
+        roots.insert(TokenizerStateID(0), n(202));
 
         eliminate_pushes_and_pops(&mut roots, &god);
         assert_no_pops_reachable_from_pushes(&roots, &god);
