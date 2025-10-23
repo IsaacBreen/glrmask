@@ -16,6 +16,7 @@ use std::time::Instant;
 use rand::prelude::*;
 use crate::datastructures::trie::PathComparison;
 use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
+use crate::glr::table::StateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 

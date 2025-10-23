@@ -2948,7 +2948,7 @@ impl GLRParser {
             // Shifts
             for &to_sid in row.shifts_and_reduces_full.values().filter_map(|action| match action {
                 Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(sid),
-                Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
+                Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => shift.as_ref(),
                 _ => None,
             }) {
                 add_predecessor(from_sid, to_sid);
