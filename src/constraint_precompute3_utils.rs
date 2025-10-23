@@ -111,6 +111,7 @@ pub struct Trie3Config {
     pub eliminate_pop0_edges: bool,
     pub assert_no_pop0_nonroot_edges: bool,
     pub enabled: bool,
+    pub collapse_pop0_via_closure: bool,
     pub num_passes: usize,
     pub merge_equivalent_llm_tokens: bool,
     pub reorder_llm_tokens: bool,
@@ -138,6 +139,7 @@ impl Default for Trie3Config {
         Self {
             enabled: true,
             num_passes: 3,
+            collapse_pop0_via_closure: true,
             eliminate_pop0_edges: true,
             assert_no_pop0_nonroot_edges: true,
             merge_equivalent_llm_tokens: true,
@@ -168,6 +170,7 @@ impl Trie3Config {
         Self {
             enabled: false,
             num_passes: 0,
+            collapse_pop0_via_closure: false,
             eliminate_pop0_edges: false,
             assert_no_pop0_nonroot_edges: false,
             merge_equivalent_llm_tokens: false,
@@ -478,6 +481,38 @@ pub fn optimize_trie3_size(
 
         // New pass: eliminate pop=0 edges originating from non-root nodes.
         if config.eliminate_pop0_edges {
+            if config.collapse_pop0_via_closure {
+                // Stronger and safer: collapse all pop=0 structure via SCC+DAG summary into a pop=0–free graph.
+                run_pass!("Collapsing pop=0 closure via SCC + DAG summary", {
+                    collapse_pop0_closure_trie3(
+                        roots,
+                        trie3_god,
+                        max_llm_token_id,
+                        max_state_id
+                    );
+                    if config.assert_no_pop0_nonroot_edges {
+                        assert_no_pop0_nonroot_edges_trie3(roots, trie3_god);
+                    }
+                });
+                if config.compress_edges {
+                    run_pass!("Compressing edges + unary chains (post-pop0-collapse)", {
+                        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                        compress_unary_chains_trie3(roots, &trie3_god);
+                    });
+                }
+                if config.refine_token_atoms {
+                    run_pass!("Refining token-set atoms (post-pop0-collapse)", {
+                        refine_edges_to_token_atoms_trie3(
+                            roots, &trie3_god, max_llm_token_id, max_state_id, config.refine_token_atoms_max_blocks
+                        );
+                    });
+                }
+                if config.refine_token_atoms_exact {
+                    run_pass!("Refining token-set atoms (exact, post-pop0-collapse)", {
+                        refine_edges_to_token_atoms_trie3_exact(roots, &trie3_god, max_llm_token_id, max_state_id);
+                    });
+                }
+            } else {
             run_pass!("Eliminating pop=0 edges (non-roots)", {
                 eliminate_pop0_edges_except_roots_trie3(roots, trie3_god);
                 if config.assert_no_pop0_nonroot_edges {
@@ -570,6 +605,7 @@ pub fn optimize_trie3_size(
                         max_llm_token_id, max_state_id
                     );
                 });
+            }
             }
         }
     }
@@ -1095,6 +1131,298 @@ fn detect_true_cycle_recursive_trie3_llm_only(
     visited.insert(node_idx);
     path.pop();
     None
+}
+
+/// Collapse all pop=0 structure by summarizing epsilon-like (pop=0) reachability via SCC + DAG closure.
+/// This builds a new, pop=0–free graph with one node per SCC of the pop=0 subgraph. For each SCC S,
+/// we compute a fixpoint summary of all pop!=0 transitions reachable through any sequence of pop=0 steps,
+/// intersecting LLMTokenBV and StateIDBV filters along the path. Roots are remapped to their SCC nodes.
+/// Correctness follows guarded epsilon-elimination; termination is guaranteed by monotonicity over finite bitvectors.
+pub fn collapse_pop0_closure_trie3(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+    max_llm_token_id: usize,
+    max_state_id: usize,
+) {
+    crate::debug!(2, "Collapsing pop=0 closure via SCC + DAG summary (Trie3)...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    // Assign dense IDs to nodes for compact arrays.
+    let n = all_nodes.len();
+    let mut dense_of: HashMap<PrecomputeNode3Index, usize> = HashMap::with_capacity(n * 2);
+    let mut old_of: Vec<PrecomputeNode3Index> = Vec::with_capacity(n);
+    for (i, idx) in all_nodes.iter().enumerate() {
+        dense_of.insert(*idx, i);
+        old_of.push(*idx);
+    }
+
+    // Build adjacency for pop=0 edges and capture per-node edge data.
+    // Also collect base (pop!=0) edges per node, and end flags.
+    let mut adj0: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut zero_edges: Vec<Vec<(LLMTokenBV, usize, StateIDBV)>> = vec![Vec::new(); n];
+    let mut base_edges: Vec<BTreeMap<(isize, LLMTokenBV), BTreeMap<usize, StateIDBV>>> = vec![BTreeMap::new(); n];
+    let mut ends: Vec<bool> = vec![false; n];
+
+    for (i, node_idx) in old_of.iter().enumerate() {
+        let g = node_idx.read(trie3_god).expect("read");
+        ends[i] = g.value.end;
+        for ((pop, llm_bv), dm) in g.children() {
+            if *pop == 0 {
+                for (dst, sids) in dm {
+                    let j = *dense_of.get(dst).expect("dense id for dst");
+                    // Record structure for SCC and summarization
+                    adj0[i].push(j);
+                    zero_edges[i].push((llm_bv.clone(), j, sids.clone()));
+                }
+            } else {
+                // Pop != 0: base edge
+                for (dst, sids) in dm {
+                    let j = *dense_of.get(dst).expect("dense id for dst");
+                    let entry = base_edges[i].entry((*pop, llm_bv.clone())).or_insert_with(BTreeMap::new);
+                    entry.entry(j).and_modify(|e| *e |= sids).or_insert(sids.clone());
+                }
+            }
+        }
+    }
+
+    // Tarjan SCC over pop=0 adjacency.
+    struct Tarjan {
+        index: usize,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        indices: Vec<Option<usize>>,
+        low: Vec<usize>,
+        comp_id: Vec<Option<usize>>,
+        comp_count: usize,
+    }
+    fn strongconnect(v: usize, t: &mut Tarjan, adj: &Vec<Vec<usize>>) {
+        t.indices[v] = Some(t.index);
+        t.low[v] = t.index;
+        t.index += 1;
+        t.stack.push(v);
+        t.on_stack[v] = true;
+        for &w in &adj[v] {
+            if t.indices[w].is_none() {
+                strongconnect(w, t, adj);
+                t.low[v] = std::cmp::min(t.low[v], t.low[w]);
+            } else if t.on_stack[w] {
+                t.low[v] = std::cmp::min(t.low[v], t.indices[w].unwrap());
+            }
+        }
+        if t.low[v] == t.indices[v].unwrap() {
+            // New component root
+            loop {
+                let w = t.stack.pop().unwrap();
+                t.on_stack[w] = false;
+                t.comp_id[w] = Some(t.comp_count);
+                if w == v { break; }
+            }
+            t.comp_count += 1;
+        }
+    }
+    let mut t = Tarjan {
+        index: 0,
+        stack: Vec::new(),
+        on_stack: vec![false; n],
+        indices: vec![None; n],
+        low: vec![0; n],
+        comp_id: vec![None; n],
+        comp_count: 0,
+    };
+    for v in 0..n {
+        if t.indices[v].is_none() {
+            strongconnect(v, &mut t, &adj0);
+        }
+    }
+    let comp_count = t.comp_count;
+    let mut comp_of_node: Vec<usize> = vec![0; n];
+    for i in 0..n {
+        comp_of_node[i] = t.comp_id[i].expect("assigned");
+    }
+    crate::debug!(3, "collapse_pop0: computed {} SCCs over {} nodes", comp_count, n);
+
+    // Build per-component info: base (pop!=0) edges aggregated by dest component,
+    // zero-pop edges aggregated (we'll use them to push summaries).
+    let mut comp_nodes: Vec<Vec<usize>> = vec![Vec::new(); comp_count];
+    let mut comp_end: Vec<bool> = vec![false; comp_count];
+    let mut comp_base: Vec<BTreeMap<(isize, LLMTokenBV), BTreeMap<usize, StateIDBV>>> = vec![BTreeMap::new(); comp_count];
+    let mut comp_zero: Vec<Vec<(LLMTokenBV, usize, StateIDBV)>> = vec![Vec::new(); comp_count];
+
+    for i in 0..n {
+        let c = comp_of_node[i];
+        comp_nodes[c].push(i);
+        comp_end[c] |= ends[i];
+    }
+    for i in 0..n {
+        let c = comp_of_node[i];
+        // Base edges: map dest node -> dest comp
+        for (ek, dm) in &base_edges[i] {
+            let (p, l) = ek;
+            for (dst_i, sids) in dm {
+                let dst_c = comp_of_node[*dst_i];
+                let entry = comp_base[c].entry((*p, l.clone())).or_insert_with(BTreeMap::new);
+                entry.entry(dst_c).and_modify(|e| *e |= sids).or_insert(sids.clone());
+            }
+        }
+        // Zero edges: keep (llm, dest_comp, sids)
+        for (l0, j, s0) in &zero_edges[i] {
+            let dst_c = comp_of_node[*j];
+            comp_zero[c].push((l0.clone(), dst_c, s0.clone()));
+        }
+    }
+
+    // Build condensation DAG over components (pop=0 edges only).
+    let mut dag_adj: Vec<Vec<usize>> = vec![Vec::new(); comp_count];
+    {
+        let mut seen = HashSet::<(usize, usize)>::new();
+        for c in 0..comp_count {
+            for (_, dst_c, _) in &comp_zero[c] {
+                if *dst_c != c && seen.insert((c, *dst_c)) {
+                    dag_adj[c].push(*dst_c);
+                }
+            }
+        }
+    }
+    // Topological order of components (DAG). We'll use reverse topological order to ensure
+    // summaries of successors are available when processing predecessors.
+    let mut indeg = vec![0usize; comp_count];
+    for c in 0..comp_count {
+        for &d in &dag_adj[c] { indeg[d] += 1; }
+    }
+    let mut q = VecDeque::new();
+    for c in 0..comp_count {
+        if indeg[c] == 0 { q.push_back(c); }
+    }
+    let mut topo: Vec<usize> = Vec::with_capacity(comp_count);
+    while let Some(u) = q.pop_front() {
+        topo.push(u);
+        for &v in &dag_adj[u] {
+            indeg[v] -= 1;
+            if indeg[v] == 0 { q.push_back(v); }
+        }
+    }
+    if topo.len() != comp_count {
+        // Should not happen; but if it does, fall back to arbitrary order.
+        crate::debug!(2, "collapse_pop0: condensation graph not a DAG? Proceeding anyway.");
+        topo.clear();
+        topo.extend(0..comp_count);
+    }
+
+    // Summaries per component:
+    // summary[c]: (pop!=0, llm_bv) -> dest_comp -> SIDs
+    let mut summary: Vec<BTreeMap<(isize, LLMTokenBV), BTreeMap<usize, StateIDBV>>> =
+        vec![BTreeMap::new(); comp_count];
+
+    // Helper to constrain and insert into a summary; returns true if it changed.
+    fn insert_edge_summary(
+        tgt: &mut BTreeMap<(isize, LLMTokenBV), BTreeMap<usize, StateIDBV>>,
+        pop: isize,
+        llm: &LLMTokenBV,
+        dst_c: usize,
+        sids: &StateIDBV,
+        max_llm: usize,
+        max_sid: usize,
+    ) -> bool {
+        if llm.is_empty() || sids.is_empty() { return false; }
+        let mut l2 = llm.clone();
+        let mut s2 = sids.clone();
+        l2.constrain(max_llm);
+        s2.constrain(max_sid);
+        if l2.is_empty() || s2.is_empty() { return false; }
+        let entry = tgt.entry((pop, l2)).or_insert_with(BTreeMap::new);
+        if let Some(existing) = entry.get(&dst_c) {
+            let mut merged = existing.clone();
+            let before_len = merged.len();
+            merged |= &s2;
+            if merged.len() > before_len {
+                entry.insert(dst_c, merged);
+                return true;
+            }
+            false
+        } else {
+            entry.insert(dst_c, s2);
+            true
+        }
+    }
+
+    // Process components in reverse topological order to ensure successor summaries exist.
+    for &c in topo.iter().rev() {
+        // Initialize with base pop!=0 edges.
+        summary[c] = comp_base[c].clone();
+        // Kleene fixpoint: feed zero-pop pushes within the component and to successors.
+        let mut changed = true;
+        let edges0 = comp_zero[c].clone();
+        let max_llm = max_llm_token_id;
+        let max_sid = max_state_id;
+
+        while changed {
+            changed = false;
+            for (l0, dst_c, s0) in &edges0 {
+                let succ_sum = if *dst_c == c { &summary[c] } else { &summary[*dst_c] };
+                for ((p, l1), dm) in succ_sum.iter() {
+                    if *p == 0 { continue; } // by construction summaries have pop!=0 but keep safety
+                    let l_new = l0 & l1;
+                    if l_new.is_empty() { continue; }
+                    for (dst2, s1) in dm {
+                        let s_new = &s0 & s1;
+                        if s_new.is_empty() { continue; }
+                        if insert_edge_summary(&mut summary[c], *p, &l_new, *dst2, &s_new, max_llm, max_sid) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the new graph: one node per component, with children from summary (dest: component -> new node).
+    let mut new_idx_of_comp: Vec<PrecomputeNode3Index> = Vec::with_capacity(comp_count);
+    for c in 0..comp_count {
+        let mut contents = PrecomputedNodeContents::internal();
+        contents.end = comp_end[c];
+        let idx = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(contents)));
+        new_idx_of_comp.push(idx);
+    }
+    for c in 0..comp_count {
+        let mut children_new: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
+        let sum = &summary[c];
+        for ((p, llm_bv), dm) in sum {
+            let mut out_map: OrderedHashMap<PrecomputeNode3Index, StateIDBV> = OrderedHashMap::new();
+            for (dst_comp, sids) in dm {
+                let dst_idx = new_idx_of_comp[*dst_comp];
+                out_map.insert(dst_idx, sids.clone());
+            }
+            if !out_map.is_empty() {
+                children_new.insert((*p, llm_bv.clone()), out_map);
+            }
+        }
+        // Recompute live tokens as union of outgoing LLMTokenBV.
+        let mut live = LLMTokenBV::zeros();
+        for ((_, l), _) in &children_new {
+            live |= l;
+        }
+        if let Some(mut w) = new_idx_of_comp[c].write(trie3_god) {
+            *w.children_mut() = children_new;
+            w.value.live_tokens = live;
+        }
+    }
+
+    // Remap roots to their component representatives.
+    for (_k, r) in roots.iter_mut() {
+        let dense = *dense_of.get(r).expect("dense of root");
+        let c = comp_of_node[dense];
+        *r = new_idx_of_comp[c];
+    }
+
+    // GC old nodes and recompute depths.
+    let roots_vec2: Vec<_> = roots.values().cloned().collect();
+    Trie::gc(trie3_god, &roots_vec2);
+    Trie::recompute_all_max_depths(trie3_god, &roots_vec2);
+    crate::debug!(2, "Finished collapsing pop=0 closure: components={}, roots={}", comp_count, roots.len());
 }
 
 fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
