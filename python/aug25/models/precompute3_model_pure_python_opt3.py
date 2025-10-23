@@ -505,7 +505,7 @@ class PyAcc:
 
 @dataclass
 class WorkItem:
-    priority: Tuple[int, int, int]
+    priority: Tuple[int, int, int, int]
     node_id: NodeID
     gss: GSS
     edge_idx: int
@@ -542,6 +542,7 @@ class Model(GraphProvider):
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
     suppress_stats_report: bool = True
+    dist_to_end: Dict[NodeID, int] = field(default_factory=dict)
 
     # ------------- Construction and structure management -------------
 
@@ -624,6 +625,7 @@ class Model(GraphProvider):
             ignore_terminal_id=parser_data.get('ignore_terminal_id'),
             state={tokenizer.initial_state_id(): initial_gss},
         )
+        model.dist_to_end = model._compute_dist_to_end()
         model._compute_edge_accelerators()
         model.optimize_traversal()
         return model
@@ -658,6 +660,47 @@ class Model(GraphProvider):
             suppress_stats_report=self.suppress_stats_report,
         )
 
+    def _compute_dist_to_end(self) -> Dict[NodeID, int]:
+        """
+        Computes the shortest distance from each node to any end node using a reverse BFS.
+        Nodes that cannot reach an end node are assigned a large distance value.
+        """
+        stats = Stats.get()
+        stats.start('dist_to_end_computation')
+        print("Computing distance to nearest end node for all nodes...")
+
+        # Build reverse graph
+        reverse_adj: Dict[NodeID, List[NodeID]] = collections.defaultdict(list)
+        for u, node_data in self.arena.items():
+            for edge in node_data.children:
+                for d in edge.dests:
+                    reverse_adj[int(d.dest_idx)].append(int(u))
+
+        # Initialize distances and queue
+        infinity = len(self.arena) + 1
+        dist: Dict[NodeID, int] = {node_id: infinity for node_id in self.arena.keys()}
+        q = collections.deque()
+
+        for node_id in self.arena.keys():
+            if self.is_end(node_id):
+                dist[node_id] = 0
+                q.append(node_id)
+
+        # Reverse BFS
+        processed_nodes = 0
+        while q:
+            v = q.popleft()
+            processed_nodes += 1
+            for u in reverse_adj.get(v, []):
+                if dist[u] == infinity:
+                    dist[u] = dist[v] + 1
+                    q.append(u)
+        
+        stats.inc('dist_to_end.nodes_processed', processed_nodes)
+        stats.stop('dist_to_end_computation')
+        print("Distance computation complete.")
+        return dist
+
     def _compute_edge_accelerators(self) -> None:
         stats = Stats.get()
         stats.start('accelerators.compute_edge_complements')
@@ -668,9 +711,36 @@ class Model(GraphProvider):
         stats.stop('accelerators.compute_edge_complements')
 
     def optimize_traversal(self) -> None:
+        """
+        Reorder edges and their destination lists to favor reaching end nodes ASAP.
+        Heuristic:
+          - Inner dests: sort by dist_to_end ascending, then max_depth desc
+          - Outer edges: sort by best dest dist (after inner sort) ascending,
+            then by pop asc as a tie-breaker.
+        """
+        stats = Stats.get()
+        stats.start('optimize_traversal')
+        md = self.max_depth
+        dist = self.dist_to_end
+        infinity = len(self.arena) + 1
         for node in tqdm(self.arena.values(), desc="Optimizing traversal"):
+            if not node.children:
+                continue
+            # Sort inner dests first (so the first dest has the smallest dist_to_end)
+            for edge in node.children:
+                edge.dests.sort(key=lambda item: (dist.get(int(item.dest_idx), infinity), -md.get(int(item.dest_idx), 0)))
+            # Sort edges by best dest dist asc, then pop asc
+            def _edge_key(edge: ArenaEdge):
+                pop = edge.pop
+                dests = edge.dests
+                best_dist = dist.get(int(dests[0].dest_idx), infinity) if dests else infinity
+                return (best_dist, pop)
+            node.children.sort(key=_edge_key)
+
+            # After sorting, we still need to ensure the index is built
             for edge in node.children:
                 edge.ensure_index()
+        stats.stop('optimize_traversal')
 
     # ------------- Arena conversion and optimization -------------
 
@@ -925,12 +995,14 @@ class Model(GraphProvider):
 
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         work_heap = []
+        infinity = len(self.arena) + 1
 
         def enqueue(node_id: NodeID, gss: GSS, depth: int, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
             if gss.is_empty():
                 return
             stats.inc('get_mask.traversal.enqueues')
-            priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
+            dist = self.dist_to_end.get(node_id, infinity)
+            priority = (dist, -self.max_depth.get(node_id, 0), edge_idx, dest_idx)
             item = WorkItem(
                 priority=priority,
                 node_id=node_id,
