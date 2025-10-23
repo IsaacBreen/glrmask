@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use rand::prelude::*;
 use crate::datastructures::trie::PathComparison;
-
+use crate::glr::parser::GLRParser;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 
@@ -258,6 +258,7 @@ pub fn optimize_trie3_size(
     max_state_id: usize,
     mut max_llm_token_id: usize,
     stage_vocab: &mut StageVocab,
+    parser: &GLRParser,
 ) {
     has_true_cycle_trie3(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
     has_true_cycle_trie3_llm_only(trie3_god, &roots.values().cloned().collect::<Vec<_>>(), stage_vocab.internal_max_llm_token);
