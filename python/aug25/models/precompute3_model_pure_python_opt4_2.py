@@ -27,6 +27,34 @@ LLMTokenSet = RangeSet
 StateIDSet = RangeSetStates
 TerminalIdSet = RangeSet
 
+# A large sentinel value for "unreachable" distance to any end node.
+INF_DIST = 1 << 30
+
+def _compute_end_distance_from_intermediate(
+    intermediate_arena: Dict[NodeID, IntermediateArenaNode]
+) -> Dict[NodeID, int]:
+    rev_adj: Dict[NodeID, Set[NodeID]] = collections.defaultdict(set)
+    nodes: Set[NodeID] = set(intermediate_arena.keys())
+    for uid, node in intermediate_arena.items():
+        for edge in node.children:
+            v = int(edge.dests.dest_idx)
+            rev_adj[v].add(uid)
+            nodes.add(v)
+    dist = {n: INF_DIST for n in nodes}
+    q = collections.deque()
+    for uid, node in intermediate_arena.items():
+        if node.clean_end:
+            dist[uid] = 0
+            q.append(uid)
+    while q:
+        u = q.popleft()
+        nd = dist[u] + 1
+        for p in rev_adj.get(u, ()):
+            if dist[p] > nd:
+                dist[p] = nd
+                q.append(p)
+    return dist
+
 def _acc_memoize(use_value_cache: bool = True):
     """Per-invocation memoization for PyAcc transformers."""
     def decorator(fn):
@@ -188,12 +216,20 @@ class ArenaNode:
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
 
-def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
+def _optimize_intermediate_arena(
+    intermediate_arena: Dict[NodeID, IntermediateArenaNode],
+    max_depth: Dict[NodeID, int],
+    dist_to_end: Dict[NodeID, int],
+):
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
         if not node.children:
             continue
-        # Sort edges by destination depth (desc) and then pop count (asc)
-        node.children.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
+        # Sort edges by distance to end (asc), then destination depth (desc), then pop count (asc)
+        node.children.sort(key=lambda e: (
+            dist_to_end.get(int(e.dests.dest_idx), INF_DIST),
+            -max_depth.get(int(e.dests.dest_idx), 0),
+            e.pop
+        ))
 
 def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, IntermediateArenaNode]:
     """Stage 1: Convert from the loaded format to a flattened intermediate format."""
@@ -258,12 +294,13 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
         )
     return arena
 
-def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Dict[NodeID, ArenaNode]:
+def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Tuple[Dict[NodeID, ArenaNode], Dict[NodeID, int]]:
     """Orchestrates the full conversion from loaded data to the final arena format."""
     intermediate_arena = _load_and_flatten_arena(loaded_arena)
-    _optimize_intermediate_arena(intermediate_arena, max_depth)
+    dist_to_end = _compute_end_distance_from_intermediate(intermediate_arena)
+    _optimize_intermediate_arena(intermediate_arena, max_depth, dist_to_end)
     final_arena = _merge_and_finalize_arena(intermediate_arena)
-    return final_arena
+    return final_arena, dist_to_end
 
 @dataclass(frozen=True, eq=False)
 class PyAcc:
@@ -328,6 +365,7 @@ class Model(GraphProvider):
     all_internal_llm_tokens_bitset: LLMTokenSet
     ignore_terminal_id: Optional[int]
     state: Dict[int, GSS]
+    dist_to_end: Dict[NodeID, int] = field(default_factory=dict)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -356,7 +394,7 @@ class Model(GraphProvider):
             clean_end = node_data.get("value", {}).get("clean_end", False)
             loaded_arena[uid] = LoadedArenaNode(children=loaded_children, clean_end=clean_end)
 
-        arena = _convert_arena(loaded_arena, max_depth)
+        arena, dist_to_end = _convert_arena(loaded_arena, max_depth)
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
         dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
@@ -398,6 +436,7 @@ class Model(GraphProvider):
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
             state={tokenizer.initial_state_id(): initial_gss},
+            dist_to_end=dist_to_end,
         )
         model._compute_edge_accelerators()
         model.optimize_traversal()
@@ -574,7 +613,7 @@ class Model(GraphProvider):
             # Iterate grouped dests in ascending order for locality
             for dest_j in sorted(grouped.keys()):
                 if dests_proc >= max_dests:
-                    priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+                    priority = (self.dist_to_end.get(node_id, INF_DIST), edge_i, dest_j)
                     yield Suspend(priority)
                     dests_proc = 0
                 dest = edge.dests[dest_j]
@@ -590,7 +629,7 @@ class Model(GraphProvider):
                 dests_proc += 1
 
             if edges_proc >= max_edges:
-                priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
+                priority = (self.dist_to_end.get(node_id, INF_DIST), edge_i + 1, 0)
                 yield Suspend(priority)
                 edges_proc = 0
             edges_proc += 1
@@ -625,7 +664,7 @@ class Model(GraphProvider):
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
             if not gss_init.is_empty():
-                priority = (-self.max_depth.get(r, 0), 0, 0)
+                priority = (self.dist_to_end.get(r, INF_DIST), 0, 0)
                 heapq.heappush(work_heap, HeapItem(priority, WorkItemNew(r, gss_init)))
         t1 = time.perf_counter()
 
@@ -668,7 +707,7 @@ class Model(GraphProvider):
 
                         if isinstance(yielded, Enqueue):
                             new_node_id, new_gss = yielded.node_id, yielded.gss
-                            child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                            child_priority = (self.dist_to_end.get(new_node_id, INF_DIST), 0, 0)
                             heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss)))
                         elif isinstance(yielded, Suspend):
                             heapq.heappush(work_heap, HeapItem(yielded.priority, WorkItemSuspended(gen, work_llm_mask)))
