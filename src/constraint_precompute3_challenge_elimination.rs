@@ -806,7 +806,6 @@ mod tests {
                 if s_push.is_disjoint(&s_pop) {
                     return false;
                 }
-                path_keys[push_idx] = IntermediateTrie3EdgeKey::Push(s_push & s_pop);
                 path_keys.remove(pop_idx);
             } else if n == 1 {
                 if s_push.is_disjoint(&s_pop) {

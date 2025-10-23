@@ -68,7 +68,7 @@ impl<'a> Debug for DebugRangesTruncated<'a> {
         // If not truncating (either few ranges, or alternate mode which usually means "show all")
         if total_ranges <= self.limit || self.is_alternate {
             // Use RangeSetBlaze's own Debug impl, which formats as a list of RangeInclusive<usize>
-            self.set.fmt(f)
+            Debug::fmt(&self.set, f)
         } else {
             // Truncate: format a list of the first `limit` ranges, then an ellipsis entry
             let mut list_formatter = f.debug_list();
