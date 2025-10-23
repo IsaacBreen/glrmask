@@ -402,6 +402,20 @@ pub fn optimize_trie3_size(
             });
         }
 
+        // Flatten zero-pop closures from roots to guarantee there are no pop=0 chains
+        // from any root to an end node longer than one hop, while preserving semantics
+        // by lifting effects and composing masks/SIDs.
+        run_pass!("Flattening pop=0 closure from roots", {
+            flatten_root_pop0_closure_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
+        });
+        // Quickly compress again to coalesce any fragmentation introduced by flattening.
+        if config.compress_edges {
+            run_pass!("Compressing edges + unary chains (post-flatten)", {
+                compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                compress_unary_chains_trie3(roots, &trie3_god);
+            });
+        }
+
         if config.merge_nodes_exact.enabled {
             run_pass!("Merging nodes (post-compress)", {
                 merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
@@ -2491,25 +2505,40 @@ fn compress_unary_chains_trie3(
             if p_idx == u_idx {
                 continue; // Avoid attempting to rewire a pure self-loop through itself.
             }
-            // Only contract if the incoming and outgoing (pop, LLMTokenBV) keys match exactly.
-            if in_key != out_key {
+            // Contract if:
+            // - The incoming and outgoing keys are identical (original case), OR
+            // - Both are pop=0 (epsilon-like), in which case we compose masks/SIDs.
+            let keys_match = in_key == out_key;
+            let can_compose_pop0 = in_key.0 == 0 && out_key.0 == 0;
+            if !keys_match && !can_compose_pop0 {
                 continue;
             }
 
             // Perform the rewrite: in parent P, remove the U mapping under in_key,
             // and add/union V mapping with SIDs intersection S(P->U) ∧ S(U->V).
             if let Some(mut pw) = p_idx.write(trie3_god) {
-                let (pop, llm) = in_key.clone();
-                if let Some(dm) = pw.children_mut().get_mut(&(pop, llm.clone())) {
+                let (in_pop, in_llm) = in_key.clone();
+                if let Some(dm) = pw.children_mut().get_mut(&(in_pop, in_llm.clone())) {
                     if let Some(s_pu_actual) = dm.remove(&u_idx) {
+                        // Compose SIDs
                         let s_comp = &s_pu_actual & &s_uv;
-                        if !s_comp.is_empty() {
-                            dm.entry(v_idx)
+                        // Compose key for the new edge
+                        let (new_pop, new_llm) = if keys_match {
+                            (in_pop, in_llm.clone())
+                        } else {
+                            // Both pop=0; compose LLM masks by intersection
+                            (0, &in_llm & &out_key.1)
+                        };
+                        // If either the composed LLM or SIDs are empty, we still remove the
+                        // P->U mapping (since U had only one outgoing), but we don't add a new one.
+                        if !new_llm.is_empty() && !s_comp.is_empty() {
+                            let entry = pw.children_mut().entry((new_pop, new_llm)).or_insert_with(OrderedHashMap::new);
+                            entry.entry(v_idx)
                                 .and_modify(|e| *e |= &s_comp)
                                 .or_insert(s_comp);
                         }
                         if dm.is_empty() {
-                            pw.children_mut().remove(&(pop, llm.clone()));
+                            pw.children_mut().remove(&(in_pop, in_llm.clone()));
                         }
                         // Recompute live tokens as union of outgoing LLM masks for robustness.
                         let mut new_live = LLMTokenBV::zeros();
@@ -2531,3 +2560,116 @@ fn compress_unary_chains_trie3(
 
     crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
 }
+
+/// Flatten pop=0 closures starting from each root. This eliminates all root->(non-end) pop=0 edges by
+/// lifting their reachable effects (direct root->end and root->(pop!=0) edges) with correctly composed
+/// LLMTokenBV and StateIDBV. This preserves semantics while guaranteeing that any pop=0 path from a root
+/// to an end node has length <= 1 (i.e., root->end directly).
+fn flatten_root_pop0_closure_trie3(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+    max_llm_token_id: usize,
+    max_state_id: usize,
+){
+    crate::debug!(2, "Flattening pop=0 closure from roots in Trie3...");
+    use std::collections::VecDeque;
+
+    for root_idx in roots.values() {
+        // 1) Snapshot root edges and split into nonzero-pop (kept) and zero-pop (seeds).
+        let (nonzero_edges, seeds): (
+            BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>>,
+            Vec<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)>
+        ) = {
+            let r = root_idx.read(trie3_god).expect("read root");
+            let mut nonzero = BTreeMap::new();
+            let mut seed_vec = Vec::new();
+            for ((pop, llm_bv), dm) in r.children() {
+                if *pop == 0 {
+                    // For each destination, seed BFS with composed masks from root->dest.
+                    for (dst, sids) in dm {
+                        let mut llm0 = llm_bv.clone();
+                        llm0.constrain(max_llm_token_id);
+                        let mut sids0 = sids.clone();
+                        sids0.constrain(max_state_id);
+                        if !llm0.is_empty() && !sids0.is_empty() {
+                            seed_vec.push((*dst, llm0, sids0));
+                        }
+                    }
+                } else {
+                    // Keep non-zero-pop edges as-is (they are not part of zero-closure).
+                    let entry = nonzero.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
+                    for (dst, sids) in dm {
+                        entry.entry(*dst)
+                            .and_modify(|e| *e |= sids)
+                            .or_insert(sids.clone());
+                    }
+                }
+            }
+            (nonzero, seed_vec)
+        };
+
+        // If there are no zero-pop seeds, nothing to flatten for this root.
+        if seeds.is_empty() {
+            continue;
+        }
+
+        // 2) Aggregate new children for the root: start from existing nonzero-pop edges and
+        //    add direct root->end (pop=0) and root->(pop!=0) edges discovered via zero-closure.
+        let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = nonzero_edges;
+        let mut q: VecDeque<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)> = VecDeque::from(seeds);
+
+        while let Some((u, acc_llm, acc_sids)) = q.pop_front() {
+            // If this node itself is an end, add a direct root->u (pop=0) edge with composed masks.
+            if let Some(ug) = u.read(trie3_god) {
+                if ug.value.end {
+                    let key = (0, acc_llm.clone());
+                    let dm = new_children.entry(key).or_insert_with(OrderedHashMap::new);
+                    dm.entry(u)
+                        .and_modify(|e| *e |= &acc_sids)
+                        .or_insert(acc_sids.clone());
+                }
+
+                // Explore its outgoing edges.
+                for ((pop, llm_bv), dm) in ug.children() {
+                    let mut next_llm = &acc_llm & llm_bv;
+                    next_llm.constrain(max_llm_token_id);
+                    if next_llm.is_empty() {
+                        continue;
+                    }
+                    for (v, sids) in dm {
+                        let mut next_sids = &acc_sids & sids;
+                        next_sids.constrain(max_state_id);
+                        if next_sids.is_empty() {
+                            continue;
+                        }
+                        if *pop == 0 {
+                            // Continue along zero-pop closure
+                            q.push_back((*v, next_llm.clone(), next_sids));
+                        } else {
+                            // Lift this non-zero edge to the root.
+                            let k = (*pop, next_llm.clone());
+                            let dests = new_children.entry(k).or_insert_with(OrderedHashMap::new);
+                            dests.entry(*v)
+                                .and_modify(|e| *e |= &next_sids)
+                                .or_insert(next_sids);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3) Write back: replace root's children with new aggregate (which contains no pop=0 edges
+        //    to non-end nodes).
+        if let Some(mut w) = root_idx.write(trie3_god) {
+            *w.children_mut() = new_children;
+            // Recompute live tokens as union of outgoing LLM masks.
+            let mut new_live = LLMTokenBV::zeros();
+            for ((_, llm_bv), _) in w.children() {
+                new_live |= llm_bv;
+            }
+            w.value.live_tokens = new_live;
+        }
+    }
+    crate::debug!(2, "Finished flattening pop=0 closures from roots.");
+}
+
