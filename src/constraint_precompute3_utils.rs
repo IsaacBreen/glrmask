@@ -125,7 +125,6 @@ pub struct Trie3Config {
     pub stochastic_equivalence_check: bool,
     pub debug_remove_pop_gt_0: bool,
     pub eliminate_pop0_edges: bool,
-    pub assert_no_pop0_edges: bool,
     pub assert_pop0_paths_to_end_are_short: bool,
 }
 
@@ -149,7 +148,6 @@ impl Default for Trie3Config {
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
             eliminate_pop0_edges: false,
-            assert_no_pop0_edges: false,
             assert_pop0_paths_to_end_are_short: false,
         }
     }
@@ -175,7 +173,6 @@ impl Trie3Config {
             stochastic_equivalence_check: false,
             debug_remove_pop_gt_0: false,
             eliminate_pop0_edges: false,
-            assert_no_pop0_edges: false,
             assert_pop0_paths_to_end_are_short: false,
         }
     }
@@ -445,12 +442,6 @@ pub fn optimize_trie3_size(
         if config.eliminate_pop0_edges {
             run_pass!("Eliminating pop=0 edges (epsilon elimination)", {
                 eliminate_pop0_edges_trie3(roots, trie3_god);
-            });
-        }
-
-        if config.assert_no_pop0_edges {
-            run_pass!("Asserting no pop=0 edges", {
-                assert_no_pop0_edges_trie3(roots, trie3_god);
             });
         }
     }

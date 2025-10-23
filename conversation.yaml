@@ -2718,7 +2718,6 @@ local_system:
           pub stochastic_equivalence_check: bool,
           pub debug_remove_pop_gt_0: bool,
           pub eliminate_pop0_edges: bool,
-          pub assert_no_pop0_edges: bool,
           pub assert_pop0_paths_to_end_are_short: bool,
       }
 
@@ -2742,7 +2741,6 @@ local_system:
                   stochastic_equivalence_check: false,
                   debug_remove_pop_gt_0: false,
                   eliminate_pop0_edges: false,
-                  assert_no_pop0_edges: false,
                   assert_pop0_paths_to_end_are_short: false,
               }
           }
@@ -2768,7 +2766,6 @@ local_system:
                   stochastic_equivalence_check: false,
                   debug_remove_pop_gt_0: false,
                   eliminate_pop0_edges: false,
-                  assert_no_pop0_edges: false,
                   assert_pop0_paths_to_end_are_short: false,
               }
           }
@@ -3040,14 +3037,6 @@ local_system:
                       eliminate_pop0_edges_trie3(roots, trie3_god);
                   });
               }
-
-              if config.assert_no_pop0_edges {
-                  run_pass!("Asserting no pop=0 edges", {
-                      assert_no_pop0_edges_trie3(roots, trie3_god);
-                  });
-              }
-          }
-
       	crate::debug!(2, "Recomputing max depths...");
           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
@@ -9102,98 +9091,5 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Re-introduce pass to eliminate pop=0 edges
       and add assertion for verification"'
-    metadata:
-  - user: |-
-      Diff of src/constraint_precompute3_utils.rs since previous turn:
-      ```diff
-      --- original version of src/constraint_precompute3_utils.rs
-      +++ current version of src/constraint_precompute3_utils.rs
-      @@ -444,6 +444,8 @@
-                       eliminate_pop0_edges_trie3(roots, trie3_god);
-                   });
-               }
-      +    }
-      +
-       	crate::debug!(2, "Recomputing max depths...");
-           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-       
-
-      ```
-    metadata:
-  - user: And the assertion?
-    metadata:
-  - assistant: |-
-      You are absolutely right. My apologies. I implemented the assertion function but completely failed to add the configuration flag and the call to actually run it. Thank you for catching that oversight.
-
-      Here is the correct patch to wire up the assertion.
-
-      ### Step-by-step Instructions
-
-      1.  **Add a Configuration Flag for the Assertion**
-          *   In `src/constraint_precompute3_utils.rs`, edit the `Trie3Config` struct and add the new boolean flag: `pub assert_no_pop0_edges: bool,`.
-          *   In the `impl Default for Trie3Config` block, initialize this new flag to `false`.
-          *   In the `Trie3Config::off()` function, also initialize this flag to `false`.
-
-      2.  **Call the Assertion in the Pipeline**
-          *   In `src/constraint_precompute3_utils.rs`, find the `optimize_trie3_size` function.
-          *   Immediately after the `run_pass!` block that calls `eliminate_pop0_edges_trie3`, add a new `run_pass!` block.
-          *   This new block will be conditional on `config.assert_no_pop0_edges` and will call the `assert_no_pop0_edges_trie3` function.
-
-      ### Git Diff
-
-      ```diff
-      --- a/src/constraint_precompute3_utils.rs
-      +++ b/src/constraint_precompute3_utils.rs
-      @@ -79,6 +79,7 @@
-           pub stochastic_equivalence_check: bool,
-           pub debug_remove_pop_gt_0: bool,
-           pub eliminate_pop0_edges: bool,
-      +    pub assert_no_pop0_edges: bool,
-           pub assert_pop0_paths_to_end_are_short: bool,
-       }
-       
-      @@ -99,6 +100,7 @@
-                   stochastic_equivalence_check: false,
-                   debug_remove_pop_gt_0: false,
-                   eliminate_pop0_edges: false,
-      +            assert_no_pop0_edges: false,
-                   assert_pop0_paths_to_end_are_short: false,
-               }
-           }
-      @@ -122,6 +124,7 @@
-                   stochastic_equivalence_check: false,
-                   debug_remove_pop_gt_0: false,
-                   eliminate_pop0_edges: false,
-      +            assert_no_pop0_edges: false,
-                   assert_pop0_paths_to_end_are_short: false,
-               }
-           }
-      @@ -236,6 +239,12 @@
-                   run_pass!("Eliminating pop=0 edges (epsilon elimination)", {
-                       eliminate_pop0_edges_trie3(roots, trie3_god);
-                   });
-      +        }
-      +
-      +        if config.assert_no_pop0_edges {
-      +            run_pass!("Asserting no pop=0 edges", {
-      +                assert_no_pop0_edges_trie3(roots, trie3_god);
-      +            });
-               }
-           }
-       
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint_precompute3_utils.rs
-      Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
-    metadata:
-  - user: 'Changes committed with message: "feat: Implement pass to eliminate all
-      pop=0 edges and add optional verification assertion"'
     metadata:
 ...
