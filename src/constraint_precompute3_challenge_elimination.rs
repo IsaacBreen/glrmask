@@ -1490,40 +1490,66 @@ mod tests {
 
         let paths_before = get_normalized_paths(&roots, &god);
 
-        let options =
-            crate::datastructures::trie::PrettyPrintOptions::default()
-                .display_edge_keys_only()
-                .omit_depth();
-        eprintln!("Full graph before:");
-        eprintln!(
-            "{}",
-            Trie::pretty_print_with_options(
-                &god,
-                roots.values().cloned().collect::<Vec<_>>().as_slice(),
-                &options
-            )
-        );
-
         eliminate_pushes_and_pops(&mut roots, &god);
 
         let paths_after = get_normalized_paths(&roots, &god);
 
-        let options =
-            crate::datastructures::trie::PrettyPrintOptions::default()
-                .display_edge_keys_only()
-                .omit_depth();
-        eprintln!("Full graph after:");
-        eprintln!(
-            "{}",
-            Trie::pretty_print_with_options(
-                &god,
-                roots.values().cloned().collect::<Vec<_>>().as_slice(),
-                &options
-            )
-        );
-
         assert_paths_eq(&paths_before, &paths_after);
 
         assert_no_pops_reachable_from_pushes(&roots, &god);
+    }
+
+    #[test]
+    fn test_eliminate_convergent_push_path_failure() {
+        let god = IntermediateTrie3GodWrapper::new();
+
+        let mut node_map = HashMap::new();
+        let node_ids = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
+        for id in node_ids {
+            let contents = if id == 8 {
+                IntermediatePrecomputedNodeContents3::leaf()
+            } else {
+                IntermediatePrecomputedNodeContents3::internal()
+            };
+            node_map.insert(id, Trie2Index::from(god.insert(Trie::new(contents))));
+        }
+        let n = |id: usize| -> Trie2Index { *node_map.get(&id).unwrap() };
+
+        // This test creates a structure that mimics the failing case from the complex test.
+        // There are two paths that converge on node `n(4)`.
+        // Path 1: 0 -> 1 -> 2 -> 3 -> 4. The edge 3->4 is a Push.
+        // Path 2: 0 -> 4. This is a non-Push edge.
+        // From node 4, there is a Push-CheckLLM-Pop sequence (4->5->6->7) that will be
+        // eliminated, making node 4 a candidate for elimination (incoming Push from 3,
+        // no outgoing Pushes). The elimination should reroute Path 1 to go from 3 to 7
+        // directly, while leaving Path 2 (0 -> 4 -> 7) intact.
+        // The original failure was caused by the rerouted path (Path 1) being lost entirely.
+
+        // Path 1 prefix
+        god.insert_edge_simple(n(0), n(1), IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(5)), ());
+        god.insert_edge_simple(n(1), n(2), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
+        god.insert_edge_simple(n(2), n(3), IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_item(3)), ());
+
+        // Path 1 connects to convergence point n(4) with a Push
+        god.insert_edge_simple(n(3), n(4), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(0)), ());
+
+        // Path 2 connects to convergence point n(4) with a Pop
+        god.insert_edge_simple(n(0), n(4), IntermediateTrie3EdgeKey::Pop(0, StateIDBV::from_iter([0, 3, 7])), ());
+
+        // Common path from n(4) that triggers the elimination
+        god.insert_edge_simple(n(4), n(5), IntermediateTrie3EdgeKey::Push(StateIDBV::from_item(9)), ());
+        god.insert_edge_simple(n(5), n(6), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(1)), ());
+        god.insert_edge_simple(n(6), n(7), IntermediateTrie3EdgeKey::Pop(1, StateIDBV::max_ones()), ());
+        god.insert_edge_simple(n(7), n(8), IntermediateTrie3EdgeKey::CheckLLM(LLMTokenBV::from_item(1)), ());
+
+        let mut roots = BTreeMap::new();
+        roots.insert(TokenizerStateID(0), n(0));
+
+        let paths_before = get_normalized_paths(&roots, &god);
+
+        eliminate_pushes_and_pops(&mut roots, &god);
+
+        let paths_after = get_normalized_paths(&roots, &god);
+        assert_paths_eq(&paths_before, &paths_after);
     }
 }
