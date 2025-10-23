@@ -2,6 +2,7 @@ import time
 import inspect
 from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple, Optional
+import os
 
 
 class Stats:
@@ -43,7 +44,7 @@ class Stats:
         self.timers: Dict[str, float] = {}
 
         # Enabled flag lets callers noop the collection if needed.
-        self.enabled = True
+        self.enabled = os.environ.get("DISABLE_STATS") is None
 
         # Optional group prefixes (strings).
         self.groups = set()
