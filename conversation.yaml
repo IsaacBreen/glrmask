@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python_opt4.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python_opt4.py: |
@@ -408,6 +408,7 @@ local_system:
               )
               model._compute_edge_accelerators()
               model.optimize_traversal()
+              model._compute_and_print_stats()
               return model
 
           def _compute_edge_accelerators(self) -> None:
@@ -524,6 +525,69 @@ local_system:
                                   goto_id = self.parser_table.table[from_id].gotos[nt_id]
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
               return GSS.merge_many(shifted)
+
+          def _compute_and_print_stats(self):
+              import collections
+              try:
+                  import numpy as np
+              except ImportError:
+                  print("Numpy not found, cannot print detailed distribution stats.")
+                  np = None
+
+              stats = collections.defaultdict(list)
+              pop_counts = collections.Counter()
+              num_nodes = len(self.arena)
+              num_clean_end_nodes = 0
+
+              for node in self.arena.values():
+                  if node.clean_end:
+                      num_clean_end_nodes += 1
+                  stats['edges_per_node'].append(len(node.children))
+                  for edge in node.children:
+                      stats['dests_per_edge'].append(len(edge.dests))
+                      pop_counts[edge.pop] += 1
+                      stats['llm_bv_cardinality'].append(len(edge.llm_bv))
+                      for dest in edge.dests:
+                          stats['dest_state_bv_cardinality'].append(len(dest.state_bv))
+
+              num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
+              num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
+
+              print("\n--- Arena Stats ---")
+              print(f"Total nodes: {num_nodes}")
+              print(f"Clean end nodes: {num_clean_end_nodes}")
+              print(f"Total edges: {num_edges}")
+              print(f"Total destinations: {num_dests}")
+
+              def print_dist_stats(name, data):
+                  if not data or not np:
+                      print(f"\n--- {name} Distribution ---")
+                      print(f"  (No data or numpy not available)")
+                      return
+                  arr = np.array(data)
+                  print(f"\n--- {name} Distribution ---")
+                  print(f"  Min: {np.min(arr)}")
+                  print(f"  Max: {np.max(arr)}")
+                  print(f"  Mean: {np.mean(arr):.2f}")
+                  print(f"  Median: {np.median(arr)}")
+                  print(f"  Std Dev: {np.std(arr):.2f}")
+                  print(f"  Percentiles (25, 50, 75, 90, 99): {np.percentile(arr, [25, 50, 75, 90, 99])}")
+
+              print_dist_stats("Edges per Node", stats['edges_per_node'])
+              print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
+              print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
+              print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
+              if self.max_depth:
+                  print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
+
+              print("\n--- Pop Counts ---")
+              if num_edges > 0:
+                  for pop_val, count in sorted(pop_counts.items()):
+                      print(f"  Pop {pop_val}: {count} edges ({count/num_edges*100:.2f}%)")
+              else:
+                  print("  (No edges)")
+
+              print("-------------------\n")
 
           def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
               a_node = self.arena.get(node_id)
@@ -1227,26 +1291,50 @@ local_system:
               pop_counts = collections.Counter()
               num_nodes = len(self.arena)
               num_clean_end_nodes = 0
+              total_llm_bv_cardinality = 0
+              total_state_bv_cardinality = 0
 
               for node in self.arena.values():
                   if node.clean_end:
                       num_clean_end_nodes += 1
                   stats['edges_per_node'].append(len(node.children))
+
+                  if node.children:
+                      unique_dests_in_node = set(d.dest_idx for edge in node.children for d in edge.dests)
+                      stats['unique_dests_per_node'].append(len(unique_dests_in_node))
+
+                      sum_llm_bv_len_for_node = sum(len(edge.llm_bv) for edge in node.children)
+                      if node.llm_bv_union and len(node.llm_bv_union) > 0:
+                          overlap_factor = sum_llm_bv_len_for_node / len(node.llm_bv_union)
+                          stats['llm_bv_overlap_factor'].append(overlap_factor)
+
                   for edge in node.children:
                       stats['dests_per_edge'].append(len(edge.dests))
+                      if edge.dests:
+                          stats['unique_dests_per_edge'].append(len({d.dest_idx for d in edge.dests}))
                       pop_counts[edge.pop] += 1
-                      stats['llm_bv_cardinality'].append(len(edge.llm_bv))
+
+                      llm_bv_len = len(edge.llm_bv)
+                      stats['llm_bv_cardinality'].append(llm_bv_len)
+                      total_llm_bv_cardinality += llm_bv_len
+
+                      stats['dest_states_union_cardinality'].append(len(edge.dest_states_union))
+
                       for dest in edge.dests:
-                          stats['dest_state_bv_cardinality'].append(len(dest.state_bv))
+                          state_bv_len = len(dest.state_bv)
+                          stats['dest_state_bv_cardinality'].append(state_bv_len)
+                          total_state_bv_cardinality += state_bv_len
 
               num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
               num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
 
               print("\n--- Arena Stats ---")
-              print(f"Total nodes: {num_nodes}")
-              print(f"Clean end nodes: {num_clean_end_nodes}")
-              print(f"Total edges: {num_edges}")
-              print(f"Total destinations: {num_dests}")
+              print(f"Total nodes: {num_nodes:,}")
+              print(f"Clean end nodes: {num_clean_end_nodes:,}")
+              print(f"Total edges: {num_edges:,}")
+              print(f"Total destinations: {num_dests:,}")
+              print(f"Total LLM token cardinality (sum over edges): {total_llm_bv_cardinality:,}")
+              print(f"Total state ID cardinality (sum over dests): {total_state_bv_cardinality:,}")
 
               def print_dist_stats(name, data):
                   if not data or not np:
@@ -1254,17 +1342,26 @@ local_system:
                       print(f"  (No data or numpy not available)")
                       return
                   arr = np.array(data)
+                  # Check if original data was integer to format min/max appropriately
+                  is_int_data = all(isinstance(x, int) for x in data)
+                  fmt = "," if is_int_data else ",.2f"
+
                   print(f"\n--- {name} Distribution ---")
-                  print(f"  Min: {np.min(arr)}")
-                  print(f"  Max: {np.max(arr)}")
-                  print(f"  Mean: {np.mean(arr):.2f}")
-                  print(f"  Median: {np.median(arr)}")
-                  print(f"  Std Dev: {np.std(arr):.2f}")
-                  print(f"  Percentiles (25, 50, 75, 90, 99): {np.percentile(arr, [25, 50, 75, 90, 99])}")
+                  print(f"  Min: {np.min(arr):{fmt}}")
+                  print(f"  Max: {np.max(arr):{fmt}}")
+                  print(f"  Mean: {np.mean(arr):,.2f}")
+                  print(f"  Median: {np.median(arr):,.2f}") # Median can be float for int arrays
+                  print(f"  Std Dev: {np.std(arr):,.2f}")
+                  percentiles = np.percentile(arr, [25, 50, 75, 90, 99])
+                  print(f"  Percentiles (25, 50, 75, 90, 99): [{', '.join(f'{p:,.2f}' for p in percentiles)}]")
 
               print_dist_stats("Edges per Node", stats['edges_per_node'])
+              print_dist_stats("Unique Destinations per Node", stats['unique_dests_per_node'])
               print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
+              print_dist_stats("Unique Destinations per Edge", stats['unique_dests_per_edge'])
               print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
+              print_dist_stats("LLM BV Overlap Factor per Node", stats['llm_bv_overlap_factor'])
+              print_dist_stats("StateIDSet Union Cardinality per Edge", stats['dest_states_union_cardinality'])
               print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
               if self.max_depth:
                   print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
@@ -1272,13 +1369,13 @@ local_system:
               print("\n--- Pop Counts ---")
               if num_edges > 0:
                   for pop_val, count in sorted(pop_counts.items()):
-                      print(f"  Pop {pop_val}: {count} edges ({count/num_edges*100:.2f}%)")
+                      print(f"  Pop {pop_val}: {count:,} edges ({count/num_edges*100:.2f}%)")
               else:
                   print("  (No edges)")
 
               print("-------------------\n")
 
-          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, stats: Dict[str, int]) -> Generator[Union[Enqueue, Suspend], None, None]:
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
               a_node = self.arena.get(node_id)
               if not a_node:
                   return
@@ -1892,6 +1989,7 @@ messages:
               )
               model._compute_edge_accelerators()
               model.optimize_traversal()
+              model._compute_and_print_stats()
               return model
 
           def _compute_edge_accelerators(self) -> None:
@@ -2008,6 +2106,69 @@ messages:
                                   goto_id = self.parser_table.table[from_id].gotos[nt_id]
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
               return GSS.merge_many(shifted)
+
+          def _compute_and_print_stats(self):
+              import collections
+              try:
+                  import numpy as np
+              except ImportError:
+                  print("Numpy not found, cannot print detailed distribution stats.")
+                  np = None
+
+              stats = collections.defaultdict(list)
+              pop_counts = collections.Counter()
+              num_nodes = len(self.arena)
+              num_clean_end_nodes = 0
+
+              for node in self.arena.values():
+                  if node.clean_end:
+                      num_clean_end_nodes += 1
+                  stats['edges_per_node'].append(len(node.children))
+                  for edge in node.children:
+                      stats['dests_per_edge'].append(len(edge.dests))
+                      pop_counts[edge.pop] += 1
+                      stats['llm_bv_cardinality'].append(len(edge.llm_bv))
+                      for dest in edge.dests:
+                          stats['dest_state_bv_cardinality'].append(len(dest.state_bv))
+
+              num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
+              num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
+
+              print("\n--- Arena Stats ---")
+              print(f"Total nodes: {num_nodes}")
+              print(f"Clean end nodes: {num_clean_end_nodes}")
+              print(f"Total edges: {num_edges}")
+              print(f"Total destinations: {num_dests}")
+
+              def print_dist_stats(name, data):
+                  if not data or not np:
+                      print(f"\n--- {name} Distribution ---")
+                      print(f"  (No data or numpy not available)")
+                      return
+                  arr = np.array(data)
+                  print(f"\n--- {name} Distribution ---")
+                  print(f"  Min: {np.min(arr)}")
+                  print(f"  Max: {np.max(arr)}")
+                  print(f"  Mean: {np.mean(arr):.2f}")
+                  print(f"  Median: {np.median(arr)}")
+                  print(f"  Std Dev: {np.std(arr):.2f}")
+                  print(f"  Percentiles (25, 50, 75, 90, 99): {np.percentile(arr, [25, 50, 75, 90, 99])}")
+
+              print_dist_stats("Edges per Node", stats['edges_per_node'])
+              print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
+              print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
+              print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
+              if self.max_depth:
+                  print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
+
+              print("\n--- Pop Counts ---")
+              if num_edges > 0:
+                  for pop_val, count in sorted(pop_counts.items()):
+                      print(f"  Pop {pop_val}: {count} edges ({count/num_edges*100:.2f}%)")
+              else:
+                  print("  (No edges)")
+
+              print("-------------------\n")
 
           def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
               a_node = self.arena.get(node_id)
@@ -2180,9 +2341,71 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt4.py
-  - user: Once the trie has been built, I want to know about it. I want to know stats.
-      I'm not entirely sure which stats. But my aim is to optimize `get_mask` performance,
-      so I want stats that will help me with that.
+  - user: |-
+      Here are some stats about the performance of `get_mask` on the first step, when the parser state is just the initial state, and eveything is at its simplest.
+      We expect this step to take little more than a check of the sole parser state. There's no other useful work to do. I'm not sure if this minimalism is achievable, but I guess I imagine it as the ideal.
+      `````ad-attachment
+      collapse: closed
+
+      ```
+        [get_mask]
+          45 members · 1 hits · 17.443ms total · 17.443ms/hit
+          member                                                   |    hits | hits/group_hit | total_ms | avg_ms | ms/group_hit
+          ---------------------------------------------------------+---------+----------------+----------+--------+-------------
+          get_mask                                                 |       1 |           1.00 |    7.446 |  7.446 |        7.446
+          get_mask.initial_tokenizer_states                        |       1 |           1.00 |          |        |             
+          get_mask.initial_stats                                   |       1 |           1.00 |    0.009 |  0.009 |        0.009
+          get_mask.initial.gss_heads.sum                           |       1 |           1.00 |          |        |             
+          get_mask.initial.unique_accs                             |       0 |           0.00 |          |        |             
+          get_mask.seeding                                         |       1 |           1.00 |    0.042 |  0.042 |        0.042
+          get_mask.seeding.initialize_acc.calls                    |       1 |           1.00 |          |        |             
+          get_mask.seeding.initialize_acc.total                    |       1 |           1.00 |    0.018 |  0.018 |        0.018
+          get_mask.seeding.initialize_acc.disallowed_map_size.sum  |       0 |           0.00 |          |        |             
+          get_mask.seeding.initialize_acc.difference               |       1 |           1.00 |    0.012 |  0.012 |        0.012
+          get_mask.seeding.gss_loops                               |       1 |           1.00 |          |        |             
+          get_mask.seeding.gss.apply                               |       1 |           1.00 |    0.033 |  0.033 |        0.033
+          get_mask.traversal.enqueues                              |      77 |          77.00 |          |        |             
+          get_mask.main_loop                                       |       1 |           1.00 |    5.654 |  5.654 |        5.654
+          get_mask.traversal.depth_heap.pops                       |      11 |          11.00 |          |        |             
+          get_mask.traversal.nodes_processed                       |      11 |          11.00 |          |        |             
+          get_mask.gss.at_node.accs.sum                            |       0 |           0.00 |          |        |             
+          get_mask.main_loop.node.reduce_acc                       |      11 |          11.00 |    0.018 |  0.002 |        0.018
+          get_mask.traversal.end_nodes                             |       5 |           5.00 |          |        |             
+          get_mask.main_loop.end_node.final_mask_union             |       5 |           5.00 |    0.079 |  0.016 |        0.079
+          get_mask.zombie_check.node.skipped_no_potential          |       5 |           5.00 |          |        |             
+          get_mask.traversal.edge_blocks.sum                       |   2,370 |        2370.00 |          |        |             
+          get_mask.traversal.dests_blocks.sum                      | 141,984 |      141984.00 |          |        |             
+          get_mask.main_loop.edge.early_skip_check                 |     395 |         395.00 |    0.406 |  0.001 |        0.406
+          get_mask.traversal.edge.skipped_no_new_tokens            |     149 |         149.00 |          |        |             
+          get_mask.main_loop.edge.dest_union_pruned_pop0           |     174 |         174.00 |          |        |             
+          get_mask.traversal.edges_traversed                       |      72 |          72.00 |          |        |             
+          get_mask.traversal.edge_pop_val.0                        |      72 |          72.00 |          |        |             
+          get_mask.main_loop.edge.pop_cache_hits                   |      71 |          71.00 |          |        |             
+          get_mask.main_loop.edge.popn n==0                        |       1 |           1.00 |          |        |             
+          get_mask.main_loop.edge.popn                             |       1 |           1.00 |    0.002 |  0.002 |        0.002
+          get_mask.main_loop.edge.popped.reduce_acc                |       1 |           1.00 |    0.001 |  0.001 |        0.001
+          get_mask.main_loop.edge.subset_fastpath.check            |      72 |          72.00 |    0.067 |  0.001 |        0.067
+          get_mask.main_loop.edge.intersect_and_prune.calls        |      72 |          72.00 |          |        |             
+          get_mask.main_loop.edge.intersect_and_prune.intersection |      72 |          72.00 |    0.288 |  0.004 |        0.288
+          get_mask.main_loop.edge.apply_and_prune                  |      72 |          72.00 |    0.598 |  0.008 |        0.598
+          get_mask.traversal.edge.gss_merges                       |      67 |          67.00 |          |        |             
+          get_mask.main_loop.edge.gss_merge                        |      67 |          67.00 |    1.011 |  0.015 |        1.011
+          get_mask.traversal.dests_traversed                       |   2,424 |        2424.00 |          |        |             
+          get_mask.main_loop.edge.peek_and_filter                  |      70 |          70.00 |    0.031 |  0.000 |        0.031
+          get_mask.main_loop.edge.isolate_many                     |       5 |           5.00 |    0.035 |  0.007 |        0.035
+          get_mask.traversal.node_requeued_for_more_edges          |       5 |           5.00 |          |        |             
+          get_mask.traversal.max_depth_reached                     |      13 |          13.00 |          |        |             
+          get_mask.traversal.nodes_visited.unique                  |       2 |           2.00 |          |        |             
+          get_mask.final_conversion                                |       1 |           1.00 |    1.694 |  1.694 |        1.694
+      ```
+
+      `````
+
+      Once the trie has been built, I want to know about it. I want to know stats. I'm not entirely sure which stats. But my aim is to optimize `get_mask` performance, so I want stats that will help me with that.
+      I don't mean I want stats *from* `get_mask`; I mean I want stats about the tree - computed and printed on construction - that could be *useful for* optimizing `get_mask`.
+      I'm considering perhaps using a different data structure for the tree. But I don't know what to use. Some stats to inform that might be nice.
+
+      I already print some. Expand it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2202,873 +2425,217 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add statistics gathering for optimizing `get_mask`, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to expand the arena statistics, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **File: `python/aug25/models/precompute3_model_pure_python_opt4.py`**
+      1.  **Open the file**: `python/aug25/models/precompute3_model_pure_python_opt4.py`.
+      2.  **Locate the `_compute_and_print_stats` method**: This method is inside the `Model` class, starting around line 600.
+      3.  **Replace the method**: Replace the entire body of the `_compute_and_print_stats` method with the updated version below. This new version calculates and prints additional statistics about the arena structure, such as unique destination counts, LLM token set overlap, and total set cardinalities, and also improves the formatting of the output for better readability.
 
-      2.  **Add a `stats` field to the `Model` dataclass**:
-          In the `Model` dataclass definition, after the `state` field, insert the following line to add a field for collecting statistics. This will be a dictionary that defaults to 0 for new keys.
+      ```python
+          def _compute_and_print_stats(self):
+              import collections
+              try:
+                  import numpy as np
+              except ImportError:
+                  print("Numpy not found, cannot print detailed distribution stats.")
+                  np = None
 
-          ```python
-          # ... inside @dataclass class Model:
-              state: Dict[int, GSS]
-              stats: Dict[str, int] = field(default_factory=lambda: collections.defaultdict(int), init=False, repr=False)
-          ```
+              stats = collections.defaultdict(list)
+              pop_counts = collections.Counter()
+              num_nodes = len(self.arena)
+              num_clean_end_nodes = 0
+              total_llm_bv_cardinality = 0
+              total_state_bv_cardinality = 0
 
-      3.  **Update the `_process_internal_node_gen` method**:
-          *   Modify the method signature to accept the `stats` dictionary as an argument.
-              *   **From:**
-                  ```python
-                  def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
-                  ```
-              *   **To:**
-                  ```python
-                  def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, stats: Dict[str, int]) -> Generator[Union[Enqueue, Suspend], None, None]:
-                  ```
-          *   Sprinkle counters throughout the method to track various events. The following snippets show what to add and where.
+              for node in self.arena.values():
+                  if node.clean_end:
+                      num_clean_end_nodes += 1
+                  stats['edges_per_node'].append(len(node.children))
 
-              *   At the start of the `for edge_i, edge in enumerate(a_node.children):` loop:
-                  ```python
-                  stats['edges_processed'] += 1
-                  ```
-              *   Inside the `if edge.dest_states_union.isdisjoint(peek0_rs):` block:
-                  ```python
-                  stats['pruned_by_peek0_disjoint'] += 1
-                  ```
-              *   Inside the `if edge.pop in pop_cache:` block:
-                  ```python
-                  stats['pop_cache_hits'] += 1
-                  ```
-              *   Inside the `else:` block for a pop cache miss:
-                  ```python
-                  stats['pop_cache_misses'] += 1
-                  stats['gss_popn_calls'] += 1
-                  ```
-              *   Inside the `if popped.is_empty():` block:
-                  ```python
-                  stats['pruned_by_pop_empty'] += 1
-                  ```
-              *   Inside the `if not popped_acc or popped_acc.llm_mask.is_empty():` block:
-                  ```python
-                  stats['pruned_by_acc_empty'] += 1
-                  ```
-              *   Inside the `if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):` block:
-                  ```python
-                  stats['pruned_by_dest_disjoint'] += 1
-                  ```
-              *   Inside the `if popped_acc.llm_mask.isdisjoint(edge.llm_bv):` block:
-                  ```python
-                  stats['pruned_by_llm_mask_disjoint'] += 1
-                  ```
-              *   Before `popped = popped.apply_and_prune(intersect)`:
-                  ```python
-                  stats['gss_apply_and_prune_calls'] += 1
-                  ```
-              *   Inside the `if popped.is_empty():` block after the `apply_and_prune` call:
-                  ```python
-                  stats['pruned_by_apply_and_prune'] += 1
-                  ```
-              *   Inside the `if dests_proc >= max_dests:` block:
-                  ```python
-                  stats['suspensions'] += 1
-                  ```
-              *   In the `else` block where `isolate_many` is called:
-                  ```python
-                  stats['gss_isolate_many_calls'] += 1
-                  ```
-              *   Before `yield Enqueue(d, child_gss)`:
-                  ```python
-                  stats['enqueues'] += 1
-                  ```
-              *   After `dests_proc += 1`:
-                  ```python
-                  stats['dests_processed'] += 1
-                  ```
-              *   Inside the `if edges_proc >= max_edges:` block:
-                  ```python
-                  stats['suspensions'] += 1
-                  ```
+                  if node.children:
+                      unique_dests_in_node = set(d.dest_idx for edge in node.children for d in edge.dests)
+                      stats['unique_dests_per_node'].append(len(unique_dests_in_node))
 
-      4.  **Update the `get_mask` method**:
-          *   At the very beginning of the method, clear any previous stats:
-              ```python
-              self.stats.clear()
-              ```
-          *   At the top of the `while work_heap:` loop, add counters for heap size and processed items:
-              ```python
-              self.stats['max_heap_size'] = max(self.stats.get('max_heap_size', 0), len(work_heap) + 1)
-              self.stats['work_items_processed'] += 1
-              ```
-          *   Inside the `if isinstance(work, WorkItemSuspended):` block, add:
-              ```python
-              self.stats['work_item_suspended'] += 1
-              ```
-          *   Inside the `elif isinstance(work, WorkItemNew):` block, add:
-              ```python
-              self.stats['work_item_new'] += 1
-              ```
-          *   Update the call to `_process_internal_node_gen` to pass the stats dictionary:
-              *   **From:**
-                  ```python
-                  gen = self._process_internal_node_gen(node_id, gss_node)
-                  ```
-              *   **To:**
-                  ```python
-                  gen = self._process_internal_node_gen(node_id, gss_node, self.stats)
-                  ```
-          *   Finally, at the end of the method, just before the `return` statement, modify the existing `print` and add new code to print the collected statistics:
-              *   **Change:**
-                  ```python
-                  print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
-                  ```
-              *   **To:**
-                  ```python
-                  print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms", end='')
+                      sum_llm_bv_len_for_node = sum(len(edge.llm_bv) for edge in node.children)
+                      if node.llm_bv_union and len(node.llm_bv_union) > 0:
+                          overlap_factor = sum_llm_bv_len_for_node / len(node.llm_bv_union)
+                          stats['llm_bv_overlap_factor'].append(overlap_factor)
 
-                  print("\n--- Get Mask Stats ---")
-                  for k, v in sorted(self.stats.items()):
-                      print(f"{k}: {v}")
-                  print("----------------------")
-                  ```
+                  for edge in node.children:
+                      stats['dests_per_edge'].append(len(edge.dests))
+                      if edge.dests:
+                          stats['unique_dests_per_edge'].append(len({d.dest_idx for d in edge.dests}))
+                      pop_counts[edge.pop] += 1
 
-      ### Git Diff
+                      llm_bv_len = len(edge.llm_bv)
+                      stats['llm_bv_cardinality'].append(llm_bv_len)
+                      total_llm_bv_cardinality += llm_bv_len
 
-      Here is the git diff to apply these changes.
+                      stats['dest_states_union_cardinality'].append(len(edge.dest_states_union))
 
-      ```diff
-      --- a/python/aug25/models/precompute3_model_pure_python_opt4.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_opt4.py
-      @@ -378,6 +378,7 @@
-           all_internal_llm_tokens_bitset: LLMTokenSet
-           ignore_terminal_id: Optional[int]
-           state: Dict[int, GSS]
-      +    stats: Dict[str, int] = field(default_factory=lambda: collections.defaultdict(int), init=False, repr=False)
-       
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-      @@ -520,7 +521,7 @@
-                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
-               return GSS.merge_many(shifted)
-       
-      -    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
-      +    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, stats: Dict[str, int]) -> Generator[Union[Enqueue, Suspend], None, None]:
-               a_node = self.arena.get(node_id)
-               if not a_node:
-                   return
-      @@ -532,20 +533,29 @@
-               pop_cache = {}
-       
-               for edge_i, edge in enumerate(a_node.children):
-      +            stats['edges_processed'] += 1
-                   if edge.pop == 0:
-                       if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-      -                if edge.dest_states_union.isdisjoint(peek0_rs): continue
-      -
-      -            if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-      +                if edge.dest_states_union.isdisjoint(peek0_rs):
-      +                    stats['pruned_by_peek0_disjoint'] += 1
-      +                    continue
-      +
-      +            if edge.pop in pop_cache:
-      +                stats['pop_cache_hits'] += 1
-      +                popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-                   else:
-      +                stats['pop_cache_misses'] += 1
-      +                stats['gss_popn_calls'] += 1
-                       popped = gss_node.popn(edge.pop)
-                       if popped.is_empty():
-      +                    stats['pruned_by_pop_empty'] += 1
-                           pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
-                           continue
-                       popped_acc = popped.reduce_acc()
-                       if not popped_acc or popped_acc.llm_mask.is_empty():
-      +                    stats['pruned_by_acc_empty'] += 1
-                           pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
-                           continue
-                       # Avoid double-peek: call once and reuse both list and RangeSetStates
-                       peeked = popped.peek()
-                       peek_rs = RangeSetStates.from_indices(peeked)
-                       pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
-       
-      -            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
-      +            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
-      +                stats['pruned_by_dest_disjoint'] += 1
-      +                continue
-       
-                   if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-      -                if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
-      +                if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
-      +                    stats['pruned_by_llm_mask_disjoint'] += 1
-      +                    continue
-                       @_acc_memoize(use_value_cache=False)
-                       def intersect(acc: PyAcc):
-                           new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                           return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-      +                stats['gss_apply_and_prune_calls'] += 1
-                       popped = popped.apply_and_prune(intersect)
-      -                if popped.is_empty(): continue
-      +                if popped.is_empty():
-      +                    stats['pruned_by_apply_and_prune'] += 1
-      +                    continue
-                   if not peeked: continue
-       
-                   grouped: Dict[int, List[int]] = {}
-      @@ -561,6 +571,7 @@
-                   for dest_j in sorted(grouped.keys()):
-                       if dests_proc >= max_dests:
-                           priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-      +                    stats['suspensions'] += 1
-                           yield Suspend(priority)
-                           dests_proc = 0
-                       dest = edge.dests[dest_j]
-      @@ -569,19 +580,24 @@
-                       if len(values_to_keep) == len(peeked):
-                           child_gss = popped
-                       else:
-      +                    stats['gss_isolate_many_calls'] += 1
-                           child_gss = popped.isolate_many(values_to_keep)
-                       if child_gss.is_empty(): continue
-                       d: NodeID = int(dest.dest_idx)
-      +                stats['enqueues'] += 1
-                       yield Enqueue(d, child_gss)
-                       dests_proc += 1
-      +                stats['dests_processed'] += 1
-       
-                   if edges_proc >= max_edges:
-                       priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-      +                stats['suspensions'] += 1
-                       yield Suspend(priority)
-                       edges_proc = 0
-                   edges_proc += 1
-       
-           def get_mask(self) -> LLMTokenSet:
-      +        self.stats.clear()
-               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-               work_heap = []
-               t0 = time.perf_counter()
-      @@ -614,15 +630,19 @@
-       
-               remaining_mask = all_ones
-               while work_heap:
-      +            self.stats['max_heap_size'] = max(self.stats.get('max_heap_size', 0), len(work_heap) + 1)
-      +            self.stats['work_items_processed'] += 1
-                   heap_item = heapq.heappop(work_heap)
-                   priority, work = heap_item.priority, heap_item.item
-       
-                   if isinstance(work, WorkItemSuspended):
-      +                self.stats['work_item_suspended'] += 1
-                       gen = work.generator
-                       work_llm_mask = work.llm_mask
-       
-                       if work_llm_mask.isdisjoint(remaining_mask):
-                           continue
-                   elif isinstance(work, WorkItemNew):
-      +                self.stats['work_item_new'] += 1
-                       node_id, gss_node = work.node_id, work.gss
-                       assert isinstance(node_id, int)
-                       assert isinstance(gss_node, GSS)
-      @@ -638,7 +658,7 @@
-                       if not a_node or not a_node.children or work_llm_mask.isdisjoint(remaining_mask):
-                           continue
-       
-      -                gen = self._process_internal_node_gen(node_id, gss_node)
-      +                gen = self._process_internal_node_gen(node_id, gss_node, self.stats)
-                   else:
-                       raise ValueError(f'Unexpected work item: {work}')
-       
-      @@ -662,6 +682,12 @@
-                   if i in self.internal_to_original_map:
-                       original_indices |= self.internal_to_original_map[i]
-               t3 = time.perf_counter()
-      -        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
-      +        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms", end='')
-      +
-      +        print("\n--- Get Mask Stats ---")
-      +        for k, v in sorted(self.stats.items()):
-      +            print(f"{k}: {v}")
-      +        print("----------------------")
-      +
-               return original_indices
+                      for dest in edge.dests:
+                          state_bv_len = len(dest.state_bv)
+                          stats['dest_state_bv_cardinality'].append(state_bv_len)
+                          total_state_bv_cardinality += state_bv_len
 
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+              num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
+              num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
 
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4.py.
-    metadata:
-  - user: 'Changes committed with message: "Add performance statistics tracking to
-      Model.get_mask and related traversal methods"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python_opt4.py since previous turn:
-      ```diff
+              print("\n--- Arena Stats ---")
+              print(f"Total nodes: {num_nodes:,}")
+              print(f"Clean end nodes: {num_clean_end_nodes:,}")
+              print(f"Total edges: {num_edges:,}")
+              print(f"Total destinations: {num_dests:,}")
+              print(f"Total LLM token cardinality (sum over edges): {total_llm_bv_cardinality:,}")
+              print(f"Total state ID cardinality (sum over dests): {total_state_bv_cardinality:,}")
 
-      ```
-    metadata:
-  - user: I don't mean I want stats *from* `get_mask`; I mean I want stats about the
-      tree - computed and printed on construction - that could be *useful for* optimizing
-      `get_mask`.
-    metadata:
-  - assistant: |-
-      Of course. Your previous request to add statistics to `get_mask` was a misunderstanding of your goal. I will now provide instructions and a diff to remove that instrumentation and instead add a new feature to compute and print statistics about the arena's structure immediately after it's built. This will give you insights into the trie's characteristics to help guide future optimizations.
-
-      ### Step-by-step Instructions
-
-      1.  **File: `python/aug25/models/precompute3_model_pure_python_opt4.py`**
-
-      2.  **Remove `get_mask` Statistics Gathering**:
-          The code added previously for `get_mask` stats is no longer needed.
-          *   In the `Model` dataclass definition, delete the `stats` field:
-              ```python
-              # ... inside @dataclass class Model:
-                  state: Dict[int, GSS]
-                  stats: Dict[str, int] = field(default_factory=lambda: collections.defaultdict(int), init=False, repr=False) # <- DELETE THIS LINE
-              ```
-          *   In the `_process_internal_node_gen` method, revert its signature and remove all the `stats[...] += 1` lines that were added.
-          *   In the `get_mask` method, remove all lines that reference `self.stats`, revert the call to `_process_internal_node_gen`, and restore the original, single-line `print` statement at the end.
-
-      3.  **Add Arena Statistics Gathering on Construction**:
-          *   Add the following new method, `_compute_and_print_stats`, to the `Model` class. A good place for it is after the `_process_token` method.
-
-              ```python
-              def _compute_and_print_stats(self):
-                  import collections
-                  try:
-                      import numpy as np
-                  except ImportError:
-                      print("Numpy not found, cannot print detailed distribution stats.")
-                      np = None
-          
-                  stats = collections.defaultdict(list)
-                  pop_counts = collections.Counter()
-                  num_nodes = len(self.arena)
-                  num_clean_end_nodes = 0
-          
-                  for node in self.arena.values():
-                      if node.clean_end:
-                          num_clean_end_nodes += 1
-                      stats['edges_per_node'].append(len(node.children))
-                      for edge in node.children:
-                          stats['dests_per_edge'].append(len(edge.dests))
-                          pop_counts[edge.pop] += 1
-                          stats['llm_bv_cardinality'].append(len(edge.llm_bv))
-                          for dest in edge.dests:
-                              stats['dest_state_bv_cardinality'].append(len(dest.state_bv))
-          
-                  num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
-                  num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
-          
-                  print("\n--- Arena Stats ---")
-                  print(f"Total nodes: {num_nodes}")
-                  print(f"Clean end nodes: {num_clean_end_nodes}")
-                  print(f"Total edges: {num_edges}")
-                  print(f"Total destinations: {num_dests}")
-          
-                  def print_dist_stats(name, data):
-                      if not data or not np:
-                          print(f"\n--- {name} Distribution ---")
-                          print(f"  (No data or numpy not available)")
-                          return
-                      arr = np.array(data)
+              def print_dist_stats(name, data):
+                  if not data or not np:
                       print(f"\n--- {name} Distribution ---")
-                      print(f"  Min: {np.min(arr)}")
-                      print(f"  Max: {np.max(arr)}")
-                      print(f"  Mean: {np.mean(arr):.2f}")
-                      print(f"  Median: {np.median(arr)}")
-                      print(f"  Std Dev: {np.std(arr):.2f}")
-                      print(f"  Percentiles (25, 50, 75, 90, 99): {np.percentile(arr, [25, 50, 75, 90, 99])}")
-          
-                  print_dist_stats("Edges per Node", stats['edges_per_node'])
-                  print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
-                  print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
-                  print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
-                  if self.max_depth:
-                      print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
-          
-                  print("\n--- Pop Counts ---")
-                  if num_edges > 0:
-                      for pop_val, count in sorted(pop_counts.items()):
-                          print(f"  Pop {pop_val}: {count} edges ({count/num_edges*100:.2f}%)")
-                  else:
-                      print("  (No edges)")
-          
-                  print("-------------------\n")
-              ```
+                      print(f"  (No data or numpy not available)")
+                      return
+                  arr = np.array(data)
+                  # Check if original data was integer to format min/max appropriately
+                  is_int_data = all(isinstance(x, int) for x in data)
+                  fmt = "," if is_int_data else ",.2f"
 
-          *   In the `Model.from_json_string` static method, add a call to this new method just before the `return` statement:
-              ```python
-              # ... inside from_json_string ...
-                  model._compute_edge_accelerators()
-                  model.optimize_traversal()
-                  model._compute_and_print_stats() # Add this line
-                  return model
-              ```
+                  print(f"\n--- {name} Distribution ---")
+                  print(f"  Min: {np.min(arr):{fmt}}")
+                  print(f"  Max: {np.max(arr):{fmt}}")
+                  print(f"  Mean: {np.mean(arr):,.2f}")
+                  print(f"  Median: {np.median(arr):,.2f}") # Median can be float for int arrays
+                  print(f"  Std Dev: {np.std(arr):,.2f}")
+                  percentiles = np.percentile(arr, [25, 50, 75, 90, 99])
+                  print(f"  Percentiles (25, 50, 75, 90, 99): [{', '.join(f'{p:,.2f}' for p in percentiles)}]")
+
+              print_dist_stats("Edges per Node", stats['edges_per_node'])
+              print_dist_stats("Unique Destinations per Node", stats['unique_dests_per_node'])
+              print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
+              print_dist_stats("Unique Destinations per Edge", stats['unique_dests_per_edge'])
+              print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
+              print_dist_stats("LLM BV Overlap Factor per Node", stats['llm_bv_overlap_factor'])
+              print_dist_stats("StateIDSet Union Cardinality per Edge", stats['dest_states_union_cardinality'])
+              print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
+              if self.max_depth:
+                  print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
+
+              print("\n--- Pop Counts ---")
+              if num_edges > 0:
+                  for pop_val, count in sorted(pop_counts.items()):
+                      print(f"  Pop {pop_val}: {count:,} edges ({count/num_edges*100:.2f}%)")
+              else:
+                  print("  (No edges)")
+
+              print("-------------------\n")
+      ```
 
       ### Git Diff
 
-      Here is the git diff that applies all the changes described above.
-
       ```diff
       --- a/python/aug25/models/precompute3_model_pure_python_opt4.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt4.py
-      @@ -378,7 +378,6 @@
-           all_internal_llm_tokens_bitset: LLMTokenSet
-           ignore_terminal_id: Optional[int]
-           state: Dict[int, GSS]
-      -    stats: Dict[str, int] = field(default_factory=lambda: collections.defaultdict(int), init=False, repr=False)
+      @@ -606,53 +606,88 @@
+               stats = collections.defaultdict(list)
+               pop_counts = collections.Counter()
+               num_nodes = len(self.arena)
+               num_clean_end_nodes = 0
+      +        total_llm_bv_cardinality = 0
+      +        total_state_bv_cardinality = 0
        
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-      @@ -447,6 +446,8 @@
-               )
-               model._compute_edge_accelerators()
-               model.optimize_traversal()
-      +        model._compute_and_print_stats()
-               return model
-       
-           def _compute_edge_accelerators(self) -> None:
-      @@ -520,7 +521,63 @@
-                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
-               return GSS.merge_many(shifted)
-       
-      -    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
-      +    def _compute_and_print_stats(self):
-      +        import collections
-      +        try:
-      +            import numpy as np
-      +        except ImportError:
-      +            print("Numpy not found, cannot print detailed distribution stats.")
-      +            np = None
+               for node in self.arena.values():
+                   if node.clean_end:
+                       num_clean_end_nodes += 1
+                   stats['edges_per_node'].append(len(node.children))
       +
-      +        stats = collections.defaultdict(list)
-      +        pop_counts = collections.Counter()
-      +        num_nodes = len(self.arena)
-      +        num_clean_end_nodes = 0
+      +            if node.children:
+      +                unique_dests_in_node = set(d.dest_idx for edge in node.children for d in edge.dests)
+      +                stats['unique_dests_per_node'].append(len(unique_dests_in_node))
       +
-      +        for node in self.arena.values():
-      +            if node.clean_end:
-      +                num_clean_end_nodes += 1
-      +            stats['edges_per_node'].append(len(node.children))
-      +            for edge in node.children:
-      +                stats['dests_per_edge'].append(len(edge.dests))
-      +                pop_counts[edge.pop] += 1
-      +                stats['llm_bv_cardinality'].append(len(edge.llm_bv))
-      +                for dest in edge.dests:
-      +                    stats['dest_state_bv_cardinality'].append(len(dest.state_bv))
+      +                sum_llm_bv_len_for_node = sum(len(edge.llm_bv) for edge in node.children)
+      +                if node.llm_bv_union and len(node.llm_bv_union) > 0:
+      +                    overlap_factor = sum_llm_bv_len_for_node / len(node.llm_bv_union)
+      +                    stats['llm_bv_overlap_factor'].append(overlap_factor)
       +
-      +        num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
-      +        num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
+                   for edge in node.children:
+                       stats['dests_per_edge'].append(len(edge.dests))
+      +                if edge.dests:
+      +                    stats['unique_dests_per_edge'].append(len({d.dest_idx for d in edge.dests}))
+                       pop_counts[edge.pop] += 1
+      -                stats['llm_bv_cardinality'].append(len(edge.llm_bv))
       +
-      +        print("\n--- Arena Stats ---")
-      +        print(f"Total nodes: {num_nodes}")
-      +        print(f"Clean end nodes: {num_clean_end_nodes}")
-      +        print(f"Total edges: {num_edges}")
-      +        print(f"Total destinations: {num_dests}")
+      +                llm_bv_len = len(edge.llm_bv)
+      +                stats['llm_bv_cardinality'].append(llm_bv_len)
+      +                total_llm_bv_cardinality += llm_bv_len
       +
-      +        def print_dist_stats(name, data):
-      +            if not data or not np:
-      +                print(f"\n--- {name} Distribution ---")
-      +                print(f"  (No data or numpy not available)")
-      +                return
-      +            arr = np.array(data)
-      +            print(f"\n--- {name} Distribution ---")
-      +            print(f"  Min: {np.min(arr)}")
-      +            print(f"  Max: {np.max(arr)}")
-      +            print(f"  Mean: {np.mean(arr):.2f}")
-      +            print(f"  Median: {np.median(arr)}")
-      +            print(f"  Std Dev: {np.std(arr):.2f}")
-      +            print(f"  Percentiles (25, 50, 75, 90, 99): {np.percentile(arr, [25, 50, 75, 90, 99])}")
+      +                stats['dest_states_union_cardinality'].append(len(edge.dest_states_union))
       +
-      +        print_dist_stats("Edges per Node", stats['edges_per_node'])
-      +        print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
-      +        print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
-      +        print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
-      +        if self.max_depth:
-      +            print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
+                       for dest in edge.dests:
+      -                    stats['dest_state_bv_cardinality'].append(len(dest.state_bv))
+      +                    state_bv_len = len(dest.state_bv)
+      +                    stats['dest_state_bv_cardinality'].append(state_bv_len)
+      +                    total_state_bv_cardinality += state_bv_len
+       
+               num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
+               num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
+       
+               print("\n--- Arena Stats ---")
+      -        print(f"Total nodes: {num_nodes}")
+      -        print(f"Clean end nodes: {num_clean_end_nodes}")
+      -        print(f"Total edges: {num_edges}")
+      -        print(f"Total destinations: {num_dests}")
+      +        print(f"Total nodes: {num_nodes:,}")
+      +        print(f"Clean end nodes: {num_clean_end_nodes:,}")
+      +        print(f"Total edges: {num_edges:,}")
+      +        print(f"Total destinations: {num_dests:,}")
+      +        print(f"Total LLM token cardinality (sum over edges): {total_llm_bv_cardinality:,}")
+      +        print(f"Total state ID cardinality (sum over dests): {total_state_bv_cardinality:,}")
+       
+               def print_dist_stats(name, data):
+                   if not data or not np:
+                       print(f"\n--- {name} Distribution ---")
+                       print(f"  (No data or numpy not available)")
+                       return
+                   arr = np.array(data)
+      +            # Check if original data was integer to format min/max appropriately
+      +            is_int_data = all(isinstance(x, int) for x in data)
+      +            fmt = "," if is_int_data else ",.2f"
       +
-      +        print("\n--- Pop Counts ---")
-      +        if num_edges > 0:
-      +            for pop_val, count in sorted(pop_counts.items()):
-      +                print(f"  Pop {pop_val}: {count} edges ({count/num_edges*100:.2f}%)")
-      +        else:
-      +            print("  (No edges)")
-      +
-      +        print("-------------------\n")
-      +
-      +    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
-               a_node = self.arena.get(node_id)
-               if not a_node:
-                   return
-      @@ -532,20 +589,14 @@
-               pop_cache = {}
+                   print(f"\n--- {name} Distribution ---")
+      -            print(f"  Min: {np.min(arr)}")
+      -            print(f"  Max: {np.max(arr)}")
+      -            print(f"  Mean: {np.mean(arr):.2f}")
+      -            print(f"  Median: {np.median(arr)}")
+      -            print(f"  Std Dev: {np.std(arr):.2f}")
+      -            print(f"  Percentiles (25, 50, 75, 90, 99): {np.percentile(arr, [25, 50, 75, 90, 99])}")
+      +            print(f"  Min: {np.min(arr):{fmt}}")
+      +            print(f"  Max: {np.max(arr):{fmt}}")
+      +            print(f"  Mean: {np.mean(arr):,.2f}")
+      +            print(f"  Median: {np.median(arr):,.2f}") # Median can be float for int arrays
+      +            print(f"  Std Dev: {np.std(arr):,.2f}")
+      +            percentiles = np.percentile(arr, [25, 50, 75, 90, 99])
+      +            print(f"  Percentiles (25, 50, 75, 90, 99): [{', '.join(f'{p:,.2f}' for p in percentiles)}]")
        
-               for edge_i, edge in enumerate(a_node.children):
-      -            stats['edges_processed'] += 1
-                   if edge.pop == 0:
-                       if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-      -                if edge.dest_states_union.isdisjoint(peek0_rs):
-      -                    stats['pruned_by_peek0_disjoint'] += 1
-      -                    continue
-      +                if edge.dest_states_union.isdisjoint(peek0_rs): continue
+               print_dist_stats("Edges per Node", stats['edges_per_node'])
+      +        print_dist_stats("Unique Destinations per Node", stats['unique_dests_per_node'])
+               print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
+      +        print_dist_stats("Unique Destinations per Edge", stats['unique_dests_per_edge'])
+               print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
+      +        print_dist_stats("LLM BV Overlap Factor per Node", stats['llm_bv_overlap_factor'])
+      +        print_dist_stats("StateIDSet Union Cardinality per Edge", stats['dest_states_union_cardinality'])
+               print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
+               if self.max_depth:
+                   print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
        
-      -            if edge.pop in pop_cache:
-      -                stats['pop_cache_hits'] += 1
-      -                popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-      +            if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-                   else:
-      -                stats['pop_cache_misses'] += 1
-      -                stats['gss_popn_calls'] += 1
-                       popped = gss_node.popn(edge.pop)
-                       if popped.is_empty():
-      -                    stats['pruned_by_pop_empty'] += 1
-                           pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
-                           continue
-                       popped_acc = popped.reduce_acc()
-                       if not popped_acc or popped_acc.llm_mask.is_empty():
-      -                    stats['pruned_by_acc_empty'] += 1
-                           pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
-                           continue
-                       # Avoid double-peek: call once and reuse both list and RangeSetStates
-      @@ -553,20 +604,13 @@
-                       peek_rs = RangeSetStates.from_indices(peeked)
-                       pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+               print("\n--- Pop Counts ---")
+               if num_edges > 0:
+                   for pop_val, count in sorted(pop_counts.items()):
+      -                print(f"  Pop {pop_val}: {count} edges ({count/num_edges*100:.2f}%)")
+      +                print(f"  Pop {pop_val}: {count:,} edges ({count/num_edges*100:.2f}%)")
+               else:
+                   print("  (No edges)")
        
-      -            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
-      -                stats['pruned_by_dest_disjoint'] += 1
-      -                continue
-      +            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
-       
-                   if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-      -                if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
-      -                    stats['pruned_by_llm_mask_disjoint'] += 1
-      -                    continue
-      +                if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
-                       @_acc_memoize(use_value_cache=False)
-                       def intersect(acc: PyAcc):
-                           new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                           return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-      -                stats['gss_apply_and_prune_calls'] += 1
-                       popped = popped.apply_and_prune(intersect)
-      -                if popped.is_empty():
-      -                    stats['pruned_by_apply_and_prune'] += 1
-      -                    continue
-      +                if popped.is_empty(): continue
-                   if not peeked: continue
-       
-                   grouped: Dict[int, List[int]] = {}
-      @@ -582,7 +626,6 @@
-                   for dest_j in sorted(grouped.keys()):
-                       if dests_proc >= max_dests:
-                           priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-      -                    stats['suspensions'] += 1
-                           yield Suspend(priority)
-                           dests_proc = 0
-                       dest = edge.dests[dest_j]
-      @@ -591,19 +634,16 @@
-                       if len(values_to_keep) == len(peeked):
-                           child_gss = popped
-                       else:
-      -                    stats['gss_isolate_many_calls'] += 1
-                           child_gss = popped.isolate_many(values_to_keep)
-                       if child_gss.is_empty(): continue
-                       d: NodeID = int(dest.dest_idx)
-      -                stats['enqueues'] += 1
-                       yield Enqueue(d, child_gss)
-                       dests_proc += 1
-      -                stats['dests_processed'] += 1
-       
-                   if edges_proc >= max_edges:
-                       priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-      -                stats['suspensions'] += 1
-                       yield Suspend(priority)
-                       edges_proc = 0
-                   edges_proc += 1
-       
-           def get_mask(self) -> LLMTokenSet:
-      -        self.stats.clear()
-               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-               work_heap = []
-               t0 = time.perf_counter()
-      @@ -636,19 +676,15 @@
-       
-               remaining_mask = all_ones
-               while work_heap:
-      -            self.stats['max_heap_size'] = max(self.stats.get('max_heap_size', 0), len(work_heap) + 1)
-      -            self.stats['work_items_processed'] += 1
-                   heap_item = heapq.heappop(work_heap)
-                   priority, work = heap_item.priority, heap_item.item
-       
-                   if isinstance(work, WorkItemSuspended):
-      -                self.stats['work_item_suspended'] += 1
-                       gen = work.generator
-                       work_llm_mask = work.llm_mask
-       
-                       if work_llm_mask.isdisjoint(remaining_mask):
-                           continue
-                   elif isinstance(work, WorkItemNew):
-      -                self.stats['work_item_new'] += 1
-                       node_id, gss_node = work.node_id, work.gss
-                       assert isinstance(node_id, int)
-                       assert isinstance(gss_node, GSS)
-      @@ -664,7 +700,7 @@
-                       if not a_node or not a_node.children or work_llm_mask.isdisjoint(remaining_mask):
-                           continue
-       
-      -                gen = self._process_internal_node_gen(node_id, gss_node, self.stats)
-      +                gen = self._process_internal_node_gen(node_id, gss_node)
-                   else:
-                       raise ValueError(f'Unexpected work item: {work}')
-       
-      @@ -688,11 +724,6 @@
-                   if i in self.internal_to_original_map:
-                       original_indices |= self.internal_to_original_map[i]
-               t3 = time.perf_counter()
-      -        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms", end='')
-      -
-      -        print("\n--- Get Mask Stats ---")
-      -        for k, v in sorted(self.stats.items()):
-      -            print(f"{k}: {v}")
-      -        print("----------------------")
-      -
-      +        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
-               return original_indices
-
-      ```
-    metadata:
-  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
-      applied now.
-    metadata:
-  - assistant: |-
-      ```diff
-      --- a/python/aug25/models/precompute3_model_pure_python_opt4.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_opt4.py
-      @@ -378,7 +378,6 @@
-           all_internal_llm_tokens_bitset: LLMTokenSet
-           ignore_terminal_id: Optional[int]
-           state: Dict[int, GSS]
-      -    stats: Dict[str, int] = field(default_factory=lambda: collections.defaultdict(int), init=False, repr=False)
-       
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-      @@ -447,6 +446,8 @@
-               )
-               model._compute_edge_accelerators()
-               model.optimize_traversal()
-      +        model._compute_and_print_stats()
-               return model
-       
-           def _compute_edge_accelerators(self) -> None:
-      @@ -521,2 +521,63 @@
-               return GSS.merge_many(shifted)
-       
-      -    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, stats: Dict[str, int]) -> Generator[Union[Enqueue, Suspend], None, None]:
-      +    def _compute_and_print_stats(self):
-      +        import collections
-      +        try:
-      +            import numpy as np
-      +        except ImportError:
-      +            print("Numpy not found, cannot print detailed distribution stats.")
-      +            np = None
-      +
-      +        stats = collections.defaultdict(list)
-      +        pop_counts = collections.Counter()
-      +        num_nodes = len(self.arena)
-      +        num_clean_end_nodes = 0
-      +
-      +        for node in self.arena.values():
-      +            if node.clean_end:
-      +                num_clean_end_nodes += 1
-      +            stats['edges_per_node'].append(len(node.children))
-      +            for edge in node.children:
-      +                stats['dests_per_edge'].append(len(edge.dests))
-      +                pop_counts[edge.pop] += 1
-      +                stats['llm_bv_cardinality'].append(len(edge.llm_bv))
-      +                for dest in edge.dests:
-      +                    stats['dest_state_bv_cardinality'].append(len(dest.state_bv))
-      +
-      +        num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
-      +        num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
-      +
-      +        print("\n--- Arena Stats ---")
-      +        print(f"Total nodes: {num_nodes}")
-      +        print(f"Clean end nodes: {num_clean_end_nodes}")
-      +        print(f"Total edges: {num_edges}")
-      +        print(f"Total destinations: {num_dests}")
-      +
-      +        def print_dist_stats(name, data):
-      +            if not data or not np:
-      +                print(f"\n--- {name} Distribution ---")
-      +                print(f"  (No data or numpy not available)")
-      +                return
-      +            arr = np.array(data)
-      +            print(f"\n--- {name} Distribution ---")
-      +            print(f"  Min: {np.min(arr)}")
-      +            print(f"  Max: {np.max(arr)}")
-      +            print(f"  Mean: {np.mean(arr):.2f}")
-      +            print(f"  Median: {np.median(arr)}")
-      +            print(f"  Std Dev: {np.std(arr):.2f}")
-      +            print(f"  Percentiles (25, 50, 75, 90, 99): {np.percentile(arr, [25, 50, 75, 90, 99])}")
-      +
-      +        print_dist_stats("Edges per Node", stats['edges_per_node'])
-      +        print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
-      +        print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
-      +        print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
-      +        if self.max_depth:
-      +            print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
-      +
-      +        print("\n--- Pop Counts ---")
-      +        if num_edges > 0:
-      +            for pop_val, count in sorted(pop_counts.items()):
-      +                print(f"  Pop {pop_val}: {count} edges ({count/num_edges*100:.2f}%)")
-      +        else:
-      +            print("  (No edges)")
-      +
-      +        print("-------------------\n")
-      +
-      +    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, stats: Dict[str, int]) -> Generator[Union[Enqueue, Suspend], None, None]:
-               a_node = self.arena.get(node_id)
-               if not a_node:
-                   return
-      @@ -532,20 +589,14 @@
-               pop_cache = {}
-       
-               for edge_i, edge in enumerate(a_node.children):
-      -            stats['edges_processed'] += 1
-                   if edge.pop == 0:
-                       if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-      -                if edge.dest_states_union.isdisjoint(peek0_rs):
-      -                    stats['pruned_by_peek0_disjoint'] += 1
-      -                    continue
-      +                if edge.dest_states_union.isdisjoint(peek0_rs): continue
-       
-      -            if edge.pop in pop_cache:
-      -                stats['pop_cache_hits'] += 1
-      -                popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-      +            if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-                   else:
-      -                stats['pop_cache_misses'] += 1
-      -                stats['gss_popn_calls'] += 1
-                       popped = gss_node.popn(edge.pop)
-                       if popped.is_empty():
-      -                    stats['pruned_by_pop_empty'] += 1
-                           pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
-                           continue
-                       popped_acc = popped.reduce_acc()
-                       if not popped_acc or popped_acc.llm_mask.is_empty():
-      -                    stats['pruned_by_acc_empty'] += 1
-                           pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
-                           continue
-                       # Avoid double-peek: call once and reuse both list and RangeSetStates
-      @@ -553,20 +604,13 @@
-                       peek_rs = RangeSetStates.from_indices(peeked)
-                       pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
-       
-      -            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
-      -                stats['pruned_by_dest_disjoint'] += 1
-      -                continue
-      +            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
-       
-                   if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-      -                if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
-      -                    stats['pruned_by_llm_mask_disjoint'] += 1
-      -                    continue
-      +                if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
-                       @_acc_memoize(use_value_cache=False)
-                       def intersect(acc: PyAcc):
-                           new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                           return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-      -                stats['gss_apply_and_prune_calls'] += 1
-                       popped = popped.apply_and_prune(intersect)
-      -                if popped.is_empty():
-      -                    stats['pruned_by_apply_and_prune'] += 1
-      -                    continue
-      +                if popped.is_empty(): continue
-                   if not peeked: continue
-       
-                   grouped: Dict[int, List[int]] = {}
-      @@ -582,7 +626,6 @@
-                   for dest_j in sorted(grouped.keys()):
-                       if dests_proc >= max_dests:
-                           priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-      -                    stats['suspensions'] += 1
-                           yield Suspend(priority)
-                           dests_proc = 0
-                       dest = edge.dests[dest_j]
-      @@ -591,19 +634,16 @@
-                       if len(values_to_keep) == len(peeked):
-                           child_gss = popped
-                       else:
-      -                    stats['gss_isolate_many_calls'] += 1
-                           child_gss = popped.isolate_many(values_to_keep)
-                       if child_gss.is_empty(): continue
-                       d: NodeID = int(dest.dest_idx)
-      -                stats['enqueues'] += 1
-                       yield Enqueue(d, child_gss)
-                       dests_proc += 1
-      -                stats['dests_processed'] += 1
-       
-                   if edges_proc >= max_edges:
-                       priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-      -                stats['suspensions'] += 1
-                       yield Suspend(priority)
-                       edges_proc = 0
-                   edges_proc += 1
-       
-           def get_mask(self) -> LLMTokenSet:
-      -        self.stats.clear()
-               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-               work_heap = []
-               t0 = time.perf_counter()
-      @@ -636,19 +676,15 @@
-       
-               remaining_mask = all_ones
-               while work_heap:
-      -            self.stats['max_heap_size'] = max(self.stats.get('max_heap_size', 0), len(work_heap) + 1)
-      -            self.stats['work_items_processed'] += 1
-                   heap_item = heapq.heappop(work_heap)
-                   priority, work = heap_item.priority, heap_item.item
-       
-                   if isinstance(work, WorkItemSuspended):
-      -                self.stats['work_item_suspended'] += 1
-                       gen = work.generator
-                       work_llm_mask = work.llm_mask
-       
-                       if work_llm_mask.isdisjoint(remaining_mask):
-                           continue
-                   elif isinstance(work, WorkItemNew):
-      -                self.stats['work_item_new'] += 1
-                       node_id, gss_node = work.node_id, work.gss
-                       assert isinstance(node_id, int)
-                       assert isinstance(gss_node, GSS)
-      @@ -664,7 +700,7 @@
-                       if not a_node or not a_node.children or work_llm_mask.isdisjoint(remaining_mask):
-                           continue
-       
-      -                gen = self._process_internal_node_gen(node_id, gss_node, self.stats)
-      +                gen = self._process_internal_node_gen(node_id, gss_node)
-                   else:
-                       raise ValueError(f'Unexpected work item: {work}')
-       
-      @@ -688,11 +724,6 @@
-                   if i in self.internal_to_original_map:
-                       original_indices |= self.internal_to_original_map[i]
-               t3 = time.perf_counter()
-      -        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms", end='')
-      -
-      -        print("\n--- Get Mask Stats ---")
-      -        for k, v in sorted(self.stats.items()):
-      -            print(f"{k}: {v}")
-      -        print("----------------------")
-      -
-      +        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
-               return original_indices
 
       ```
     metadata:
@@ -3081,7 +2648,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4.py.
     metadata:
-  - user: 'Changes committed with message: "Add arena structure statistics printing
-      on model construction and remove temporary get_mask instrumentation"'
+  - user: 'Changes committed with message: "model: Enhance arena statistics reporting
+      in _compute_and_print_stats"'
     metadata:
 ...

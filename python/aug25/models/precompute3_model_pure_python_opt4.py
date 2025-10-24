@@ -531,26 +531,50 @@ class Model(GraphProvider):
         pop_counts = collections.Counter()
         num_nodes = len(self.arena)
         num_clean_end_nodes = 0
+        total_llm_bv_cardinality = 0
+        total_state_bv_cardinality = 0
 
         for node in self.arena.values():
             if node.clean_end:
                 num_clean_end_nodes += 1
             stats['edges_per_node'].append(len(node.children))
+
+            if node.children:
+                unique_dests_in_node = set(d.dest_idx for edge in node.children for d in edge.dests)
+                stats['unique_dests_per_node'].append(len(unique_dests_in_node))
+
+                sum_llm_bv_len_for_node = sum(len(edge.llm_bv) for edge in node.children)
+                if node.llm_bv_union and len(node.llm_bv_union) > 0:
+                    overlap_factor = sum_llm_bv_len_for_node / len(node.llm_bv_union)
+                    stats['llm_bv_overlap_factor'].append(overlap_factor)
+
             for edge in node.children:
                 stats['dests_per_edge'].append(len(edge.dests))
+                if edge.dests:
+                    stats['unique_dests_per_edge'].append(len({d.dest_idx for d in edge.dests}))
                 pop_counts[edge.pop] += 1
-                stats['llm_bv_cardinality'].append(len(edge.llm_bv))
+
+                llm_bv_len = len(edge.llm_bv)
+                stats['llm_bv_cardinality'].append(llm_bv_len)
+                total_llm_bv_cardinality += llm_bv_len
+
+                stats['dest_states_union_cardinality'].append(len(edge.dest_states_union))
+
                 for dest in edge.dests:
-                    stats['dest_state_bv_cardinality'].append(len(dest.state_bv))
+                    state_bv_len = len(dest.state_bv)
+                    stats['dest_state_bv_cardinality'].append(state_bv_len)
+                    total_state_bv_cardinality += state_bv_len
 
         num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
         num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
 
         print("\n--- Arena Stats ---")
-        print(f"Total nodes: {num_nodes}")
-        print(f"Clean end nodes: {num_clean_end_nodes}")
-        print(f"Total edges: {num_edges}")
-        print(f"Total destinations: {num_dests}")
+        print(f"Total nodes: {num_nodes:,}")
+        print(f"Clean end nodes: {num_clean_end_nodes:,}")
+        print(f"Total edges: {num_edges:,}")
+        print(f"Total destinations: {num_dests:,}")
+        print(f"Total LLM token cardinality (sum over edges): {total_llm_bv_cardinality:,}")
+        print(f"Total state ID cardinality (sum over dests): {total_state_bv_cardinality:,}")
 
         def print_dist_stats(name, data):
             if not data or not np:
@@ -558,17 +582,26 @@ class Model(GraphProvider):
                 print(f"  (No data or numpy not available)")
                 return
             arr = np.array(data)
+            # Check if original data was integer to format min/max appropriately
+            is_int_data = all(isinstance(x, int) for x in data)
+            fmt = "," if is_int_data else ",.2f"
+
             print(f"\n--- {name} Distribution ---")
-            print(f"  Min: {np.min(arr)}")
-            print(f"  Max: {np.max(arr)}")
-            print(f"  Mean: {np.mean(arr):.2f}")
-            print(f"  Median: {np.median(arr)}")
-            print(f"  Std Dev: {np.std(arr):.2f}")
-            print(f"  Percentiles (25, 50, 75, 90, 99): {np.percentile(arr, [25, 50, 75, 90, 99])}")
+            print(f"  Min: {np.min(arr):{fmt}}")
+            print(f"  Max: {np.max(arr):{fmt}}")
+            print(f"  Mean: {np.mean(arr):,.2f}")
+            print(f"  Median: {np.median(arr):,.2f}") # Median can be float for int arrays
+            print(f"  Std Dev: {np.std(arr):,.2f}")
+            percentiles = np.percentile(arr, [25, 50, 75, 90, 99])
+            print(f"  Percentiles (25, 50, 75, 90, 99): [{', '.join(f'{p:,.2f}' for p in percentiles)}]")
 
         print_dist_stats("Edges per Node", stats['edges_per_node'])
+        print_dist_stats("Unique Destinations per Node", stats['unique_dests_per_node'])
         print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
+        print_dist_stats("Unique Destinations per Edge", stats['unique_dests_per_edge'])
         print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
+        print_dist_stats("LLM BV Overlap Factor per Node", stats['llm_bv_overlap_factor'])
+        print_dist_stats("StateIDSet Union Cardinality per Edge", stats['dest_states_union_cardinality'])
         print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
         if self.max_depth:
             print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
@@ -576,7 +609,7 @@ class Model(GraphProvider):
         print("\n--- Pop Counts ---")
         if num_edges > 0:
             for pop_val, count in sorted(pop_counts.items()):
-                print(f"  Pop {pop_val}: {count} edges ({count/num_edges*100:.2f}%)")
+                print(f"  Pop {pop_val}: {count:,} edges ({count/num_edges*100:.2f}%)")
         else:
             print("  (No edges)")
 
