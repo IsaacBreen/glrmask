@@ -484,26 +484,38 @@ class Model(GraphProvider):
             node.pop_to_llm_union = dict(llm_union_by_pop)
 
     def _compute_descendant_llm_closure(self) -> None:
-        """Compute an upper-bound mask of tokens reachable from each node to a clean_end."""
+        """Compute an upper-bound mask of tokens reachable from each node to a clean_end.
+        We use a monotone fixed-point iteration to be correct even when max_depth does
+        not strictly decrease along edges (e.g., equal depths or cycles).
+        """
         all_ones = self.all_internal_llm_tokens_bitset
-        # Process nodes in ascending max_depth: leaves (0) first, then parents.
-        ordered_nodes = sorted(self.arena.keys(), key=lambda nid: int(self.max_depth.get(nid, 0)))
-        for nid in ordered_nodes:
-            node = self.arena[nid]
-            if node.clean_end:
-                node.llm_bv_descendant = all_ones
-                continue
-            if not node.children:
-                node.llm_bv_descendant = RangeSet.empty()
-                continue
-            accum = RangeSet.empty()
-            for edge in node.children:
-                dest_union_closure = RangeSet.empty()
-                for d in edge.dests:
-                    dest_union_closure |= self.arena[int(d.dest_idx)].llm_bv_descendant
-                if not dest_union_closure.is_empty():
-                    accum |= edge.llm_bv.intersection(dest_union_closure)
-            node.llm_bv_descendant = accum
+        # Initialize: end nodes are all-ones; others start empty.
+        for nid, node in self.arena.items():
+            node.llm_bv_descendant = all_ones if node.clean_end else RangeSet.empty()
+
+        # Iteratively grow descendant closures until a fixed point is reached.
+        changed = True
+        while changed:
+            changed = False
+            for nid, node in self.arena.items():
+                if node.clean_end:
+                    # Already saturated
+                    continue
+                if not node.children:
+                    # Leaf without clean_end stays empty unless it was already grown previously
+                    continue
+                new_accum = RangeSet.empty()
+                for edge in node.children:
+                    dest_union_closure = RangeSet.empty()
+                    for d in edge.dests:
+                        dest_union_closure |= self.arena[int(d.dest_idx)].llm_bv_descendant
+                    if not dest_union_closure.is_empty():
+                        new_accum |= edge.llm_bv.intersection(dest_union_closure)
+                # Monotone update: only grow the closure.
+                updated = node.llm_bv_descendant.union(new_accum)
+                if updated != node.llm_bv_descendant:
+                    node.llm_bv_descendant = updated
+                    changed = True
 
     def optimize_traversal(self) -> None:
         for node in self.arena.values():
