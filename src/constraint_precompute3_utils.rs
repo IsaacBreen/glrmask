@@ -730,6 +730,13 @@ pub fn optimize_trie3_size(
         }
     }
 
+    // Enforce single END node invariant as a final polish step.
+    // This guarantees we never leave the pipeline with more than one END node,
+    // even if earlier passes already canonicalized them.
+    run_pass!("Canonicalizing END nodes (final polish)", {
+        canonicalize_end_nodes_trie3(roots, trie3_god);
+    });
+
     if let (Some(original_arena), Some(original_roots)) = (original_arena, original_roots) {
         crate::debug!(2, "Running stochastic equivalence check...");
 
@@ -2422,11 +2429,9 @@ pub fn merge_nodes_trie3_ultrafast(
         old_of.push(*node_idx);
     }
 
-    // First pass: count edges per node and capture ends + live token ptrs
+    // First pass: count edges per node and capture ends
     let mut out_counts: Vec<usize> = vec![0; n];
     let mut ends: Vec<u8> = vec![0; n];
-    // Store LLM live-token pointer addresses to assign ids later
-    let mut live_llm_ptrs: Vec<*const RangeSetBlaze<usize>> = vec![std::ptr::null(); n];
     #[cfg(not(rustrover))]
     let it = tqdm!(old_of.iter().enumerate(), desc = "Trie3 Merge Ultra (Pass1 count)", total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
     #[cfg(rustrover)]
@@ -2434,7 +2439,6 @@ pub fn merge_nodes_trie3_ultrafast(
     for (i, node_idx) in it {
         let g = node_idx.read(trie3_god).expect("read");
         ends[i] = if g.value.end { 1 } else { 0 };
-        live_llm_ptrs[i] = Arc::as_ptr(&g.value.live_tokens.inner);
 
         let mut cnt = 0usize;
         for (_ek, dm) in g.children() {
@@ -2450,25 +2454,14 @@ pub fn merge_nodes_trie3_ultrafast(
     }
     let m = offsets[n];
 
-    // LLM bitset pointer-id map
+    // LLM bitset pointer-id map (for edge-key LLM masks only)
     let mut llm_id_map: HashMap<*const RangeSetBlaze<usize>, u32> = HashMap::new();
     let mut next_llm_id: u32 = 0;
     let mut get_or_insert_llm_id = |ptr: *const RangeSetBlaze<usize>| -> u32 {
-        if let Some(id) = llm_id_map.get(&ptr) {
-            *id
-        } else {
-            let id = next_llm_id;
-            next_llm_id = next_llm_id.wrapping_add(1);
-            llm_id_map.insert(ptr, id);
-            id
+        if let Some(id) = llm_id_map.get(&ptr) { *id } else {
+            let id = next_llm_id; next_llm_id = next_llm_id.wrapping_add(1); llm_id_map.insert(ptr, id); id
         }
     };
-
-    // Assign live token ids
-    let mut live_llm_id: Vec<u32> = vec![0; n];
-    for i in 0..n {
-        live_llm_id[i] = get_or_insert_llm_id(live_llm_ptrs[i]);
-    }
 
     // Flat edge structure: pop, llm_id, dest_dense
     #[derive(Copy, Clone)]
@@ -2505,11 +2498,12 @@ pub fn merge_nodes_trie3_ultrafast(
     let mut prev_class: Vec<u32> = vec![0; n];
     // Initialize coarse classes by (end flag, degree, live_llm_id)
     {
-        let mut init_map: HashMap<(u8, u32, usize), u32> = HashMap::with_capacity(n.checked_div(2).unwrap_or(1024));
+        // Ignore live_tokens entirely: they are derived and must not partition nodes.
+        let mut init_map: HashMap<(u8, usize), u32> = HashMap::with_capacity(n.checked_div(2).unwrap_or(1024));
         let mut next_c: u32 = 0;
         for i in 0..n {
             let deg = offsets[i + 1] - offsets[i];
-            let key = (ends[i], live_llm_id[i], deg);
+            let key = (ends[i], deg);
             let c = init_map.entry(key).or_insert_with(|| { let id = next_c; next_c = next_c.wrapping_add(1); id });
             prev_class[i] = *c;
         }
@@ -2556,9 +2550,6 @@ pub fn merge_nodes_trie3_ultrafast(
             // end flag
             h ^= ends[u] as u64;
             h = h.wrapping_mul(0x100000001b3);
-            // live_llm_id
-            h ^= live_llm_id[u] as u64;
-            h = h.wrapping_mul(0x100000001b3);
             // length
             h ^= agg_items.len() as u64;
             h = h.wrapping_mul(0x100000001b3);
@@ -2599,7 +2590,6 @@ pub fn merge_nodes_trie3_ultrafast(
     #[derive(Hash, Eq, PartialEq, Clone)]
     struct KeyNoSids {
         end: u8,
-        live: u32,
         // Sorted vector of (pop, llm_id, dest_class) triples
         edges: Vec<(u32, u32, u32)>,
     }
@@ -2662,7 +2652,6 @@ pub fn merge_nodes_trie3_ultrafast(
             // BTreeMap iteration is already sorted; we can rely on that
             let key = KeyNoSids {
                 end: ends[u_dense],
-                live: live_llm_id[u_dense],
                 edges: keys_vec.clone(),
             };
             let sids_vec: Vec<StateIDBV> = aggr.into_values().collect();
@@ -2743,6 +2732,14 @@ pub fn merge_nodes_trie3_ultrafast(
                 new_children.insert((pop, llm_bv), dest_map);
             }
         }
+        // Commit the rewritten children and recompute live_tokens
+        let mut new_live = LLMTokenBV::zeros();
+        for ((_, llm_bv), _) in &new_children { new_live |= llm_bv; }
+        w.value.live_tokens = new_live;
+        *w.children_mut() = new_children;
+    }
+
+    // Remap roots to their representatives
     }
 
     // Remap roots to their representatives
