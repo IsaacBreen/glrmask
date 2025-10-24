@@ -442,8 +442,7 @@ pub fn optimize_trie3_size(
         // New: Collapse all END nodes early to maximize downstream sharing.
         run_pass!("Canonicalizing END nodes (pre-merge)", {
             canonicalize_end_nodes_trie3(roots, trie3_god);
-            });
-        }
+        });
 
         if config.merge_equivalent_llm_tokens {
             run_pass!("Merging equivalent LLM tokens", {
