@@ -505,7 +505,7 @@ local_system:
           all_root_ids: Set[int] = {int(r) for _s, r in roots_map}
           end_ids: Set[int] = {
               nid for nid, node in values_dict.items()
-              if node.get("value", {}).get("clean_end", False)
+              if not node.get("children")  # A node with no children is an end node
           }
           print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.", file=sys.stderr)
 
@@ -2007,5 +2007,76 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Apply max-edges-per-node limit after
       filtering by LLM/state ranges"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/visualize_constraint.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Are end nodes labelled properly?
+    metadata:
+  - assistant: |-
+      You've raised an excellent point. The current logic for identifying "end nodes" is too specific and likely incorrect for general use. It checks for a `clean_end` flag, which might not be present in all constraint files.
+
+      A more accurate and robust definition of an end node in this trie structure is a node that has no outgoing edges (i.e., no `children`). I will correct the logic to use this definition.
+
+      ### Step-by-step Instructions
+
+      1.  **File: `python/aug25/visualize_constraint.py`**
+
+          a.  **Locate the end node identification logic:** Find the section around line 80 where `end_ids` is defined.
+
+          b.  **Replace the definition:** Change the list comprehension from checking for the `clean_end` flag to checking if the `children` key is missing or empty.
+
+          Replace this:
+          ```python
+          end_ids: Set[int] = {
+              nid for nid, node in values_dict.items()
+              if node.get("value", {}).get("clean_end", False)
+          }
+          ```
+          With this corrected version:
+          ```python
+          end_ids: Set[int] = {
+              nid for nid, node in values_dict.items()
+              if not node.get("children")  # A node with no children is an end node
+          }
+          ```
+
+      This change will correctly identify any node that terminates a path in the trie as an "end node" and label it appropriately in the visualization.
+
+      ### Git Diff
+
+      Here is the corresponding git diff to apply the fix.
+
+      ```diff
+      --- a/python/aug25/visualize_constraint.py
+      +++ b/python/aug25/visualize_constraint.py
+      @@ -79,8 +79,8 @@
+           roots_map = data.get("precomputed3", [])
+           all_root_ids: Set[int] = {int(r) for _s, r in roots_map}
+           end_ids: Set[int] = {
+      -        nid for nid, node in values_dict.items()
+      -        if node.get("value", {}).get("clean_end", False)
+      +        nid for nid, node in values_dict.items()
+      +        if not node.get("children")  # A node with no children is an end node
+           }
+           print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.", file=sys.stderr)
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/visualize_constraint.py
+      Applying patch to 'python/aug25/visualize_constraint.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/visualize_constraint.py.
+    metadata:
+  - user: "Changes committed with message: \"Fix: Identify end nodes by absence of
+      children instead of 'clean_end' flag\""
     metadata:
 ...

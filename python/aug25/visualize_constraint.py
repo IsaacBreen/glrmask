@@ -109,7 +109,7 @@ def visualize_constraint(
     all_root_ids: Set[int] = {int(r) for _s, r in roots_map}
     end_ids: Set[int] = {
         nid for nid, node in values_dict.items()
-        if node.get("value", {}).get("clean_end", False)
+        if not node.get("children")  # A node with no children is an end node
     }
     print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.", file=sys.stderr)
 
