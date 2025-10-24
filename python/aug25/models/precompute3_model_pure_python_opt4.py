@@ -19,7 +19,9 @@ from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
 from ..common_interface import GraphProvider
 from ..range_set import FFIRangeSet as RangeSet
-from ..range_set import FFIRangeSet as RangeSet
+from ..range_set import RoaringRangeSet as RangeSet
+from ..range_set import PyRangeSet as RangeSet
+# from ..range_set import BitsetRangeSet as RangeSet
 from ..range_set import SetRangeSet as RangeSetOut
 from ..range_set import SetRangeSet as RangeSetStates
 
