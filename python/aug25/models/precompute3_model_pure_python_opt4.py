@@ -223,6 +223,10 @@ class ArenaNode:
     children: List[ArenaEdge] = field(default_factory=list)
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
+    # New fields for optimization
+    pop_inv_index: Dict[int, Dict[int, Dict[LLMTokenSet, List[Tuple[int, int]]]]] = field(default_factory=dict)
+    pop_state_union: Dict[int, StateIDSet] = field(default_factory=dict)
+    pop_llm_union: Dict[int, LLMTokenSet] = field(default_factory=dict)
 
 def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
@@ -373,8 +377,8 @@ class Model(GraphProvider):
     ignore_terminal_id: Optional[int]
     state: Dict[int, GSS]
     # Runtime tunables and results
-    gm_max_edges: int = 1
-    gm_max_dests: int = 1
+    gm_max_edges: int = 256
+    gm_max_dests: int = 2048
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
     suppress_stats_report: bool = False
@@ -452,6 +456,7 @@ class Model(GraphProvider):
         )
         model._compute_edge_accelerators()
         model.optimize_traversal()
+        model._build_inverted_indices()
         model._compute_and_print_stats()
         return model
 
@@ -465,6 +470,26 @@ class Model(GraphProvider):
         for node in self.arena.values():
             for edge in node.children:
                 edge.ensure_index()
+
+    def _build_inverted_indices(self) -> None:
+        for node in tqdm(self.arena.values(), desc="Building inverted indices"):
+            pop_inv_index: Dict[int, Dict[int, Dict[LLMTokenSet, List[Tuple[int, int]]]]] = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(list)))
+            pop_state_union: Dict[int, StateIDSet] = collections.defaultdict(RangeSetStates.empty)
+            pop_llm_union: Dict[int, LLMTokenSet] = collections.defaultdict(RangeSet.empty)
+
+            for edge_i, edge in enumerate(node.children):
+                edge.ensure_index()
+                pop = edge.pop
+                pop_llm_union[pop] |= edge.llm_bv
+                pop_state_union[pop] |= edge.dest_states_union
+
+                for state_id, dest_indices in edge.state_to_dest.items():
+                    for dest_j in dest_indices:
+                        pop_inv_index[pop][state_id][edge.llm_bv].append((edge_i, dest_j))
+            
+            node.pop_inv_index = {p: dict(s_map) for p, s_map in pop_inv_index.items()}
+            node.pop_state_union = dict(pop_state_union)
+            node.pop_llm_union = dict(pop_llm_union)
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
@@ -737,103 +762,113 @@ class Model(GraphProvider):
         a_node = self.arena.get(node_id)
         if not a_node:
             return
-
-        # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
-        max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
-        edges_proc, dests_proc = 0, 0
-        peek0_rs = None
         pop_cache = {}
 
-        for edge_i, edge in enumerate(a_node.children):
-            if edge.llm_bv.isdisjoint(remaining_mask):
-                stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+        # Iterate over pop values present at this node
+        for pop, inv_index_for_pop in a_node.pop_inv_index.items():
+            stats.inc(f'get_mask.traversal.pop_val.{pop}')
+            # Early exit checks using precomputed unions
+            if a_node.pop_llm_union[pop].isdisjoint(remaining_mask):
+                stats.inc('get_mask.traversal.pop_bucket.skipped_no_new_tokens')
                 continue
-            if edge.llm_bv.isdisjoint(gss_mask):
-                stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
+            if a_node.pop_llm_union[pop].isdisjoint(gss_mask):
+                stats.inc('get_mask.traversal.pop_bucket.pre_gss_disjoint_skips')
                 continue
 
-            if edge.pop == 0:
-                if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                if edge.dest_states_union.isdisjoint(peek0_rs):
-                    stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
-                    continue
-
-            stats.inc('get_mask.traversal.edges_traversed')
-            stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
-
-            if edge.pop in pop_cache:
-                popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-                stats.inc('get_mask.main_loop.edge.pop_cache_hits')
+            # Get popped GSS (from cache or compute)
+            if pop in pop_cache:
+                popped, popped_acc, peeked, peek_rs = pop_cache[pop]
+                stats.inc('get_mask.main_loop.pop_cache_hits')
             else:
-                stats.start('get_mask.main_loop.edge.popn')
-                popped = gss_node.popn(edge.pop)
-                stats.stop('get_mask.main_loop.edge.popn')
+                stats.start('get_mask.main_loop.popn')
+                popped = gss_node.popn(pop)
+                stats.stop('get_mask.main_loop.popn')
                 if popped.is_empty():
-                    stats.inc('get_mask.traversal.edge.popped_empty')
-                    pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+                    stats.inc('get_mask.traversal.popped_empty')
+                    pop_cache[pop] = (popped, None, [], RangeSetStates.empty())
                     continue
-                stats.start('get_mask.main_loop.edge.popped.reduce_acc')
+                
+                stats.start('get_mask.main_loop.popped.reduce_acc')
                 popped_acc = popped.reduce_acc()
-                stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
+                stats.stop('get_mask.main_loop.popped.reduce_acc')
                 if not popped_acc or popped_acc.llm_mask.is_empty():
-                    pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                    pop_cache[pop] = (GSS.empty(), None, [], RangeSetStates.empty())
                     continue
-                # Avoid double-peek: call once and reuse both list and RangeSetStates
+                
                 peeked = popped.peek()
                 peek_rs = RangeSetStates.from_indices(peeked)
-                pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                pop_cache[pop] = (popped, popped_acc, peeked, peek_rs)
 
-            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
-                if popped_acc: stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
+            if not popped_acc:
                 continue
 
-            if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
-                @_acc_memoize(use_value_cache=False)
-                def intersect(acc: PyAcc):
-                    new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                    return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                stats.start('get_mask.main_loop.edge.apply_and_prune')
-                popped = popped.apply_and_prune(intersect)
-                stats.stop('get_mask.main_loop.edge.apply_and_prune')
-                if popped.is_empty(): continue
-            if not peeked: continue
+            # Intersect peeked states with states relevant for this pop bucket
+            relevant_peek_rs = peek_rs.intersection(a_node.pop_state_union[pop])
+            if relevant_peek_rs.is_empty():
+                stats.inc('get_mask.traversal.pop_bucket.no_relevant_states')
+                continue
+            
+            dests_by_llm_bv: Dict[LLMTokenSet, Dict[Tuple[int, int], List[int]]] = collections.defaultdict(lambda: collections.defaultdict(list))
+            
+            for state_id in relevant_peek_rs.iter_indices():
+                if state_id in inv_index_for_pop:
+                    for llm_bv, dest_tuples in inv_index_for_pop[state_id].items():
+                        for edge_i, dest_j in dest_tuples:
+                            dests_by_llm_bv[llm_bv][(edge_i, dest_j)].append(state_id)
 
-            grouped: Dict[int, List[int]] = {}
-            m = edge.state_to_dest
-            for sid in peeked:
-                dest_list = m.get(sid)
-                if not dest_list: continue
-                for dest_j in dest_list:
-                    lst = grouped.get(dest_j)
-                    if lst is None: grouped[dest_j] = [sid]
-                    else: lst.append(sid)
-
-            # Iterate grouped dests in ascending order for locality
-            for dest_j in sorted(grouped.keys()):
-                if dests_proc >= max_dests:
-                    priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                    yield Suspend(priority, depth)
-                    dests_proc = 0
-                dest = edge.dests[dest_j]
-                values_to_keep = grouped[dest_j]
-                # If all heads survive, reuse popped directly
-                if len(values_to_keep) == len(peeked):
-                    child_gss = popped
+            apply_prune_cache = {}
+            
+            for llm_bv, dest_groups in dests_by_llm_bv.items():
+                if llm_bv.isdisjoint(remaining_mask) or llm_bv.isdisjoint(popped_acc.llm_mask):
+                    continue
+                
+                if llm_bv in apply_prune_cache:
+                    popped_masked = apply_prune_cache[llm_bv]
+                    stats.inc('get_mask.main_loop.apply_prune_cache_hits')
                 else:
-                    stats.start('get_mask.main_loop.edge.isolate_many')
-                    child_gss = popped.isolate_many(values_to_keep)
-                    stats.stop('get_mask.main_loop.edge.isolate_many')
-                if child_gss.is_empty(): continue
-                d: NodeID = int(dest.dest_idx)
-                yield Enqueue(d, child_gss, depth + 1)
-                dests_proc += 1
+                    all_ones = self.all_internal_llm_tokens_bitset
+                    llm_bv_not = all_ones.difference(llm_bv)
 
-            if edges_proc >= max_edges:
-                priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                yield Suspend(priority, depth)
-                edges_proc = 0
-            edges_proc += 1
+                    if popped_acc.llm_mask.isdisjoint(llm_bv_not):
+                        popped_masked = popped
+                    else:
+                        @_acc_memoize(use_value_cache=False)
+                        def intersect(acc: PyAcc):
+                            new_mask = acc.llm_mask.intersection(llm_bv)
+                            return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                        
+                        stats.start('get_mask.main_loop.apply_and_prune')
+                        popped_masked = popped.apply_and_prune(intersect)
+                        stats.stop('get_mask.main_loop.apply_and_prune')
+                    
+                    apply_prune_cache[llm_bv] = popped_masked
+
+                if popped_masked.is_empty():
+                    continue
+
+                isolate_cache = {}
+
+                for (edge_i, dest_j), s_list in dest_groups.items():
+                    s_list_tuple = tuple(sorted(s_list))
+                    if s_list_tuple in isolate_cache:
+                        child_gss = isolate_cache[s_list_tuple]
+                        stats.inc('get_mask.main_loop.isolate_cache_hits')
+                    else:
+                        if len(s_list) == len(peeked):
+                            child_gss = popped_masked
+                        else:
+                            stats.start('get_mask.main_loop.isolate_many')
+                            child_gss = popped_masked.isolate_many(s_list)
+                            stats.stop('get_mask.main_loop.isolate_many')
+                        isolate_cache[s_list_tuple] = child_gss
+                    
+                    if child_gss.is_empty():
+                        continue
+                        
+                    edge = a_node.children[edge_i]
+                    dest = edge.dests[dest_j]
+                    d: NodeID = int(dest.dest_idx)
+                    yield Enqueue(d, child_gss, depth + 1)
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
         stats = Stats.get()
