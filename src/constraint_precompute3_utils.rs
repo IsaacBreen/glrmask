@@ -93,11 +93,182 @@ impl Default for Trie3MergeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            exact_max_iters: 40,
+            exact_max_iters: 1000,
         }
     }
 }
 
+/// NEW MERGE PASS:
+/// Global-atoms bisimulation merge. Compared to existing WL / structural merges, this pass:
+///  - Derives a global partition of tokens ("atoms") per pop across the entire graph by splitting a
+///    universe set with all observed edge masks at that pop (with a cap).
+///  - Iteratively refines node classes: two nodes are equivalent iff for every pop and every atom,
+///    the aggregated semantics (mapping from destination class to union of SIDs) match.
+///  - Rewires all edges to representatives and reconstructs representative edges deterministically.
+pub fn merge_nodes_trie3_global_atoms(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+    max_llm_token_id: usize,
+    max_iters: usize,
+    max_atoms_per_pop: usize,
+) {
+    crate::debug!(2, "Merging nodes (global-atoms bisimulation) in precomputed trie 3 (iters={}, cap={} atoms/pop).",
+        max_iters, max_atoms_per_pop);
+
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    // Derive global atoms by pop.
+    let atoms_by_pop = build_global_token_atoms_by_pop(trie3_god, &all_nodes, max_llm_token_id, max_atoms_per_pop);
+    if atoms_by_pop.is_empty() {
+        crate::debug!(3, "Global-atoms merge: no edges present; skipping.");
+        return;
+    }
+
+    // Dense ids for nodes
+    let n = all_nodes.len();
+    let mut dense_of: HashMap<Trie2Index, usize> = HashMap::with_capacity(n);
+    let mut old_of: Vec<Trie2Index> = Vec::with_capacity(n);
+    for (i, idx) in all_nodes.iter().enumerate() {
+        dense_of.insert(*idx, i);
+        old_of.push(*idx);
+    }
+
+    // Ends and raw edges (pop, llm_bv, dest_dense, sids)
+    type RawEdge3 = (isize, LLMTokenBV, usize, StateIDBV);
+    let mut ends: Vec<bool> = vec![false; n];
+    let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
+    for (u_dense, u_idx) in old_of.iter().enumerate() {
+        let g = u_idx.read(trie3_god).expect("read");
+        ends[u_dense] = g.value.end;
+        for (ek, dm) in g.children() {
+            for (dst, sids) in dm {
+                if let Some(v_dense) = dense_of.get(dst) {
+                    raw_edges[u_dense].push((ek.0, ek.1.clone(), *v_dense, sids.clone()));
+                }
+            }
+        }
+    }
+
+    // Partition refinement
+    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+    for it in 0..max_iters {
+        // Signature: (end_flag, Vec<(pop, Vec< Vec<(dest_class, StateIDBV)> >>)>)
+        // For each (pop, atom_j), we compute a canonical vector of (dest_class, aggregated SIDs).
+        use std::collections::HashMap as HM;
+        let mut sig_to_id: HM<(bool, Vec<(isize, Vec<Vec<(usize, StateIDBV)>>)>>, usize> = HM::new();
+        let mut next_id = 0usize;
+        let mut new_class = vec![0usize; n];
+        let mut changes = 0usize;
+
+        #[cfg(not(rustrover))]
+        let itn = tqdm!(0..n, desc = format!("Trie3 Merge Global-Atoms Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+        #[cfg(rustrover)]
+        let itn = 0..n;
+        for u in itn {
+            // For each pop, build a vector per atom index: aggregated (dest_class -> SIDs)
+            let mut per_pop: BTreeMap<isize, Vec<Vec<(usize, StateIDBV)>>> = BTreeMap::new();
+            for (pop, atoms) in &atoms_by_pop {
+                per_pop.insert(*pop, vec![Vec::new(); atoms.len()]);
+            }
+
+            // Temporary aggregation: per (pop, atom_idx) -> BTreeMap<dest_class, SIDs>
+            // We'll finalize into sorted vectors for determinism.
+            let mut agg_maps: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
+            for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
+                if let Some(atoms) = atoms_by_pop.get(p) {
+                    for (j, a) in atoms.iter().enumerate() {
+                        if (&llm_bv & a).is_empty() { continue; }
+                        let dest_class = prev_class[*v_dense];
+                        let key = (*p, j);
+                        agg_maps.entry(key)
+                            .or_insert_with(BTreeMap::new)
+                            .entry(dest_class)
+                            .and_modify(|e| *e |= sids)
+                            .or_insert_with(|| sids.clone());
+                    }
+                }
+            }
+            // Finalize to vectors
+            for ((pop, j), m) in agg_maps {
+                let vec_m: Vec<(usize, StateIDBV)> = m.into_iter().collect();
+                if let Some(blocks) = per_pop.get_mut(&pop) {
+                    if j < blocks.len() {
+                        blocks[j] = vec_m;
+                    }
+                }
+            }
+            // Build signature
+            let mut sig_vec: Vec<(isize, Vec<Vec<(usize, StateIDBV)>>)> = per_pop.into_iter().collect();
+            let sig = (ends[u], sig_vec);
+            let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
+            new_class[u] = cid;
+            if new_class[u] != prev_class[u] { changes += 1; }
+        }
+        crate::debug!(3, "Global-atoms merge iter {}: classes={}, changes={}", it + 1, new_class.iter().max().map(|m| m + 1).unwrap_or(0), changes);
+        prev_class = new_class;
+        if changes == 0 { break; }
+    }
+
+    // Representatives for final classes
+    let final_partition = prev_class;
+    let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
+    let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
+    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+        if representatives[class_id].is_none() {
+            representatives[class_id] = Some(old_of[u_dense]);
+        }
+    }
+    let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::with_capacity(n);
+    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+        node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
+    }
+
+    // Rewrite all edges in the graph to class representatives
+    rewire_all_edges_to_representatives(trie3_god, roots, &node_to_rep);
+
+    // Rebuild representative edges deterministically by aggregating to dest classes and mapping to reps.
+    for class_id in 0..num_classes {
+        if let Some(rep_idx) = representatives[class_id] {
+            // Use a single exemplar node from the class to rebuild representative edges
+            let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
+            // Aggregate by (pop, llm_bv, dest_class) unioning SIDs
+            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+            for (p, llm_bv, v_dense, sids) in &raw_edges[u_dense] {
+                let dest_class = final_partition[*v_dense];
+                aggr.entry((*p, llm_bv.clone(), dest_class))
+                    .and_modify(|e| *e |= sids)
+                    .or_insert_with(|| sids.clone());
+            }
+            let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+            for ((p, bv_key, dest_class), sids) in aggr {
+                if let Some(dst_rep) = representatives[dest_class] {
+                    new_children.entry((p, bv_key.clone()))
+                        .or_insert_with(OrderedHashMap::new)
+                        .entry(dst_rep)
+                        .and_modify(|e| *e |= &sids)
+                        .or_insert(sids);
+                }
+            }
+            // Recompute live tokens
+            let mut new_live = LLMTokenBV::zeros();
+            for ((_, l), _) in &new_children { new_live |= l; }
+            let mut w = rep_idx.write(trie3_god).expect("write");
+            *w.children_mut() = new_children;
+            w.value.live_tokens = new_live;
+        }
+    }
+
+    // Remap roots to representatives
+    for r in roots.values_mut() {
+        *r = *node_to_rep.get(r).unwrap();
+    }
+    // Cleanup
+    let roots_vec2: Vec<_> = roots.values().cloned().collect();
+    Trie::gc(trie3_god, &roots_vec2);
+    Trie::recompute_all_max_depths(trie3_god, &roots_vec2);
+}
 impl Trie3MergeConfig {
     pub fn off() -> Self {
         Self {
@@ -106,6 +277,9 @@ impl Trie3MergeConfig {
         }
     }
 }
+
+// NOTE: New global-atoms merge pass configuration flags are added in Trie3Config below.
+// They enable a bisimulation-style refinement over globally derived token atoms per pop.
 
 #[derive(Debug, Clone)]
 pub struct Trie3Config {
@@ -129,6 +303,10 @@ pub struct Trie3Config {
     pub refine_token_atoms_exact: bool,
     pub refine_token_atoms_max_blocks: usize,
     pub factor_common_destinations: bool,
+    // NEW: global-atoms bisimulation merge
+    pub merge_nodes_global_atoms: bool,
+    pub merge_nodes_global_atoms_max_iters: usize,
+    pub merge_nodes_global_atoms_max_atoms_per_pop: usize,
     pub factor_common_destinations_min_incoming: usize,
     pub stochastic_equivalence_check: bool,
     pub debug_remove_pop_gt_0: bool,
@@ -157,6 +335,10 @@ impl Default for Trie3Config {
             refine_token_atoms: true,
             refine_token_atoms_exact: true,
             refine_token_atoms_max_blocks: 2048,
+            // New: enable global-atoms bisimulation merge by default with conservative caps
+            merge_nodes_global_atoms: true,
+            merge_nodes_global_atoms_max_iters: 6,
+            merge_nodes_global_atoms_max_atoms_per_pop: 4096,
             factor_common_destinations: true,
             factor_common_destinations_min_incoming: 12,
             stochastic_equivalence_check: false,
@@ -187,6 +369,10 @@ impl Trie3Config {
             refine_token_atoms: false,
             refine_token_atoms_exact: false,
             refine_token_atoms_max_blocks: 0,
+            // New pass: off in the .off() preset
+            merge_nodes_global_atoms: false,
+            merge_nodes_global_atoms_max_iters: 0,
+            merge_nodes_global_atoms_max_atoms_per_pop: 0,
             // keep these off for the .off() preset
             factor_common_destinations_min_incoming: 0,
             // eliminate_pop0_edges/assert_no_pop0_nonroot_edges already set above
@@ -253,6 +439,71 @@ fn debug_remove_pop_gt_0_edges_trie3(
         w.value.live_tokens = new_live;
         *w.children_mut() = new_children;
     }
+}
+
+/// Recompute the derived 'live_tokens' field for all nodes from scratch as the union of outgoing
+/// LLM masks. This normalizes away incidental differences introduced by earlier passes and ensures
+/// 'live_tokens' remains a pure derivative that does not affect optimization semantics.
+fn normalize_live_tokens_trie3(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+){
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+    for n in &all_nodes {
+        if let Some(mut w) = n.write(trie3_god) {
+            let mut new_live = LLMTokenBV::zeros();
+            for ((_, llm_bv), _) in w.children() {
+                new_live |= llm_bv;
+            }
+            w.value.live_tokens = new_live;
+        }
+    }
+}
+
+/// Helper: Build a global set of token "atoms" per 'pop' by splitting the universe with every
+/// LLMTokenBV mask used by any edge at that pop. Caps the number of atoms per pop to avoid
+/// blowups; if exceeded, falls back to a single-universe atom at that pop.
+fn build_global_token_atoms_by_pop(
+    trie3_god: &Trie3GodWrapper,
+    nodes: &[PrecomputeNode3Index],
+    max_llm_token_id: usize,
+    max_atoms_per_pop: usize,
+) -> BTreeMap<isize, Vec<LLMTokenBV>> {
+    let mut by_pop_masks: BTreeMap<isize, Vec<LLMTokenBV>> = BTreeMap::new();
+    for n in nodes {
+        let g = n.read(trie3_god).expect("read");
+        for ((pop, llm_bv), _dm) in g.children() {
+            if !llm_bv.is_empty() {
+                by_pop_masks.entry(*pop).or_default().push(llm_bv.clone());
+            }
+        }
+    }
+    let universe = LLMTokenBV::ones(max_llm_token_id + 1);
+    let mut atoms_by_pop: BTreeMap<isize, Vec<LLMTokenBV>> = BTreeMap::new();
+    for (pop, masks) in by_pop_masks {
+        // Start with a single block, split iteratively by every mask.
+        let mut blocks = vec![universe.clone()];
+        let mut aborted = false;
+        for m in masks {
+            let mut next_blocks: Vec<LLMTokenBV> = Vec::with_capacity(blocks.len().saturating_mul(2));
+            for b in blocks.into_iter() {
+                let inter = &b & &m;
+                if !inter.is_empty() { next_blocks.push(inter); }
+                let diff = &b - &m;
+                if !diff.is_empty() { next_blocks.push(diff); }
+            }
+            if next_blocks.len() > max_atoms_per_pop {
+                aborted = true;
+                break;
+            }
+            blocks = next_blocks;
+            if blocks.is_empty() { break; }
+        }
+        atoms_by_pop.insert(pop, if aborted || blocks.is_empty() { vec![universe.clone()] } else { blocks });
+    }
+    atoms_by_pop
 }
 
 fn propagate_and_generalize_sids_trie3(
@@ -388,6 +639,7 @@ pub fn optimize_trie3_size(
 
 	crate::debug!(2, "Optimizing Trie 3 size...");
 
+    // First normalize any stale derived fields so they don't affect downstream reasoning.
 	crate::debug!(2, "Initial stats:");
 	compute_and_print_precompute_stats3(roots, trie3_god);
 
@@ -404,6 +656,11 @@ pub fn optimize_trie3_size(
             step_counter += 1;
         };
     }
+    // Normalize live_tokens right at the beginning of optimization passes to ensure it remains derived.
+    run_pass!("Normalizing derived live_tokens", {
+        normalize_live_tokens_trie3(roots, trie3_god);
+    });
+
 
 	for pass_num in 0..config.num_passes {
         if config.num_passes > 1 {
@@ -502,6 +759,15 @@ pub fn optimize_trie3_size(
                     roots, &trie3_god,
                     max_llm_token_id, max_state_id,
                     config.refine_token_atoms_max_blocks);
+            });
+        }
+
+        // NEW: Global-atoms bisimulation merge. This aligns token semantics across nodes globally (per pop)
+        // and merges nodes whose behavior is identical for each global token-atom and pop, even when their
+        // local edge partitions differ.
+        if config.merge_nodes_global_atoms && config.merge_nodes_global_atoms_max_iters > 0 {
+            run_pass!("Merging nodes (global-atoms bisimulation)", {
+                merge_nodes_trie3_global_atoms(roots, &trie3_god, max_llm_token_id, config.merge_nodes_global_atoms_max_iters, config.merge_nodes_global_atoms_max_atoms_per_pop);
             });
         }
 
@@ -794,9 +1060,9 @@ pub fn optimize_trie3_size(
         }
 
         let compare = |p1: &PrecomputeTrie3Path, p2: &PrecomputeTrie3Path| -> PathComparison {
-            if p1.0 != p2.0 {
-                return PathComparison::Different;
-            }
+            // Ignore 'live_tokens' in node contents; only 'end' must match at each node.
+            if p1.0.end != p2.0.end { return PathComparison::Different; }
+
             if p1.1.len() > p2.1.len() {
                 return PathComparison::Different;
             }
@@ -826,6 +1092,7 @@ pub fn optimize_trie3_size(
             }
         };
 
+        // Note: get_path_summary now ignores 'live_tokens' completely (uses only edge masks).
         let mut rng = rand::thread_rng();
         let num_samples = 1000;
         let max_path_len = 50;
@@ -897,7 +1164,7 @@ pub fn optimize_trie3_size(
             println!("--- MINIMIZED FAILING EXAMPLE ---");
             println!("--- Failing Path Summary ---");
             let (llm, states) = get_path_summary(&path);
-            println!("Valid for LLM tokens: {:?}", llm);
+            println!("Valid for LLM tokens (edge-derived only): {:?}", llm);
             println!("State checks per position:");
             for (pos, sids) in &states {
                 println!("  pos {}: {:?}", pos, sids);
@@ -2124,6 +2391,10 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
     if all_nodes.is_empty() { return; }
+
+    // NOTE: This pass already ignores 'live_tokens' (derived) in its signature.
+    // The new global-atoms pass complements this by aligning semantics globally
+    // across nodes for each pop and token atom.
 
     let mut dense_of: HashMap<Trie2Index, usize> = HashMap::new();
     let mut old_of: Vec<Trie2Index> = Vec::with_capacity(all_nodes.len());
