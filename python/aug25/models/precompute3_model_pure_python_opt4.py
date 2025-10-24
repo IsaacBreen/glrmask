@@ -454,7 +454,6 @@ class Model(GraphProvider):
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
             state={tokenizer.initial_state_id(): initial_gss},
         )
-        model._recompute_max_depth()
         model._compute_edge_accelerators()
         # New: per-pop unions and descendant closures for stronger pruning
         model._compute_bucket_unions()
@@ -463,66 +462,6 @@ class Model(GraphProvider):
         model._compute_and_print_stats()
         return model
 
-
-    def _recompute_max_depth(self) -> None:
-        """
-        Robustly re-computes max_depth for all nodes using topological sort. max_depth is the longest path
-        to a clean_end node. This is crucial for the correctness of the bottom-up
-        computation of llm_bv_descendant.
-        """
-        # 1. Build adjacency list and compute in-degrees for topological sort
-        adj = {nid: set() for nid in self.arena}
-        in_degree = {nid: 0 for nid in self.arena}
-        for nid, node in tqdm(self.arena.items(), desc="Building graph for topo-sort"):
-            for edge in node.children:
-                for d in edge.dests:
-                    dest_id = int(d.dest_idx)
-                    # Add edge if it's not a self-loop and not already present
-                    if nid != dest_id and dest_id not in adj[nid]:
-                        adj[nid].add(dest_id)
-                        in_degree[dest_id] += 1
-
-        # 2. Kahn's algorithm for topological sort
-        q = collections.deque([nid for nid, deg in in_degree.items() if deg == 0])
-        topological_order = []
-        with tqdm(total=len(self.arena), desc="Topological sort", unit="node") as pbar:
-            while q:
-                nid = q.popleft()
-                topological_order.append(nid)
-                pbar.update(1)
-                for neighbor in adj.get(nid, set()):
-                    in_degree[neighbor] -= 1
-                    if in_degree[neighbor] == 0:
-                        q.append(neighbor)
-
-        if len(topological_order) != len(self.arena):
-            print(f"Warning: Cycle detected or nodes missed in topological sort. "
-                  f"Processed {len(topological_order)} of {len(self.arena)} nodes.")
-
-        # 3. Compute max_depth in reverse topological order
-        new_max_depth = {nid: -1 for nid in self.arena}
-        for nid in tqdm(reversed(topological_order), desc="Computing max_depth", total=len(topological_order)):
-            node = self.arena.get(nid)
-            if not node: continue
-
-            current_max = -1
-            if node.clean_end:
-                current_max = 0
-
-            max_child_depth = -1
-            for edge in node.children:
-                for d in edge.dests:
-                    child_nid = int(d.dest_idx)
-                    child_depth = new_max_depth.get(child_nid, -1)
-                    if child_depth > -1:
-                        max_child_depth = max(max_child_depth, child_depth)
-
-            if max_child_depth > -1:
-                current_max = max(current_max, 1 + max_child_depth)
-
-            new_max_depth[nid] = current_max
-
-        self.max_depth = {nid: max(0, d) for nid, d in new_max_depth.items()}
     def _compute_edge_accelerators(self) -> None:
         all_ones = self.all_internal_llm_tokens_bitset
         for node in self.arena.values():
@@ -549,7 +488,7 @@ class Model(GraphProvider):
         all_ones = self.all_internal_llm_tokens_bitset
         # Process nodes in ascending max_depth: leaves (0) first, then parents.
         ordered_nodes = sorted(self.arena.keys(), key=lambda nid: int(self.max_depth.get(nid, 0)))
-        for nid in tqdm(ordered_nodes, desc="Computing descendant LLM closure"):
+        for nid in ordered_nodes:
             node = self.arena[nid]
             if node.clean_end:
                 node.llm_bv_descendant = all_ones
@@ -939,7 +878,7 @@ class Model(GraphProvider):
             if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
                 if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
                     continue
-                key_apply = (id(popped), edge.llm_bv)
+                key_apply = (id(popped), id(edge.llm_bv))
                 cached_apply = local_apply_cache.get(key_apply)
                 if cached_apply is not None:
                     source_after_apply = cached_apply
@@ -981,7 +920,7 @@ class Model(GraphProvider):
                     child_gss = source_after_apply
                 else:
                     # Global/local cache for isolate_many
-                    key_isolate = (id(source_after_apply), tuple(sorted(values_to_keep)))
+                    key_isolate = (id(source_after_apply), tuple(values_to_keep))
                     if isolate_cache is not None and key_isolate in isolate_cache:
                         stats.inc('get_mask.isolate_many.cache_hits')
                         child_gss = isolate_cache[key_isolate]
