@@ -827,14 +827,15 @@ class Model(GraphProvider):
         # Local per-(popped, llm_bv) apply cache to amortize within this node
         local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
 
+        local_ctr = None
+        if oracle_counters is not None:
+            local_ctr = oracle_counters.setdefault(int(node_id), {"edges": 0, "apply": 0, "isolate": 0})
+
         edge_iterator = None
         ordered_indices = edge_order_override_map.get(node_id) if edge_order_override_map else None
         if ordered_indices:
             # Oracle-guided order. We still need to iterate non-guided edges if any.
             all_indices = set(range(len(a_node.children)))
-            # Initialize per-node oracle counters lazily
-            local_ctr = None
-            if oracle_counters is not None: local_ctr = oracle_counters.setdefault(int(node_id), {"edges": 0, "apply": 0, "isolate": 0})
             other_indices = sorted(list(all_indices - set(ordered_indices)))
             edge_iterator = ((i, a_node.children[i]) for i in ordered_indices + other_indices)
         else:
@@ -848,10 +849,6 @@ class Model(GraphProvider):
             if edge.llm_bv.isdisjoint(gss_mask):
                 stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
                 continue
-
-            # Initialize local counters if not yet
-            if oracle_counters is not None and 'edges' not in (local_ctr or {}): local_ctr = oracle_counters.setdefault(int(node_id), {"edges": 0, "apply": 0, "isolate": 0})
-
             if edge.pop == 0:
                 if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
                 if edge.dest_states_union.isdisjoint(peek0_rs):
