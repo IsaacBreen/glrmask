@@ -331,7 +331,7 @@ impl Default for Trie3Config {
             merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: true,
             generalize_sids: true,
-            simplify_llm_token_bvs: false,
+            simplify_llm_token_bvs: true,
             refine_token_atoms: true,
             refine_token_atoms_exact: true,
             refine_token_atoms_max_blocks: 2048,
