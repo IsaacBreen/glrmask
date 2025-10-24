@@ -1456,7 +1456,7 @@ local_system:
               computation of llm_bv_descendant.
               """
               reverse_adj = collections.defaultdict(list)
-              for nid, node in self.arena.items():
+              for nid, node in tqdm(self.arena.items(), desc="Recomputing max_depth (build reverse graph)"):
                   for edge in node.children:
                       for d in edge.dests:
                           reverse_adj[int(d.dest_idx)].append(nid)
@@ -1503,7 +1503,7 @@ local_system:
               all_ones = self.all_internal_llm_tokens_bitset
               # Process nodes in ascending max_depth: leaves (0) first, then parents.
               ordered_nodes = sorted(self.arena.keys(), key=lambda nid: int(self.max_depth.get(nid, 0)))
-              for nid in ordered_nodes:
+              for nid in tqdm(ordered_nodes, desc="Computing descendant LLM closure"):
                   node = self.arena[nid]
                   if node.clean_end:
                       node.llm_bv_descendant = all_ones
@@ -2126,7 +2126,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -6132,5 +6132,64 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix functional equivalence in get_mask
       optimizations by recomputing max_depth and canonicalizing cache keys"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Add tqdm to _recompute_max_depth
+    metadata:
+  - assistant: |-
+      The issue of functional equivalence was correctly addressed by recomputing `max_depth` and canonicalizing cache keys. To improve visibility during the model loading phase, I will now add `tqdm` to the computationally intensive parts of the new pre-computation methods.
+
+      Here are the step-by-step instructions and the corresponding diff.
+
+      ### Step-by-step Instructions
+
+      1.  **In `python/aug25/models/precompute3_model_pure_python_opt4.py`, add `tqdm` to the graph construction loop in `_recompute_max_depth`.**
+          Wrap `self.arena.items()` with `tqdm` and provide a descriptive label.
+
+      2.  **In `python/aug25/models/precompute3_model_pure_python_opt4.py`, add `tqdm` to the main loop in `_compute_descendant_llm_closure`.**
+          Wrap `ordered_nodes` with `tqdm` and provide a descriptive label.
+
+      ### Git Diffs
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python_opt4.py b/python/aug25/models/precompute3_model_pure_python_opt4.py
+      --- a/python/aug25/models/precompute3_model_pure_python_opt4.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_opt4.py
+      @@ -460,7 +460,7 @@
+               computation of llm_bv_descendant.
+               """
+               reverse_adj = collections.defaultdict(list)
+      -        for nid, node in self.arena.items():
+      +        for nid, node in tqdm(self.arena.items(), desc="Recomputing max_depth (build reverse graph)"):
+                   for edge in node.children:
+                       for d in edge.dests:
+                           reverse_adj[int(d.dest_idx)].append(nid)
+      @@ -501,7 +501,7 @@
+               all_ones = self.all_internal_llm_tokens_bitset
+               # Process nodes in ascending max_depth: leaves (0) first, then parents.
+               ordered_nodes = sorted(self.arena.keys(), key=lambda nid: int(self.max_depth.get(nid, 0)))
+      -        for nid in ordered_nodes:
+      +        for nid in tqdm(ordered_nodes, desc="Computing descendant LLM closure"):
+                   node = self.arena[nid]
+                   if node.clean_end:
+                       node.llm_bv_descendant = all_ones
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4.py.
+    metadata:
+  - user: 'Changes committed with message: "Add tqdm to pre-computation steps for
+      better loading feedback"'
     metadata:
 ...

@@ -470,7 +470,7 @@ class Model(GraphProvider):
         computation of llm_bv_descendant.
         """
         reverse_adj = collections.defaultdict(list)
-        for nid, node in self.arena.items():
+        for nid, node in tqdm(self.arena.items(), desc="Recomputing max_depth (build reverse graph)"):
             for edge in node.children:
                 for d in edge.dests:
                     reverse_adj[int(d.dest_idx)].append(nid)
@@ -517,7 +517,7 @@ class Model(GraphProvider):
         all_ones = self.all_internal_llm_tokens_bitset
         # Process nodes in ascending max_depth: leaves (0) first, then parents.
         ordered_nodes = sorted(self.arena.keys(), key=lambda nid: int(self.max_depth.get(nid, 0)))
-        for nid in ordered_nodes:
+        for nid in tqdm(ordered_nodes, desc="Computing descendant LLM closure"):
             node = self.arena[nid]
             if node.clean_end:
                 node.llm_bv_descendant = all_ones
