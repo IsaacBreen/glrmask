@@ -32,7 +32,7 @@ set -euo pipefail
 : "${CONSTRAINT_FILE:=""}"
 : "${CODE_FILE:="./src/example_code.js"}"
 : "${SKIP_CPP_BUILD:=0}" # Set to 1 to disable C++ compilation
-: "${SKIP_RUST:=0}" # Set to 1 to disable Rust compilation
+: "${SKIP_RUST_BUILD:=0}" # Set to 1 to disable Rust compilation
 : "${REPEAT:=1}"
 : "${AGG_METHOD:=""}"
 : "${SKIP_PLOTS:=0}" # Set to 1 to skip plot generation
@@ -190,8 +190,8 @@ else
 fi
 
 # --- Automated Rust Build Process ---
-if [ "${SKIP_RUST:-0}" == "1" ]; then
-  echo "SKIP_RUST is set. Skipping Rust module build."
+if [ "${SKIP_RUST_BUILD:-0}" == "1" ]; then
+  echo "SKIP_RUST_BUILD is set. Skipping Rust module build."
   echo "---"
 else
   echo "Automating Rust module build..."
