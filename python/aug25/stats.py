@@ -433,6 +433,11 @@ class Stats:
             max_desc = max(max_desc, len(self.durations.get(k, [])))
         return max_desc
 
+    @property
+    def times(self) -> Dict[str, float]:
+        """Backwards compatibility: returns total duration (seconds) per key."""
+        return {k: sum(v) for k, v in self.durations.items()}
+
     def __enter__(self):
         self.reset()
         return self
