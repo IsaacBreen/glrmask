@@ -8,13 +8,6 @@ import time
 from typing import Dict, List, Tuple, Optional, Union, Any, Set
 from dataclasses import dataclass, field
 
-# Progress bars (safe fallback if tqdm is unavailable)
-try:
-    from tqdm import tqdm
-except Exception:  # pragma: no cover
-    def tqdm(x, **kwargs):
-        return x
-
 from ..common_interface import GraphProvider
 from ..stats import Stats
 # from ..common_interface import RangeSet
@@ -624,9 +617,6 @@ class Model(GraphProvider):
         # Reorder edges/dests to prioritize reaching end nodes quickly
         model.optimize_traversal()
 
-        # Stochastic check for catastrophic cycles
-        model._detect_catastrophic_cycles()
-
         return model
 
     def _compute_edge_accelerators(self) -> None:
@@ -641,112 +631,6 @@ class Model(GraphProvider):
                 if edge.llm_bv_not is None:
                     edge.llm_bv_not = all_ones.difference(edge.llm_bv)
         stats.stop('accelerators.compute_edge_complements')
-
-    def _detect_catastrophic_cycles(self, samples: int = 100) -> None:
-        """
-        Stochastically checks for catastrophic cycles.
-        A catastrophic cycle is a pop=0 path back to the same node for a
-        fixed (LLM token, parser state) pair. Such cycles can cause infinite
-        loops or performance degradation in some traversal algorithms.
-        """
-        self.stats.start('catastrophic_cycle_detection')
-        print("Running catastrophic cycle detection...")
-
-        import random
-
-        def sample_from_rangeset(rs: Union[LLMTokenSet, StateIDSet]):
-            ranges = rs.to_ranges()
-            if not ranges:
-                return None
-            
-            total_size = sum(end - start + 1 for start, end in ranges)
-            if total_size == 0:
-                return None
-                
-            pick = random.randrange(total_size)
-            for start, end in ranges:
-                count = end - start + 1
-                if pick < count:
-                    return start + pick
-                pick -= count
-            return None  # Should not be reached
-
-        # Collect all pop=0 hyper-edges to sample from.
-        # A hyper-edge here is a (start_node, dest_node, llm_bv, state_bv) tuple.
-        pop0_hyper_edges = []
-        for u, node_data in self.arena.items():
-            for edge in node_data.children:
-                if edge.pop == 0:
-                    for v, state_bv in edge.dests:
-                        if not edge.llm_bv.is_empty() and not state_bv.is_empty():
-                            pop0_hyper_edges.append((u, v, edge.llm_bv, state_bv))
-        
-        if not pop0_hyper_edges:
-            print("No pop=0 edges found. Skipping cycle detection.")
-            self.stats.stop('catastrophic_cycle_detection')
-            return
-
-        for _ in tqdm(range(samples), desc="Cycle Detection"):
-            _u, _v, llm_bv, state_bv = random.choice(pop0_hyper_edges)
-            
-            token = sample_from_rangeset(llm_bv)
-            state_id = sample_from_rangeset(state_bv)
-
-            if token is None or state_id is None:
-                continue
-
-            memo_neighbors = {}
-            def get_neighbors(node_id):
-                if node_id in memo_neighbors:
-                    return memo_neighbors[node_id]
-                
-                neighbors = []
-                node_data = self.arena.get(node_id)
-                if node_data:
-                    for edge in node_data.children:
-                        if edge.pop == 0 and edge.llm_bv.contains(token):
-                            for dest_node_id, dest_state_bv in edge.dests:
-                                if dest_state_bv.contains(state_id):
-                                    neighbors.append(int(dest_node_id))
-                
-                memo_neighbors[node_id] = list(set(neighbors))
-                return memo_neighbors[node_id]
-
-            path = set()
-            visited = set()
-            recursion_stack = []
-            
-            def find_cycle_util(u):
-                visited.add(u)
-                path.add(u)
-                recursion_stack.append(u)
-
-                for v_neighbor in get_neighbors(u):
-                    if v_neighbor in path:
-                        cycle_path = list(recursion_stack[recursion_stack.index(v_neighbor):])
-                        cycle_path.append(v_neighbor)
-                        return cycle_path
-                    if v_neighbor not in visited:
-                        found_cycle = find_cycle_util(v_neighbor)
-                        if found_cycle:
-                            return found_cycle
-                
-                path.remove(u)
-                recursion_stack.pop()
-                return None
-
-            for node_id in self.arena.keys():
-                if node_id not in visited:
-                    cycle = find_cycle_util(node_id)
-                    if cycle:
-                        cycle_str = " -> ".join(map(str, cycle))
-                        raise RuntimeError(
-                            f"Catastrophic cycle detected for (token={token}, state_id={state_id}).\n"
-                            f"Cycle path: {cycle_str}"
-                        )
-        
-        self.stats.stop('catastrophic_cycle_detection')
-        print(f"Catastrophic cycle detection passed ({samples} samples).")
 
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
