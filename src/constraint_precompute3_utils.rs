@@ -179,7 +179,7 @@ pub fn merge_nodes_trie3_global_atoms(
             for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
                 if let Some(atoms) = atoms_by_pop.get(p) {
                     for (j, a) in atoms.iter().enumerate() {
-                        if (&llm_bv & a).is_empty() { continue; }
+                        if (llm_bv & a).is_empty() { continue; }
                         let dest_class = prev_class[*v_dense];
                         let key = (*p, j);
                         agg_maps.entry(key)
@@ -488,10 +488,10 @@ fn build_global_token_atoms_by_pop(
         let mut aborted = false;
         for m in masks {
             let mut next_blocks: Vec<LLMTokenBV> = Vec::with_capacity(blocks.len().saturating_mul(2));
-            for b in blocks.into_iter() {
-                let inter = &b & &m;
+            for b in blocks.iter() {
+                let inter = b & &m;
                 if !inter.is_empty() { next_blocks.push(inter); }
-                let diff = &b - &m;
+                let diff = b - &m;
                 if !diff.is_empty() { next_blocks.push(diff); }
             }
             if next_blocks.len() > max_atoms_per_pop {
