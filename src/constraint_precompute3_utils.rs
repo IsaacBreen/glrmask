@@ -248,8 +248,52 @@ pub fn merge_nodes_trie3_global_atoms(
         if changes == 0 { break; }
     }
 
-    // Representatives for final classes
-    let final_partition = prev_class;
+    // Representatives for final classes (with root-safe refinement)
+    let mut final_partition = prev_class;
+
+    // Root-safe refinement: if a class contains any internal pop=0 edge, then
+    // mapping the entire class to one representative would create a pop=0 self-loop
+    // on the representative. If a root maps to that representative, it becomes a
+    // root self-loop that cannot be eliminated and will trip cycle checks.
+    //
+    // Strategy: detect classes that have internal pop=0 edges, and detach every root
+    // member of such classes into a fresh singleton class before rewiring.
+    let num_classes_before = final_partition.iter().max().map_or(0, |m| m + 1);
+    let mut class_has_pop0_internal_edge = vec![false; num_classes_before];
+    for (u_dense, edges) in raw_edges.iter().enumerate() {
+        for (p, llm_bv, v_dense, sids) in edges {
+            if *p == 0 && !llm_bv.is_empty() && !sids.is_empty() {
+                let cu = final_partition[u_dense];
+                let cv = final_partition[*v_dense];
+                if cu == cv {
+                    class_has_pop0_internal_edge[cu] = true;
+                }
+            }
+        }
+    }
+    // Map dense ids that are roots
+    let roots_set: HashSet<Trie2Index> = roots.values().cloned().collect();
+    let mut is_root_dense = vec![false; n];
+    for (i, idx) in old_of.iter().enumerate() {
+        if roots_set.contains(idx) {
+            is_root_dense[i] = true;
+        }
+    }
+    // Detach roots that would otherwise end up in a class with internal pop=0 edges
+    let mut detached_roots = 0usize;
+    let mut next_class_id = num_classes_before;
+    for u in 0..n {
+        let cid = final_partition[u];
+        if is_root_dense[u] && class_has_pop0_internal_edge.get(cid).copied().unwrap_or(false) {
+            final_partition[u] = next_class_id;
+            next_class_id += 1;
+            detached_roots += 1;
+        }
+    }
+    if detached_roots > 0 {
+        crate::debug!(3, "Global-atoms merge: detached {} root(s) from classes with internal pop=0 edges to avoid root self-loops.", detached_roots);
+    }
+
     let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
     let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
     for (u_dense, &class_id) in final_partition.iter().enumerate() {
@@ -265,18 +309,24 @@ pub fn merge_nodes_trie3_global_atoms(
     // Rewrite all edges in the graph to class representatives
     rewire_all_edges_to_representatives(trie3_god, roots, &node_to_rep);
 
-    // Rebuild representative edges deterministically by aggregating to dest classes and mapping to reps.
+    // Rebuild representative edges deterministically by aggregating over ALL members of each class,
+    // then mapping destinations to their class representatives.
+    // Precompute members per class
+    let mut members_by_class: Vec<Vec<usize>> = vec![Vec::new(); num_classes];
+    for (u_dense, &cid) in final_partition.iter().enumerate() {
+        members_by_class[cid].push(u_dense);
+    }
     for class_id in 0..num_classes {
         if let Some(rep_idx) = representatives[class_id] {
-            // Use a single exemplar node from the class to rebuild representative edges
-            let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
-            // Aggregate by (pop, llm_bv, dest_class) unioning SIDs
+            // Aggregate by (pop, llm_bv, dest_class) unioning SIDs over all class members
             let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-            for (p, llm_bv, v_dense, sids) in &raw_edges[u_dense] {
-                let dest_class = final_partition[*v_dense];
-                aggr.entry((*p, llm_bv.clone(), dest_class))
-                    .and_modify(|e| *e |= sids)
-                    .or_insert_with(|| sids.clone());
+            for &u_dense in &members_by_class[class_id] {
+                for (p, llm_bv, v_dense, sids) in &raw_edges[u_dense] {
+                    let dest_class = final_partition[*v_dense];
+                    aggr.entry((*p, llm_bv.clone(), dest_class))
+                        .and_modify(|e| *e |= sids)
+                        .or_insert_with(|| sids.clone());
+                }
             }
             let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
             for ((p, bv_key, dest_class), sids) in aggr {

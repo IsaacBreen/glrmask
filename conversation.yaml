@@ -158,13 +158,46 @@ local_system:
               }
           }
 
-          // Partition refinement
+          // Precompute, once, for every unique (pop, LLMTokenBV) mask pointer, which atoms (by index) it overlaps.
+          // This avoids scanning all atoms for every edge repeatedly.
+          use std::collections::BTreeMap as BTM;
+          let mut unique_bvs_per_pop: BTM<isize, Vec<LLMTokenBV>> = BTM::new();
+          let mut seen_ptrs_per_pop: BTM<isize, HashSet<*const RangeSetBlaze<usize>>> = BTM::new();
+          for edges in &raw_edges {
+              for (p, llm_bv, _v, _sids) in edges {
+                  if !atoms_by_pop.contains_key(p) { continue; }
+                  let ptr = Arc::as_ptr(&llm_bv.inner);
+                  let seen = seen_ptrs_per_pop.entry(*p).or_default();
+                  if seen.insert(ptr) {
+                      unique_bvs_per_pop.entry(*p).or_default().push(llm_bv.clone());
+                  }
+              }
+          }
+          let mut atom_idxs_by_pop_ptr: BTM<isize, HashMap<*const RangeSetBlaze<usize>, Vec<usize>>> = BTM::new();
+          for (p, bvs) in unique_bvs_per_pop {
+              if let Some(atoms) = atoms_by_pop.get(&p) {
+                  let mut map: HashMap<*const RangeSetBlaze<usize>, Vec<usize>> = HashMap::new();
+                  for bv in bvs {
+                      let ptr = Arc::as_ptr(&bv.inner);
+                      let mut idxs: Vec<usize> = Vec::new();
+                      for (j, a) in atoms.iter().enumerate() {
+                          if !(&bv & a).is_empty() {
+                              idxs.push(j);
+                          }
+                      }
+                      map.insert(ptr, idxs);
+                  }
+                  atom_idxs_by_pop_ptr.insert(p, map);
+              }
+          }
+
+          // Partition refinement (optimized)
           let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
           for it in 0..max_iters {
-              // Signature: (end_flag, Vec<(pop, Vec< Vec<(dest_class, StateIDBV)> >>)>)
-              // For each (pop, atom_j), we compute a canonical vector of (dest_class, aggregated SIDs).
-              use std::collections::HashMap as HM;
-              let mut sig_to_id: HM<(bool, Vec<(isize, Vec<Vec<(usize, StateIDBV)> >)>), usize> = HM::new();
+              // Signature (compact): (end_flag, Vec<((pop, atom_idx), Vec<(dest_class, StateIDBV)>)>)
+              // Only atoms actually hit by this node are included; canonicalization is via sorted BTreeMaps below.
+              type SigKey = (bool, Vec<((isize, usize), Vec<(usize, StateIDBV)>)>);
+              let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
               let mut next_id = 0usize;
               let mut new_class = vec![0usize; n];
               let mut changes = 0usize;
@@ -174,41 +207,45 @@ local_system:
               #[cfg(rustrover)]
               let itn = 0..n;
               for u in itn {
-                  // For each pop, build a vector per atom index: aggregated (dest_class -> SIDs)
-                  let mut per_pop: BTreeMap<isize, Vec<Vec<(usize, StateIDBV)>>> = BTreeMap::new();
-                  for (pop, atoms) in &atoms_by_pop {
-                      per_pop.insert(*pop, vec![Vec::new(); atoms.len()]);
+                  // 1) Aggregate once per (pop, LLM mask pointer) to dest_class -> SIDs.
+                  // This removes duplicate work across atoms for the same mask.
+                  let mut per_bv_aggr: HashMap<(isize, *const RangeSetBlaze<usize>), BTreeMap<usize, StateIDBV>> = HashMap::new();
+                  for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
+                      if !atoms_by_pop.contains_key(p) { continue; }
+                      let dest_class = prev_class[*v_dense];
+                      let ptr = Arc::as_ptr(&llm_bv.inner);
+                      per_bv_aggr
+                          .entry((*p, ptr))
+                          .or_insert_with(BTreeMap::new)
+                          .entry(dest_class)
+                          .and_modify(|e| *e |= sids)
+                          .or_insert_with(|| sids.clone());
                   }
 
-                  // Temporary aggregation: per (pop, atom_idx) -> BTreeMap<dest_class, SIDs>
-                  // We'll finalize into sorted vectors for determinism.
-                  let mut agg_maps: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
-                  for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
-                      if let Some(atoms) = atoms_by_pop.get(p) {
-                          for (j, a) in atoms.iter().enumerate() {
-                              if (llm_bv & a).is_empty() { continue; }
-                              let dest_class = prev_class[*v_dense];
-                              let key = (*p, j);
-                              agg_maps.entry(key)
-                                  .or_insert_with(BTreeMap::new)
-                                  .entry(dest_class)
-                                  .and_modify(|e| *e |= sids)
-                                  .or_insert_with(|| sids.clone());
+                  // 2) Fan out each (pop, mask-pointer) aggregated map to only the atoms it overlaps.
+                  // Temporary aggregation: (pop, atom_idx) -> BTreeMap<dest_class, SIDs>, sorted for determinism.
+                  let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
+                  for ((pop, ptr), dm) in per_bv_aggr {
+                      if let Some(pop_map) = atom_idxs_by_pop_ptr.get(&pop) {
+                          if let Some(atom_idxs) = pop_map.get(&ptr) {
+                              for &j in atom_idxs {
+                                  let entry = per_atom_aggr.entry((pop, j)).or_insert_with(BTreeMap::new);
+                                  for (dest_class, sids) in &dm {
+                                      entry.entry(*dest_class)
+                                          .and_modify(|e| *e |= sids)
+                                          .or_insert_with(|| sids.clone());
+                                  }
+                              }
                           }
                       }
                   }
-                  // Finalize to vectors
-                  for ((pop, j), m) in agg_maps {
-                      let vec_m: Vec<(usize, StateIDBV)> = m.into_iter().collect();
-                      if let Some(blocks) = per_pop.get_mut(&pop) {
-                          if j < blocks.len() {
-                              blocks[j] = vec_m;
-                          }
-                      }
+
+                  // 3) Build compact signature. We only include non-empty atoms that this node touches.
+                  let mut sig_entries: Vec<((isize, usize), Vec<(usize, StateIDBV)>)> = Vec::with_capacity(per_atom_aggr.len());
+                  for (key, m) in per_atom_aggr {
+                      sig_entries.push((key, m.into_iter().collect()));
                   }
-                  // Build signature
-                  let mut sig_vec: Vec<(isize, Vec<Vec<(usize, StateIDBV)>>)> = per_pop.into_iter().collect();
-                  let sig = (ends[u], sig_vec);
+                  let sig: SigKey = (ends[u], sig_entries);
                   let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
                   new_class[u] = cid;
                   if new_class[u] != prev_class[u] { changes += 1; }
@@ -338,7 +375,7 @@ local_system:
                   merge_nodes_ultrafast: false,
                   prune_nodes_not_reaching_end: true,
                   generalize_sids: true,
-                  simplify_llm_token_bvs: true,
+                  simplify_llm_token_bvs: false,
                   refine_token_atoms: true,
                   refine_token_atoms_exact: true,
                   refine_token_atoms_max_blocks: 2048,
@@ -4097,8 +4134,52 @@ local_system:
               if changes == 0 { break; }
           }
 
-          // Representatives for final classes
-          let final_partition = prev_class;
+          // Representatives for final classes (with root-safe refinement)
+          let mut final_partition = prev_class;
+
+          // Root-safe refinement: if a class contains any internal pop=0 edge, then
+          // mapping the entire class to one representative would create a pop=0 self-loop
+          // on the representative. If a root maps to that representative, it becomes a
+          // root self-loop that cannot be eliminated and will trip cycle checks.
+          //
+          // Strategy: detect classes that have internal pop=0 edges, and detach every root
+          // member of such classes into a fresh singleton class before rewiring.
+          let num_classes_before = final_partition.iter().max().map_or(0, |m| m + 1);
+          let mut class_has_pop0_internal_edge = vec![false; num_classes_before];
+          for (u_dense, edges) in raw_edges.iter().enumerate() {
+              for (p, llm_bv, v_dense, sids) in edges {
+                  if *p == 0 && !llm_bv.is_empty() && !sids.is_empty() {
+                      let cu = final_partition[u_dense];
+                      let cv = final_partition[*v_dense];
+                      if cu == cv {
+                          class_has_pop0_internal_edge[cu] = true;
+                      }
+                  }
+              }
+          }
+          // Map dense ids that are roots
+          let roots_set: HashSet<Trie2Index> = roots.values().cloned().collect();
+          let mut is_root_dense = vec![false; n];
+          for (i, idx) in old_of.iter().enumerate() {
+              if roots_set.contains(idx) {
+                  is_root_dense[i] = true;
+              }
+          }
+          // Detach roots that would otherwise end up in a class with internal pop=0 edges
+          let mut detached_roots = 0usize;
+          let mut next_class_id = num_classes_before;
+          for u in 0..n {
+              let cid = final_partition[u];
+              if is_root_dense[u] && class_has_pop0_internal_edge.get(cid).copied().unwrap_or(false) {
+                  final_partition[u] = next_class_id;
+                  next_class_id += 1;
+                  detached_roots += 1;
+              }
+          }
+          if detached_roots > 0 {
+              crate::debug!(3, "Global-atoms merge: detached {} root(s) from classes with internal pop=0 edges to avoid root self-loops.", detached_roots);
+          }
+
           let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
           let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
           for (u_dense, &class_id) in final_partition.iter().enumerate() {
@@ -4114,18 +4195,24 @@ local_system:
           // Rewrite all edges in the graph to class representatives
           rewire_all_edges_to_representatives(trie3_god, roots, &node_to_rep);
 
-          // Rebuild representative edges deterministically by aggregating to dest classes and mapping to reps.
+          // Rebuild representative edges deterministically by aggregating over ALL members of each class,
+          // then mapping destinations to their class representatives.
+          // Precompute members per class
+          let mut members_by_class: Vec<Vec<usize>> = vec![Vec::new(); num_classes];
+          for (u_dense, &cid) in final_partition.iter().enumerate() {
+              members_by_class[cid].push(u_dense);
+          }
           for class_id in 0..num_classes {
               if let Some(rep_idx) = representatives[class_id] {
-                  // Use a single exemplar node from the class to rebuild representative edges
-                  let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
-                  // Aggregate by (pop, llm_bv, dest_class) unioning SIDs
+                  // Aggregate by (pop, llm_bv, dest_class) unioning SIDs over all class members
                   let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-                  for (p, llm_bv, v_dense, sids) in &raw_edges[u_dense] {
-                      let dest_class = final_partition[*v_dense];
-                      aggr.entry((*p, llm_bv.clone(), dest_class))
-                          .and_modify(|e| *e |= sids)
-                          .or_insert_with(|| sids.clone());
+                  for &u_dense in &members_by_class[class_id] {
+                      for (p, llm_bv, v_dense, sids) in &raw_edges[u_dense] {
+                          let dest_class = final_partition[*v_dense];
+                          aggr.entry((*p, llm_bv.clone(), dest_class))
+                              .and_modify(|e| *e |= sids)
+                              .or_insert_with(|| sids.clone());
+                      }
                   }
                   let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
                   for ((p, bv_key, dest_class), sids) in aggr {
@@ -4217,7 +4304,7 @@ local_system:
                   merge_nodes_ultrafast: false,
                   prune_nodes_not_reaching_end: true,
                   generalize_sids: true,
-                  simplify_llm_token_bvs: true,
+                  simplify_llm_token_bvs: false,
                   refine_token_atoms: true,
                   refine_token_atoms_exact: true,
                   refine_token_atoms_max_blocks: 2048,
@@ -7921,13 +8008,46 @@ messages:
               }
           }
 
-          // Partition refinement
+          // Precompute, once, for every unique (pop, LLMTokenBV) mask pointer, which atoms (by index) it overlaps.
+          // This avoids scanning all atoms for every edge repeatedly.
+          use std::collections::BTreeMap as BTM;
+          let mut unique_bvs_per_pop: BTM<isize, Vec<LLMTokenBV>> = BTM::new();
+          let mut seen_ptrs_per_pop: BTM<isize, HashSet<*const RangeSetBlaze<usize>>> = BTM::new();
+          for edges in &raw_edges {
+              for (p, llm_bv, _v, _sids) in edges {
+                  if !atoms_by_pop.contains_key(p) { continue; }
+                  let ptr = Arc::as_ptr(&llm_bv.inner);
+                  let seen = seen_ptrs_per_pop.entry(*p).or_default();
+                  if seen.insert(ptr) {
+                      unique_bvs_per_pop.entry(*p).or_default().push(llm_bv.clone());
+                  }
+              }
+          }
+          let mut atom_idxs_by_pop_ptr: BTM<isize, HashMap<*const RangeSetBlaze<usize>, Vec<usize>>> = BTM::new();
+          for (p, bvs) in unique_bvs_per_pop {
+              if let Some(atoms) = atoms_by_pop.get(&p) {
+                  let mut map: HashMap<*const RangeSetBlaze<usize>, Vec<usize>> = HashMap::new();
+                  for bv in bvs {
+                      let ptr = Arc::as_ptr(&bv.inner);
+                      let mut idxs: Vec<usize> = Vec::new();
+                      for (j, a) in atoms.iter().enumerate() {
+                          if !(&bv & a).is_empty() {
+                              idxs.push(j);
+                          }
+                      }
+                      map.insert(ptr, idxs);
+                  }
+                  atom_idxs_by_pop_ptr.insert(p, map);
+              }
+          }
+
+          // Partition refinement (optimized)
           let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
           for it in 0..max_iters {
-              // Signature: (end_flag, Vec<(pop, Vec< Vec<(dest_class, StateIDBV)> >>)>)
-              // For each (pop, atom_j), we compute a canonical vector of (dest_class, aggregated SIDs).
-              use std::collections::HashMap as HM;
-              let mut sig_to_id: HM<(bool, Vec<(isize, Vec<Vec<(usize, StateIDBV)> >)>), usize> = HM::new();
+              // Signature (compact): (end_flag, Vec<((pop, atom_idx), Vec<(dest_class, StateIDBV)>)>)
+              // Only atoms actually hit by this node are included; canonicalization is via sorted BTreeMaps below.
+              type SigKey = (bool, Vec<((isize, usize), Vec<(usize, StateIDBV)>)>);
+              let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
               let mut next_id = 0usize;
               let mut new_class = vec![0usize; n];
               let mut changes = 0usize;
@@ -7937,41 +8057,45 @@ messages:
               #[cfg(rustrover)]
               let itn = 0..n;
               for u in itn {
-                  // For each pop, build a vector per atom index: aggregated (dest_class -> SIDs)
-                  let mut per_pop: BTreeMap<isize, Vec<Vec<(usize, StateIDBV)>>> = BTreeMap::new();
-                  for (pop, atoms) in &atoms_by_pop {
-                      per_pop.insert(*pop, vec![Vec::new(); atoms.len()]);
+                  // 1) Aggregate once per (pop, LLM mask pointer) to dest_class -> SIDs.
+                  // This removes duplicate work across atoms for the same mask.
+                  let mut per_bv_aggr: HashMap<(isize, *const RangeSetBlaze<usize>), BTreeMap<usize, StateIDBV>> = HashMap::new();
+                  for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
+                      if !atoms_by_pop.contains_key(p) { continue; }
+                      let dest_class = prev_class[*v_dense];
+                      let ptr = Arc::as_ptr(&llm_bv.inner);
+                      per_bv_aggr
+                          .entry((*p, ptr))
+                          .or_insert_with(BTreeMap::new)
+                          .entry(dest_class)
+                          .and_modify(|e| *e |= sids)
+                          .or_insert_with(|| sids.clone());
                   }
 
-                  // Temporary aggregation: per (pop, atom_idx) -> BTreeMap<dest_class, SIDs>
-                  // We'll finalize into sorted vectors for determinism.
-                  let mut agg_maps: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
-                  for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
-                      if let Some(atoms) = atoms_by_pop.get(p) {
-                          for (j, a) in atoms.iter().enumerate() {
-                              if (llm_bv & a).is_empty() { continue; }
-                              let dest_class = prev_class[*v_dense];
-                              let key = (*p, j);
-                              agg_maps.entry(key)
-                                  .or_insert_with(BTreeMap::new)
-                                  .entry(dest_class)
-                                  .and_modify(|e| *e |= sids)
-                                  .or_insert_with(|| sids.clone());
+                  // 2) Fan out each (pop, mask-pointer) aggregated map to only the atoms it overlaps.
+                  // Temporary aggregation: (pop, atom_idx) -> BTreeMap<dest_class, SIDs>, sorted for determinism.
+                  let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
+                  for ((pop, ptr), dm) in per_bv_aggr {
+                      if let Some(pop_map) = atom_idxs_by_pop_ptr.get(&pop) {
+                          if let Some(atom_idxs) = pop_map.get(&ptr) {
+                              for &j in atom_idxs {
+                                  let entry = per_atom_aggr.entry((pop, j)).or_insert_with(BTreeMap::new);
+                                  for (dest_class, sids) in &dm {
+                                      entry.entry(*dest_class)
+                                          .and_modify(|e| *e |= sids)
+                                          .or_insert_with(|| sids.clone());
+                                  }
+                              }
                           }
                       }
                   }
-                  // Finalize to vectors
-                  for ((pop, j), m) in agg_maps {
-                      let vec_m: Vec<(usize, StateIDBV)> = m.into_iter().collect();
-                      if let Some(blocks) = per_pop.get_mut(&pop) {
-                          if j < blocks.len() {
-                              blocks[j] = vec_m;
-                          }
-                      }
+
+                  // 3) Build compact signature. We only include non-empty atoms that this node touches.
+                  let mut sig_entries: Vec<((isize, usize), Vec<(usize, StateIDBV)>)> = Vec::with_capacity(per_atom_aggr.len());
+                  for (key, m) in per_atom_aggr {
+                      sig_entries.push((key, m.into_iter().collect()));
                   }
-                  // Build signature
-                  let mut sig_vec: Vec<(isize, Vec<Vec<(usize, StateIDBV)>>)> = per_pop.into_iter().collect();
-                  let sig = (ends[u], sig_vec);
+                  let sig: SigKey = (ends[u], sig_entries);
                   let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
                   new_class[u] = cid;
                   if new_class[u] != prev_class[u] { changes += 1; }
@@ -8101,7 +8225,7 @@ messages:
                   merge_nodes_ultrafast: false,
                   prune_nodes_not_reaching_end: true,
                   generalize_sids: true,
-                  simplify_llm_token_bvs: true,
+                  simplify_llm_token_bvs: false,
                   refine_token_atoms: true,
                   refine_token_atoms_exact: true,
                   refine_token_atoms_max_blocks: 2048,
@@ -11612,9 +11736,14 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_utils.rs
-  - user: Merging nodes (global-atoms bisimulation) just takes far too long. Like
-      15 minutes for 2 itertaions. It needs to be faster. The other passes are on
-      the order of 10 ms to 1 second.
+  - user: |
+      thread 'test_constraint_basic::test_constraint_repetition_a' (21944936) panicked at src/constraint_precompute3_utils.rs:1366:17:
+      LLM-compatible cycle with pop=0 detected in precompute3 trie. Example violation: internal LLM token ID 0 and state ID 3.
+      Cycle path:
+        Trie2Index(0) --> Trie2Index(0)
+    metadata:
+  - user: Merging nodes (global-atoms bisimulation) can cause this kind of error.
+      Work out why. Think mathematically. Prove your hypothesis. Fix it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -11634,260 +11763,152 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are concrete, step-by-step changes to make the global-atoms bisimulation merge dramatically faster by avoiding O(edges × atoms) work per iteration:
+      Below are concrete, step-by-step edits to fix the pop=0 cycle introduced by the global-atoms bisimulation merge. The root cause is that the merge collapses nodes that have pop=0 edges between members of the same equivalence class. When a class contains any internal pop=0 edge, mapping all members to a single representative inevitably creates a pop=0 self-loop on the representative. If a root is remapped into that representative, the final cycle check fails because eliminate_pop0_edges_except_roots_trie3 does not remove pop=0 edges from roots.
+
+      To fix this soundly and deterministically:
+      - After the iterative refinement converges, refine the final partition so that no root is part of any class that has an internal pop=0 edge. We do this by detaching each such root into a singleton class before rewiring edges. This guarantees that no class that becomes a root after remapping has any internal pop=0 edge, hence no root self-loops can appear.
+      - Additionally, when reconstructing representative edges, aggregate over all members of each class (not a single exemplar). This produces correct representative edge sets and avoids inconsistencies.
 
       Step-by-step instructions
 
-      1) File to edit
-      - src/constraint_precompute3_utils.rs
+      1) File: src/constraint_precompute3_utils.rs
 
-      2) Replace the inner algorithm of merge_nodes_trie3_global_atoms to avoid per-edge-per-atom scans
-      - The current implementation builds a huge per-pop vector for every node and iterates all atoms for every edge mask. This is the bottleneck.
-      - Implement the following optimizations:
-        - Precompute, once, for every unique (pop, LLMTokenBV) mask pointer across the entire graph, which global atoms it overlaps. This replaces repeated intersection checks with a single lookup.
-        - For each node and iteration, first aggregate the node’s outgoing edges by (pop, LLM mask pointer) to a single destination-class map. Then, fan out that aggregated map only to those atoms that overlap the mask (using the precomputed lookup).
-        - Build signatures only from non-empty atom entries actually touched by the node, using a compact canonical structure:
-          (end_flag, Vec<((pop, atom_idx), Vec<(dest_class, StateIDBV)>)>)
-          This avoids allocating vectors of length “atoms_per_pop” filled with empties.
-      - Keep the rest of the function (rewiring to representatives, rebuilding representative edges, GC, and depth recomputation) unchanged.
+         In function merge_nodes_trie3_global_atoms:
+         - Right after the partition refinement loop completes, change the construction of final_partition to be mutable, and insert a new “root-safe refinement” block:
+           - Build a class-level flag class_has_pop0_internal_edge that marks classes containing any internal pop=0 edge (non-empty mask and SIDs).
+           - Build a dense map of which nodes are roots.
+           - For each root that belongs to a class with class_has_pop0_internal_edge=true, detach the root into a fresh singleton class by assigning it a new class id.
+           - Recompute num_classes based on the refined final_partition.
+           - Optional: add a small debug line to show how many roots were detached.
 
-      3) What to change in code (summary)
-      - Inside merge_nodes_trie3_global_atoms, after raw_edges are collected, add a precomputation block:
-        - Gather unique LLMTokenBV pointers per pop.
-        - Build a map: (pop, llm_ptr) -> [atom indices] (those atoms that intersect the mask).
-      - In the refinement loop:
-        - Replace the previous construction of per_pop empty vectors and nested aggregation with:
-          - A per-node, per (pop, mask-pointer) aggregation into dest_class -> SIDs.
-          - A second phase that distributes each aggregated map to only the overlapping atoms via the precomputed index.
-          - Build a compact signature keyed by ((pop, atom_idx), canonical dest vector), without emitting empty atoms or empty pops.
-      - This reduces both compute and memory pressure significantly.
+         - Next, change the representative edge reconstruction to aggregate edges across all members of the class rather than using a single exemplar:
+           - Precompute members_by_class: Vec<Vec<usize>> mapping class_id -> list of node dense ids.
+           - For each class, union edges from all its members into a BTreeMap keyed by (pop, llm_bv, dest_class), then rebuild representative children accordingly.
 
-      4) No external dependencies, no config changes required
-      - The patch is self-contained and uses the same imports already available in the file.
-      - It preserves correctness and semantics while being much faster.
+      2) No other files are changed.
 
-      Git diff patches
+      What exactly to insert/change:
+      - Replace the “Representatives for final classes” block so that final_partition is mutable and refined as described.
+      - Replace the “Use a single exemplar node from the class to rebuild representative edges” block with the class-members aggregation version.
+
+      After these edits, merging will no longer create pop=0 cycles at roots. The elimination pass will take care of non-root 0-pop self-loops, and the final cycle checks will pass.
+
+      Below is the precise patch.
 
       ```diff
       diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
       --- a/src/constraint_precompute3_utils.rs
       +++ b/src/constraint_precompute3_utils.rs
-      @@ -49,112 +49,187 @@
-       pub fn merge_nodes_trie3_global_atoms(
-           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-           trie3_god: &Trie3GodWrapper,
-           max_llm_token_id: usize,
-           max_iters: usize,
-           max_atoms_per_pop: usize,
-       ) {
-           crate::debug!(2, "Merging nodes (global-atoms bisimulation) in precomputed trie 3 (iters={}, cap={} atoms/pop).",
-               max_iters, max_atoms_per_pop);
-       
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-           if all_nodes.is_empty() { return; }
-       
-           // Derive global atoms by pop.
-           let atoms_by_pop = build_global_token_atoms_by_pop(trie3_god, &all_nodes, max_llm_token_id, max_atoms_per_pop);
-           if atoms_by_pop.is_empty() {
-               crate::debug!(3, "Global-atoms merge: no edges present; skipping.");
-               return;
-           }
-       
-           // Dense ids for nodes
-           let n = all_nodes.len();
-           let mut dense_of: HashMap<Trie2Index, usize> = HashMap::with_capacity(n);
-           let mut old_of: Vec<Trie2Index> = Vec::with_capacity(n);
-           for (i, idx) in all_nodes.iter().enumerate() {
-               dense_of.insert(*idx, i);
-               old_of.push(*idx);
-           }
-       
-           // Ends and raw edges (pop, llm_bv, dest_dense, sids)
-           type RawEdge3 = (isize, LLMTokenBV, usize, StateIDBV);
-           let mut ends: Vec<bool> = vec![false; n];
-           let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
-           for (u_dense, u_idx) in old_of.iter().enumerate() {
-               let g = u_idx.read(trie3_god).expect("read");
-               ends[u_dense] = g.value.end;
-               for (ek, dm) in g.children() {
-                   for (dst, sids) in dm {
-                       if let Some(v_dense) = dense_of.get(dst) {
-                           raw_edges[u_dense].push((ek.0, ek.1.clone(), *v_dense, sids.clone()));
-                       }
-                   }
-               }
-           }
-       
-      -    // Partition refinement
-      +    // Precompute, once, for every unique (pop, LLMTokenBV) mask pointer, which atoms (by index) it overlaps.
-      +    // This avoids scanning all atoms for every edge repeatedly.
-      +    use std::collections::BTreeMap as BTM;
-      +    let mut unique_bvs_per_pop: BTM<isize, Vec<LLMTokenBV>> = BTM::new();
-      +    let mut seen_ptrs_per_pop: BTM<isize, HashSet<*const RangeSetBlaze<usize>>> = BTM::new();
-      +    for edges in &raw_edges {
-      +        for (p, llm_bv, _v, _sids) in edges {
-      +            if !atoms_by_pop.contains_key(p) { continue; }
-      +            let ptr = Arc::as_ptr(&llm_bv.inner);
-      +            let seen = seen_ptrs_per_pop.entry(*p).or_default();
-      +            if seen.insert(ptr) {
-      +                unique_bvs_per_pop.entry(*p).or_default().push(llm_bv.clone());
-      +            }
-      +        }
-      +    }
-      +    let mut atom_idxs_by_pop_ptr: BTM<isize, HashMap<*const RangeSetBlaze<usize>, Vec<usize>>> = BTM::new();
-      +    for (p, bvs) in unique_bvs_per_pop {
-      +        if let Some(atoms) = atoms_by_pop.get(&p) {
-      +            let mut map: HashMap<*const RangeSetBlaze<usize>, Vec<usize>> = HashMap::new();
-      +            for bv in bvs {
-      +                let ptr = Arc::as_ptr(&bv.inner);
-      +                let mut idxs: Vec<usize> = Vec::new();
-      +                for (j, a) in atoms.iter().enumerate() {
-      +                    if !(&bv & a).is_empty() {
-      +                        idxs.push(j);
-      +                    }
-      +                }
-      +                map.insert(ptr, idxs);
-      +            }
-      +            atom_idxs_by_pop_ptr.insert(p, map);
-      +        }
-      +    }
-      +
-      +    // Partition refinement (optimized)
-           let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
-           for it in 0..max_iters {
-      -        // Signature: (end_flag, Vec<(pop, Vec< Vec<(dest_class, StateIDBV)> >>)>)
-      -        // For each (pop, atom_j), we compute a canonical vector of (dest_class, aggregated SIDs).
-      -        use std::collections::HashMap as HM;
-      -        let mut sig_to_id: HM<(bool, Vec<(isize, Vec<Vec<(usize, StateIDBV)> >)>), usize> = HM::new();
-      +        // Signature (compact): (end_flag, Vec<((pop, atom_idx), Vec<(dest_class, StateIDBV)>)>)
-      +        // Only atoms actually hit by this node are included; canonicalization is via sorted BTreeMaps below.
-      +        type SigKey = (bool, Vec<((isize, usize), Vec<(usize, StateIDBV)>)>);
-      +        let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
-               let mut next_id = 0usize;
-               let mut new_class = vec![0usize; n];
-               let mut changes = 0usize;
-       
-               #[cfg(not(rustrover))]
-      -        let itn = tqdm!(0..n, desc = format!("Trie3 Merge Global-Atoms Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
-      +        let itn = tqdm!(0..n, desc = format!("Trie3 Merge Global-Atoms Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
-               #[cfg(rustrover)]
-               let itn = 0..n;
-               for u in itn {
-      -            // For each pop, build a vector per atom index: aggregated (dest_class -> SIDs)
-      -            let mut per_pop: BTreeMap<isize, Vec<Vec<(usize, StateIDBV)>>> = BTreeMap::new();
-      -            for (pop, atoms) in &atoms_by_pop {
-      -                per_pop.insert(*pop, vec![Vec::new(); atoms.len()]);
-      -            }
-      -
-      -            // Temporary aggregation: per (pop, atom_idx) -> BTreeMap<dest_class, SIDs>
-      -            // We'll finalize into sorted vectors for determinism.
-      -            let mut agg_maps: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
-      -            for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
-      -                if let Some(atoms) = atoms_by_pop.get(p) {
-      -                    for (j, a) in atoms.iter().enumerate() {
-      -                        if (llm_bv & a).is_empty() { continue; }
-      -                        let dest_class = prev_class[*v_dense];
-      -                        let key = (*p, j);
-      -                        agg_maps.entry(key)
-      -                            .or_insert_with(BTreeMap::new)
-      -                            .entry(dest_class)
-      -                            .and_modify(|e| *e |= sids)
-      -                            .or_insert_with(|| sids.clone());
-      -                    }
-      -                }
-      -            }
-      -            // Finalize to vectors
-      -            for ((pop, j), m) in agg_maps {
-      -                let vec_m: Vec<(usize, StateIDBV)> = m.into_iter().collect();
-      -                if let Some(blocks) = per_pop.get_mut(&pop) {
-      -                    if j < blocks.len() {
-      -                        blocks[j] = vec_m;
-      -                    }
-      -                }
-      -            }
-      -            // Build signature
-      -            let mut sig_vec: Vec<(isize, Vec<Vec<(usize, StateIDBV)>>)> = per_pop.into_iter().collect();
-      -            let sig = (ends[u], sig_vec);
-      -            let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
-      +            // 1) Aggregate once per (pop, LLM mask pointer) to dest_class -> SIDs.
-      +            // This removes duplicate work across atoms for the same mask.
-      +            let mut per_bv_aggr: HashMap<(isize, *const RangeSetBlaze<usize>), BTreeMap<usize, StateIDBV>> = HashMap::new();
-      +            for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
-      +                if !atoms_by_pop.contains_key(p) { continue; }
-      +                let dest_class = prev_class[*v_dense];
-      +                let ptr = Arc::as_ptr(&llm_bv.inner);
-      +                per_bv_aggr
-      +                    .entry((*p, ptr))
-      +                    .or_insert_with(BTreeMap::new)
-      +                    .entry(dest_class)
-      +                    .and_modify(|e| *e |= sids)
-      +                    .or_insert_with(|| sids.clone());
-      +            }
-      +
-      +            // 2) Fan out each (pop, mask-pointer) aggregated map to only the atoms it overlaps.
-      +            // Temporary aggregation: (pop, atom_idx) -> BTreeMap<dest_class, SIDs>, sorted for determinism.
-      +            let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
-      +            for ((pop, ptr), dm) in per_bv_aggr {
-      +                if let Some(pop_map) = atom_idxs_by_pop_ptr.get(&pop) {
-      +                    if let Some(atom_idxs) = pop_map.get(&ptr) {
-      +                        for &j in atom_idxs {
-      +                            let entry = per_atom_aggr.entry((pop, j)).or_insert_with(BTreeMap::new);
-      +                            for (dest_class, sids) in &dm {
-      +                                entry.entry(*dest_class)
-      +                                    .and_modify(|e| *e |= sids)
-      +                                    .or_insert_with(|| sids.clone());
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +
-      +            // 3) Build compact signature. We only include non-empty atoms that this node touches.
-      +            let mut sig_entries: Vec<((isize, usize), Vec<(usize, StateIDBV)>)> = Vec::with_capacity(per_atom_aggr.len());
-      +            for (key, m) in per_atom_aggr {
-      +                sig_entries.push((key, m.into_iter().collect()));
-      +            }
-      +            let sig: SigKey = (ends[u], sig_entries);
-      +            let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
-                   new_class[u] = cid;
-                   if new_class[u] != prev_class[u] { changes += 1; }
-               }
-               crate::debug!(3, "Global-atoms merge iter {}: classes={}, changes={}", it + 1, new_class.iter().max().map(|m| m + 1).unwrap_or(0), changes);
-               prev_class = new_class;
+      @@ -382,27 +382,83 @@ pub fn merge_nodes_trie3_global_atoms(
                if changes == 0 { break; }
            }
        
-           // Representatives for final classes
-           let final_partition = prev_class;
-           let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
-           let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
-           for (u_dense, &class_id) in final_partition.iter().enumerate() {
-               if representatives[class_id].is_none() {
-                   representatives[class_id] = Some(old_of[u_dense]);
-               }
-           }
-           let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::with_capacity(n);
-           for (u_dense, &class_id) in final_partition.iter().enumerate() {
-               node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
-           }
+      -    // Representatives for final classes
+      -    let final_partition = prev_class;
+      -    let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
+      -    let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
+      -    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+      -        if representatives[class_id].is_none() {
+      -            representatives[class_id] = Some(old_of[u_dense]);
+      -        }
+      -    }
+      -    let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::with_capacity(n);
+      -    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+      -        node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
+      -    }
+      +    // Representatives for final classes (with root-safe refinement)
+      +    let mut final_partition = prev_class;
+      +
+      +    // Root-safe refinement: if a class contains any internal pop=0 edge, then
+      +    // mapping the entire class to one representative would create a pop=0 self-loop
+      +    // on the representative. If a root maps to that representative, it becomes a
+      +    // root self-loop that cannot be eliminated and will trip cycle checks.
+      +    //
+      +    // Strategy: detect classes that have internal pop=0 edges, and detach every root
+      +    // member of such classes into a fresh singleton class before rewiring.
+      +    let num_classes_before = final_partition.iter().max().map_or(0, |m| m + 1);
+      +    let mut class_has_pop0_internal_edge = vec![false; num_classes_before];
+      +    for (u_dense, edges) in raw_edges.iter().enumerate() {
+      +        for (p, llm_bv, v_dense, sids) in edges {
+      +            if *p == 0 && !llm_bv.is_empty() && !sids.is_empty() {
+      +                let cu = final_partition[u_dense];
+      +                let cv = final_partition[*v_dense];
+      +                if cu == cv {
+      +                    class_has_pop0_internal_edge[cu] = true;
+      +                }
+      +            }
+      +        }
+      +    }
+      +    // Map dense ids that are roots
+      +    let roots_set: HashSet<Trie2Index> = roots.values().cloned().collect();
+      +    let mut is_root_dense = vec![false; n];
+      +    for (i, idx) in old_of.iter().enumerate() {
+      +        if roots_set.contains(idx) {
+      +            is_root_dense[i] = true;
+      +        }
+      +    }
+      +    // Detach roots that would otherwise end up in a class with internal pop=0 edges
+      +    let mut detached_roots = 0usize;
+      +    let mut next_class_id = num_classes_before;
+      +    for u in 0..n {
+      +        let cid = final_partition[u];
+      +        if is_root_dense[u] && class_has_pop0_internal_edge.get(cid).copied().unwrap_or(false) {
+      +            final_partition[u] = next_class_id;
+      +            next_class_id += 1;
+      +            detached_roots += 1;
+      +        }
+      +    }
+      +    if detached_roots > 0 {
+      +        crate::debug!(3, "Global-atoms merge: detached {} root(s) from classes with internal pop=0 edges to avoid root self-loops.", detached_roots);
+      +    }
+      +
+      +    let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
+      +    let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
+      +    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+      +        if representatives[class_id].is_none() {
+      +            representatives[class_id] = Some(old_of[u_dense]);
+      +        }
+      +    }
+      +    let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::with_capacity(n);
+      +    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+      +        node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
+      +    }
        
            // Rewrite all edges in the graph to class representatives
            rewire_all_edges_to_representatives(trie3_god, roots, &node_to_rep);
        
-           // Rebuild representative edges deterministically by aggregating to dest classes and mapping to reps.
-           for class_id in 0..num_classes {
-               if let Some(rep_idx) = representatives[class_id] {
-                   // Use a single exemplar node from the class to rebuild representative edges
-                   let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
-                   // Aggregate by (pop, llm_bv, dest_class) unioning SIDs
-                   let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-                   for (p, llm_bv, v_dense, sids) in &raw_edges[u_dense] {
-                       let dest_class = final_partition[*v_dense];
-                       aggr.entry((*p, llm_bv.clone(), dest_class))
-                           .and_modify(|e| *e |= sids)
-                           .or_insert_with(|| sids.clone());
-                   }
+      -    // Rebuild representative edges deterministically by aggregating to dest classes and mapping to reps.
+      -    for class_id in 0..num_classes {
+      -        if let Some(rep_idx) = representatives[class_id] {
+      -            // Use a single exemplar node from the class to rebuild representative edges
+      -            let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
+      -            // Aggregate by (pop, llm_bv, dest_class) unioning SIDs
+      -            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+      -            for (p, llm_bv, v_dense, sids) in &raw_edges[u_dense] {
+      -                let dest_class = final_partition[*v_dense];
+      -                aggr.entry((*p, llm_bv.clone(), dest_class))
+      -                    .and_modify(|e| *e |= sids)
+      -                    .or_insert_with(|| sids.clone());
+      -            }
+      +    // Rebuild representative edges deterministically by aggregating over ALL members of each class,
+      +    // then mapping destinations to their class representatives.
+      +    // Precompute members per class
+      +    let mut members_by_class: Vec<Vec<usize>> = vec![Vec::new(); num_classes];
+      +    for (u_dense, &cid) in final_partition.iter().enumerate() {
+      +        members_by_class[cid].push(u_dense);
+      +    }
+      +    for class_id in 0..num_classes {
+      +        if let Some(rep_idx) = representatives[class_id] {
+      +            // Aggregate by (pop, llm_bv, dest_class) unioning SIDs over all class members
+      +            let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+      +            for &u_dense in &members_by_class[class_id] {
+      +                for (p, llm_bv, v_dense, sids) in &raw_edges[u_dense] {
+      +                    let dest_class = final_partition[*v_dense];
+      +                    aggr.entry((*p, llm_bv.clone(), dest_class))
+      +                        .and_modify(|e| *e |= sids)
+      +                        .or_insert_with(|| sids.clone());
+      +                }
+      +            }
                    let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
                    for ((p, bv_key, dest_class), sids) in aggr {
                        if let Some(dst_rep) = representatives[dest_class] {
@@ -11911,11 +11932,6 @@ messages:
            for r in roots.values_mut() {
                *r = *node_to_rep.get(r).unwrap();
            }
-           // Cleanup
-           let roots_vec2: Vec<_> = roots.values().cloned().collect();
-           Trie::gc(trie3_god, &roots_vec2);
-           Trie::recompute_all_max_depths(trie3_god, &roots_vec2);
-       }
       ```
     metadata:
   - user: |
@@ -11927,7 +11943,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Perf: Optimize global-atoms bisimulation
-      merge by precomputing atom intersections and using compact signatures."'
+  - user: 'Changes committed with message: "Fix: Prevent pop=0 root self-loops in
+      global-atoms merge by refining partition and aggregating edges"'
     metadata:
 ...
