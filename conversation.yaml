@@ -1440,7 +1440,6 @@ local_system:
                   ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
                   state={tokenizer.initial_state_id(): initial_gss},
               )
-              model._recompute_max_depth()
               model._compute_edge_accelerators()
               # New: per-pop unions and descendant closures for stronger pruning
               model._compute_bucket_unions()
@@ -1448,34 +1447,6 @@ local_system:
               model.optimize_traversal()
               model._compute_and_print_stats()
               return model
-
-          def _recompute_max_depth(self) -> None:
-              """
-              Robustly re-computes max_depth for all nodes. max_depth is the longest path
-              to a clean_end node. This is crucial for the correctness of the bottom-up
-              computation of llm_bv_descendant.
-              """
-              reverse_adj = collections.defaultdict(list)
-              for nid, node in self.arena.items():
-                  for edge in node.children:
-                      for d in edge.dests:
-                          reverse_adj[int(d.dest_idx)].append(nid)
-
-              q = collections.deque()
-              new_max_depth = {nid: -1 for nid in self.arena}
-              for nid, node in self.arena.items():
-                  if node.clean_end:
-                      q.append((nid, 0))
-                      new_max_depth[nid] = 0
-
-              while q:
-                  nid, depth = q.popleft()
-                  for parent_id in reverse_adj.get(nid, []):
-                      if depth + 1 > new_max_depth[parent_id]:
-                          new_max_depth[parent_id] = depth + 1
-                          q.append((parent_id, depth + 1))
-
-              self.max_depth = {nid: max(0, d) for nid, d in new_max_depth.items()}
 
           def _compute_edge_accelerators(self) -> None:
               all_ones = self.all_internal_llm_tokens_bitset
@@ -1799,7 +1770,7 @@ local_system:
               gss_mask: LLMTokenSet,
               depth: int,
               global_pop_cache: Optional[Dict] = None,
-              apply_cache: Optional[Dict] = None,
+              apply_cache: Optional[Dict[Tuple[int, LLMTokenSet], GSS]] = None,
               isolate_cache: Optional[Dict] = None,
           ) -> Generator[Union[Enqueue, Suspend], None, None]:
               stats = Stats.get()
@@ -1815,7 +1786,7 @@ local_system:
               skip_pops: Set[int] = set()
               checked_pops: Set[int] = set()
               # Local per-(popped, llm_bv) apply cache to amortize within this node
-              local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
+              local_apply_cache: Dict[Tuple[int, LLMTokenSet], GSS] = {} if apply_cache is None else apply_cache
 
               for edge_i, edge in enumerate(a_node.children):
                   if edge.pop in skip_pops:
@@ -1964,7 +1935,7 @@ local_system:
 
               # Global caches across the whole traversal
               global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
-              apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
+              apply_cache_by_bv: Dict[Tuple[int, LLMTokenSet], GSS] = {}
               isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
               @dataclass
               class HeapItem:
@@ -6026,81 +5997,55 @@ messages:
       But promising. Fix it without compromising performance.
     metadata:
   - assistant: |-
-      Hello! I've analyzed the functional equivalence issue with the previous optimizations. The problem likely stems from an underestimation of the `llm_bv_descendant` closure, which can happen if the pre-computed `max_depth` values in the input file don't strictly adhere to the property that `max_depth(parent) > max_depth(child)`. This leads to incorrect pruning.
+      Of course. It appears the performance optimizations introduced a subtle correctness issue. The principles behind the optimizations (descendant closure pruning, bucket-level pruning, caching) are sound, but implementation details, especially around cache keys, can easily lead to functional differences.
 
-      To fix this, I'll introduce a robust re-computation of `max_depth` during model loading. I've also identified and corrected two minor issues in the caching logic that could lead to incorrectness or poor performance. These changes will ensure the optimizations are both correct and effective, directly targeting the worst-case performance spikes you're concerned about.
+      The issue likely stems from non-canonical or unsafe cache keys. Using `id()` of objects can be problematic if memory is reused, and using tuples of lists without sorting them makes the key dependent on element order, which may not be guaranteed.
 
-      Here are the step-by-step instructions to apply the fixes:
+      Here is a corrected implementation that makes the cache keys robust, ensuring functional equivalence while retaining the performance benefits.
 
       ### Step-by-step Instructions
 
-      1.  **In `python/aug25/models/precompute3_model_pure_python_opt4.py`, add a new `_recompute_max_depth` method to the `Model` class.**
-          This method will programmatically calculate the correct `max_depth` for each node by finding the longest path from that node to any `clean_end` node. This is done by building a reverse graph of the arena and running a breadth-first search from the end nodes backwards.
+      1.  **File: `python/aug25/models/precompute3_model_pure_python_opt4.py`**
 
-      2.  **Call this new method from `Model.from_json_string`.**
-          Immediately after the `Model` instance is created, call `model._recompute_max_depth()` to replace the potentially unreliable `max_depth` loaded from the file with the newly computed correct values. This must be done before the descendant closure is computed.
+          a.  In the `_process_internal_node_gen` method signature, update the type hint for the `apply_cache` parameter to reflect that the cache key will use a `LLMTokenSet` object, not an integer `id`.
 
-      3.  **Correct the `apply_and_prune` cache key.**
-          In `_process_internal_node_gen`, find the line that defines `key_apply`. Change it from `(id(popped), id(edge.llm_bv))` to `(id(popped), edge.llm_bv)`. Using the `RangeSet` object directly is safer and correct because it is hashable.
+          b.  Inside `_process_internal_node_gen`, correct the type hint for the `local_apply_cache` variable to match the new key structure.
 
-      4.  **Correct the `isolate_many` cache key.**
-          In `_process_internal_node_gen`, find the line that defines `key_isolate`. Change it from `(id(source_after_apply), tuple(values_to_keep))` to `(id(source_after_apply), tuple(sorted(values_to_keep)))`. Sorting the list of states makes the key canonical, which is necessary for the cache to work correctly and achieve a high hit rate.
+          c.  Still inside `_process_internal_node_gen`, modify the creation of `key_apply`. Instead of using `id(edge.llm_bv)`, use the `edge.llm_bv` object itself, as `RangeSet` is hashable and this is safer than relying on object IDs.
 
-      ---
+          d.  Further down in `_process_internal_node_gen`, modify the creation of `key_isolate`. Wrap `values_to_keep` in `sorted()` before converting to a tuple. This creates a canonical cache key for the set of states, making the cache behavior independent of the order in which states were collected.
+
+          e.  Finally, in the `get_mask` method, update the type hint for the `apply_cache_by_bv` dictionary to match the change made to its key structure.
+
+      These changes ensure that the caching mechanisms are robust and do not alter the logic of the traversal, restoring functional equivalence.
 
       ### Git Diffs
 
-      Here is the git diff to apply these changes:
+      Here is the git diff to apply the fixes.
 
       ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python_opt4.py b/python/aug25/models/precompute3_model_pure_python_opt4.py
       --- a/python/aug25/models/precompute3_model_pure_python_opt4.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt4.py
-      @@ -483,12 +483,39 @@
-                   ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
-                   state={tokenizer.initial_state_id(): initial_gss},
-               )
-      +        model._recompute_max_depth()
-               model._compute_edge_accelerators()
-               # New: per-pop unions and descendant closures for stronger pruning
-               model._compute_bucket_unions()
-               model._compute_descendant_llm_closure()
-               model.optimize_traversal()
-               model._compute_and_print_stats()
-               return model
+      @@ -806,7 +806,7 @@
+               remaining_mask: LLMTokenSet,
+               gss_mask: LLMTokenSet,
+               depth: int,
+               global_pop_cache: Optional[Dict] = None,
+      -        apply_cache: Optional[Dict] = None,
+      +        apply_cache: Optional[Dict[Tuple[int, LLMTokenSet], GSS]] = None,
+               isolate_cache: Optional[Dict] = None,
+           ) -> Generator[Union[Enqueue, Suspend], None, None]:
+               stats = Stats.get()
+      @@ -819,7 +819,7 @@
+               skip_pops: Set[int] = set()
+               checked_pops: Set[int] = set()
+               # Local per-(popped, llm_bv) apply cache to amortize within this node
+      -        local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
+      +        local_apply_cache: Dict[Tuple[int, LLMTokenSet], GSS] = {} if apply_cache is None else apply_cache
        
-      +    def _recompute_max_depth(self) -> None:
-      +        """
-      +        Robustly re-computes max_depth for all nodes. max_depth is the longest path
-      +        to a clean_end node. This is crucial for the correctness of the bottom-up
-      +        computation of llm_bv_descendant.
-      +        """
-      +        reverse_adj = collections.defaultdict(list)
-      +        for nid, node in self.arena.items():
-      +            for edge in node.children:
-      +                for d in edge.dests:
-      +                    reverse_adj[int(d.dest_idx)].append(nid)
-      +
-      +        q = collections.deque()
-      +        new_max_depth = {nid: -1 for nid in self.arena}
-      +        for nid, node in self.arena.items():
-      +            if node.clean_end:
-      +                q.append((nid, 0))
-      +                new_max_depth[nid] = 0
-      +
-      +        while q:
-      +            nid, depth = q.popleft()
-      +            for parent_id in reverse_adj.get(nid, []):
-      +                if depth + 1 > new_max_depth[parent_id]:
-      +                    new_max_depth[parent_id] = depth + 1
-      +                    q.append((parent_id, depth + 1))
-      +
-      +        self.max_depth = {nid: max(0, d) for nid, d in new_max_depth.items()}
-      +
-           def _compute_edge_accelerators(self) -> None:
-               all_ones = self.all_internal_llm_tokens_bitset
-               for node in self.arena.values():
-      @@ -891,7 +918,7 @@
+               for edge_i, edge in enumerate(a_node.children):
+                   if edge.pop in skip_pops:
+      @@ -886,7 +886,7 @@
                    if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
                        if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
                            continue
@@ -6109,7 +6054,7 @@ messages:
                        cached_apply = local_apply_cache.get(key_apply)
                        if cached_apply is not None:
                            source_after_apply = cached_apply
-      @@ -934,7 +961,7 @@
+      @@ -928,7 +928,7 @@
                            child_gss = source_after_apply
                        else:
                            # Global/local cache for isolate_many
@@ -6118,6 +6063,15 @@ messages:
                            if isolate_cache is not None and key_isolate in isolate_cache:
                                stats.inc('get_mask.isolate_many.cache_hits')
                                child_gss = isolate_cache[key_isolate]
+      @@ -952,8 +952,8 @@
+       
+               # Global caches across the whole traversal
+               global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
+      -        apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
+      +        apply_cache_by_bv: Dict[Tuple[int, LLMTokenSet], GSS] = {}
+               isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
+               @dataclass
+               class HeapItem:
 
       ```
     metadata:
@@ -6130,7 +6084,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4.py.
     metadata:
-  - user: 'Changes committed with message: "Fix functional equivalence in get_mask
-      optimizations by recomputing max_depth and canonicalizing cache keys"'
+  - user: 'Changes committed with message: "Fix functional mismatch in get_mask by
+      making cache keys robust for apply and isolate caches"'
     metadata:
 ...
