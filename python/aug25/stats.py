@@ -48,6 +48,9 @@ class Stats:
         # Optional group prefixes (strings).
         self.groups = set()
 
+        # Flag to control printing of the 'All Stats' table (default: False)
+        self.show_all_stats = False
+
     @staticmethod
     def get():
         """Get the singleton instance."""
@@ -61,6 +64,7 @@ class Stats:
         self.durations.clear()
         self.timers.clear()
         self.key_positions.clear()
+        self.show_all_stats = False
 
     def inc(self, key: str, value: int = 1):
         """Increment a counter."""
@@ -132,6 +136,11 @@ class Stats:
         """Clear configured groups."""
         self.groups.clear()
 
+    # -------- Reporting Configuration --------
+    def set_show_all_stats(self, value: bool):
+        """Set whether to include the 'All Stats' table in the report."""
+        self.show_all_stats = value
+
     # -------- Reporting --------
 
     def report(self):
@@ -146,44 +155,45 @@ class Stats:
         stats_headers = ("key", "hits", "total_ms", "mean_ms", "stdev_ms", "min_ms", "p50_ms", "p95_ms", "max_ms")
         stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
         stats_rows = []
-        all_keys = self.counts.keys() | self.durations.keys()
-        if all_keys:
-            sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
-            for key in sorted_keys:
-                # 'hits' is timer hits if available, otherwise counter value.
-                hits = None
-                if key in self.durations:
-                    hits = len(self.durations[key])
+        if self.show_all_stats:
+            all_keys = self.counts.keys() | self.durations.keys()
+            if all_keys:
+                sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
+                for key in sorted_keys:
+                    # 'hits' is timer hits if available, otherwise counter value.
+                    hits = None
+                    if key in self.durations:
+                        hits = len(self.durations[key])
 
-                if hits is None:
-                    hits = self.counts.get(key)
+                    if hits is None:
+                        hits = self.counts.get(key)
 
-                if key in self.durations:
-                    durs_ms = [d * 1000.0 for d in self.durations[key]]
-                    if not durs_ms:
-                        stats_rows.append((key, 0, 0.0, None, None, None, None, None, None))
-                        continue
+                    if key in self.durations:
+                        durs_ms = [d * 1000.0 for d in self.durations[key]]
+                        if not durs_ms:
+                            stats_rows.append((key, 0, 0.0, None, None, None, None, None, None))
+                            continue
 
-                    total_ms = sum(durs_ms)
-                    mean_ms = statistics.mean(durs_ms)
-                    min_ms = min(durs_ms)
-                    max_ms = max(durs_ms)
-                    if len(durs_ms) > 1:
-                        stdev_ms = statistics.stdev(durs_ms)
-                        # Use median for p50, more robust for even-sized lists
-                        p50_ms = statistics.median(durs_ms)
-                        # quantiles() is new in 3.8. It splits data into n+1 intervals.
-                        # For percentiles (n=100), it gives 99 points. p95 is index 94.
-                        qs = statistics.quantiles(durs_ms, n=100)
-                        p95_ms = qs[94]
+                        total_ms = sum(durs_ms)
+                        mean_ms = statistics.mean(durs_ms)
+                        min_ms = min(durs_ms)
+                        max_ms = max(durs_ms)
+                        if len(durs_ms) > 1:
+                            stdev_ms = statistics.stdev(durs_ms)
+                            # Use median for p50, more robust for even-sized lists
+                            p50_ms = statistics.median(durs_ms)
+                            # quantiles() is new in 3.8. It splits data into n+1 intervals.
+                            # For percentiles (n=100), it gives 99 points. p95 is index 94.
+                            qs = statistics.quantiles(durs_ms, n=100)
+                            p95_ms = qs[94]
+                        else:
+                            stdev_ms = 0.0
+                            p50_ms = mean_ms
+                            p95_ms = mean_ms
+                        stats_rows.append((key, hits, total_ms, mean_ms, stdev_ms, min_ms, p50_ms, p95_ms, max_ms))
                     else:
-                        stdev_ms = 0.0
-                        p50_ms = mean_ms
-                        p95_ms = mean_ms
-                    stats_rows.append((key, hits, total_ms, mean_ms, stdev_ms, min_ms, p50_ms, p95_ms, max_ms))
-                else:
-                    # It's a counter-only key
-                    stats_rows.append((key, hits, None, None, None, None, None, None, None))
+                        # It's a counter-only key
+                        stats_rows.append((key, hits, None, None, None, None, None, None, None))
 
         # 2. Prepare Groups data
         groups_data = []
@@ -287,7 +297,7 @@ class Stats:
 
         print("\n═══ Performance Stats ═══")
 
-        if stats_rows:
+        if self.show_all_stats and stats_rows:
             print("\n▶ All Stats")
             self._print_table(headers=stats_headers, rows=stats_rows, formats=stats_formats, indent="  ", widths=max_widths)
 

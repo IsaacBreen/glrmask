@@ -471,6 +471,9 @@ local_system:
               # Optional group prefixes (strings).
               self.groups = set()
 
+              # Flag to control printing of the 'All Stats' table (default: False)
+              self.show_all_stats = False
+
           @staticmethod
           def get():
               """Get the singleton instance."""
@@ -484,6 +487,7 @@ local_system:
               self.durations.clear()
               self.timers.clear()
               self.key_positions.clear()
+              self.show_all_stats = False
 
           def inc(self, key: str, value: int = 1):
               """Increment a counter."""
@@ -555,6 +559,11 @@ local_system:
               """Clear configured groups."""
               self.groups.clear()
 
+          # -------- Reporting Configuration --------
+          def set_show_all_stats(self, value: bool):
+              """Set whether to include the 'All Stats' table in the report."""
+              self.show_all_stats = value
+
           # -------- Reporting --------
 
           def report(self):
@@ -569,44 +578,45 @@ local_system:
               stats_headers = ("key", "hits", "total_ms", "mean_ms", "stdev_ms", "min_ms", "p50_ms", "p95_ms", "max_ms")
               stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
               stats_rows = []
-              all_keys = self.counts.keys() | self.durations.keys()
-              if all_keys:
-                  sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
-                  for key in sorted_keys:
-                      # 'hits' is timer hits if available, otherwise counter value.
-                      hits = None
-                      if key in self.durations:
-                          hits = len(self.durations[key])
+              if self.show_all_stats:
+                  all_keys = self.counts.keys() | self.durations.keys()
+                  if all_keys:
+                      sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
+                      for key in sorted_keys:
+                          # 'hits' is timer hits if available, otherwise counter value.
+                          hits = None
+                          if key in self.durations:
+                              hits = len(self.durations[key])
 
-                      if hits is None:
-                          hits = self.counts.get(key)
+                          if hits is None:
+                              hits = self.counts.get(key)
 
-                      if key in self.durations:
-                          durs_ms = [d * 1000.0 for d in self.durations[key]]
-                          if not durs_ms:
-                              stats_rows.append((key, 0, 0.0, None, None, None, None, None, None))
-                              continue
+                          if key in self.durations:
+                              durs_ms = [d * 1000.0 for d in self.durations[key]]
+                              if not durs_ms:
+                                  stats_rows.append((key, 0, 0.0, None, None, None, None, None, None))
+                                  continue
 
-                          total_ms = sum(durs_ms)
-                          mean_ms = statistics.mean(durs_ms)
-                          min_ms = min(durs_ms)
-                          max_ms = max(durs_ms)
-                          if len(durs_ms) > 1:
-                              stdev_ms = statistics.stdev(durs_ms)
-                              # Use median for p50, more robust for even-sized lists
-                              p50_ms = statistics.median(durs_ms)
-                              # quantiles() is new in 3.8. It splits data into n+1 intervals.
-                              # For percentiles (n=100), it gives 99 points. p95 is index 94.
-                              qs = statistics.quantiles(durs_ms, n=100)
-                              p95_ms = qs[94]
+                              total_ms = sum(durs_ms)
+                              mean_ms = statistics.mean(durs_ms)
+                              min_ms = min(durs_ms)
+                              max_ms = max(durs_ms)
+                              if len(durs_ms) > 1:
+                                  stdev_ms = statistics.stdev(durs_ms)
+                                  # Use median for p50, more robust for even-sized lists
+                                  p50_ms = statistics.median(durs_ms)
+                                  # quantiles() is new in 3.8. It splits data into n+1 intervals.
+                                  # For percentiles (n=100), it gives 99 points. p95 is index 94.
+                                  qs = statistics.quantiles(durs_ms, n=100)
+                                  p95_ms = qs[94]
+                              else:
+                                  stdev_ms = 0.0
+                                  p50_ms = mean_ms
+                                  p95_ms = mean_ms
+                              stats_rows.append((key, hits, total_ms, mean_ms, stdev_ms, min_ms, p50_ms, p95_ms, max_ms))
                           else:
-                              stdev_ms = 0.0
-                              p50_ms = mean_ms
-                              p95_ms = mean_ms
-                          stats_rows.append((key, hits, total_ms, mean_ms, stdev_ms, min_ms, p50_ms, p95_ms, max_ms))
-                      else:
-                          # It's a counter-only key
-                          stats_rows.append((key, hits, None, None, None, None, None, None, None))
+                              # It's a counter-only key
+                              stats_rows.append((key, hits, None, None, None, None, None, None, None))
 
               # 2. Prepare Groups data
               groups_data = []
@@ -710,7 +720,7 @@ local_system:
 
               print("\n═══ Performance Stats ═══")
 
-              if stats_rows:
+              if self.show_all_stats and stats_rows:
                   print("\n▶ All Stats")
                   self._print_table(headers=stats_headers, rows=stats_rows, formats=stats_formats, indent="  ", widths=max_widths)
 
@@ -1718,5 +1728,177 @@ messages:
     metadata:
   - user: "Changes committed with message: \"Add 'times' @property for backwards compatibility
       with previous total duration tracking\""
+    metadata:
+  - user: |-
+      Diff of python/aug25/stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Make it so that only groups are shown, not 'all stats' configurable via
+      a flag which disables all stats by default.
+    metadata:
+  - assistant: |-
+      This modification introduces a configuration flag, `show_all_stats`, to control whether the "All Stats" table is included in the report. By default, this flag is set to `False`, meaning only the "Groups" section will be shown unless explicitly enabled.
+
+      ### Step-by-step instructions
+
+      1.  **In `python/aug25/stats.py`, update `Stats.__init__`:**
+          Add `self.show_all_stats = False` to the end of the `__init__` method to disable the "All Stats" table by default.
+
+      2.  **In `python/aug25/stats.py`, update `Stats.reset`:**
+          Add `self.show_all_stats = False` to the `reset` method to ensure the default is restored when stats are cleared.
+
+      3.  **In `python/aug25/stats.py`, add `Stats.set_show_all_stats`:**
+          Add a new method `set_show_all_stats` after `clear_groups` to allow users to enable the "All Stats" table.
+
+      4.  **In `python/aug25/stats.py`, update `Stats.report` (Data Preparation Phase):**
+          Wrap the logic for preparing `stats_rows` (section "1. Prepare combined stats data") with a check for `if self.show_all_stats:`. This prevents unnecessary data preparation when the table is disabled.
+
+      5.  **In `python/aug25/stats.py`, update `Stats.report` (Printing Phase):**
+          Wrap the printing of the "All Stats" table with a check for `if self.show_all_stats and stats_rows:`.
+
+      ### Git Diff
+
+      ```diff
+      --- a/python/aug25/stats.py
+      +++ b/python/aug25/stats.py
+      @@ -45,6 +45,9 @@
+       
+               # Optional group prefixes (strings).
+               self.groups = set()
+      +
+      +        # Flag to control printing of the 'All Stats' table (default: False)
+      +        self.show_all_stats = False
+       
+           @staticmethod
+           def get():
+      @@ -56,6 +59,7 @@
+               self.durations.clear()
+               self.timers.clear()
+               self.key_positions.clear()
+      +        self.show_all_stats = False
+       
+           def inc(self, key: str, value: int = 1):
+               """Increment a counter."""
+      @@ -118,6 +122,11 @@
+           def clear_groups(self):
+               """Clear configured groups."""
+               self.groups.clear()
+      +
+      +    # -------- Reporting Configuration --------
+      +    def set_show_all_stats(self, value: bool):
+      +        """Set whether to include the 'All Stats' table in the report."""
+      +        self.show_all_stats = value
+       
+           # -------- Reporting --------
+       
+      @@ -130,50 +139,51 @@
+               # 1. Prepare combined stats data  
+               stats_headers = ("key", "hits", "total_ms", "mean_ms", "stdev_ms", "min_ms", "p50_ms", "p95_ms", "max_ms")
+               stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+               stats_rows = []
+      -        all_keys = self.counts.keys() | self.durations.keys()
+      -        if all_keys:
+      -            sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
+      -            for key in sorted_keys:
+      -                # 'hits' is timer hits if available, otherwise counter value.
+      -                hits = None
+      -                if key in self.durations:
+      -                    hits = len(self.durations[key])
+      -
+      -                if hits is None:
+      -                    hits = self.counts.get(key)
+      -
+      -                if key in self.durations:
+      -                    durs_ms = [d * 1000.0 for d in self.durations[key]]
+      -                    if not durs_ms:
+      -                        stats_rows.append((key, 0, 0.0, None, None, None, None, None, None))
+      -                        continue
+      -
+      -                    total_ms = sum(durs_ms)
+      -                    mean_ms = statistics.mean(durs_ms)
+      -                    min_ms = min(durs_ms)
+      -                    max_ms = max(durs_ms)
+      -                    if len(durs_ms) > 1:
+      -                        stdev_ms = statistics.stdev(durs_ms)
+      -                        # Use median for p50, more robust for even-sized lists
+      -                        p50_ms = statistics.median(durs_ms)
+      -                        # quantiles() is new in 3.8. It splits data into n+1 intervals.
+      -                        # For percentiles (n=100), it gives 99 points. p95 is index 94.
+      -                        qs = statistics.quantiles(durs_ms, n=100)
+      -                        p95_ms = qs[94]
+      -                    else:
+      -                        stdev_ms = 0.0
+      -                        p50_ms = mean_ms
+      -                        p95_ms = mean_ms
+      -                    stats_rows.append((key, hits, total_ms, mean_ms, stdev_ms, min_ms, p50_ms, p95_ms, max_ms))
+      -                else:
+      -                    # It's a counter-only key
+      -                    stats_rows.append((key, hits, None, None, None, None, None, None, None))
+      +        if self.show_all_stats:
+      +            all_keys = self.counts.keys() | self.durations.keys()
+      +            if all_keys:
+      +                sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
+      +                for key in sorted_keys:
+      +                    # 'hits' is timer hits if available, otherwise counter value.
+      +                    hits = None
+      +                    if key in self.durations:
+      +                        hits = len(self.durations[key])
+      +
+      +                    if hits is None:
+      +                        hits = self.counts.get(key)
+      +
+      +                    if key in self.durations:
+      +                        durs_ms = [d * 1000.0 for d in self.durations[key]]
+      +                        if not durs_ms:
+      +                            stats_rows.append((key, 0, 0.0, None, None, None, None, None, None))
+      +                            continue
+      +
+      +                        total_ms = sum(durs_ms)
+      +                        mean_ms = statistics.mean(durs_ms)
+      +                        min_ms = min(durs_ms)
+      +                        max_ms = max(durs_ms)
+      +                        if len(durs_ms) > 1:
+      +                            stdev_ms = statistics.stdev(durs_ms)
+      +                            # Use median for p50, more robust for even-sized lists
+      +                            p50_ms = statistics.median(durs_ms)
+      +                            # quantiles() is new in 3.8. It splits data into n+1 intervals.
+      +                            # For percentiles (n=100), it gives 99 points. p95 is index 94.
+      +                            qs = statistics.quantiles(durs_ms, n=100)
+      +                            p95_ms = qs[94]
+      +                        else:
+      +                            stdev_ms = 0.0
+      +                            p50_ms = mean_ms
+      +                            p95_ms = mean_ms
+      +                        stats_rows.append((key, hits, total_ms, mean_ms, stdev_ms, min_ms, p50_ms, p95_ms, max_ms))
+      +                    else:
+      +                        # It's a counter-only key
+      +                        stats_rows.append((key, hits, None, None, None, None, None, None, None))
+       
+               # 2. Prepare Groups data
+               groups_data = []
+      @@ -286,7 +296,7 @@
+       
+               print("\n═══ Performance Stats ═══")
+       
+      -        if stats_rows:
+      +        if self.show_all_stats and stats_rows:
+                   print("\n▶ All Stats")
+                   self._print_table(headers=stats_headers, rows=stats_rows, formats=stats_formats, indent="  ", widths=max_widths)
+       
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/stats.py
+      Applying patch to 'python/aug25/stats.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/stats.py.
+    metadata:
+  - user: "Changes committed with message: \"Make 'All Stats' table optional in report,
+      defaulting to disabled via 'show_all_stats' flag\""
     metadata:
 ...
