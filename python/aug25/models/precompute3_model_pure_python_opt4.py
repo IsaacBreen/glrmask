@@ -802,6 +802,8 @@ class Model(GraphProvider):
         global_pop_cache: Optional[Dict] = None,
         apply_cache: Optional[Dict] = None,
         isolate_cache: Optional[Dict] = None,
+        edge_order_override_map: Optional[Dict[int, List[int]]] = None,
+        dest_scores: Optional[Dict[int, int]] = None,
     ) -> Generator[Union[Enqueue, Suspend], None, None]:
         stats = Stats.get()
         a_node = self.arena.get(node_id)
@@ -818,7 +820,16 @@ class Model(GraphProvider):
         # Local per-(popped, llm_bv) apply cache to amortize within this node
         local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
 
-        for edge_i, edge in enumerate(a_node.children):
+        edge_iterator = None
+        ordered_indices = edge_order_override_map.get(node_id) if edge_order_override_map else None
+        if ordered_indices:
+            # Oracle-guided order. We still need to iterate non-guided edges if any.
+            all_indices = set(range(len(a_node.children)))
+            other_indices = sorted(list(all_indices - set(ordered_indices)))
+            edge_iterator = ((i, a_node.children[i]) for i in ordered_indices + other_indices)
+        else:
+            edge_iterator = enumerate(a_node.children)
+        for edge_i, edge in edge_iterator:
             if edge.pop in skip_pops:
                 continue
             if edge.llm_bv.isdisjoint(remaining_mask):
@@ -923,8 +934,14 @@ class Model(GraphProvider):
                     if lst is None: grouped[dest_j] = [sid]
                     else: lst.append(sid)
 
-            # Iterate grouped dests in ascending order for locality
-            for dest_j in sorted(grouped.keys()):
+            dest_keys = list(grouped.keys())
+            if dest_scores:
+                # Sort by destination node score (desc), then by original index (asc) for stability
+                dest_keys.sort(key=lambda j: (-dest_scores.get(int(edge.dests[j].dest_idx), 0), j))
+            else:
+                # Iterate grouped dests in ascending order for locality
+                dest_keys.sort()
+            for dest_j in dest_keys:
                 if dests_proc >= max_dests:
                     priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
                     yield Suspend(priority, depth)
