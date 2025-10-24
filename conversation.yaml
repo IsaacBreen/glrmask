@@ -12417,7 +12417,7 @@ local_system:
       import json
       import sys
       from pathlib import Path
-      from typing import Dict, Any, List, Set
+      from typing import Dict, Any, List, Set, Optional
 
       try:
           import graphviz
@@ -12458,6 +12458,7 @@ local_system:
           max_depth: int,
           file_format: str,
           rankdir: str,
+          splines: str,
           selected_roots: Optional[List[int]] = None,
       ):
           """
@@ -12501,7 +12502,7 @@ local_system:
           dot.attr(
               'graph',
               rankdir=rankdir,
-              splines='ortho',
+              splines=splines,
               nodesep='0.6',
               ranksep='1.2',
               label=f"Trie from {constraint_path.name}\\n(max_depth={max_depth})",
@@ -12663,6 +12664,13 @@ local_system:
               default=None,
               help="Comma-separated list of root node IDs to display. If not set, all roots are shown."
           )
+          parser.add_argument(
+              "--splines",
+              type=str,
+              default='curved',
+              choices=['curved', 'line', 'ortho', 'polyline', 'spline'],
+              help="Graphviz spline type for edge routing. 'curved' is more stable. (default: curved)"
+          )
           args = parser.parse_args()
 
           if not args.constraint_file.exists():
@@ -12689,6 +12697,7 @@ local_system:
               max_depth=args.max_depth,
               file_format=args.format,
               rankdir=args.rankdir,
+              splines=args.splines,
               selected_roots=selected_roots,
           )
 
@@ -19491,5 +19500,230 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Visualize: Add --roots argument to select
       which graph roots to display"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/common_interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/create_additional_benchmark_plots.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/equality.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimization_coordinator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimizer_general.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/reduce_constraint.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/visualize_constraint.py since previous turn:
+      ```diff
+      --- original version of python/aug25/visualize_constraint.py
+      +++ current version of python/aug25/visualize_constraint.py
+      @@ -22,7 +22,7 @@
+       import json
+       import sys
+       from pathlib import Path
+      -from typing import Dict, Any, List, Set
+      +from typing import Dict, Any, List, Set, Optional
+       
+       try:
+           import graphviz
+
+      ```
+    metadata:
+  - user: |-
+      python python/aug25/visualize_constraint.py -f .cache/test_vocabs/js_constraint2.json.gz -d 1 --format svg --roots 0
+      Loading constraint file: .cache/test_vocabs/js_constraint2.json.gz
+      Loaded 38691 nodes from trie.
+      Found 165 total root nodes and 1 end nodes.
+      Displaying selected roots: [0]
+      Traversing graph to build visualization...
+      Nodes processed:  50%|██████████████████████████████████████████████████████████████████████████                                                                          | 12190/24379 [00:00<00:00, 13229.81it/s]
+
+      Rendering graph to js_constraint2.svg (format: svg)...
+      Warning: Orthogonal edges do not currently handle edge labels. Try using xlabels.
+      An error occurred during rendering: Command '[PosixPath('dot'), '-Kdot', '-Tsvg', '-O', 'js_constraint2']' died with <Signals.SIGSEGV: 11>. [stderr: b'Warning: Orthogonal edges do not currently handle edge labels. Try using xlabels.\n']
+    metadata:
+  - assistant: |-
+      It looks like you're running into a segmentation fault within the Graphviz `dot` command itself. This often happens with very large or complex graphs, and the warning `Orthogonal edges do not currently handle edge labels` is a strong clue. The `ortho` spline type can be unstable with edge labels.
+
+      Let's switch the default edge style to `curved`, which is more robust, and add an option to control it from the command line.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `python/aug25/visualize_constraint.py`.**
+
+      2.  **Update the `visualize_constraint` function signature** to accept a `splines` argument.
+          Change this line:
+          ```python
+          def visualize_constraint(
+              constraint_path: Path,
+              output_path: Path,
+              max_depth: int,
+              file_format: str,
+              rankdir: str,
+              selected_roots: Optional[List[int]] = None,
+          ):
+          ```
+          to this:
+          ```python
+          def visualize_constraint(
+              constraint_path: Path,
+              output_path: Path,
+              max_depth: int,
+              file_format: str,
+              rankdir: str,
+              splines: str,
+              selected_roots: Optional[List[int]] = None,
+          ):
+          ```
+
+      3.  **Modify the graph attributes** inside `visualize_constraint` to use the new `splines` parameter.
+          Change this line:
+          ```python
+          splines='ortho',
+          ```
+          to:
+          ```python
+          splines=splines,
+          ```
+
+      4.  **In the `main` function, add the `--splines` command-line argument.** Insert the following code just before the `args = parser.parse_args()` line:
+          ```python
+          parser.add_argument(
+              "--splines",
+              type=str,
+              default='curved',
+              choices=['curved', 'line', 'ortho', 'polyline', 'spline'],
+              help="Graphviz spline type for edge routing. 'curved' is more stable. (default: curved)"
+          )
+          ```
+
+      5.  **Finally, update the call to `visualize_constraint` in `main`** to pass the new argument.
+          Change this line:
+          ```python
+          rankdir=args.rankdir,
+          selected_roots=selected_roots,
+          ```
+          to:
+          ```python
+          rankdir=args.rankdir,
+          splines=args.splines,
+          selected_roots=selected_roots,
+          ```
+
+      ### Git Diff
+
+      Here is the git diff reflecting the changes described above.
+
+      ```diff
+      --- a/python/aug25/visualize_constraint.py
+      +++ b/python/aug25/visualize_constraint.py
+      @@ -64,6 +64,7 @@
+           max_depth: int,
+           file_format: str,
+           rankdir: str,
+      +    splines: str,
+           selected_roots: Optional[List[int]] = None,
+       ):
+           """
+      @@ -97,7 +98,7 @@
+           dot.attr(
+               'graph',
+               rankdir=rankdir,
+      -        splines='ortho',
+      +        splines=splines,
+               nodesep='0.6',
+               ranksep='1.2',
+               label=f"Trie from {constraint_path.name}\\n(max_depth={max_depth})",
+      @@ -222,6 +223,13 @@
+               default=None,
+               help="Comma-separated list of root node IDs to display. If not set, all roots are shown."
+           )
+      +    parser.add_argument(
+      +        "--splines",
+      +        type=str,
+      +        default='curved',
+      +        choices=['curved', 'line', 'ortho', 'polyline', 'spline'],
+      +        help="Graphviz spline type for edge routing. 'curved' is more stable. (default: curved)"
+      +    )
+           args = parser.parse_args()
+       
+           if not args.constraint_file.exists():
+      @@ -246,6 +254,7 @@
+               max_depth=args.max_depth,
+               file_format=args.format,
+               rankdir=args.rankdir,
+      +        splines=args.splines,
+               selected_roots=selected_roots,
+           )
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/visualize_constraint.py
+      Applying patch to 'python/aug25/visualize_constraint.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/visualize_constraint.py.
+    metadata:
+  - user: 'Changes committed with message: "Visualize: Add --splines argument to control
+      edge routing and fix SIGSEGV"'
     metadata:
 ...

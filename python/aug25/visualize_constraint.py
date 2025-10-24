@@ -63,6 +63,7 @@ def visualize_constraint(
     max_depth: int,
     file_format: str,
     rankdir: str,
+    splines: str,
     selected_roots: Optional[List[int]] = None,
 ):
     """
@@ -106,7 +107,7 @@ def visualize_constraint(
     dot.attr(
         'graph',
         rankdir=rankdir,
-        splines='ortho',
+        splines=splines,
         nodesep='0.6',
         ranksep='1.2',
         label=f"Trie from {constraint_path.name}\\n(max_depth={max_depth})",
@@ -268,6 +269,13 @@ def main():
         default=None,
         help="Comma-separated list of root node IDs to display. If not set, all roots are shown."
     )
+    parser.add_argument(
+        "--splines",
+        type=str,
+        default='curved',
+        choices=['curved', 'line', 'ortho', 'polyline', 'spline'],
+        help="Graphviz spline type for edge routing. 'curved' is more stable. (default: curved)"
+    )
     args = parser.parse_args()
 
     if not args.constraint_file.exists():
@@ -294,6 +302,7 @@ def main():
         max_depth=args.max_depth,
         file_format=args.format,
         rankdir=args.rankdir,
+        splines=args.splines,
         selected_roots=selected_roots,
     )
 
