@@ -1146,57 +1146,6 @@ class Model(GraphProvider):
                 edge_order_map[int(u)] = [idx for (idx, _) in weighted]
         return scores, edge_order_map
 
-    def _oracle_build_guidance_advanced(
-        self,
-        plan: Dict,
-        reward_masks: Dict[int, LLMTokenSet],
-        target_mask: LLMTokenSet,
-        jitter: int = 0,
-    ) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
-        """Target-aware guidance.
-        - Node scores ~ (reward tokens at node)/(estimated node cost).
-        - Edge order per node is by the sum of reward tokens at child destinations.
-        - Optional jitter adds small random noise to break ties differently across trials.
-        """
-        node_costs_raw: Dict[int, Dict[str, int]] = {int(k): v for k, v in plan.get('node_costs', {}).items()}
-        def node_cost(u: int) -> float:
-            c = node_costs_raw.get(int(u), {"edges": 0, "apply": 0, "isolate": 0})
-            return float(c.get("edges", 0)) + self.oracle_apply_weight * float(c.get("apply", 0)) + self.oracle_isolate_weight * float(c.get("isolate", 0)) + 1.0
-
-        scores: Dict[int, int] = {}
-        # Node scores: tokens per cost (scaled)
-        for u, m in reward_masks.items():
-            if m is None or m.is_empty():
-                continue
-            tok = len(m.intersection(target_mask))
-            if tok <= 0:
-                continue
-            base = int(1000.0 * float(tok) / node_cost(int(u)))
-            if jitter > 0:
-                base += random.randint(0, int(jitter))
-            if base > 0:
-                scores[int(u)] = base
-
-        # Edge ordering: by sum of child reward tokens (intersected with target)
-        edge_order_map: Dict[int, List[int]] = {}
-        for u, node in self.arena.items():
-            if not node.children:
-                continue
-            weighted: List[Tuple[int, int]] = []
-            for idx, edge in enumerate(node.children):
-                s = 0
-                for d in edge.dests:
-                    cm = reward_masks.get(int(d.dest_idx))
-                    if cm is not None and not cm.is_empty():
-                        s += int(len(cm.intersection(target_mask)))
-                if jitter > 0 and s > 0:
-                    s += random.randint(0, int(jitter))
-                weighted.append((idx, s))
-            if any(w > 0 for _, w in weighted):
-                weighted.sort(key=lambda t: t[1], reverse=True)
-                edge_order_map[int(u)] = [idx for (idx, _) in weighted]
-        return scores, edge_order_map
-
     def _oracle_compute_reward_masks_from_end_masks(self, end_masks: Dict[int, LLMTokenSet]) -> Dict[int, LLMTokenSet]:
         """Exact reward propagation: seed end nodes with their exact end masks (union across all visits),
         then propagate upstream via edge.llm_bv intersections until a fixed point.
@@ -1911,10 +1860,10 @@ class Model(GraphProvider):
                     stats.start('get_mask.main_loop.end_node.final_mask_union')
                     final_mask |= gss_acc.llm_mask
                     stats.stop('get_mask.main_loop.end_node.final_mask_union')
-                        remaining_mask = all_ones.difference(final_mask)
-                        if remaining_mask.is_empty():
-                            stats.inc('get_mask.early_exit_full_mask')
-                            break
+                    remaining_mask = all_ones.difference(final_mask)
+                    if remaining_mask.is_empty():
+                        stats.inc('get_mask.early_exit_full_mask')
+                        break
 
                 a_node = self.arena.get(node_id)
                 # Stronger upper bound than llm_bv_union: descendant closure
