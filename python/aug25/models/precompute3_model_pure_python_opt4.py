@@ -1109,7 +1109,7 @@ class Model(GraphProvider):
                 edge_order_map[int(u)] = [idx for (idx, _) in weighted]
         return scores, edge_order_map
 
-    def _oracle_build_guidance_from_plan(self, plan: Dict) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
+    def _oracle_build_guidance_from_plan(self, plan: Dict, jitter: int = 0) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
         """Build a stronger oracle guidance from planning analysis:
         - plan['end_events']: list[(end_node_id, delta_mask)]
         - plan['frontiers']: node_id -> RangeSet (descendant closure ∩ gss_acc at visit)
@@ -1162,7 +1162,9 @@ class Model(GraphProvider):
                     for u, fmask in frontiers.items():
                         if u not in covered_nodes and fmask.issubset(newX):
                             prune_gain_weight += node_weight(u)
-                
+                if jitter > 0 and prune_gain_weight > 0:
+                    prune_gain_weight *= (1.0 + random.uniform(-jitter / 100.0, jitter / 100.0))
+
                 score = self.oracle_prune_weight * prune_gain_weight + self.oracle_token_weight * float(tok_gain)
                 if score > best_score:
                     best_score, best_id, best_mask, best_idx = score, nid, mask, i
@@ -1625,7 +1627,7 @@ class Model(GraphProvider):
         reward_masks = self._oracle_compute_reward_masks(end_events) if self.oracle_reward_prune else {}
 
         # Build a base target-aware guidance
-        guided_scores, edge_order_map = self._oracle_build_guidance_advanced(plan, reward_masks, target_mask, jitter=0)
+        guided_scores, edge_order_map = self._oracle_build_guidance_from_plan(plan, jitter=0)
 
         # Randomized search over guidance to minimize edges traversed
         best_scores = guided_scores
@@ -1636,8 +1638,8 @@ class Model(GraphProvider):
         trials = max(1, int(self.oracle_trials))
         for t in range(trials):
             # Inject jitter to explore different orderings
-            trial_scores, trial_edge_map = self._oracle_build_guidance_advanced(
-                plan, reward_masks, target_mask, jitter=self.oracle_jitter if self.oracle_jitter > 0 else 0
+            trial_scores, trial_edge_map = self._oracle_build_guidance_from_plan(
+                plan, jitter=self.oracle_jitter if self.oracle_jitter > 0 else 0
             )
             # Evaluate this guidance
             prev_suppress = self.suppress_stats_report
