@@ -2,6 +2,8 @@ import time
 import inspect
 from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple, Optional
+import statistics
+import math
 import os
 
 
@@ -31,11 +33,8 @@ class Stats:
         # General counters (manual via inc()).
         self.counts: Dict[str, int] = defaultdict(int)
 
-        # Timings: total duration (seconds) per key.
-        self.times: Dict[str, float] = defaultdict(float)
-
-        # Timings: hit counts per key (number of successful stop() calls).
-        self.time_counts: Dict[str, int] = defaultdict(int)
+        # Timings: list of durations (seconds) per key.
+        self.durations: Dict[str, List[float]] = defaultdict(list)
 
         # Location of first call for each key: key -> (file, line)
         self.key_positions: Dict[str, Tuple[str, int]] = {}
@@ -59,8 +58,7 @@ class Stats:
     def reset(self):
         """Clear all collected stats."""
         self.counts.clear()
-        self.times.clear()
-        self.time_counts.clear()
+        self.durations.clear()
         self.timers.clear()
         self.key_positions.clear()
 
@@ -83,18 +81,15 @@ class Stats:
         if not self.enabled:
             return
         if key in self.timers:
-            self.times[key] += time.perf_counter() - self.timers[key]
-            self.time_counts[key] += 1
+            duration = time.perf_counter() - self.timers[key]
+            self.durations[key].append(duration)
             del self.timers[key]
 
     def _record_key_position(self, key: str):
         """If seeing a key for the first time, record its call site (file, line)."""
         if self.enabled and key not in self.key_positions:
-            # Inspection is expensive. Pause all active timers while it runs.
-            now = time.perf_counter()
-            active_timer_keys = list(self.timers.keys())
-            for k in active_timer_keys:
-                self.times[k] += now - self.timers[k]
+            # Inspection is expensive. Adjust active timers to account for the pause.
+            pause_start = time.perf_counter()
 
             # --- Expensive operation ---
             caller_frame = None
@@ -118,10 +113,10 @@ class Stats:
                     del caller_frame
             # --- End of expensive operation ---
 
-            # Resume timers
-            new_start_time = time.perf_counter()
-            for k in active_timer_keys:
-                self.timers[k] = new_start_time
+            # Adjust start time of all active timers
+            pause_duration = time.perf_counter() - pause_start
+            for k in self.timers:
+                self.timers[k] += pause_duration
 
     # -------- Group management --------
 
@@ -148,31 +143,52 @@ class Stats:
         # This phase gathers all data and rows for all tables before printing.
 
         # 1. Prepare combined stats data  
-        stats_headers = ("key", "hits", "total_ms", "avg_ms")
-        stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+        stats_headers = ("key", "hits", "total_ms", "mean_ms", "stdev_ms", "min_ms", "p50_ms", "p95_ms", "max_ms")
+        stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
         stats_rows = []
-        all_keys = self.counts.keys() | self.times.keys()
+        all_keys = self.counts.keys() | self.durations.keys()
         if all_keys:
             sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
             for key in sorted_keys:
                 # 'hits' is timer hits if available, otherwise counter value.
-                hits = self.time_counts.get(key)
+                hits = None
+                if key in self.durations:
+                    hits = len(self.durations[key])
+
                 if hits is None:
                     hits = self.counts.get(key)
 
-                total_ms = None
-                avg_ms = None
-                if key in self.times:
-                    total_ms = self.times[key] * 1000.0
-                    timer_hits_for_avg = self.time_counts.get(key, 0)
-                    avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
+                if key in self.durations:
+                    durs_ms = [d * 1000.0 for d in self.durations[key]]
+                    if not durs_ms:
+                        stats_rows.append((key, 0, 0.0, None, None, None, None, None, None))
+                        continue
 
-                stats_rows.append((key, hits, total_ms, avg_ms))
+                    total_ms = sum(durs_ms)
+                    mean_ms = statistics.mean(durs_ms)
+                    min_ms = min(durs_ms)
+                    max_ms = max(durs_ms)
+                    if len(durs_ms) > 1:
+                        stdev_ms = statistics.stdev(durs_ms)
+                        # Use median for p50, more robust for even-sized lists
+                        p50_ms = statistics.median(durs_ms)
+                        # quantiles() is new in 3.8. It splits data into n+1 intervals.
+                        # For percentiles (n=100), it gives 99 points. p95 is index 94.
+                        qs = statistics.quantiles(durs_ms, n=100)
+                        p95_ms = qs[94]
+                    else:
+                        stdev_ms = 0.0
+                        p50_ms = mean_ms
+                        p95_ms = mean_ms
+                    stats_rows.append((key, hits, total_ms, mean_ms, stdev_ms, min_ms, p50_ms, p95_ms, max_ms))
+                else:
+                    # It's a counter-only key
+                    stats_rows.append((key, hits, None, None, None, None, None, None, None))
 
         # 2. Prepare Groups data
         groups_data = []
-        group_members_headers = ("member", "hits", "hits/group_hit", "total_ms", "avg_ms", "ms/group_hit")
-        group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ratio_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+        group_members_headers = ("member", "hits", "hits/group_hit", "total_ms", "mean_ms", "stdev_ms", "min_ms", "max_ms", "ms/group_hit")
+        group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ratio_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
         if self.groups:
             group_sort_keys = {}
             for g in self.groups:
@@ -187,10 +203,10 @@ class Stats:
                 if not all_members:
                     continue
 
-                timing_members = [m for m in all_members if m in self.times]
+                timing_members = [m for m in all_members if m in self.durations]
 
                 group_hits = self._group_hits(g, timing_members)
-                group_total_ms = sum(self.times[k] for k in timing_members) * 1000.0
+                group_total_ms = sum(sum(self.durations.get(k, [])) for k in timing_members) * 1000.0
                 group_avg_ms = (group_total_ms / group_hits) if group_hits else 0.0
 
                 group_info = {
@@ -207,7 +223,10 @@ class Stats:
                     sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
                     for k in sorted_members:
                         # 'hits' is timer hits if available, otherwise counter value.
-                        hits = self.time_counts.get(k)
+                        hits = None
+                        if k in self.durations:
+                            hits = len(self.durations[k])
+
                         if hits is None:
                             hits = self.counts.get(k)
 
@@ -215,22 +234,30 @@ class Stats:
                         if hits is not None and group_hits > 0:
                             hits_per_group_hit = hits / group_hits
 
-                        total_ms = None
-                        avg_ms = None
-                        per_group_ms = None
-                        if k in self.times:
-                            total_ms = self.times[k] * 1000.0
-                            timer_hits_for_avg = self.time_counts.get(k, 0)
-                            avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
-                            per_group_ms = (total_ms / group_hits) if group_hits else 0.0
+                        if k in self.durations:
+                            durs_ms = [d * 1000.0 for d in self.durations[k]]
+                            if not durs_ms:
+                                member_rows.append((k, 0, hits_per_group_hit, 0.0, None, None, None, None, 0.0))
+                                continue
 
-                        member_rows.append((k, hits, hits_per_group_hit, total_ms, avg_ms, per_group_ms))
+                            total_ms = sum(durs_ms)
+                            mean_ms = statistics.mean(durs_ms)
+                            min_ms = min(durs_ms)
+                            max_ms = max(durs_ms)
+                            if len(durs_ms) > 1:
+                                stdev_ms = statistics.stdev(durs_ms)
+                            else:
+                                stdev_ms = 0.0
+                            per_group_ms = (total_ms / group_hits) if group_hits else 0.0
+                            member_rows.append((k, hits, hits_per_group_hit, total_ms, mean_ms, stdev_ms, min_ms, max_ms, per_group_ms))
+                        else:
+                            # Counter-only member
+                            member_rows.append((k, hits, hits_per_group_hit, None, None, None, None, None, None))
 
                 groups_data.append({"info": group_info, "member_rows": member_rows})
 
         # --- Width Calculation Phase ---
         # This phase determines the max width for each column across all tables.
-
         max_widths = defaultdict(int)
 
         def update_widths(headers, rows, formats):
@@ -385,7 +412,7 @@ class Stats:
         A key belongs if key == prefix or key.startswith(prefix + ".").
         """
         pfx_dot = prefix + "."
-        all_keys = self.times.keys() | self.counts.keys()
+        all_keys = self.durations.keys() | self.counts.keys()
         members = [k for k in all_keys if k == prefix or k.startswith(pfx_dot)]
         return members
 
@@ -398,12 +425,12 @@ class Stats:
         This approximates "how many times the group ran" even if the root itself
         wasn't timed explicitly.
         """
-        direct = self.time_counts.get(prefix, 0)
+        direct = len(self.durations.get(prefix, []))
         if direct > 0:
             return direct
         max_desc = 0
         for k in members:
-            max_desc = max(max_desc, self.time_counts.get(k, 0))
+            max_desc = max(max_desc, len(self.durations.get(k, [])))
         return max_desc
 
     def __enter__(self):
