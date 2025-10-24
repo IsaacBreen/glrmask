@@ -337,7 +337,7 @@ impl Default for Trie3Config {
             refine_token_atoms_max_blocks: 2048,
             // New: enable global-atoms bisimulation merge by default with conservative caps
             merge_nodes_global_atoms: true,
-            merge_nodes_global_atoms_max_iters: 6,
+            merge_nodes_global_atoms_max_iters: 2,
             merge_nodes_global_atoms_max_atoms_per_pop: 4096,
             factor_common_destinations: true,
             factor_common_destinations_min_incoming: 12,
