@@ -120,34 +120,15 @@ def visualize_constraint(
     graph_attrs = [
         f'rankdir="{rankdir}"',
         f'splines="{splines}"',
-        'overlap="scale"',  # Helps prevent node overlap
-        'concentrate="true"', # Merges parallel edges
-        'nodesep="0.8"',
-        'ranksep="1.5"',
-        'fontname="Helvetica"',
+        'nodesep="0.6"',
+        'ranksep="1.2"',
         f'label="{constraint_path.name}\\n(max_depth={max_depth})"',
         'labelloc="t"',
         'fontsize="20"',
-        'outputorder="edgesfirst"', # Draw edges first
     ]
     dot_lines.append(f"  graph [{', '.join(graph_attrs)}];")
-    dot_lines.append('  node [shape="box", style="rounded,filled", fontname="Helvetica", color="#666666", fontcolor="#333333"];')
-    dot_lines.append('  edge [fontname="Helvetica", fontsize="10", color="#555555", fontcolor="#444444", arrowsize="0.7", penwidth="1.2"];')
-
-    # --- Add Legend ---
-    dot_lines.extend([
-        '  subgraph cluster_legend {',
-        '    label = "Legend";',
-        '    style = "rounded";',
-        '    bgcolor = "#F5F5F5";',
-        '    node [style="rounded,filled"];',
-        '    "legend_root" [label="Root Node", fillcolor="#D5E8D4"];',
-        '    "legend_end" [label="End Node", fillcolor="#F8CECC", shape="doubleoctagon"];',
-        '    "legend_root_end" [label="Root & End", fillcolor="#DAE8FC", shape="doubleoctagon"];',
-        '    "legend_other" [label="Intermediate", fillcolor="#E8E8E8"];',
-        '    "legend_root" -> "legend_end" -> "legend_root_end" -> "legend_other" [style=invis];',
-        '  }',
-    ])
+    dot_lines.append('  node [shape="box", style="rounded,filled", fontname="Helvetica"];')
+    dot_lines.append('  edge [fontname="Helvetica", fontsize="10"];')
 
     # BFS traversal to build the graph
     q = collections.deque()
@@ -166,12 +147,6 @@ def visualize_constraint(
     print("Traversing graph to build visualization...", file=sys.stderr)
     pbar = tqdm(total=len(q), desc="Nodes processed")
 
-    # Color palette for nodes
-    DEFAULT_COLOR = "#E8E8E8"
-    ROOT_COLOR = "#D5E8D4"
-    END_COLOR = "#F8CECC"
-    ROOT_END_COLOR = "#DAE8FC"
-
     while q:
         node_id, depth = q.popleft()
         pbar.update(1)
@@ -180,16 +155,15 @@ def visualize_constraint(
         is_root = node_id in all_root_ids
         is_end = node_id in end_ids
         label = f"Node {node_id}"
-        
-        fillcolor = DEFAULT_COLOR
+        fillcolor = 'lightblue'
         shape = 'box'
 
         if is_root and is_end:
-            fillcolor, shape, label = ROOT_END_COLOR, 'doubleoctagon', f"Root & End {node_id}"
+            fillcolor, shape, label = 'gold', 'doubleoctagon', f"Root & End {node_id}"
         elif is_root:
-            fillcolor, label = ROOT_COLOR, f"Root {node_id}"
+            fillcolor, label = 'lightgreen', f"Root {node_id}"
         elif is_end:
-            fillcolor, shape, label = END_COLOR, 'doubleoctagon', f"End {node_id}"
+            fillcolor, shape, label = 'lightpink', 'doubleoctagon', f"End {node_id}"
 
         dot_lines.append(f'  "{node_id}" [label={json.dumps(label)}, fillcolor="{fillcolor}", shape="{shape}"];')
 
