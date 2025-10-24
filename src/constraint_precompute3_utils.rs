@@ -2740,9 +2740,6 @@ pub fn merge_nodes_trie3_ultrafast(
     }
 
     // Remap roots to their representatives
-    }
-
-    // Remap roots to their representatives
     for root_idx in roots.values_mut() {
         if let Some(dense) = dense_of.get(root_idx) {
             let rep_dense = node_to_rep_dense[*dense as usize] as usize;
