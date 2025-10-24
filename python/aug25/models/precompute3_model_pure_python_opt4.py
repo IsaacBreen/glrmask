@@ -1656,37 +1656,22 @@ class Model(GraphProvider):
 
                         if isinstance(yielded, Enqueue):
                             new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
-                            if self.is_end(new_node_id):
-                                stats.inc('get_mask.traversal.end_nodes_eager')
-                                if not new_gss.is_empty():
-                                    end_acc = new_gss.reduce_acc()
-                                    if not final_mask.issuperset(end_acc.llm_mask):
-                                        delta = end_acc.llm_mask.difference(final_mask)
-                                        if record_end_unions and not delta.is_empty():
-                                            end_union_events.append((int(new_node_id), delta))
-                                        stats.start('get_mask.main_loop.end_node.final_mask_union_eager')
-                                        final_mask |= end_acc.llm_mask
-                                        stats.stop('get_mask.main_loop.end_node.final_mask_union_eager')
-                                        remaining_mask = all_ones.difference(final_mask)
-                                        if not record_end_unions and remaining_mask.is_empty():
-                                            break
+                            base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                            # Dynamic, target-aware child priority if enabled and reward masks present
+                            if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                                child_priority = self._priority_for_node(
+                                    new_node_id,
+                                    new_depth,
+                                    remaining_mask,
+                                    guided_scores=guided_scores,
+                                    oracle_reward_mask=oracle_reward_mask,
+                                    analysis_node_costs=oracle_node_costs,
+                                )
+                            elif guided_scores is not None:
+                                child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
                             else:
-                                base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                                # Dynamic, target-aware child priority if enabled and reward masks present
-                                if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-                                    child_priority = self._priority_for_node(
-                                        new_node_id,
-                                        new_depth,
-                                        remaining_mask,
-                                        guided_scores=guided_scores,
-                                        oracle_reward_mask=oracle_reward_mask,
-                                        analysis_node_costs=oracle_node_costs,
-                                    )
-                                elif guided_scores is not None:
-                                    child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
-                                else:
-                                    child_priority = base_child_pri
-                                heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
+                                child_priority = base_child_pri
+                            heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
                         elif isinstance(yielded, Suspend):
                             # Recompute scheduling priority for the suspended work dynamically based on remaining_mask
                             if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
