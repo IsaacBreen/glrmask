@@ -463,34 +463,66 @@ class Model(GraphProvider):
         model._compute_and_print_stats()
         return model
 
+
     def _recompute_max_depth(self) -> None:
         """
-        Robustly re-computes max_depth for all nodes. max_depth is the longest path
+        Robustly re-computes max_depth for all nodes using topological sort. max_depth is the longest path
         to a clean_end node. This is crucial for the correctness of the bottom-up
         computation of llm_bv_descendant.
         """
-        reverse_adj = collections.defaultdict(list)
-        for nid, node in tqdm(self.arena.items(), desc="Recomputing max_depth (build reverse graph)"):
+        # 1. Build adjacency list and compute in-degrees for topological sort
+        adj = {nid: set() for nid in self.arena}
+        in_degree = {nid: 0 for nid in self.arena}
+        for nid, node in tqdm(self.arena.items(), desc="Building graph for topo-sort"):
             for edge in node.children:
                 for d in edge.dests:
-                    reverse_adj[int(d.dest_idx)].append(nid)
+                    dest_id = int(d.dest_idx)
+                    # Add edge if it's not a self-loop and not already present
+                    if nid != dest_id and dest_id not in adj[nid]:
+                        adj[nid].add(dest_id)
+                        in_degree[dest_id] += 1
 
-        q = collections.deque()
+        # 2. Kahn's algorithm for topological sort
+        q = collections.deque([nid for nid, deg in in_degree.items() if deg == 0])
+        topological_order = []
+        with tqdm(total=len(self.arena), desc="Topological sort", unit="node") as pbar:
+            while q:
+                nid = q.popleft()
+                topological_order.append(nid)
+                pbar.update(1)
+                for neighbor in adj.get(nid, set()):
+                    in_degree[neighbor] -= 1
+                    if in_degree[neighbor] == 0:
+                        q.append(neighbor)
+
+        if len(topological_order) != len(self.arena):
+            print(f"Warning: Cycle detected or nodes missed in topological sort. "
+                  f"Processed {len(topological_order)} of {len(self.arena)} nodes.")
+
+        # 3. Compute max_depth in reverse topological order
         new_max_depth = {nid: -1 for nid in self.arena}
-        for nid, node in self.arena.items():
-            if node.clean_end:
-                q.append((nid, 0))
-                new_max_depth[nid] = 0
+        for nid in tqdm(reversed(topological_order), desc="Computing max_depth", total=len(topological_order)):
+            node = self.arena.get(nid)
+            if not node: continue
 
-        while q:
-            nid, depth = q.popleft()
-            for parent_id in reverse_adj.get(nid, []):
-                if depth + 1 > new_max_depth[parent_id]:
-                    new_max_depth[parent_id] = depth + 1
-                    q.append((parent_id, depth + 1))
+            current_max = -1
+            if node.clean_end:
+                current_max = 0
+
+            max_child_depth = -1
+            for edge in node.children:
+                for d in edge.dests:
+                    child_nid = int(d.dest_idx)
+                    child_depth = new_max_depth.get(child_nid, -1)
+                    if child_depth > -1:
+                        max_child_depth = max(max_child_depth, child_depth)
+
+            if max_child_depth > -1:
+                current_max = max(current_max, 1 + max_child_depth)
+
+            new_max_depth[nid] = current_max
 
         self.max_depth = {nid: max(0, d) for nid, d in new_max_depth.items()}
-
     def _compute_edge_accelerators(self) -> None:
         all_ones = self.all_internal_llm_tokens_bitset
         for node in self.arena.values():
