@@ -1269,14 +1269,14 @@ class Model(GraphProvider):
         guided_scores: Optional[Dict[int, int]] = None,
         edge_order_map: Optional[Dict[int, List[int]]] = None,
         record_end_unions: bool = False,
-    ) -> Tuple[Union[RangeSetOut, Dict], List[Tuple[int, LLMTokenSet]]]:
+    ) -> Tuple[Dict, Dict]:
         """Internal engine behind get_mask.
         If guided_scores/edge_order_map are provided, they influence traversal priority and edge ordering.
         If record_end_unions is True:
           - Returns: (timed_output_dict, oracle_data) where oracle_data is a dict with:
               'end_events': list of (end_node_id, delta_mask),
               'frontiers': node_id -> RangeSet, 'node_costs': node_id -> dict(counts)
-        Returns (timed_output_dict, end_union_events)."""
+        Returns (timed_output_dict, oracle_data)."""
         stats = Stats.get()
         stats.start('get_mask')
         stats.counts['get_mask.traversal.max_depth'] = 0
@@ -1467,12 +1467,12 @@ class Model(GraphProvider):
                 "node_costs": analysis_node_costs or {},
             }
         else:
-            oracle_data = []
+            oracle_data = {}
         return {
             "type": "timed_output",
             "output": original_indices,
             "time_sec": Stats.get().times.get('get_mask.main_loop', 0.0),
-        }, end_union_events
+        }, oracle_data
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
         # Oracle wrapper: plan, then guided run
@@ -1488,20 +1488,70 @@ class Model(GraphProvider):
         finally:
             self.suppress_stats_report = prev_suppress
 
-        # 2) Build stronger guidance from the oracle plan (frontier-weighted greedy order)
-        guided_scores, edge_order_map = self._oracle_build_guidance_from_plan(plan if isinstance(plan, dict) else {})
+        # 2) Build stronger guidance from the oracle plan:
+        #    (a) exact/greedy minimal end-node cover for maximal token coverage
+        #    (b) frontier-weighted greedy ordering using per-node costs
+        #    (c) token-weighted edge ordering toward the selected ends
+        if not isinstance(plan, dict):
+            plan = {}
+
+        end_events = plan.get("end_events", [])
+        # Compute minimal end-node cover (exact under threshold, greedy otherwise)
+        selected_end_nodes = self._compute_oracle_min_cover(end_events)
+        # Base guidance from the selected ends: push ancestors of those ends earlier
+        cover_scores, cover_edge_map = self._oracle_prepare_guidance(selected_end_nodes)
+        # Frontier-weighted greedy guidance using node frontiers and per-node costs
+        frontier_scores, frontier_edge_map = self._oracle_build_guidance_from_plan(plan)
+
+        # Union both score maps, biasing toward cover-based scores
+        guided_scores: Dict[int, int] = dict(frontier_scores)
+        for k, v in cover_scores.items():
+            guided_scores[k] = guided_scores.get(k, 0) + (2 * int(v))
+
+        # Build a target token mask (union of masks from selected ends)
+        items_by_end: Dict[int, LLMTokenSet] = {}
+        for nid, mask in end_events:
+            if mask is None or mask.is_empty():
+                continue
+            prev = items_by_end.get(int(nid))
+            items_by_end[int(nid)] = mask if prev is None else prev.union(mask)
+        target_mask = RangeSet.empty()
+        for eid in selected_end_nodes:
+            m = items_by_end.get(int(eid))
+            if m is not None:
+                target_mask |= m
+
+        # Start with frontier-based edge ordering, then refine with token-weighted ordering
+        edge_order_map: Dict[int, List[int]] = dict(frontier_edge_map)
+        for u, node in self.arena.items():
+            if not node.children:
+                continue
+            scored: List[Tuple[int, int]] = []
+            for idx, edge in enumerate(node.children):
+                # Sum of child destination node scores
+                s = 0
+                for d in edge.dests:
+                    s += int(guided_scores.get(int(d.dest_idx), 0))
+                # Token weight: how much this edge can contribute toward the selected ends
+                tok_gain = len(edge.llm_bv.intersection(target_mask)) if target_mask is not None else 0
+                # Combine (favor node score strongly, then token gain as tie-breaker)
+                combined = (s * 1000) + int(tok_gain)
+                scored.append((idx, combined))
+            if any(score > 0 for (_, score) in scored):
+                scored.sort(key=lambda t: t[1], reverse=True)
+                edge_order_map[int(u)] = [idx for (idx, _) in scored]
+
         if self.oracle_debug:
-            n_events = len(plan.get("end_events", [])) if isinstance(plan, dict) else 0
-            n_frontiers = len(plan.get("frontiers", {})) if isinstance(plan, dict) else 0
-            n_costs = len(plan.get("node_costs", {})) if isinstance(plan, dict) else 0
-            print(f"[oracle] planning: collected {n_events} end-events, "
+            n_events = len(end_events)
+            distinct_end_ids = len({int(nid) for nid, m in end_events if m is not None and not m.is_empty()})
+            n_frontiers = len(plan.get("frontiers", {}))
+            n_costs = len(plan.get("node_costs", {}))
+            print(f"[oracle] planning: collected {n_events} end-events from {distinct_end_ids} distinct end nodes, "
                   f"{n_frontiers} node-frontiers, {n_costs} node-cost entries; "
-                  f"produced guided scores for {len(guided_scores)} nodes and edge ordering for {len(edge_order_map)} nodes.")
+                  f"min-cover size = {len(selected_end_nodes)}; "
+                  f"produced guided scores for {len(guided_scores)} nodes and edge ordering for {len(edge_order_map)} nodes (token-weighted).")
 
         # 3) Reset stats per request, then run the guided traversal
-        # (We use the stronger oracle guidance just computed.)
-
-        # 4) Reset stats per request, then run the guided traversal
         Stats.get().reset()
         out, _ = self._get_mask_run(guided_scores=guided_scores, edge_order_map=edge_order_map, record_end_unions=False)
         return out
