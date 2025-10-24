@@ -579,6 +579,9 @@ class Model(GraphProvider):
             np = None
 
         stats = collections.defaultdict(list)
+        stats['edges_per_pop_bucket'] = []
+        stats['state_coverage_per_pop_bucket'] = []
+        stats['avg_edges_per_state_per_pop_bucket'] = []
         pop_counts = collections.Counter()
         num_nodes = len(self.arena)
         num_clean_end_nodes = 0
@@ -615,6 +618,29 @@ class Model(GraphProvider):
                     state_bv_len = len(dest.state_bv)
                     stats['dest_state_bv_cardinality'].append(state_bv_len)
                     total_state_bv_cardinality += state_bv_len
+
+            # --- New pop-bucket stats for the current node ---
+            pop_buckets = collections.defaultdict(list)
+            for edge in node.children:
+                pop_buckets[edge.pop].append(edge)
+
+            for pop, edges_in_bucket in pop_buckets.items():
+                # Edges per pop-bucket
+                stats['edges_per_pop_bucket'].append(len(edges_in_bucket))
+
+                # State coverage and avg edges per state
+                pop_state_union = RangeSetStates.empty()
+                sum_dest_states_union_cardinality = 0
+                for edge in edges_in_bucket:
+                    pop_state_union |= edge.dest_states_union
+                    sum_dest_states_union_cardinality += len(edge.dest_states_union)
+
+                state_coverage = len(pop_state_union)
+                stats['state_coverage_per_pop_bucket'].append(state_coverage)
+
+                if state_coverage > 0:
+                    avg_edges = sum_dest_states_union_cardinality / state_coverage
+                    stats['avg_edges_per_state_per_pop_bucket'].append(avg_edges)
 
         num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
         num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
@@ -676,6 +702,9 @@ class Model(GraphProvider):
         print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
         print_dist_stats("LLM BVs per (Pop, StateID)", llm_bvs_per_pop_state)
         print_dist_stats("Destinations per (Pop, StateID)", dests_per_pop_state)
+        print_dist_stats("Edges per Pop-Bucket", stats['edges_per_pop_bucket'])
+        print_dist_stats("State Coverage per Pop-Bucket", stats['state_coverage_per_pop_bucket'])
+        print_dist_stats("Avg Edges per State per Pop-Bucket", stats['avg_edges_per_state_per_pop_bucket'])
         if self.max_depth:
             print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
 
