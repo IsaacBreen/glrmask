@@ -9,24 +9,62 @@ _project_root = Path(__file__).resolve().parents[2]
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-# Import the model we want to inspect and the visualizer
-from python.aug25.models.precompute3_model_pure_python_opt4 import Model
+# Import the visualizer, which is a standalone script
 from python.aug25.visualize_constraint import visualize_constraint
-from python.aug25.range_set import FFIRangeSet as RangeSet
 
 # Global variable to hold the inspector instance for easy REPL access
 inspector = None
 
+# --- Helper Functions ---
+
+def format_ranges(ranges: list[list[int]], max_len: int = 40) -> str:
+    """
+    Converts a list of [start, end] ranges into a compact, readable string.
+    Truncates the string if it exceeds max_len.
+    """
+    if not ranges:
+        return "{}"
+
+    parts = []
+    for start, end in ranges:
+        if start == end:
+            parts.append(str(start))
+        else:
+            parts.append(f"{start}..{end}")
+
+    result = ", ".join(parts)
+    if len(result) > max_len:
+        return result[:max_len - 3] + "..."
+    return result
+
+def token_in_ranges(token_id: int, ranges: list[list[int]]) -> bool:
+    """Checks if a token ID is present in a list of [start, end] ranges."""
+    for start, end in ranges:
+        if start <= token_id <= end:
+            return True
+    return False
+
 class Inspector:
     """
-    A REPL-friendly wrapper around a loaded grammar constraint Model
+    A REPL-friendly wrapper around a loaded grammar constraint file
     for interactive inspection and analysis.
     """
-    def __init__(self, model: Model, constraint_path: Path):
-        self.model = model
+    def __init__(self, constraint_data: dict, constraint_path: Path):
+        self.data = constraint_data
         self.constraint_path = constraint_path
+        
+        trie_data = self.data.get("trie3_god", {})
+        values_list = trie_data.get("values", [])
+        self.values_dict: Dict[int, Dict] = {int(k): v for k, v in values_list}
+        
+        roots_list = self.data.get("precomputed3", [])
+        self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_list}
+
+        self._adj = None
         self._reverse_adj = None
+        
         print(f"Inspector created for '{constraint_path.name}'.")
+        print(f"Loaded {len(self.values_dict)} nodes.")
         print("Type 'inspector.help()' for a list of commands.")
 
     def help(self):
@@ -47,8 +85,52 @@ class Inspector:
 
     def stats(self):
         """Prints detailed statistics about the loaded model's arena."""
-        # The model already has a great stats printer
-        self.model._compute_and_print_stats()
+        num_nodes = len(self.values_dict)
+        num_roots = len(set(self.roots_map.values()))
+        num_ends = 0
+        num_edges = 0
+        num_dests = 0
+        pop_counts = collections.Counter()
+
+        for node in self.values_dict.values():
+            children = node.get("children", [])
+            if not children:
+                num_ends += 1
+            
+            for edge in children:
+                num_edges += 1
+                (pop, _llm_bv), dests = edge
+                pop_counts[int(pop)] += 1
+                num_dests += len(dests)
+
+        print("\n--- Arena Statistics ---")
+        print(f"  Nodes: {num_nodes:,}")
+        print(f"  Unique Roots: {num_roots:,}")
+        print(f"  End Nodes (no children): {num_ends:,}")
+        print(f"  Total Edges (child groups): {num_edges:,}")
+        print(f"  Total Destinations: {num_dests:,}")
+        
+        print("\n  Pop Counts:")
+        if pop_counts:
+            for pop, count in sorted(pop_counts.items()):
+                print(f"    - Pop {pop}: {count:,} edges")
+        else:
+            print("    (No edges with pop counts found)")
+        print("------------------------\n")
+
+    @property
+    def adj(self):
+        """Builds and caches the forward adjacency map (parent -> set(dests))."""
+        if self._adj is None:
+            print("Building forward adjacency map (one-time operation)...")
+            self._adj = collections.defaultdict(set)
+            for u, node in self.values_dict.items():
+                for edge in node.get("children", []):
+                    _key, dests = edge
+                    for dest_id, _state_bv in dests:
+                        self._adj[int(u)].add(int(dest_id))
+            print("Done.")
+        return self._adj
 
     @property
     def reverse_adj(self):
@@ -56,25 +138,29 @@ class Inspector:
         if self._reverse_adj is None:
             print("Building reverse adjacency map (one-time operation)...")
             self._reverse_adj = collections.defaultdict(set)
-            for u, node in self.model.arena.items():
-                for edge in node.children:
-                    for dest in edge.dests:
-                        self._reverse_adj[dest.dest_idx].add(u)
+            for u, node in self.values_dict.items():
+                for edge in node.get("children", []):
+                    _key, dests = edge
+                    for dest_id, _state_bv in dests:
+                        self._reverse_adj[int(dest_id)].add(int(u))
             print("Done.")
         return self._reverse_adj
 
     def node(self, node_id: int):
         """Prints detailed information about a specific node."""
-        node = self.model.arena.get(node_id)
+        node = self.values_dict.get(node_id)
         if not node:
             print(f"Node {node_id} not found in arena.")
             return
 
         print(f"\n--- Node {node_id} ---")
-        is_root = any(r == node_id for r in self.model.roots_map.values())
+        is_root = any(r == node_id for r in self.roots_map.values())
+        children = node.get("children", [])
+        is_end = not children
+
         print(f"  Is Root: {'Yes' if is_root else 'No'}")
-        print(f"  Is End (clean_end): {'Yes' if node.clean_end else 'No'}")
-        print(f"  Max Depth (heuristic): {self.model.max_depth.get(node_id, 'N/A')}")
+        print(f"  Is End (no children): {'Yes' if is_end else 'No'}")
+        print(f"  Max Depth (heuristic): {node.get('max_depth', 'N/A')}")
 
         parents = self.reverse_adj.get(node_id)
         if parents:
@@ -82,35 +168,35 @@ class Inspector:
         else:
             print("  Parents: None")
 
-        print(f"  Children ({len(node.children)} edges):")
-        if not node.children:
+        print(f"  Children ({len(children)} edges):")
+        if not children:
             print("    None")
         else:
-            for i, edge in enumerate(node.children):
-                dest_ids = sorted([d.dest_idx for d in edge.dests])
-                print(f"    - Edge {i}: pop={edge.pop}")
-                print(f"      - LLM Tokens: {edge.llm_bv.to_ranges()}")
-                print(f"      - State Union: {edge.dest_states_union.to_ranges()}")
+            for i, edge in enumerate(children):
+                (pop, llm_bv_json), dests = edge
+                dest_ids = sorted([int(d[0]) for d in dests])
+                print(f"    - Edge {i}: pop={pop}")
+                print(f"      - LLM Tokens: {format_ranges(llm_bv_json)}")
                 print(f"      - Destinations ({len(dest_ids)}): {dest_ids}")
         print("-" * 15)
 
     def roots(self):
         """Lists all root nodes."""
-        root_ids = sorted(list(set(self.model.roots_map.values())))
+        root_ids = sorted(list(set(self.roots_map.values())))
         print(f"Found {len(root_ids)} unique root nodes:")
         print(root_ids)
         return root_ids
 
     def ends(self):
-        """Lists all end nodes (nodes with clean_end=True)."""
-        end_ids = sorted([nid for nid, node in self.model.arena.items() if node.clean_end])
-        print(f"Found {len(end_ids)} clean_end nodes:")
+        """Lists all end nodes (nodes with no children)."""
+        end_ids = sorted([nid for nid, node in self.values_dict.items() if not node.get("children")])
+        print(f"Found {len(end_ids)} end nodes:")
         print(end_ids)
         return end_ids
 
     def path(self, start_id: int, end_id: int, max_depth: int = 10):
         """Finds and prints a path from a start node to an end node using BFS."""
-        if start_id not in self.model.arena or end_id not in self.model.arena:
+        if start_id not in self.values_dict or end_id not in self.values_dict:
             print("Error: One or both nodes not in arena.")
             return
 
@@ -129,16 +215,11 @@ class Inspector:
             if len(path) > max_depth:
                 continue
 
-            node_data = self.model.arena.get(current_node)
-            if not node_data:
-                continue
-
-            for edge in node_data.children:
-                for dest in edge.dests:
-                    if dest.dest_idx not in visited:
-                        visited.add(dest.dest_idx)
-                        new_path = path + [dest.dest_idx]
-                        q.append((dest.dest_idx, new_path))
+            for neighbor in self.adj.get(current_node, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    new_path = path + [neighbor]
+                    q.append((neighbor, new_path))
 
         print("No path found within the depth limit.")
         return None
@@ -146,9 +227,10 @@ class Inspector:
     def find_pop(self, pop_value: int):
         """Finds all nodes with at least one edge having the specified pop value."""
         found_nodes = []
-        for nid, node in self.model.arena.items():
-            for edge in node.children:
-                if edge.pop == pop_value:
+        for nid, node in self.values_dict.items():
+            for edge in node.get("children", []):
+                (pop, _llm_bv), _dests = edge
+                if int(pop) == pop_value:
                     found_nodes.append(nid)
                     break
         print(f"Found {len(found_nodes)} nodes with edges where pop={pop_value}:")
@@ -158,9 +240,10 @@ class Inspector:
     def find_token(self, token_id: int):
         """Finds all nodes with at least one edge that accepts the given LLM token ID."""
         found_nodes = []
-        for nid, node in self.model.arena.items():
-            for edge in node.children:
-                if edge.llm_bv.contains(token_id):
+        for nid, node in self.values_dict.items():
+            for edge in node.get("children", []):
+                (_pop, llm_bv_json), _dests = edge
+                if token_in_ranges(token_id, llm_bv_json):
                     found_nodes.append(nid)
                     break
         print(f"Found {len(found_nodes)} nodes with edges accepting token {token_id}:")
@@ -205,16 +288,19 @@ def load(constraint_path: str) -> Inspector:
         print(f"Error: File not found at '{path}'")
         return
 
-    print(f"Loading model from '{path}'...")
-    if path.suffix == ".gz":
-        with gzip.open(path, "rt", encoding="utf-8") as f:
-            json_str = f.read()
-    else:
-        with open(path, 'r', encoding='utf-8') as f:
-            json_str = f.read()
+    print(f"Loading constraint data from '{path}'...")
+    try:
+        if path.suffix == ".gz":
+            with gzip.open(path, "rt", encoding="utf-8") as f:
+                json_data = json.load(f)
+        else:
+            with open(path, 'r', encoding='utf-8') as f:
+                json_data = json.load(f)
+    except Exception as e:
+        print(f"Error loading or parsing JSON file: {e}")
+        return
 
-    model = Model.from_json_string(json_str)
-    inspector = Inspector(model, path)
+    inspector = Inspector(json_data, path)
     return inspector
 
 
