@@ -5,7 +5,6 @@ import heapq
 import itertools
 import json
 import os
-import math
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple, Generator, Any
@@ -381,10 +380,6 @@ class Model(GraphProvider):
     gm_max_dests: int = 4096
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
-    # Oracle analysis mode
-    oracle_mode: bool = True
-    oracle_exact_cover_threshold: int = 24
-    oracle_debug: bool = False
     suppress_stats_report: bool = False
 
     @staticmethod
@@ -802,8 +797,6 @@ class Model(GraphProvider):
         global_pop_cache: Optional[Dict] = None,
         apply_cache: Optional[Dict] = None,
         isolate_cache: Optional[Dict] = None,
-        edge_order_override_map: Optional[Dict[int, List[int]]] = None,
-        dest_scores: Optional[Dict[int, int]] = None,
     ) -> Generator[Union[Enqueue, Suspend], None, None]:
         stats = Stats.get()
         a_node = self.arena.get(node_id)
@@ -820,16 +813,7 @@ class Model(GraphProvider):
         # Local per-(popped, llm_bv) apply cache to amortize within this node
         local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
 
-        edge_iterator = None
-        ordered_indices = edge_order_override_map.get(node_id) if edge_order_override_map else None
-        if ordered_indices:
-            # Oracle-guided order. We still need to iterate non-guided edges if any.
-            all_indices = set(range(len(a_node.children)))
-            other_indices = sorted(list(all_indices - set(ordered_indices)))
-            edge_iterator = ((i, a_node.children[i]) for i in ordered_indices + other_indices)
-        else:
-            edge_iterator = enumerate(a_node.children)
-        for edge_i, edge in edge_iterator:
+        for edge_i, edge in enumerate(a_node.children):
             if edge.pop in skip_pops:
                 continue
             if edge.llm_bv.isdisjoint(remaining_mask):
@@ -934,14 +918,8 @@ class Model(GraphProvider):
                     if lst is None: grouped[dest_j] = [sid]
                     else: lst.append(sid)
 
-            dest_keys = list(grouped.keys())
-            if dest_scores:
-                # Sort by destination node score (desc), then by original index (asc) for stability
-                dest_keys.sort(key=lambda j: (-dest_scores.get(int(edge.dests[j].dest_idx), 0), j))
-            else:
-                # Iterate grouped dests in ascending order for locality
-                dest_keys.sort()
-            for dest_j in dest_keys:
+            # Iterate grouped dests in ascending order for locality
+            for dest_j in sorted(grouped.keys()):
                 if dests_proc >= max_dests:
                     priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
                     yield Suspend(priority, depth)
@@ -973,199 +951,103 @@ class Model(GraphProvider):
                 yield Suspend(priority, depth)
                 edges_proc = 0
             edges_proc += 1
-    def _ensure_reverse_adjacency(self) -> Dict[int, Set[int]]:
-        """Build and cache reverse adjacency: dest_node -> set(parent_nodes)."""
-        if getattr(self, 'reverse_adj', None) is not None:
-            return self.reverse_adj
-        parents: Dict[int, Set[int]] = collections.defaultdict(set)
-        for u, node in self.arena.items():
-            for edge in node.children:
-                for dest in edge.dests:
-                    parents[int(dest.dest_idx)].add(int(u))
-        self.reverse_adj = dict(parents)
-        return self.reverse_adj
+    
+    def _get_gss_hash(self, gss: GSS, cache: Dict[int, Any]) -> Any:
+        """Computes a canonical, hashable representation of a GSS object."""
+        gss_id = id(gss)
+        if gss_id in cache:
+            return cache[gss_id]
+        
+        # This implementation assumes GSS provides an `iter_stacks` method that yields
+        # (stack, acc) pairs, where stack is a list of state IDs. This is a reasonable
+        # assumption for such a data structure.
+        try:
+            # PyAcc is hashable, but the stack (list) is not. Convert to tuple.
+            stacks_repr = frozenset(
+                (tuple(stack), acc) for stack, acc in gss.iter_stacks()
+            )
+            cache[gss_id] = stacks_repr
+            return stacks_repr
+        except (AttributeError, TypeError):
+            # Fallback if iter_stacks doesn't exist or assumptions are wrong.
+            # This is not robust but prevents crashing.
+            return gss_id
 
-    def _compute_oracle_min_cover(self, end_union_events: List[Tuple[int, LLMTokenSet]]) -> List[int]:
-        """Given a list of (end_node_id, delta_mask) events collected from a full planning run,
-        compute a minimal set of end nodes whose union covers the final mask.
-        If the number of distinct end nodes is <= oracle_exact_cover_threshold, run exact branch-and-bound;
-        otherwise, run greedy maximum-coverage.
-        Returns a list of selected end node IDs (ordering chosen greedily by marginal gain for replay)."""
-        # Coalesce by end-node id
-        items_by_end: Dict[int, LLMTokenSet] = {}
-        universe = RangeSet.empty()
-        for nid, delta in end_union_events:
-            if delta is None or delta.is_empty():
-                continue
-            prev = items_by_end.get(nid)
-            if prev is None:
-                items_by_end[nid] = delta
-            else:
-                items_by_end[nid] = prev.union(delta)
-        # Remove empties if any remained
-        items_by_end = {k: v for k, v in items_by_end.items() if v is not None and not v.is_empty()}
-        # Build universe
-        for v in items_by_end.values():
-            universe |= v
-        items: List[Tuple[int, LLMTokenSet]] = list(items_by_end.items())
-        # Nothing to cover => return empty plan
-        if universe.is_empty() or not items:
+    def _get_all_successors(self, node_id: NodeID, gss_node: GSS) -> List[Tuple[NodeID, GSS]]:
+        """A non-pruning, non-suspending version of _process_internal_node_gen."""
+        successors = []
+        a_node = self.arena.get(node_id)
+        if not a_node or not a_node.children:
             return []
 
-        # Utility: greedy sequencing (also used to order final selected items)
-        def greedy_sequence(cand_items: List[Tuple[int, LLMTokenSet]], target: LLMTokenSet) -> List[int]:
-            remaining = target
-            selected: List[int] = []
-            # Copy items to avoid mutating caller
-            pool = list(cand_items)
-            while not remaining.is_empty() and pool:
-                best_idx = None
-                best_gain = 0
-                for i, (nid, mask) in enumerate(pool):
-                    gain = len(remaining.intersection(mask))
-                    if gain > best_gain:
-                        best_gain = gain
-                        best_idx = i
-                if best_idx is None or best_gain == 0:
-                    break
-                nid, mask = pool.pop(best_idx)
-                selected.append(nid)
-                remaining = remaining.difference(mask)
-            return selected
+        pop_cache: Dict[int, Tuple[Any, List[int]]] = {}
+        local_apply_cache: Dict[Tuple[int, int], GSS] = {}
 
-        # Exact cover via branch-and-bound if small
-        if len(items) <= max(0, int(self.oracle_exact_cover_threshold)):
-            # Pre-sort items by descending size to improve pruning
-            items.sort(key=lambda it: len(it[1]), reverse=True)
-            best_solution: Optional[List[int]] = None
-
-            # Precompute masks list for quick access
-            masks_only = [m for (_, m) in items]
-            node_ids = [nid for (nid, _) in items]
-
-            def dfs(remaining: LLMTokenSet, start_idx: int, chosen_idxs: List[int]) -> None:
-                nonlocal best_solution
-                if remaining.is_empty():
-                    # Found a feasible cover
-                    if best_solution is None or len(chosen_idxs) < len(best_solution):
-                        best_solution = chosen_idxs.copy()
-                    return
-                if best_solution is not None and len(chosen_idxs) >= len(best_solution):
-                    return
-                # Lower bound: ceil(|remaining| / max possible coverage of any single item)
-                max_gain = 0
-                for i in range(start_idx, len(items)):
-                    g = len(remaining.intersection(masks_only[i]))
-                    if g > max_gain:
-                        max_gain = g
-                if max_gain == 0:
-                    return  # impossible to cover remaining with available items
-                lb = int(math.ceil(len(remaining) / max(1, max_gain)))
-                if best_solution is not None and len(chosen_idxs) + lb >= len(best_solution):
-                    return  # cannot beat current best
-                # Heuristic: try the item with largest marginal first
-                best_i = None
-                best_i_gain = -1
-                for i in range(start_idx, len(items)):
-                    g = len(remaining.intersection(masks_only[i]))
-                    if g > best_i_gain:
-                        best_i_gain = g
-                        best_i = i
-                # Include branch
-                if best_i is not None and best_i_gain > 0:
-                    new_remaining = remaining.difference(masks_only[best_i])
-                    dfs(new_remaining, best_i + 1, chosen_idxs + [best_i])
-                # Exclude branch: skip best_i and continue
-                # This helps ensure exactness if including best_i is not optimal
-                next_start = start_idx
-                for i in range(start_idx, len(items)):
-                    if i == best_i:
-                        continue
-                    # Try excluding best_i by exploring others; we move sequentially to avoid combinatorial explosion
-                    # This is still exponential but OK under small thresholds
-                    dfs(remaining, i + 1, chosen_idxs)
-                    break  # only move one step to keep branching factor in check
-
-            dfs(universe, 0, [])
-            if best_solution is None:
-                # Fallback to greedy (shouldn't happen unless masks do not cover universe)
-                return greedy_sequence(items, universe)
-            # Order the chosen items greedily for replay
-            chosen_items = [(node_ids[i], masks_only[i]) for i in best_solution]
-            return greedy_sequence(chosen_items, universe)
-        else:
-            # Greedy coverage for larger sets
-            return greedy_sequence(items, universe)
-
-    def _oracle_prepare_guidance(self, selected_end_nodes: List[int]) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
-        """Compute guided priorities from selected end nodes:
-        - scores: node_id -> count of selected ends reachable downstream (via reverse edges)
-        - edge_order_map: node_id -> list of edge indices sorted by descending score of destination
-        """
-        rev = self._ensure_reverse_adjacency()
-        scores: Dict[int, int] = collections.defaultdict(int)
-        # For each selected end, propagate +1 to all ancestors
-        for end_nid in selected_end_nodes:
-            seen: Set[int] = set()
-            dq = collections.deque([end_nid])
-            while dq:
-                cur = dq.popleft()
-                if cur in seen:
+        for edge in a_node.children:
+            if edge.pop in pop_cache:
+                popped, peeked = pop_cache[edge.pop]
+            else:
+                popped = gss_node.popn(edge.pop)
+                if popped.is_empty():
+                    pop_cache[edge.pop] = (popped, [])
                     continue
-                seen.add(cur)
-                scores[cur] += 1
-                for parent in rev.get(cur, ()):
-                    if parent not in seen:
-                        dq.append(parent)
-        # Build per-node edge ordering by sum of destination scores
-        edge_order_map: Dict[int, List[int]] = {}
-        for u, node in self.arena.items():
-            if not node.children:
+                peeked = popped.peek()
+                pop_cache[edge.pop] = (popped, peeked)
+
+            if not peeked:
                 continue
-            edge_scores: List[Tuple[int, int]] = []
-            for idx, edge in enumerate(node.children):
-                s = 0
-                for d in edge.dests:
-                    s += int(scores.get(int(d.dest_idx), 0))
-                edge_scores.append((idx, s))
-            # If all scores zero, skip ordering for that node
-            if any(s > 0 for (_, s) in edge_scores):
-                ordered = sorted(edge_scores, key=lambda t: t[1], reverse=True)
-                edge_order_map[int(u)] = [idx for (idx, _) in ordered]
-        return dict(scores), edge_order_map
 
-    def _get_mask_run(
-        self,
-        guided_scores: Optional[Dict[int, int]] = None,
-        edge_order_map: Optional[Dict[int, List[int]]] = None,
-        record_end_unions: bool = False,
-    ) -> Tuple[Union[RangeSetOut, Dict], List[Tuple[int, LLMTokenSet]]]:
-        """Internal engine behind get_mask.
-        If guided_scores/edge_order_map are provided, they influence traversal priority and edge ordering.
-        If record_end_unions is True, returns a list of (end_node_id, delta_mask) for planning analysis.
-        Returns (timed_output_dict, end_union_events)."""
-        stats = Stats.get()
-        stats.start('get_mask')
-        stats.counts['get_mask.traversal.max_depth'] = 0
-        stats.inc('get_mask.initial_tokenizer_states', len(self.state))
+            key_apply = (id(popped), id(edge.llm_bv))
+            if key_apply in local_apply_cache:
+                source_after_apply = local_apply_cache[key_apply]
+            else:
+                @_acc_memoize(use_value_cache=False)
+                def intersect(acc: PyAcc):
+                    new_mask = acc.llm_mask.intersection(edge.llm_bv)
+                    return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                source_after_apply = popped.apply_and_prune(intersect)
+                local_apply_cache[key_apply] = source_after_apply
 
-        # Global caches across the whole traversal
-        global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
-        apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
-        isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
-        @dataclass
-        class HeapItem:
-            priority: Any
-            item: Any
+            if source_after_apply.is_empty():
+                continue
 
-            def __lt__(self, other: 'HeapItem') -> bool:
-                if not isinstance(other, HeapItem):
-                    return NotImplemented
-                return self.priority < other.priority
+            grouped: Dict[int, List[int]] = {}
+            m = edge.state_to_dest
+            for sid in peeked:
+                dest_list = m.get(sid)
+                if not dest_list: continue
+                for dest_j in dest_list:
+                    lst = grouped.get(dest_j)
+                    if lst is None: grouped[dest_j] = [sid]
+                    else: lst.append(sid)
 
-        all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-        work_heap = []
-        end_union_events: List[Tuple[int, LLMTokenSet]] = []
+            for dest_j, values_to_keep in grouped.items():
+                dest = edge.dests[dest_j]
+                if len(values_to_keep) == len(peeked):
+                    child_gss = source_after_apply
+                else:
+                    child_gss = source_after_apply.isolate_many(values_to_keep)
+                
+                if not child_gss.is_empty():
+                    successors.append((int(dest.dest_idx), child_gss))
+        return successors
+
+    def get_mask(self) -> Union[RangeSetOut, Dict]:
+        """
+        Oracle-based get_mask for performance analysis.
+        1. Discovery: Full BFS to find all reachable end nodes and their costs.
+        2. Optimization: Greedy set cover to find a near-optimal set of paths.
+        3. Execution: Reset stats and run a guided traversal on the optimal paths.
+        """
+        all_ones = self.all_internal_llm_tokens_bitset
+
+        # --- 1. Discovery Phase ---
+        q = collections.deque()
+        cost_to = {}
+        path_to = {}
+        gss_cache = {}
+        gss_hash_cache = {}
+        end_nodes_found = []
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -1177,169 +1059,147 @@ class Model(GraphProvider):
                         if term_id in term_map: disallowed |= term_map[term_id]
             return PyAcc({}, all_ones.difference(disallowed))
 
-        stats.start('get_mask.seeding')
         init_cache = {}
         for sid, gss in self.state.items():
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
             if not gss_init.is_empty():
-                base_pri = (-self.max_depth.get(r, 0), 0, 0)
-                if guided_scores is not None:
-                    priority = (-int(guided_scores.get(r, 0)),) + base_pri
-                else:
-                    priority = base_pri
-                heapq.heappush(work_heap, HeapItem(priority, WorkItemNew(r, gss_init, 0)))
-        stats.stop('get_mask.seeding')
+                gss_hash = self._get_gss_hash(gss_init, gss_hash_cache)
+                gss_cache[gss_hash] = gss_init
+                state = (r, gss_hash)
+                if state not in cost_to:
+                    cost_to[state] = 0
+                    path_to[state] = None
+                    q.append(state)
+
+        while q:
+            node_id, gss_hash = q.popleft()
+            gss_node = gss_cache[gss_hash]
+            current_cost = cost_to[(node_id, gss_hash)]
+
+            if self.is_end(node_id):
+                gss_acc = gss_node.reduce_acc()
+                if not gss_acc.llm_mask.is_empty():
+                    end_nodes_found.append({
+                        'state': (node_id, gss_hash),
+                        'cost': current_cost,
+                        'mask': gss_acc.llm_mask,
+                    })
+
+            for child_node_id, child_gss in self._get_all_successors(node_id, gss_node):
+                child_gss_hash = self._get_gss_hash(child_gss, gss_hash_cache)
+                gss_cache.setdefault(child_gss_hash, child_gss)
+                child_state = (child_node_id, child_gss_hash)
+                
+                if child_state not in cost_to:
+                    cost_to[child_state] = current_cost + 1
+                    path_to[child_state] = (node_id, gss_hash)
+                    q.append(child_state)
+
+        # --- 2. Optimization Phase (Greedy Weighted Set Cover) ---
+        total_mask_to_cover = RangeSet.empty()
+        for item in end_nodes_found:
+            total_mask_to_cover |= item['mask']
+
+        solution_nodes = []
+        if not total_mask_to_cover.is_empty():
+            covered_mask = RangeSet.empty()
+            candidate_nodes = list(end_nodes_found)
+            while covered_mask != total_mask_to_cover:
+                best_item, best_score = None, -1.0
+                for item in candidate_nodes:
+                    new_tokens = item['mask'].difference(covered_mask)
+                    if new_tokens.is_empty(): continue
+                    cost = item['cost'] if item['cost'] > 0 else 1
+                    score = len(new_tokens) / cost
+                    if score > best_score:
+                        best_score, best_item = score, item
+                if best_item is None: break
+                solution_nodes.append(best_item)
+                covered_mask |= best_item['mask']
+                candidate_nodes.remove(best_item)
+
+        # --- 3. Execution Phase ---
+        optimal_states, optimal_transitions = set(), set()
+        for sol_node in solution_nodes:
+            curr_state = sol_node['state']
+            while curr_state is not None:
+                if curr_state in optimal_states: break
+                optimal_states.add(curr_state)
+                parent_state = path_to.get(curr_state)
+                if parent_state is not None:
+                    optimal_transitions.add((parent_state, curr_state))
+                curr_state = parent_state
+
+        # Reset stats and run the guided traversal
+        stats = Stats.get()
+        stats.reset() # Resets all stats, assuming no reset_group is available.
+        stats.start('get_mask')
+        stats.counts['get_mask.traversal.max_depth'] = 0
+        stats.inc('get_mask.initial_tokenizer_states', len(self.state))
+
+        final_mask = RangeSet.empty()
+        work_q = collections.deque() # Use simple queue, priority doesn't matter for correctness
+        
+        # Re-seed, but only add states that are part of the optimal solution
+        init_cache_exec = {}
+        for sid, gss in self.state.items():
+            r = self.roots_map[int(sid)]
+            gss_init = gss.apply(initialize_acc, init_cache_exec)
+            if not gss_init.is_empty():
+                gss_hash = self._get_gss_hash(gss_init, gss_hash_cache)
+                if (r, gss_hash) in optimal_states:
+                    work_q.append(WorkItemNew(r, gss_init, 0))
 
         stats.start('get_mask.main_loop')
-        remaining_mask = all_ones
-        while work_heap:
-            if remaining_mask.is_empty():
-                stats.inc('get_mask.early_exit_full_mask')
-                break
+        visited_exec = set()
+        while work_q:
+            work = work_q.popleft()
+            node_id, gss_node, depth = work.node_id, work.gss, work.depth
+            
+            gss_hash = self._get_gss_hash(gss_node, gss_hash_cache)
+            state_key = (node_id, gss_hash)
+            if state_key in visited_exec: continue
+            visited_exec.add(state_key)
 
-            stats.inc('get_mask.traversal.depth_heap.pops')
-            heap_item = heapq.heappop(work_heap)
-            priority, work = heap_item.priority, heap_item.item
+            stats.inc('get_mask.traversal.nodes_processed')
+            stats.counts['get_mask.traversal.max_depth'] = max(stats.counts.get('get_mask.traversal.max_depth', 0), depth)
 
-            if isinstance(work, WorkItemSuspended):
-                gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
-
-                if work_llm_mask.isdisjoint(remaining_mask):
-                    continue
-            elif isinstance(work, WorkItemNew):
-                stats.inc('get_mask.traversal.nodes_processed')
-                node_id, gss_node, depth = work.node_id, work.gss, work.depth
-                stats.counts['get_mask.traversal.max_depth'] = max(stats.counts.get('get_mask.traversal.max_depth', 0), depth)
-                stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
-
-                assert isinstance(node_id, int)
-                assert isinstance(gss_node, GSS)
-                stats.start('get_mask.main_loop.node.reduce_acc')
+            if self.is_end(node_id):
+                stats.inc('get_mask.traversal.end_nodes')
                 gss_acc = gss_node.reduce_acc()
-                stats.stop('get_mask.main_loop.node.reduce_acc')
+                final_mask |= gss_acc.llm_mask
 
-                if self.is_end(node_id):
-                    stats.inc('get_mask.traversal.end_nodes')
-                    # Record delta for planning analysis (before union)
-                    if not final_mask.issuperset(gss_acc.llm_mask):
-                        delta = gss_acc.llm_mask.difference(final_mask)
-                        if record_end_unions and not delta.is_empty():
-                            end_union_events.append((int(node_id), delta))
-                        stats.start('get_mask.main_loop.end_node.final_mask_union')
-                        final_mask |= gss_acc.llm_mask
-                        stats.stop('get_mask.main_loop.end_node.final_mask_union')
-                        remaining_mask = all_ones.difference(final_mask)
-                        if remaining_mask.is_empty():
-                            stats.inc('get_mask.early_exit_full_mask')
-                            break
-
-                a_node = self.arena.get(node_id)
-                # Stronger upper bound than llm_bv_union: descendant closure
-                node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
-                work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
-
-                if not a_node or not a_node.children:
-                    continue
-                # Closure-based pruning
-                if work_llm_mask.isdisjoint(remaining_mask):
-                    stats.inc('get_mask.main_loop.node.closure_pruned')
-                    continue
-
-                gen = self._process_internal_node_gen(
-                    node_id,
-                    gss_node,
-                    remaining_mask,
-                    gss_acc.llm_mask,
-                    depth,
-                    global_pop_cache=global_pop_cache,
-                    apply_cache=apply_cache_by_bv,
-                    isolate_cache=isolate_many_cache,
-                    edge_order_override_map=edge_order_map,
-                    dest_scores=guided_scores,
-                )
-            else:
-                raise ValueError(f'Unexpected work item: {work}')
-
-            if gen:
-                while True:
-                    try:
-                        yielded = next(gen)
-
-                        if isinstance(yielded, Enqueue):
-                            new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
-                            base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                            if guided_scores is not None:
-                                child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
-                            else:
-                                child_priority = base_child_pri
-                            heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
-                        elif isinstance(yielded, Suspend):
-                            heapq.heappush(work_heap, HeapItem(yielded.priority, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
-                            break
-
-                    except StopIteration:
-                        break # Generator is done.
+            for child_node_id, child_gss in self._get_all_successors(node_id, gss_node):
+                child_gss_hash = self._get_gss_hash(child_gss, gss_hash_cache)
+                if (state_key, (child_node_id, child_gss_hash)) in optimal_transitions:
+                    stats.inc('get_mask.traversal.edges_traversed')
+                    work_q.append(WorkItemNew(child_node_id, child_gss, depth + 1))
         stats.stop('get_mask.main_loop')
 
-        stats.start('get_mask.final_conversion')
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
-        stats.stop('get_mask.final_conversion')
-
         stats.stop('get_mask')
 
-        # Capture metrics for coordinator/runner usage
-        self.last_get_mask_cost = int(Stats.get().counts.get('get_mask.traversal.edges_traversed', 0))
+        self.last_get_mask_cost = int(stats.counts.get('get_mask.traversal.edges_traversed', 0))
         self.last_get_mask_metrics = {
             "edges_traversed": float(self.last_get_mask_cost),
-            "nodes_processed": float(Stats.get().counts.get('get_mask.traversal.nodes_processed', 0)),
-            "end_nodes": float(Stats.get().counts.get('get_mask.traversal.end_nodes', 0)),
-            "main_loop_ms": float(Stats.get().times.get('get_mask.main_loop', 0.0) * 1000.0),
-            "total_ms": float(Stats.get().times.get('get_mask', 0.0) * 1000.0),
-            "max_depth": float(Stats.get().counts.get('get_mask.traversal.max_depth', 0)),
+            "nodes_processed": float(stats.counts.get('get_mask.traversal.nodes_processed', 0)),
+            "end_nodes": float(stats.counts.get('get_mask.traversal.end_nodes', 0)),
+            "main_loop_ms": float(stats.times.get('get_mask.main_loop', 0.0) * 1000.0),
+            "total_ms": float(stats.times.get('get_mask', 0.0) * 1000.0),
+            "max_depth": float(stats.counts.get('get_mask.traversal.max_depth', 0)),
         }
-
-        # Optional internal stats printout (suppressed by default)
         if not self.suppress_stats_report:
-            if Stats.get().times['get_mask.main_loop']*1000 > 1:
-                Stats.get().report()
+            stats.report()
 
         return {
             "type": "timed_output",
             "output": original_indices,
-            "time_sec": Stats.get().times.get('get_mask.main_loop', 0.0),
-        }, end_union_events
-
-    def get_mask(self) -> Union[RangeSetOut, Dict]:
-        # Oracle wrapper: plan, then guided run
-        if not self.oracle_mode:
-            out, _ = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=False)
-            return out
-
-        # 1) Planning pass: collect end-node delta masks
-        prev_suppress = self.suppress_stats_report
-        try:
-            self.suppress_stats_report = True
-            _, end_events = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=True)
-        finally:
-            self.suppress_stats_report = prev_suppress
-
-        # 2) Compute a minimal cover of final mask by end nodes
-        selected_end_nodes = self._compute_oracle_min_cover(end_events)
-        if self.oracle_debug:
-            print(f"[oracle] planning: collected {len(end_events)} end-events; "
-                  f"selected {len(selected_end_nodes)} end nodes by set cover.")
-
-        # 3) Prepare guided scoring and edge ordering
-        guided_scores, edge_order_map = self._oracle_prepare_guidance(selected_end_nodes)
-
-        # 4) Reset stats per request, then run the guided traversal
-        Stats.get().reset()
-        out, _ = self._get_mask_run(guided_scores=guided_scores, edge_order_map=edge_order_map, record_end_unions=False)
-        return out
+            "time_sec": stats.times.get('get_mask', 0.0),
+        }
 
     def finalize(self):
         """Called at the end of a benchmark run to perform any final actions, like printing stats."""
