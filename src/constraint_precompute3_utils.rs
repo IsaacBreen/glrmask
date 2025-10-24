@@ -920,8 +920,17 @@ pub fn optimize_trie3_size(
                 });
                 if config.compress_edges {
                     run_pass!("Compressing edges + unary chains (post-pop0-struct-merge)", {
-                        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                        compress_unary_chains_trie3(roots, &trie3_god);
+                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                    compress_unary_chains_trie3(roots, &trie3_god);
+                });
+                // Defensive: immediately refine token atoms to allow reversing any local structure
+                // that the compression step couldn't improve under the global cost metric.
+                // This gives the pipeline a way to re-split token sets when that reduces local cost.
+                if config.refine_token_atoms {
+                    run_pass!("Refining token-set atoms (defensive, post-compress)", {
+                        refine_edges_to_token_atoms_trie3(
+                            roots, &trie3_god, max_llm_token_id, max_state_id, config.refine_token_atoms_max_blocks
+                        );
                     });
                 }
             }
@@ -3404,7 +3413,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
     if all_nodes.is_empty() { return; }
 
     #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Compress Edges", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
+    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Compress Edges (cost-aware)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for node_idx in it {
@@ -3413,19 +3422,40 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
             continue;
         }
 
-        // Take existing children for processing.
-        let old_children = std::mem::take(w.children_mut());
+        // Work from a snapshot so we can compute both old/new costs and adopt only if better.
+        let old_snapshot = w.children().clone();
 
-        // First stage: group by (pop, canonicalized destination map), while unioning LLM token masks for identical dest-maps.
-        // Canonicalization: BTreeMap<Trie2Index, StateIDBV> (sorted by destination) -> Vec<(Trie2Index, StateIDBV)> as a stable key.
+        // Local helpers for bounded range-count and cost metric
+        #[inline]
+        fn ranges_len_bounded(m: &LLMTokenBV, max_id: usize) -> usize {
+            let mut c = m.clone();
+            c.constrain(max_id);
+            c.inner().ranges_len()
+        }
         use std::collections::BTreeMap as BTM;
+        #[inline]
+        fn children_cost(
+            children: &BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>,
+            max_llm_token_id: usize
+        ) -> (usize, usize, usize) {
+            let mut ranges_sum = 0usize;
+            let mut dests_sum = 0usize;
+            for ((_, l), dm) in children {
+                ranges_sum += ranges_len_bounded(l, max_llm_token_id);
+                dests_sum += dm.len();
+            }
+            (ranges_sum + dests_sum, ranges_sum, dests_sum)
+        }
+
+        // Compute old cost
+        let old_cost = children_cost(&old_snapshot, max_llm_token_id).0;
+
+        // First stage: group by (pop, canonicalized dest-map), unioning L masks for identical dest-maps.
         use std::collections::HashMap as HM;
-
-        // by_pop: pop -> { canonical_dest_map_vec -> union_of_llm_bv }
         let mut by_pop: BTM<isize, HM<Vec<(Trie2Index, StateIDBV)>, LLMTokenBV>> = BTM::new();
-
-        for ((pop, mut llm_bv), dest_map) in old_children {
+        for ((pop, llm_bv_orig), dest_map_orig) in &old_snapshot {
             // Constrain token bitset to bound and skip empties.
+            let mut llm_bv = llm_bv_orig.clone();
             llm_bv.constrain(max_llm_token_id);
             if llm_bv.is_empty() {
                 continue;
@@ -3433,10 +3463,11 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
 
             // Aggregate destinations by unioning SIDs and removing empties.
             let mut dest_agg: BTM<Trie2Index, StateIDBV> = BTM::new();
-            for (dst, mut sids) in dest_map {
+            for (dst, sids0) in dest_map_orig {
+                let mut sids = sids0.clone();
                 sids.constrain(max_state_id);
                 if sids.is_empty() { continue; }
-                dest_agg.entry(dst)
+                dest_agg.entry(*dst)
                     .and_modify(|e| *e |= &sids)
                     .or_insert(sids);
             }
@@ -3444,18 +3475,16 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
                 continue;
             }
 
-            // Canonical destination vector (sorted by dst) for use as a key (Vec implements Hash/Eq/Ord given elements do).
+            // Canonical destination vector (sorted by dst) for use as a key.
             let dest_vec: Vec<(Trie2Index, StateIDBV)> = dest_agg.into_iter().collect();
 
             // Merge edges that have the same pop and identical destination map by unioning their LLM masks.
-            let entry = by_pop.entry(pop).or_default().entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
+            let entry = by_pop.entry(*pop).or_default().entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
             *entry |= &llm_bv;
         }
 
-        // Second stage: for each pop, combine groups that happen to yield identical final LLMTokenBV
-        // by unioning their destination maps. This ensures we never create two entries keyed by the
-        // same (pop, LLMTokenBV); the union is semantically equivalent to having parallel edges for
-        // that same token-set.
+        // Second stage: for each pop, combine groups that yield identical final L masks
+        // by unioning their destination maps (one entry per (pop, llm_bv)).
         let mut new_children: BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTM::new();
         for (pop, groups) in by_pop {
             // llm_bv -> aggregated destination map (as BTreeMap for determinism)
@@ -3485,8 +3514,6 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
                     }
                 }
                 if !ordered_dm.is_empty() {
-                    // If an entry for (pop, llm_bv) already exists, union destination maps' SIDs (shouldn't happen,
-                    // but this keeps the structure robust).
                     let entry = new_children.entry((pop, llm_bv)).or_insert_with(OrderedHashMap::new);
                     for (dst, sids) in ordered_dm {
                         entry.entry(dst)
@@ -3497,13 +3524,24 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
             }
         }
 
-        // Recompute live tokens as the union of all outgoing LLM masks.
-        let mut new_live = LLMTokenBV::zeros();
-        for ((_, llm_bv), _) in &new_children {
-            new_live |= llm_bv;
+        // Compare costs and adopt only if better.
+        let new_cost = children_cost(&new_children, max_llm_token_id).0;
+        if new_cost < old_cost {
+            let mut new_live = LLMTokenBV::zeros();
+            for ((_, llm_bv), _) in &new_children {
+                new_live |= llm_bv;
+            }
+            w.value.live_tokens = new_live;
+            *w.children_mut() = new_children;
+        } else {
+            // Keep old structure; normalize live_tokens from old children.
+            let mut live = LLMTokenBV::zeros();
+            for ((_, llm_bv), _) in &old_snapshot {
+                live |= llm_bv;
+            }
+            w.value.live_tokens = live;
+            // w.children() already equals old_snapshot
         }
-        w.value.live_tokens = new_live;
-        *w.children_mut() = new_children;
     }
 
     crate::debug!(2, "Finished compressing Trie3 edges.");
