@@ -63,6 +63,7 @@ def visualize_constraint(
     max_depth: int,
     file_format: str,
     rankdir: str,
+    selected_roots: Optional[List[int]] = None,
 ):
     """
     Loads a constraint file and generates a Graphviz visualization.
@@ -90,12 +91,12 @@ def visualize_constraint(
 
     # Identify root and end nodes
     roots_map = data.get("precomputed3", [])
-    root_ids: Set[int] = {int(r) for _s, r in roots_map}
+    all_root_ids: Set[int] = {int(r) for _s, r in roots_map}
     end_ids: Set[int] = {
         nid for nid, node in values_dict.items()
         if node.get("value", {}).get("clean_end", False)
     }
-    print(f"Found {len(root_ids)} root nodes and {len(end_ids)} end nodes.")
+    print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.")
 
     # Initialize Graphviz Digraph
     dot = graphviz.Digraph(
@@ -120,7 +121,11 @@ def visualize_constraint(
     seen_nodes: Set[int] = set()
     seen_edges: Set[str] = set()
 
-    for root_id in sorted(list(root_ids)):
+    start_roots = selected_roots if selected_roots is not None else sorted(list(all_root_ids))
+    if selected_roots is not None:
+        print(f"Displaying selected roots: {start_roots}")
+
+    for root_id in start_roots:
         if root_id in values_dict and root_id not in seen_nodes:
             q.append((root_id, 0))
             seen_nodes.add(root_id)
@@ -133,7 +138,7 @@ def visualize_constraint(
         pbar.update(1)
 
         # Determine node style
-        is_root = node_id in root_ids
+        is_root = node_id in all_root_ids
         is_end = node_id in end_ids
         label = f"Node {node_id}"
         fillcolor = 'lightblue'
@@ -257,10 +262,23 @@ def main():
         choices=['TB', 'LR'],
         help="Direction of graph layout (Top-to-Bottom or Left-to-Right). (default: TB)"
     )
+    parser.add_argument(
+        "--roots",
+        type=str,
+        default=None,
+        help="Comma-separated list of root node IDs to display. If not set, all roots are shown."
+    )
     args = parser.parse_args()
 
     if not args.constraint_file.exists():
         parser.error(f"Constraint file not found: {args.constraint_file}")
+
+    selected_roots = None
+    if args.roots:
+        try:
+            selected_roots = [int(r.strip()) for r in args.roots.split(',')]
+        except ValueError:
+            parser.error("Invalid value for --roots. Must be a comma-separated list of integers.")
 
     output_path = args.output
     if output_path is None:
@@ -276,6 +294,7 @@ def main():
         max_depth=args.max_depth,
         file_format=args.format,
         rankdir=args.rankdir,
+        selected_roots=selected_roots,
     )
 
 
