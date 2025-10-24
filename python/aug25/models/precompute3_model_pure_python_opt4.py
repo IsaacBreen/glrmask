@@ -454,6 +454,7 @@ class Model(GraphProvider):
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
             state={tokenizer.initial_state_id(): initial_gss},
         )
+        model._recompute_max_depth()
         model._compute_edge_accelerators()
         # New: per-pop unions and descendant closures for stronger pruning
         model._compute_bucket_unions()
@@ -461,6 +462,34 @@ class Model(GraphProvider):
         model.optimize_traversal()
         model._compute_and_print_stats()
         return model
+
+    def _recompute_max_depth(self) -> None:
+        """
+        Robustly re-computes max_depth for all nodes. max_depth is the longest path
+        to a clean_end node. This is crucial for the correctness of the bottom-up
+        computation of llm_bv_descendant.
+        """
+        reverse_adj = collections.defaultdict(list)
+        for nid, node in self.arena.items():
+            for edge in node.children:
+                for d in edge.dests:
+                    reverse_adj[int(d.dest_idx)].append(nid)
+
+        q = collections.deque()
+        new_max_depth = {nid: -1 for nid in self.arena}
+        for nid, node in self.arena.items():
+            if node.clean_end:
+                q.append((nid, 0))
+                new_max_depth[nid] = 0
+
+        while q:
+            nid, depth = q.popleft()
+            for parent_id in reverse_adj.get(nid, []):
+                if depth + 1 > new_max_depth[parent_id]:
+                    new_max_depth[parent_id] = depth + 1
+                    q.append((parent_id, depth + 1))
+
+        self.max_depth = {nid: max(0, d) for nid, d in new_max_depth.items()}
 
     def _compute_edge_accelerators(self) -> None:
         all_ones = self.all_internal_llm_tokens_bitset
@@ -784,7 +813,7 @@ class Model(GraphProvider):
         gss_mask: LLMTokenSet,
         depth: int,
         global_pop_cache: Optional[Dict] = None,
-        apply_cache: Optional[Dict[Tuple[int, LLMTokenSet], GSS]] = None,
+        apply_cache: Optional[Dict] = None,
         isolate_cache: Optional[Dict] = None,
     ) -> Generator[Union[Enqueue, Suspend], None, None]:
         stats = Stats.get()
@@ -800,7 +829,7 @@ class Model(GraphProvider):
         skip_pops: Set[int] = set()
         checked_pops: Set[int] = set()
         # Local per-(popped, llm_bv) apply cache to amortize within this node
-        local_apply_cache: Dict[Tuple[int, LLMTokenSet], GSS] = {} if apply_cache is None else apply_cache
+        local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
 
         for edge_i, edge in enumerate(a_node.children):
             if edge.pop in skip_pops:
@@ -949,7 +978,7 @@ class Model(GraphProvider):
 
         # Global caches across the whole traversal
         global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
-        apply_cache_by_bv: Dict[Tuple[int, LLMTokenSet], GSS] = {}
+        apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
         isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
         @dataclass
         class HeapItem:
