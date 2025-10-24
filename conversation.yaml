@@ -589,6 +589,8 @@ local_system:
               stats['edges_per_pop_bucket'] = []
               stats['state_coverage_per_pop_bucket'] = []
               stats['avg_edges_per_state_per_pop_bucket'] = []
+              stats['unique_llm_bvs_per_pop_bucket'] = []
+              stats['unique_dest_states_unions_per_pop_bucket'] = []
               pop_counts = collections.Counter()
               num_nodes = len(self.arena)
               num_clean_end_nodes = 0
@@ -649,6 +651,17 @@ local_system:
                           avg_edges = sum_dest_states_union_cardinality / state_coverage
                           stats['avg_edges_per_state_per_pop_bucket'].append(avg_edges)
 
+                      # B_p(u): Unique LLM BVs per Pop-Bucket. This predicts the number of
+                      # apply_and_prune calls needed if we group by llm_bv.
+                      unique_llm_bvs = {edge.llm_bv for edge in edges_in_bucket}
+                      stats['unique_llm_bvs_per_pop_bucket'].append(len(unique_llm_bvs))
+
+                      # Proxy for s-list duplication: Unique dest_states_union per Pop-Bucket.
+                      # If this is low, it suggests high potential for caching isolate_many results.
+                      unique_dest_states = {edge.dest_states_union for edge in edges_in_bucket}
+                      stats['unique_dest_states_unions_per_pop_bucket'].append(len(unique_dest_states))
+
+
               num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
               num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
 
@@ -707,9 +720,11 @@ local_system:
               print_dist_stats("LLM BV Overlap Factor per Node", stats['llm_bv_overlap_factor'])
               print_dist_stats("StateIDSet Union Cardinality per Edge", stats['dest_states_union_cardinality'])
               print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
-              print_dist_stats("LLM BVs per (Pop, StateID)", llm_bvs_per_pop_state)
-              print_dist_stats("Destinations per (Pop, StateID)", dests_per_pop_state)
+              print_dist_stats("Unique LLM BVs per (Node, Pop, StateID)", llm_bvs_per_pop_state)
+              print_dist_stats("Unique Destinations per (Node, Pop, StateID)", dests_per_pop_state)
               print_dist_stats("Edges per Pop-Bucket", stats['edges_per_pop_bucket'])
+              print_dist_stats("Unique LLM BVs per Pop-Bucket", stats['unique_llm_bvs_per_pop_bucket'])
+              print_dist_stats("Unique Dest State Unions per Pop-Bucket", stats['unique_dest_states_unions_per_pop_bucket'])
               print_dist_stats("State Coverage per Pop-Bucket", stats['state_coverage_per_pop_bucket'])
               print_dist_stats("Avg Edges per State per Pop-Bucket", stats['avg_edges_per_state_per_pop_bucket'])
               if self.max_depth:
@@ -2574,6 +2589,8 @@ messages:
               stats['edges_per_pop_bucket'] = []
               stats['state_coverage_per_pop_bucket'] = []
               stats['avg_edges_per_state_per_pop_bucket'] = []
+              stats['unique_llm_bvs_per_pop_bucket'] = []
+              stats['unique_dest_states_unions_per_pop_bucket'] = []
               pop_counts = collections.Counter()
               num_nodes = len(self.arena)
               num_clean_end_nodes = 0
@@ -2634,6 +2651,17 @@ messages:
                           avg_edges = sum_dest_states_union_cardinality / state_coverage
                           stats['avg_edges_per_state_per_pop_bucket'].append(avg_edges)
 
+                      # B_p(u): Unique LLM BVs per Pop-Bucket. This predicts the number of
+                      # apply_and_prune calls needed if we group by llm_bv.
+                      unique_llm_bvs = {edge.llm_bv for edge in edges_in_bucket}
+                      stats['unique_llm_bvs_per_pop_bucket'].append(len(unique_llm_bvs))
+
+                      # Proxy for s-list duplication: Unique dest_states_union per Pop-Bucket.
+                      # If this is low, it suggests high potential for caching isolate_many results.
+                      unique_dest_states = {edge.dest_states_union for edge in edges_in_bucket}
+                      stats['unique_dest_states_unions_per_pop_bucket'].append(len(unique_dest_states))
+
+
               num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
               num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
 
@@ -2692,9 +2720,11 @@ messages:
               print_dist_stats("LLM BV Overlap Factor per Node", stats['llm_bv_overlap_factor'])
               print_dist_stats("StateIDSet Union Cardinality per Edge", stats['dest_states_union_cardinality'])
               print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
-              print_dist_stats("LLM BVs per (Pop, StateID)", llm_bvs_per_pop_state)
-              print_dist_stats("Destinations per (Pop, StateID)", dests_per_pop_state)
+              print_dist_stats("Unique LLM BVs per (Node, Pop, StateID)", llm_bvs_per_pop_state)
+              print_dist_stats("Unique Destinations per (Node, Pop, StateID)", dests_per_pop_state)
               print_dist_stats("Edges per Pop-Bucket", stats['edges_per_pop_bucket'])
+              print_dist_stats("Unique LLM BVs per Pop-Bucket", stats['unique_llm_bvs_per_pop_bucket'])
+              print_dist_stats("Unique Dest State Unions per Pop-Bucket", stats['unique_dest_states_unions_per_pop_bucket'])
               print_dist_stats("State Coverage per Pop-Bucket", stats['state_coverage_per_pop_bucket'])
               print_dist_stats("Avg Edges per State per Pop-Bucket", stats['avg_edges_per_state_per_pop_bucket'])
               if self.max_depth:
@@ -5068,115 +5098,274 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Based on my analysis of your performance data and your request to gather more statistics before attempting optimizations, here are the step-by-step instructions and the corresponding git diff to enhance the statistical reporting in your model.
+      Short version
 
-      The new statistics will help quantify the potential benefits of re-architecting the `get_mask` traversal logic around a `(pop, state_id)`-based inverted index.
+      - Your main cost drivers in get_mask are not in “graph search,” but in edge filtering and per-edge GSS work:
+        - Extremely high numbers of popn() and apply_and_prune() calls
+        - Many isolate_many() calls
+        - Many heap pops due to tiny chunking (gm_max_edges = gm_max_dests = 1)
+        - Lots of bitset intersections
 
-      ### Step-by-step Instructions
+      - The arena statistics you already compute contain a very strong signal that a per-node inverted index keyed by (pop, state_id) would reduce work by orders of magnitude in the worst cases:
+        - LLM BVs per (Pop, StateID): mean ≈ 2.07, median 1
+        - Destinations per (Pop, StateID): mean ≈ 3.50, median 1
+        - State coverage per pop-bucket: mean ≈ 12.94, median 2
 
-      1.  **Open the file** `python/aug25/models/precompute3_model_pure_python_opt4.py`.
+        This says: once you know the popped top-of-stack state s and pop value p, the number of relevant edges at that node is tiny. But the current algorithm still iterates all edges, then looks “inside” each edge for s. That’s backwards for performance.
 
-      2.  **Navigate to the `_compute_and_print_stats` method** within the `Model` class.
+      - Proposed change: Build a node-local inverted index that maps (pop, state_id) to the exact edge/destination entries relevant for that state, grouped by llm_bv. Then, for each pop length actually present in the GSS, iterate over s in popped.peek() and only touch the handful of entries for (p, s). Pre-group by llm_bv and perform at most one apply_and_prune per distinct llm_bv, not per edge/destination.
 
-      3.  **Add new stat collectors:** At the beginning of the method, locate the `stats` dictionary initialization. Add two new keys to collect statistics on the uniqueness of `llm_bv` and `dest_states_union` within each pop-bucket.
+      - This reorders the same combinatorics. The result sets of (edge, dest, s) are identical to the current algorithm. You can prove equivalence because both enumerate exactly the same pairs {(e, j, s): s ∈ e.state_to_dest[j]} and then do the same operations on the same GSS subgraphs; you’re just changing iteration order. Apply/isolate commute for your intersect-transform, so you can legally move apply_and_prune to before isolate_many and amortize it across groups sharing the same llm_bv.
 
-          *   **Around line 700**, after the line `stats['avg_edges_per_state_per_pop_bucket'] = []`, insert the following:
-              ```python
-              stats['unique_llm_bvs_per_pop_bucket'] = []
-              stats['unique_dest_states_unions_per_pop_bucket'] = []
-              ```
+      - Before doing the engineering, collect and/or derive three additional statistics you don’t currently print that predict whether the index will pay:
+        1) For each node and each pop value p: the multiset size |{(p, s)}| and average number of unique llm_bvs per (p, s) over states actually present in the union of dests.
+        2) For each node and pop p: the expected number of apply_and_prune calls if we group by llm_bv, i.e., unique llm_bvs encountered when iterating over s in the union of dests. Compare that against today’s “edges in pop-bucket” to estimate savings.
+        3) For each node and pop p: duplication of s-lists across (edge, dest) groups (how many groups share exactly the same set of s). This predicts how many isolate_many results can be memoized and re-used.
 
-      4.  **Calculate the new stats:** Inside the same method, find the loop that iterates over `pop_buckets`.
+      - Low-effort immediate wins (no data structure changes):
+        - Raise gm_max_edges and gm_max_dests drastically (e.g., to 1024 and 8192). Heap churn is a measurable overhead and hurts worst-case latency (thousands of heap pops per call in some steps).
+        - Deduplicate isolate_many by caching child GSSes per exact s-list (as a tuple). This can cut isolate_many by a large constant factor in the worst-case steps where it’s huge.
+        - Group destinations by llm_bv within the current traversal and do one apply_and_prune per llm_bv, then isolate for each dest that uses that llm_bv from the resulting GSS. This takes advantage of the small “LLM BVs per (Pop, StateID)” statistic immediately.
 
-          *   **Around line 761**, after the `if state_coverage > 0:` block, insert the following logic to compute and store the new metrics for each bucket:
-              ```python
-              # B_p(u): Unique LLM BVs per Pop-Bucket. This predicts the number of
-              # apply_and_prune calls needed if we group by llm_bv.
-              unique_llm_bvs = {edge.llm_bv for edge in edges_in_bucket}
-              stats['unique_llm_bvs_per_pop_bucket'].append(len(unique_llm_bvs))
+      The rest of this answer is the “long version”: what to change, why it helps, the math, the proof of equivalence, and what new stats are worth collecting.
 
-              # Proxy for s-list duplication: Unique dest_states_union per Pop-Bucket.
-              # If this is low, it suggests high potential for caching isolate_many results.
-              unique_dest_states = {edge.dest_states_union for edge in edges_in_bucket}
-              stats['unique_dest_states_unions_per_pop_bucket'].append(len(unique_dest_states))
-              ```
+      1) What the data already tells us
 
-      5.  **Update the statistical report:** At the end of the method, modify the printout section to include the new stats and improve the clarity of existing ones.
+      From your arena stats:
+      - LLM BVs per (Pop, StateID): mean 2.07, median 1
+      - Destinations per (Pop, StateID): mean 3.50, median 1
+      - State coverage per pop-bucket: mean 12.94, median 2
+      - Edges per pop-bucket: median 1, mean 1.94 but with very heavy tails on some nodes
 
-          *   **Around line 820**, modify the two `print_dist_stats` calls for the inverted index stats to use more descriptive labels:
-              *   Change `"LLM BVs per (Pop, StateID)"` to `"Unique LLM BVs per (Node, Pop, StateID)"`.
-              *   Change `"Destinations per (Pop, StateID)"` to `"Unique Destinations per (Node, Pop, StateID)"`.
+      Interpretation:
+      - For a fixed node u, fixed pop length p, and fixed parser state s, there are on average about 2 distinct llm_bv partitions covering the small number of relevant destinations (≈3.5).
+      - The set of “states reachable after p pops that actually matter at u” tends to be small (a dozen on average, two at the median), even when a node has many edges.
+      - Scanning all edges at a node and then testing whether s is in each edge’s state set is the wrong iteration order; most of those edges are irrelevant for the specific s values in popped.peek().
 
-          *   **Around line 822**, after the line printing "Edges per Pop-Bucket", insert the new `print_dist_stats` calls:
-              ```python
-              print_dist_stats("Unique LLM BVs per Pop-Bucket", stats['unique_llm_bvs_per_pop_bucket'])
-              print_dist_stats("Unique Dest State Unions per Pop-Bucket", stats['unique_dest_states_unions_per_pop_bucket'])
-              ```
+      Cost symptoms in your get_mask stats:
+      - popn called 1908 times (16.3 ms) in the worst step. You do reuse the result per pop within a node via pop_cache, so that 1908 is “per node and per pop value across all nodes processed.”
+      - apply_and_prune is called hundreds of times and costs multiple milliseconds per get_mask call.
+      - isolate_many was invoked 2108 times (7.6 ms) in one step and hundreds to thousands of times in others.
+      - bitset.intersection is called thousands of times.
 
-      These changes will provide deeper insight into the arena structure, specifically quantifying the amount of redundancy that a new traversal strategy could exploit, without altering the core `get_mask` algorithm itself.
+      These line up with the edge-first iteration order; you compute popn once per pop value per node, but you still touch many edges per node and then perform small per-edge work.
 
-      ### Git Diff
+      2) Proposed data structure: per-node inverted index keyed by (pop, state), grouped by llm_bv
 
-      Here is the git diff to apply the changes described above.
+      Let G(u) be the children edges of node u. Each edge e ∈ G(u) has:
+      - an integer pop length p(e),
+      - a token mask llm_bv(e),
+      - a list of destination entries indexed by j, each dest entry has (dest_idx(e, j), state_bv(e, j)).
 
-      ```diff
-      --- a/python/aug25/models/precompute3_model_pure_python_opt4.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_opt4.py
-      @@ -699,6 +699,8 @@
-               stats = collections.defaultdict(list)
-               stats['edges_per_pop_bucket'] = []
-               stats['state_coverage_per_pop_bucket'] = []
-               stats['avg_edges_per_state_per_pop_bucket'] = []
-      +        stats['unique_llm_bvs_per_pop_bucket'] = []
-      +        stats['unique_dest_states_unions_per_pop_bucket'] = []
-               pop_counts = collections.Counter()
-               num_nodes = len(self.arena)
-               num_clean_end_nodes = 0
-      @@ -756,6 +758,17 @@
-                       if state_coverage > 0:
-                           avg_edges = sum_dest_states_union_cardinality / state_coverage
-                           stats['avg_edges_per_state_per_pop_bucket'].append(avg_edges)
-      +
-      +                # B_p(u): Unique LLM BVs per Pop-Bucket. This predicts the number of
-      +                # apply_and_prune calls needed if we group by llm_bv.
-      +                unique_llm_bvs = {edge.llm_bv for edge in edges_in_bucket}
-      +                stats['unique_llm_bvs_per_pop_bucket'].append(len(unique_llm_bvs))
-      +
-      +                # Proxy for s-list duplication: Unique dest_states_union per Pop-Bucket.
-      +                # If this is low, it suggests high potential for caching isolate_many results.
-      +                unique_dest_states = {edge.dest_states_union for edge in edges_in_bucket}
-      +                stats['unique_dest_states_unions_per_pop_bucket'].append(len(unique_dest_states))
-      +
-       
-               num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
-               num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
-      @@ -818,10 +831,12 @@
-               print_dist_stats("LLM BV Overlap Factor per Node", stats['llm_bv_overlap_factor'])
-               print_dist_stats("StateIDSet Union Cardinality per Edge", stats['dest_states_union_cardinality'])
-               print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
-      -        print_dist_stats("LLM BVs per (Pop, StateID)", llm_bvs_per_pop_state)
-      -        print_dist_stats("Destinations per (Pop, StateID)", dests_per_pop_state)
-      +        print_dist_stats("Unique LLM BVs per (Node, Pop, StateID)", llm_bvs_per_pop_state)
-      +        print_dist_stats("Unique Destinations per (Node, Pop, StateID)", dests_per_pop_state)
-               print_dist_stats("Edges per Pop-Bucket", stats['edges_per_pop_bucket'])
-      +        print_dist_stats("Unique LLM BVs per Pop-Bucket", stats['unique_llm_bvs_per_pop_bucket'])
-      +        print_dist_stats("Unique Dest State Unions per Pop-Bucket", stats['unique_dest_states_unions_per_pop_bucket'])
-               print_dist_stats("State Coverage per Pop-Bucket", stats['state_coverage_per_pop_bucket'])
-               print_dist_stats("Avg Edges per State per Pop-Bucket", stats['avg_edges_per_state_per_pop_bucket'])
-               if self.max_depth:
+      In your current code you build, per edge e, a map state_to_dest(e): state -> [j] for all states contained in each state_bv(e, j). That is already an “edge-local” inverted index.
 
-      ```
+      Node-level inverted index:
+      - For each node u and pop value p, build an index I[u][p]:
+        - For each parser state s, define I[u][p][s] as a map from llm_bv to a list of (edge_ref, dest_j_list) pairs, where edge_ref refers to an edge e with pop p, and dest_j_list are exactly the indices j such that s ∈ state_bv(e, j).
+        - Optionally, store two pre-aggregates: U_states[u][p] = the union of all states covered by pop p at node u (a RangeSetStates), and U_bv[u][p] = the union of all llm_bv(e) across edges with pop p.
+
+      Remarks:
+      - You can build this using each edge’s existing state_to_dest mapping: iterate (s -> [j]) per edge and accumulate under I[u][p][s][llm_bv(e)]. The “sets per (pop, state)” metrics you’ve already computed tell us the index is sparse (≈13 states per pop bucket on average, ≈2 llm_bv per state).
+      - Memory: It duplicates (edge, j) references by state, but your existing per-edge state_to_dest already enumerates all s across all dests. The node-level index merely pools those per-edge mappings by state. The total number of (pop, state) entries is essentially the same scale as the “Total state ID cardinality (sum over dests): 2.8M”, and for each such entry we store ≈2 llm_bv keys with small lists. This will add memory overhead, but it is guided by the same primitive enumerations you already pay.
+
+      3) Using the index in get_mask
+
+      At a node u with GSS node g and reduced acc mask M = gss_acc.llm_mask:
+      - For each pop length p present in I[u]:
+        - Compute popped_p = g.popn(p) exactly once (your current pop_cache does this already).
+        - If popped_p is empty, continue.
+        - Let S = popped_p.peek() be the set of states after popping.
+        - Let S’ = S ∩ U_states[u][p]. If empty, skip p entirely (this replaces your “dest_union_pruned_after_pop” checks on a per-edge basis with one check per pop bucket).
+        - Compute the set of relevant llm_bv values:
+          - B = { b ∈ I[u][p][s] : s ∈ S’ } (collect unique bitsets across states in S’).
+          - If M ∩ (⋃B) is empty, skip p entirely (cheap early-out).
+        - For each b ∈ B for which M ∩ b ≠ ∅, compute G_b = popped_p.apply_and_prune(intersect_with b). Memoize these in a dictionary keyed by b. You will do at most |B| apply_and_prune calls here. The observed mean “LLM BVs per (Pop, StateID)” of ≈2.07 strongly suggests |B| will be very small (often 1–3).
+        - Now group destinations by “(edge_ref, dest_j)” as you do today, except iterate from states:
+          - Let groups be a dictionary keyed by (edge_ref, dest_j) with value “the list of s ∈ S’ that map to that (edge_ref, dest_j) and whose llm_bv is b”. You can build groups by:
+            for s in S’:
+              for (b, items) in I[u][p][s].items():
+                if B mask check passed for b:
+                  for (edge_ref, dest_js) in items:
+                    for j in dest_js:
+                      groups[(edge_ref, j, b)].append(s)
+          - Optionally deduplicate s-lists as described below.
+        - For each key (edge_ref, j, b) in groups:
+          - Let s_list = groups[(edge_ref, j, b)]. If s_list == S, you can use G_b directly. Otherwise child_gss = G_b.isolate_many(s_list).
+          - Enqueue (dest_idx(edge_ref, j), child_gss).
+
+      Key benefits:
+      - You never “scan” irrelevant edges for a given pop length; you jump straight to the handful of items that actually contain the states in S.
+      - You perform at most one apply_and_prune per distinct llm_bv encountered for S, not per edge or per destination. For your data, this is often 1–3 per pop value, not hundreds.
+      - The expensive “dest_union_pruned_after_pop” work becomes a single RangeSet intersection per pop length, rather than a per-edge check.
+
+      4) Correctness (functional equivalence)
+
+      Fix a node u, a pop length p, and a GSS node g. Let S be the set of states after popping p frames: S = peek(popn(g, p)). For each edge e of u with pop p and for each destination index j of e, define D(e, j) := state_bv(e, j) ⊆ States. Current algorithm computes the set:
+        Ω = { (e, j, s) : e ∈ G(u), p(e) = p, s ∈ S ∩ D(e, j) }
+
+      The original code builds, for each such (e, j), values_to_keep = S ∩ D(e, j), then isolates g to s ∈ values_to_keep and applies an llm_bv mask per edge, yielding child GSSes toward dest_idx(e, j).
+
+      Node-level index I[u][p] is defined by I[u][p][s] = { (b, list of (e, dest_j) having s ∈ D(e, j) and llm_bv(e) = b) }.
+
+      Therefore:
+        ⋃_{s∈S} ⋃_{(b,items)∈I[u][p][s]} { ((e, j), s) : (e, dest_j_list) ∈ items, j ∈ dest_j_list }
+      is exactly the set of pairs ((e, j), s) with s ∈ S ∩ D(e, j). This is the same set Ω.
+
+      Grouping by (e, j) re-creates exactly the values_to_keep lists used by the original algorithm.
+
+      On the token-mask transform: the function intersect(acc) := (acc.terminals_union, acc.llm_mask ∩ b) applied via GSS.apply_and_prune is per-accumulator and does not depend on state IDs. Isolation selects which starting heads (states) survive through the destination; mapping order commutes with restriction to a subset: for any subset of heads H ⊆ S,
+        isolate_many(H, apply_and_prune_b(popped)) = apply_and_prune_b(isolate_many(H, popped)),
+      since apply_and_prune_b acts independently on each accumulator, and isolate_many prunes the graph structure outside H but does not merge or alter accumulators in H beyond what apply would do anyway. Because in your code apply_and_prune is purely an acc→Optional[acc] transformer and union/merge semantics of GSS are via multiset unions, these operations commute, and the child GSS after (apply first, then isolate) is isomorphic to (isolate first, then apply) up to sharing. Thus, grouping by llm_bv first and amortizing apply_and_prune across many (e, j) is sound.
+
+      Conclusion: The re-ordered algorithm enumerates exactly the same set of (edge, dest, state) triples and yields exactly the same child GSSes (modulo benign sharing), so final_mask is unchanged.
+
+      5) Complexity reduction and why this helps worst-case
+
+      Let:
+      - E_p(u) = number of edges at node u with pop p.
+      - K_p(u) = |U_states[u][p]|, the number of reachable states for pop p at u (≈ 13 mean, 2 median).
+      - For a fixed s, let L_{u,p,s} = number of distinct llm_bv values across edges with pop p that accept s (≈ 2 mean).
+      - For a fixed s, let T_{u,p,s} = total destination entries across those edges (≈ 3.5 mean).
+
+      Your current edge-first approach at node u and pop p touches O(E_p(u)) edges and performs per-edge bitset checks and possibly apply_and_prune and isolate_many. In worst-case nodes (E_p in the hundreds or more) that’s a lot of unnecessary work for states S that only touch a few edges.
+
+      The inverted-index approach touches O(Σ_{s∈S} L_{u,p,s} + Σ_{s∈S} T_{u,p,s}) items, which by the stats is around |S| · (2 + 3.5) on average, i.e., low tens, and performs at most |B| ≤ Σ_{s∈S} L_{u,p,s} (often just 1–3) apply_and_prune calls. This removes the E_p(u) factor from both bitset filtering and apply_and_prune. Those are precisely the hot counters in your worst steps.
+
+      Because worst-case latency comes from a few pathological nodes/steps, shaving an O(E_p) down to O(|S|) is exactly what reduces the maximums.
+
+      6) Immediate optimizations even without the new index
+
+      These don’t change the data structure and are worth doing now.
+
+      - Make gm_max_edges and gm_max_dests large by default.
+        - Today they are 1, which explains thousands of “depth_heap.pops” and explosion of tiny generator resumptions. That is not free in Python.
+        - Use at least gm_max_edges = 256, gm_max_dests = 2048 (or larger). This is a strict improvement to worst-case time because it reduces scheduler overhead on every get_mask call. If you need time-slicing for UI responsiveness, you can still bound the total loop time by a wall-clock timer instead of tiny counters.
+
+      - Group per-edge work by llm_bv to amortize apply_and_prune.
+        - In your current code, after you compute grouped[dest_j] = s-list, further group the destination groups by llm_bv. For each llm_bv b:
+          - Compute G_b = popped.apply_and_prune(intersect with b) once.
+          - For each destination group with that b, isolate from G_b rather than from popped.
+        - This typically converts hundreds of apply_and_prune calls into a handful.
+
+      - Deduplicate isolate_many by s-list.
+        - Many destination groups share the same s-list (especially when lists are small). Cache child GSS objects by key tuple(sorted(s_list)). Use a small LRU or a dict per node visit. If equal s-list appears multiple times, you will remove repeated isolate calls.
+
+      - Precompute per-node per-pop llm_bv_union and state_union.
+        - Even without a full (pop, state) index, store:
+          - U_states[u][p] = ⋃ over edges with pop p of dest_states_union
+          - U_bv[u][p] = ⋃ over edges with pop p of llm_bv
+        - Then, for each pop length p, after popn but before touching any edge, check:
+          - if peeked_states ∩ U_states[u][p] is empty, skip all edges of that p
+          - if gss_acc.llm_mask ∩ U_bv[u][p] is empty, skip all edges of that p
+        - This removes many “dest_union_pruned_after_pop” and “pre_gss_disjoint_skips” at the bucket level.
+
+      7) Additional stats to collect at build-time (to decide how far to go)
+
+      You already compute several good distributions. Add:
+
+      - Per-node “bucket-level” uniqueness and expected amortized work:
+        - For each node u and pop p:
+          - K_p(u) = |U_states[u][p]|
+          - L̄_p(u) = average over s ∈ U_states[u][p] of |{llm_bv across edges with pop p that accept s}|
+          - T̄_p(u) = average over s ∈ U_states[u][p] of total destination count for that s
+          - B_p(u) = |⋃_{s∈U_states[u][p]} {llm_bv present for s}| (unique llm_bv across S)
+        - Report distributions of K_p, L̄_p, T̄_p, B_p. These directly predict the expected number of apply_and_prune calls (B_p) and the per-node total number of (dest group) isolates (roughly Σ_s T_{u,p,s}). If these are small across the board (your current numbers suggest they are), the index will pay handsomely.
+
+      - s-list duplication potential:
+        - For each node u, pop p, and for each S subset seen during analysis (or approximate with U_states[u][p] if too heavy), compute the number of destination groups that share the same exact s-list. Summarize the duplication rate. This tells you how big the isolate_many cache payoff might be.
+
+      - Memory estimate for the index:
+        - While computing the “Analyzing state ambiguity” stats (which you already do), count the total number of (u, p, s, llm_bv) cells and the total number of (edge, dest_j) references stored in those cells. Multiply by an estimate of Python object overhead (~72–96 bytes per dict entry + list headers). If this count is in the tens of millions, you’ll need to compact representation (see below).
+
+      8) Implementation sketch for the inverted index with compaction
+
+      Data layout per node (u):
+      - For each distinct pop p at node u:
+        - pop_state_union[p] = RangeSetStates union of dest_states_union across edges with p
+        - pop_llm_union[p] = RangeSet union of llm_bv across edges with p
+        - inv[p] = dict: state_id -> dict: llm_bv -> list of (edge_index, dest_j)
+
+      Memory compactions if needed:
+      - Deduplicate llm_bv objects: maintain a global intern map so equal RangeSets share identity and are cheap to hash/compare.
+      - Store (edge_index, dest_j) as a compact tuple of two ints (or a small namedtuple). Avoid storing edge_ref (object) to prevent reference cycles; keep edges in a list and refer by index.
+      - Where a state_id range is contiguous and all share the same mapping, compress runs by storing a “range header” plus one map, and expand lazily. This is more work but can quarter the memory in grammars that use large contiguous ranges in dest state sets.
+      - If full index is too big, build it lazily the first time you visit a node (and cache). Because the worst-case nodes dominate max latency, building just for hot nodes still helps worst-case steps.
+
+      9) Expected payoff on your worst-case step
+
+      Take the 58 ms step:
+      - popn: 1,908 calls. With bucket-level early checks and reversed iteration, popn calls remain one per bucket per node visited. That won’t change much unless bucket-level pruning improves. But a big fraction of your time was apply_and_prune (3.8 ms) and bitset intersections (5.1 ms); those will drop because we only touch llm_bv actually needed for S and amortize apply across groups, and because we avoid per-edge “gss_mask vs edge.llm_bv” checks.
+
+      - dest_union_pruned_after_pop: 2,024. With the index, these vanish entirely (we never inspect irrelevant edges; we prune at the bucket level via pop_state_union).
+
+      - edges_traversed: 2,343 and nodes_processed: 2,200. “Edges traversed” will drop dramatically. Depending on structure, it can drop by an order of magnitude because you no longer “traverse edges,” you traverse the handful of (s, llm_bv, dest_j) that matter.
+
+      Combined with larger gm_max_* (to reduce heap churn), these changes target the worst-case steps directly, which is what you care about (the slowest mask in a stream).
+
+      10) Why not a different tree entirely?
+
+      You floated “look up state ID first (after pop), then LLM token mask; no state bitset tests.” The proposed index essentially achieves that: after pop to get S, for each s we look up all relevant (llm_bv, destinations) directly. This is precisely the “state-first” traversal.
+
+      Other radical options (for context):
+      - Multi-dimensional decision diagrams keyed by (pop, state, token) could compact redundancy further, but you will re-implement a lot of what you already have, and correctness proofs get more involved. The per-node (pop, state)->(llm_bv→dest) index is the minimal, targeted change that retains your current ArenaEdge layout.
+
+      11) Additional engineering details
+
+      - Turn on llm_bv interning. You already use RangeSet as set keys in stats; make sure RangeSet.__hash__ is stable. Add a global weak interning cache mapping ranges tuples to a shared RangeSet instance. This reduces both memory and the cost of equality across grouping.
+
+      - Make the inverted index build-time optional and measurable. Gate it behind a Model flag; when enabled, print:
+        - Build time
+        - Total cells (#(u, p, s, llm_bv)) and references stored
+        - Peak memory growth (if you can measure RSS before/after)
+
+      - Keep the existing per-edge state_to_dest for backward compatibility. The index can be built from it quickly.
+
+      - Remove or elevate the tiny “chunking” limits. If you still need soft preemption, use a wall-clock budget (e.g., break the generator only if elapsed > X ms).
+
+      12) The math you can trust
+
+      Define for a fixed node u and pop p:
+      - Edges E_p = { e ∈ G(u) : p(e) = p }
+      - For each e ∈ E_p and destination j, D(e, j) ⊆ States is the set of states that map to that destination.
+      - The set of state/edge/dest triples relevant for a given popped S is Ω = { (e, j, s) : s ∈ S ∩ D(e, j) }.
+
+      Both the current and proposed algorithms are enumerators of Ω:
+      - Current: iterate e ∈ E_p, then s ∈ S, test s ∈ D(e, j).
+      - Proposed: iterate s ∈ S, then (e, j) ∈ union over edges that include s, collected from I[u][p][s].
+
+      Thus the set of destination groups (indexed by (e, j)) together with their s-lists is identical.
+
+      The only potential source of difference is the order and sharing of apply_and_prune and isolate_many:
+      - Let F_b be the acc-transform that intersects the llm mask with llm_bv b and returns None if empty (your intersect). F_b acts independently on each acc; it is a pointwise function from accs to accs that does not depend on state IDs or GSS topology.
+      - isolate_many(H, ·) operates on GSS by restricting to top-of-stack states H; it does not look at acc internals.
+      - Thus isolate_many(H, apply_and_prune(F_b, G)) = apply_and_prune(F_b, isolate_many(H, G)). This is because both sides apply F_b pointwise to exactly the same set of accs (those reachable from H after popping). Any pruning (returning None) removes the exact same accs in both compositions.
+      - Therefore, computing apply_and_prune once per llm_bv (on popped) and then reusing that result across several (e, j) groups with different H is semantically identical to applying per group.
+
+      13) Summary of what to do now vs later
+
+      Do now (low effort, high impact on max latency):
+      - Increase gm_max_edges and gm_max_dests (e.g., 256 and 2048+).
+      - Group destinations by llm_bv and perform at most one apply_and_prune per llm_bv.
+      - Deduplicate isolate_many by s-list key.
+      - Precompute per-node per-pop unions U_states and U_bv and use them for early pruning.
+
+      Collect new stats:
+      - Per (node, pop): K_p, L̄_p, T̄_p, B_p, and duplication rate of s-lists across groups.
+      - A simple model-estimated “expected calls”:
+        - expected_apply_calls ≈ B_p
+        - expected_isolate_calls ≈ Σ_{s∈S} T_{u,p,s} minus dedup savings
+        - Compare to current “edges per pop-bucket” to estimate benefit.
+
+      If the stats look like your current distributions (small K_p, small L̄_p, small B_p), then build the (pop, state) inverted index and switch get_mask to use it. That change addresses your actual worst-case hot spots while keeping the algorithm exact.
+
+      If memory proves too high for a full index:
+      - Build the index lazily only for nodes that actually become hot in get_mask (e.g., when E_p(u) exceeds a threshold or when you observe repeated heavy work at u).
+      - Use compaction techniques (llm_bv interning, edge index references, range-compressed state groups).
+
+      Everything above is precise, keeps functional equivalence, and is fully justifiable from your measured stats. It also gives you a roadmap to decide, with numbers, whether the data structure change is “worth it” before committing to the engineering.
     metadata:
-  - user: |
+  - user: |-
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4.py.
-    metadata:
-  - user: 'Changes committed with message: "Add stats for unique LLM BVs and destination
-      state unions per pop-bucket in precomputation"'
+      No git diff blocks (```diff) or raw diffs found in the last assistant message.
     metadata:
 ...
