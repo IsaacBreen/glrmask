@@ -313,7 +313,8 @@ class PyAcc:
 
     def __hash__(self):
         # Correctly hash the dictionary content for memoization
-        return hash((len(self.terminals_union), self.llm_mask))
+        terminal_items = frozenset(self.terminals_union.items())
+        return hash((terminal_items, self.llm_mask))
 
     def merge(self, other: "PyAcc") -> "PyAcc":
         new_terminals_union = self.terminals_union.copy()
@@ -372,9 +373,9 @@ class Model(GraphProvider):
     all_internal_llm_tokens_bitset: LLMTokenSet
     ignore_terminal_id: Optional[int]
     state: Dict[int, GSS]
-    # Runtime tunables and results
-    gm_max_edges: int = 1
-    gm_max_dests: int = 1
+    # Runtime tunables and results. These control the granularity of work-suspension.
+    gm_max_edges: int = 16
+    gm_max_dests: int = 128
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
     suppress_stats_report: bool = False
