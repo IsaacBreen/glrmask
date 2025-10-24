@@ -382,7 +382,7 @@ class Model(GraphProvider):
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
     # Oracle analysis mode
-    oracle_mode: bool = False
+    oracle_mode: bool = True
     oracle_exact_cover_threshold: int = 24
     oracle_debug: bool = False
     suppress_stats_report: bool = False
