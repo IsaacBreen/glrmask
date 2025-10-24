@@ -57,6 +57,7 @@ def visualize_constraint(
     rankdir: str,
     splines: str,
     output_mode: str,
+    max_edges_per_node: Optional[int] = None,
     selected_roots: Optional[List[int]] = None,
 ):
     """
@@ -158,26 +159,55 @@ def visualize_constraint(
             continue
 
         # Process edges
+        # Collect all potential outgoing edges from this node
+        all_edges = []
         for child_group in node_data.get("children", []):
             (pop, llm_bv_json), dests = child_group
             for dest_id_int, state_bv_json in dests:
-                dest_id = int(dest_id_int)
-                
-                edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
-                if edge_key in seen_edges:
-                    continue
-                seen_edges.add(edge_key)
+                all_edges.append({
+                    'pop': pop,
+                    'llm_bv_json': llm_bv_json,
+                    'dest_id': int(dest_id_int),
+                    'state_bv_json': state_bv_json,
+                })
 
-                llm_summary = format_ranges(llm_bv_json)
-                state_summary = format_ranges(state_bv_json)
-                edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
-                
-                dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label={json.dumps(edge_label)}];')
+        edges_to_process = all_edges
+        truncated_edges = False
+        if max_edges_per_node is not None and len(all_edges) > max_edges_per_node:
+            # Sort by pop value (ascending) to keep the lowest ones
+            all_edges.sort(key=lambda e: e['pop'])
+            edges_to_process = all_edges[:max_edges_per_node]
+            truncated_edges = True
 
-                if dest_id in values_dict and dest_id not in seen_nodes:
-                    q.append((dest_id, depth + 1))
-                    seen_nodes.add(dest_id)
-                    pbar.total = len(seen_nodes) + len(q)
+        # Process edges (the potentially truncated list)
+        for edge_info in edges_to_process:
+            pop = edge_info['pop']
+            llm_bv_json = edge_info['llm_bv_json']
+            dest_id = edge_info['dest_id']
+            state_bv_json = edge_info['state_bv_json']
+            
+            edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+
+            llm_summary = format_ranges(llm_bv_json)
+            state_summary = format_ranges(state_bv_json)
+            edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
+            
+            dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label={json.dumps(edge_label)}];')
+
+            if dest_id in values_dict and dest_id not in seen_nodes:
+                q.append((dest_id, depth + 1))
+                seen_nodes.add(dest_id)
+                pbar.total = len(seen_nodes) + len(q)
+        
+        if truncated_edges:
+            # Add a truncation indicator node for edges
+            trunc_node_id = f"trunc_edges_{node_id}"
+            num_omitted = len(all_edges) - len(edges_to_process)
+            dot_lines.append(f'  "{trunc_node_id}" [label="... ({num_omitted} more edges)", shape="plaintext"];')
+            dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dotted", arrowhead="none"];')
     
     pbar.close()
     dot_lines.append('}')
@@ -304,12 +334,18 @@ def main():
     )
     parser.add_argument(
         "--clipboard",
-        action='store_true',
-        help="Copy the DOT source code to the clipboard. Requires 'pyperclip'."
-    )
-    args = parser.parse_args()
+            action='store_true',
+            help="Copy the DOT source code to the clipboard. Requires 'pyperclip'."
+        )
+        parser.add_argument(
+            "--max-edges-per-node",
+            type=int,
+            default=None,
+            help="Maximum number of edges to draw from a single node. Keeps lowest-pop edges. (default: no limit)"
+        )
+        args = parser.parse_args()
 
-    if not args.constraint_file.exists():
+        if not args.constraint_file.exists():
         parser.error(f"Constraint file not found: {args.constraint_file}")
 
     output_mode = 'render'
@@ -339,11 +375,13 @@ def main():
         output_path=output_path,
         max_depth=args.max_depth,
         file_format=args.format,
-        rankdir=args.rankdir,
-        splines=args.splines,
-        output_mode=output_mode,
-        selected_roots=selected_roots,
-    )
+            rankdir=args.rankdir,
+            splines=args.splines,
+            output_mode=output_mode,
+            max_edges_per_node=args.max_edges_per_node,
+            selected_roots=selected_roots,
+        )
+
 
 
 if __name__ == "__main__":
