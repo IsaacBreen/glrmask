@@ -22,7 +22,7 @@ import gzip
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Set, Optional
+from typing import Dict, Any, List, Set, Optional, Tuple
 import subprocess
 import tempfile
 
@@ -49,6 +49,24 @@ def format_ranges(ranges: list[list[int]], max_len: int = 40) -> str:
     return result
 
 
+def prune_ranges(ranges: List[List[int]], filter_range: Optional[Tuple[int, int]]) -> List[List[int]]:
+    """Prunes a list of [start, end] ranges to only include parts within the filter_range."""
+    if not filter_range:
+        return ranges
+
+    min_val, max_val = filter_range
+    pruned = []
+    for start, end in ranges:
+        # Find the intersection of [start, end] and [min_val, max_val]
+        overlap_start = max(start, min_val)
+        overlap_end = min(end, max_val)
+
+        if overlap_start <= overlap_end:
+            pruned.append([overlap_start, overlap_end])
+
+    return pruned
+
+
 def visualize_constraint(
     constraint_path: Path,
     output_path: Path,
@@ -59,6 +77,8 @@ def visualize_constraint(
     output_mode: str,
     max_edges_per_node: Optional[int] = None,
     selected_roots: Optional[List[int]] = None,
+    llm_token_range: Optional[Tuple[int, int]] = None,
+    state_bv_range: Optional[Tuple[int, int]] = None,
 ):
     """
     Loads a constraint file, generates Graphviz DOT source, and handles output.
@@ -186,13 +206,21 @@ def visualize_constraint(
             dest_id = edge_info['dest_id']
             state_bv_json = edge_info['state_bv_json']
             
+            # Prune BVs based on specified ranges
+            pruned_llm_bv = prune_ranges(llm_bv_json, llm_token_range)
+            pruned_state_bv = prune_ranges(state_bv_json, state_bv_range)
+
+            # Skip edges where either BV becomes empty after pruning
+            if not pruned_llm_bv or not pruned_state_bv:
+                continue
+
             edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
             if edge_key in seen_edges:
                 continue
             seen_edges.add(edge_key)
 
-            llm_summary = format_ranges(llm_bv_json)
-            state_summary = format_ranges(state_bv_json)
+            llm_summary = format_ranges(pruned_llm_bv)
+            state_summary = format_ranges(pruned_state_bv)
             edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
             dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
 
@@ -342,10 +370,42 @@ def main():
         default=None,
         help="Maximum number of edges to draw from a single node. Keeps lowest-pop edges. (default: no limit)"
     )
+    parser.add_argument(
+        "--llm-token-range",
+        type=str,
+        default=None,
+        help="Only show LLM tokens in this range. Format: 'min,max'. Example: '0,1000'."
+    )
+    parser.add_argument(
+        "--state-bv-range",
+        type=str,
+        default=None,
+        help="Only show state bitvector values in this range. Format: 'min,max'. Example: '0,50'."
+    )
     args = parser.parse_args()
 
     if not args.constraint_file.exists():
         parser.error(f"Constraint file not found: {args.constraint_file}")
+
+    llm_token_range = None
+    if args.llm_token_range:
+        try:
+            min_val, max_val = map(int, args.llm_token_range.split(','))
+            if min_val > max_val:
+                parser.error(f"Invalid range for --llm-token-range: min ({min_val}) cannot be greater than max ({max_val}).")
+            llm_token_range = (min_val, max_val)
+        except (ValueError, TypeError):
+            parser.error(f"Invalid format for --llm-token-range. Expected 'min,max', got '{args.llm_token_range}'.")
+
+    state_bv_range = None
+    if args.state_bv_range:
+        try:
+            min_val, max_val = map(int, args.state_bv_range.split(','))
+            if min_val > max_val:
+                parser.error(f"Invalid range for --state-bv-range: min ({min_val}) cannot be greater than max ({max_val}).")
+            state_bv_range = (min_val, max_val)
+        except (ValueError, TypeError):
+            parser.error(f"Invalid format for --state-bv-range. Expected 'min,max', got '{args.state_bv_range}'.")
 
     output_mode = 'render'
     if args.clipboard:
@@ -379,6 +439,8 @@ def main():
             output_mode=output_mode,
             max_edges_per_node=args.max_edges_per_node,
             selected_roots=selected_roots,
+            llm_token_range=llm_token_range,
+            state_bv_range=state_bv_range,
         )
 
 
