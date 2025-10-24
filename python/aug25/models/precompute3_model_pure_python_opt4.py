@@ -377,7 +377,7 @@ class Model(GraphProvider):
     gm_max_dests: int = 1
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
-    suppress_stats_report: bool = True
+    suppress_stats_report: bool = False
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
