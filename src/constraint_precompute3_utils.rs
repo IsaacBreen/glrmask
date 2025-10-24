@@ -184,8 +184,68 @@ pub fn merge_nodes_trie3_global_atoms(
         }
     }
 
+    // Compute longest path distance in pop=0 subgraph to prevent merging nodes in a chain.
+    let mut pop0_adj: Vec<Vec<usize>> = vec![vec![]; n];
+    let mut pop0_rev_adj: Vec<Vec<usize>> = vec![vec![]; n];
+    let mut pop0_out_degree = vec![0; n];
+    for u in 0..n {
+        for (p, _, v_dense, _) in &raw_edges[u] {
+            if *p == 0 {
+                pop0_adj[u].push(*v_dense);
+                pop0_rev_adj[*v_dense].push(u);
+                pop0_out_degree[u] += 1;
+            }
+        }
+    }
+
+    let mut dist = vec![0; n];
+    let mut q: VecDeque<usize> = VecDeque::new();
+    for i in 0..n {
+        if pop0_out_degree[i] == 0 {
+            q.push_back(i);
+        }
+    }
+
+    let mut processed_count = 0;
+    while let Some(v) = q.pop_front() {
+        processed_count += 1;
+        for &u in &pop0_rev_adj[v] {
+            dist[u] = dist[u].max(1 + dist[v]);
+            pop0_out_degree[u] -= 1;
+            if pop0_out_degree[u] == 0 {
+                q.push_back(u);
+            }
+        }
+    }
+
+    // Mark nodes in or that can reach a cycle with max distance
+    if processed_count < n {
+        let max_dist = n + 1;
+        for i in 0..n {
+            if pop0_out_degree[i] > 0 {
+                q.push_back(i);
+            }
+        }
+        while let Some(v) = q.pop_front() {
+            if dist[v] != max_dist {
+                dist[v] = max_dist;
+                for &u in &pop0_rev_adj[v] {
+                    q.push_back(u);
+                }
+            }
+        }
+    }
+
     // Partition refinement (optimized)
-    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+    // Initial partition based on end flag and pop=0 distance.
+    let mut prev_class: Vec<usize> = vec![0; n];
+    let mut class_map: HashMap<(bool, usize), usize> = HashMap::new();
+    let mut next_class_id = 0;
+    for i in 0..n {
+        let key = (ends[i], dist[i]);
+        let class_id = *class_map.entry(key).or_insert_with(|| { let id = next_class_id; next_class_id += 1; id });
+        prev_class[i] = class_id;
+    }
     for it in 0..max_iters {
         // Signature (compact): (end_flag, Vec<((pop, atom_idx), Vec<(dest_class, StateIDBV)>)>)
         // Only atoms actually hit by this node are included; canonicalization is via sorted BTreeMaps below.
