@@ -157,7 +157,7 @@ pub fn merge_nodes_trie3_global_atoms(
         // Signature: (end_flag, Vec<(pop, Vec< Vec<(dest_class, StateIDBV)> >>)>)
         // For each (pop, atom_j), we compute a canonical vector of (dest_class, aggregated SIDs).
         use std::collections::HashMap as HM;
-        let mut sig_to_id: HM<(bool, Vec<(isize, Vec<Vec<(usize, StateIDBV)>>)>>, usize> = HM::new();
+        let mut sig_to_id: HM<(bool, Vec<(isize, Vec<Vec<(usize, StateIDBV)> >)>), usize> = HM::new();
         let mut next_id = 0usize;
         let mut new_class = vec![0usize; n];
         let mut changes = 0usize;
