@@ -568,6 +568,26 @@ class Model(GraphProvider):
         num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
         num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
 
+        print("\nCalculating inverted index stats for (Pop, StateID) ambiguity (this may take a moment)...")
+        llm_bvs_per_pop_state = []
+        dests_per_pop_state = []
+
+        for node in tqdm(self.arena.values(), desc="Analyzing state ambiguity"):
+            per_node_inverted_map = collections.defaultdict(lambda: collections.defaultdict(lambda: {'llm_bvs': set(), 'dests': set()}))
+            for edge in node.children:
+                edge.ensure_index()
+                for sid, dest_j_list in edge.state_to_dest.items():
+                    state_entry = per_node_inverted_map[edge.pop][sid]
+                    state_entry['llm_bvs'].add(edge.llm_bv)
+                    for dest_j in dest_j_list:
+                        state_entry['dests'].add(edge.dests[dest_j].dest_idx)
+
+            for pop_map in per_node_inverted_map.values():
+                for state_map_val in pop_map.values():
+                    llm_bvs_per_pop_state.append(len(state_map_val['llm_bvs']))
+                    dests_per_pop_state.append(len(state_map_val['dests']))
+
+
         print("\n--- Arena Stats ---")
         print(f"Total nodes: {num_nodes:,}")
         print(f"Clean end nodes: {num_clean_end_nodes:,}")
@@ -603,6 +623,8 @@ class Model(GraphProvider):
         print_dist_stats("LLM BV Overlap Factor per Node", stats['llm_bv_overlap_factor'])
         print_dist_stats("StateIDSet Union Cardinality per Edge", stats['dest_states_union_cardinality'])
         print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
+        print_dist_stats("LLM BVs per (Pop, StateID)", llm_bvs_per_pop_state)
+        print_dist_stats("Destinations per (Pop, StateID)", dests_per_pop_state)
         if self.max_depth:
             print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
 
