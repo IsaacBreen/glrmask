@@ -3349,6 +3349,7 @@ local_system:
 
                               if isinstance(yielded, Enqueue):
                                   new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                                  base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
                                   # Dynamic, target-aware child priority if enabled and reward masks present
                                   if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
                                       child_priority = self._priority_for_node(
@@ -3360,7 +3361,6 @@ local_system:
                                           analysis_node_costs=oracle_node_costs,
                                       )
                                   elif guided_scores is not None:
-                                      base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
                                       child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
                                   else:
                                       child_priority = base_child_pri
@@ -7139,6 +7139,108 @@ messages:
                            priority = (-int(guided_scores.get(r, 0)),) + base_pri
                        else:
                            priority = base_pri
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4.py.
+    metadata:
+  - user: 'Changes committed with message: "Enhance oracle with dynamic prioritization,
+      hotspot reporting, and sequence-based guidance search"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 373, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 369, in main
+          run_benchmark(args, run_index=i)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 254, in run_benchmark
+          result = model.get_mask()
+                   ^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4.py", line 1744, in get_mask
+          _, plan = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=True)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4.py", line 1673, in _get_mask_run
+          child_priority = base_child_pri
+                           ^^^^^^^^^^^^^^
+      UnboundLocalError: cannot access local variable 'base_child_pri' where it is not associated with a value
+    metadata:
+  - assistant: |-
+      You've encountered another `UnboundLocalError`, this time for `base_child_pri`. My apologies for this oversight; it's the same pattern of error as before, where a variable was only defined within a conditional branch but used in another.
+
+      The fix is straightforward: we need to ensure `base_child_pri` is defined before the `if/elif/else` block that uses it.
+
+      ### Step-by-step instructions
+
+      1.  **Open the file `python/aug25/models/precompute3_model_pure_python_opt4.py`**.
+      2.  **Navigate to the `_get_mask_run` method**.
+      3.  **Find the `while True:` loop that processes the generator `gen`**.
+      4.  **Inside the `if isinstance(yielded, Enqueue):` block, locate the `if/elif/else` chain that determines `child_priority`**.
+      5.  **Move the definition of `base_child_pri` out of the `elif` block and place it right after the line that unpacks `yielded`**. This will make it available to all branches of the conditional.
+
+          The corrected section will look like this:
+
+          ```python
+                              if isinstance(yielded, Enqueue):
+                                  new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                                  base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                                  # Dynamic, target-aware child priority if enabled and reward masks present
+                                  if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                                      child_priority = self._priority_for_node(
+                                          new_node_id,
+                                          new_depth,
+                                          remaining_mask,
+                                          guided_scores=guided_scores,
+                                          oracle_reward_mask=oracle_reward_mask,
+                                          analysis_node_costs=oracle_node_costs,
+                                      )
+                                  elif guided_scores is not None:
+                                      child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
+                                  else:
+                                      child_priority = base_child_pri
+                                  heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
+          ```
+
+      This change resolves the `UnboundLocalError` by guaranteeing `base_child_pri` is always initialized.
+
+      ### Git Diff
+
+      Here is the git diff to apply the fix:
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python_opt4.py b/python/aug25/models/precompute3_model_pure_python_opt4.py
+      --- a/python/aug25/models/precompute3_model_pure_python_opt4.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_opt4.py
+      @@ -1657,6 +1657,7 @@
+       
+                               if isinstance(yielded, Enqueue):
+                                   new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+      +                            base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                                   # Dynamic, target-aware child priority if enabled and reward masks present
+                                   if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                                       child_priority = self._priority_for_node(
+      @@ -1668,7 +1669,6 @@
+                                           analysis_node_costs=oracle_node_costs,
+                                       )
+                                   elif guided_scores is not None:
+      -                                base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                                       child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
+                                   else:
+                                       child_priority = base_child_pri
 
       ```
     metadata:

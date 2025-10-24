@@ -1656,6 +1656,7 @@ class Model(GraphProvider):
 
                         if isinstance(yielded, Enqueue):
                             new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                            base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
                             # Dynamic, target-aware child priority if enabled and reward masks present
                             if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
                                 child_priority = self._priority_for_node(
@@ -1667,7 +1668,6 @@ class Model(GraphProvider):
                                     analysis_node_costs=oracle_node_costs,
                                 )
                             elif guided_scores is not None:
-                                base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
                                 child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
                             else:
                                 child_priority = base_child_pri
