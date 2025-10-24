@@ -191,29 +191,40 @@ def visualize_constraint(
                     'state_bv_json': state_bv_json,
                 })
 
-        edges_to_process = all_edges
+        # First, filter edges based on token/state ranges
+        filtered_edges = []
+        for edge in all_edges:
+            pruned_llm_bv = prune_ranges(edge['llm_bv_json'], llm_token_range)
+            pruned_state_bv = prune_ranges(edge['state_bv_json'], state_bv_range)
+
+            if pruned_llm_bv and pruned_state_bv:
+                # Store the original and pruned BVs for processing
+                filtered_edge_info = edge.copy()
+                filtered_edge_info['pruned_llm_bv'] = pruned_llm_bv
+                filtered_edge_info['pruned_state_bv'] = pruned_state_bv
+                filtered_edges.append(filtered_edge_info)
+
+        # Now, apply max_edges_per_node limit to the filtered list
+        edges_to_process = filtered_edges
         truncated_edges = False
-        if max_edges_per_node is not None and len(all_edges) > max_edges_per_node:
+        if max_edges_per_node is not None and len(filtered_edges) > max_edges_per_node:
             # Sort by pop value (ascending) to keep the lowest ones
-            all_edges.sort(key=lambda e: e['pop'])
-            edges_to_process = all_edges[:max_edges_per_node]
+            filtered_edges.sort(key=lambda e: e['pop'])
+            edges_to_process = filtered_edges[:max_edges_per_node]
             truncated_edges = True
 
-        # Process edges (the potentially truncated list)
+        # Process edges (the filtered and potentially truncated list)
         for edge_info in edges_to_process:
             pop = edge_info['pop']
-            llm_bv_json = edge_info['llm_bv_json']
             dest_id = edge_info['dest_id']
-            state_bv_json = edge_info['state_bv_json']
             
-            # Prune BVs based on specified ranges
-            pruned_llm_bv = prune_ranges(llm_bv_json, llm_token_range)
-            pruned_state_bv = prune_ranges(state_bv_json, state_bv_range)
+            # Use the pre-pruned BVs for display
+            pruned_llm_bv = edge_info['pruned_llm_bv']
+            pruned_state_bv = edge_info['pruned_state_bv']
 
-            # Skip edges where either BV becomes empty after pruning
-            if not pruned_llm_bv or not pruned_state_bv:
-                continue
-
+            # Use original BVs for a unique edge key
+            llm_bv_json = edge_info['llm_bv_json']
+            state_bv_json = edge_info['state_bv_json']
             edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
             if edge_key in seen_edges:
                 continue
@@ -232,7 +243,7 @@ def visualize_constraint(
         if truncated_edges:
             # Add a truncation indicator node for edges
             trunc_node_id = f"trunc_edges_{node_id}"
-            num_omitted = len(all_edges) - len(edges_to_process)
+            num_omitted = len(filtered_edges) - len(edges_to_process)
             dot_lines.append(f'  "{trunc_node_id}" [label="... ({num_omitted} more edges)", shape="plaintext"];')
             dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dotted", arrowhead="none"];')
     
