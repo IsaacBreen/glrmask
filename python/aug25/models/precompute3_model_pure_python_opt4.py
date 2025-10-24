@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import functools
 import heapq
 import itertools
 import json
@@ -343,6 +344,7 @@ class Enqueue:
 
 @dataclass
 class Suspend:
+    node_id: NodeID
     priority: Any
     depth: int
 
@@ -398,6 +400,12 @@ class Model(GraphProvider):
     oracle_trials: int = 8
     oracle_jitter: int = 7
     oracle_reward_prune: bool = True
+    # New oracle controls
+    oracle_dynamic_prioritization: bool = True
+    oracle_hotspot_report_top_k: int = 10
+    # Try random permutations of the top-K largest end masks
+    oracle_permute_top_ends: int = 8
+
     @staticmethod
     def from_json_string(s: str) -> 'Model':
         Stats.get().reset()
@@ -837,6 +845,8 @@ class Model(GraphProvider):
         local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
 
         local_ctr = None
+        # High-resolution timers per-node for hotspot analysis
+        _perf_now = time.perf_counter
         if oracle_counters is not None:
             local_ctr = oracle_counters.setdefault(int(node_id), {"edges": 0, "apply": 0, "isolate": 0})
 
@@ -883,8 +893,13 @@ class Model(GraphProvider):
                         stats.inc('get_mask.global_pop_cache_hits')
                 if popped is None:
                     stats.start('get_mask.main_loop.edge.popn')
+                    _t0 = _perf_now()
                     popped = gss_node.popn(edge.pop)
+                    _t1 = _perf_now()
                     stats.stop('get_mask.main_loop.edge.popn')
+                    if oracle_counters is not None and local_ctr is not None:
+                        local_ctr["popn_calls"] = local_ctr.get("popn_calls", 0) + 1
+                        local_ctr["popn_time_ms"] = local_ctr.get("popn_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                 if popped.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_empty')
                     pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
@@ -940,8 +955,12 @@ class Model(GraphProvider):
                         return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
                     if oracle_counters is not None and local_ctr is not None: local_ctr["apply"] += 1
                     stats.start('get_mask.main_loop.edge.apply_and_prune')
+                    _t0 = _perf_now()
                     tmp = popped.apply_and_prune(intersect)
+                    _t1 = _perf_now()
                     stats.stop('get_mask.main_loop.edge.apply_and_prune')
+                    if oracle_counters is not None and local_ctr is not None:
+                        local_ctr["apply_time_ms"] = local_ctr.get("apply_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                     if tmp.is_empty():
                         continue
                     source_after_apply = tmp
@@ -983,22 +1002,32 @@ class Model(GraphProvider):
                         child_gss = isolate_cache[key_isolate]
                     else:
                         stats.start('get_mask.main_loop.edge.isolate_many')
+                        _t0 = _perf_now()
                         child_gss = source_after_apply.isolate_many(values_to_keep)
+                        _t1 = _perf_now()
                         stats.stop('get_mask.main_loop.edge.isolate_many')
                         if oracle_counters is not None and local_ctr is not None: local_ctr["isolate"] += 1
+                        if oracle_counters is not None and local_ctr is not None:
+                            local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+                            local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                         if isolate_cache is not None:
                             isolate_cache[key_isolate] = child_gss
                 if child_gss.is_empty(): continue
                 d: NodeID = int(dest.dest_idx)
                 yield Enqueue(d, child_gss, depth + 1)
                 dests_proc += 1
+                if oracle_counters is not None and local_ctr is not None:
+                    local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
             if edges_proc >= max_edges:
                 # Suspend work after a batch to allow priority reordering at the heap level
                 priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                yield Suspend(priority, depth)
+                yield Suspend(int(node_id), priority, depth)
                 edges_proc = 0
             edges_proc += 1
+        # When max_dests suspend triggers
+        # (Handled inside the loop above with proper node_id propagation)
+
     def _ensure_reverse_adjacency(self) -> Dict[int, Set[int]]:
         """Build and cache reverse adjacency: dest_node -> set(parent_nodes)."""
         if getattr(self, 'reverse_adj', None) is not None:
@@ -1227,6 +1256,55 @@ class Model(GraphProvider):
                 edge_order_map[int(u)] = [idx for (idx, _) in ordered]
         return scores, edge_order_map
 
+    def _oracle_report_hotspots(self, plan: Dict, top_k: int = 10) -> None:
+        """Report top hotspots from planning counters to help identify 'mega nodes'."""
+        node_costs = plan.get('node_costs', {}) or {}
+        if not node_costs:
+            print("[oracle] No per-node costs collected.")
+            return
+        # Compose a sortable score with time if available
+        ranked = []
+        for nid_str, cnt in node_costs.items():
+            try:
+                nid = int(nid_str) if isinstance(nid_str, str) else int(nid_str)
+            except Exception:
+                nid = int(nid_str)
+            edges = int(cnt.get("edges", 0))
+            apply_calls = int(cnt.get("apply", 0))
+            isolate_calls = int(cnt.get("isolate", 0))
+            popn_calls = int(cnt.get("popn_calls", 0))
+            dests = int(cnt.get("dests", 0))
+            # time fields are optional floats
+            popn_ms = float(cnt.get("popn_time_ms", 0.0))
+            apply_ms = float(cnt.get("apply_time_ms", 0.0))
+            isolate_ms = float(cnt.get("isolate_time_ms", 0.0))
+            total_ms = popn_ms + apply_ms + isolate_ms
+            # Composite score: weight edges+apply+isolate + time
+            score = float(edges) + self.oracle_apply_weight * float(apply_calls) + self.oracle_isolate_weight * float(isolate_calls) + 0.001 * total_ms
+            ranked.append((score, nid, edges, apply_calls, isolate_calls, popn_calls, dests, total_ms))
+        ranked.sort(key=lambda t: t[0], reverse=True)
+        print("\n[oracle] Top hotspots (per-node costs from planning):")
+        for i, item in enumerate(ranked[:max(1, int(top_k))], start=1):
+            score, nid, edges, apply_calls, isolate_calls, popn_calls, dests, total_ms = item
+            md = self.max_depth.get(int(nid), 0)
+            ch = len(self.arena.get(int(nid), ArenaNode()).children) if int(nid) in self.arena else 0
+            print(f"  {i:2d}) node={nid} depth={md} children={ch} score={score:.2f} total_ms={total_ms:.3f} "
+                  f"| edges={edges} apply={apply_calls} isolate={isolate_calls} popn_calls={popn_calls} dests={dests}")
+        print()
+
+    def _oracle_node_cost(self, node_id: int, analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None) -> float:
+        if analysis_node_costs is not None and int(node_id) in analysis_node_costs:
+            c = analysis_node_costs[int(node_id)]
+            return float(c.get("edges", 0)) + self.oracle_apply_weight * float(c.get("apply", 0)) + self.oracle_isolate_weight * float(c.get("isolate", 0)) + 1.0
+        node = self.arena.get(int(node_id))
+        if not node:
+            return 1.0
+        # Cheap fallback: edges + 0.25 * total dest count + 1
+        total_dests = 0
+        for e in node.children:
+            total_dests += len(e.dests)
+        return 1.0 + float(len(node.children)) + 0.25 * float(total_dests)
+
     def _compute_oracle_min_cover(self, end_union_events: List[Tuple[int, LLMTokenSet]]) -> List[int]:
         """Given a list of (end_node_id, delta_mask) events collected from a full planning run,
         compute a minimal set of end nodes whose union covers the final mask.
@@ -1376,6 +1454,34 @@ class Model(GraphProvider):
                 edge_order_map[int(u)] = [idx for (idx, _) in ordered]
         return dict(scores), edge_order_map
 
+    def _priority_for_node(
+        self,
+        node_id: int,
+        depth: int,
+        remaining_mask: LLMTokenSet,
+        guided_scores: Optional[Dict[int, int]] = None,
+        oracle_reward_mask: Optional[Dict[int, LLMTokenSet]] = None,
+        analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None,
+    ) -> Tuple:
+        """Dynamic priority tuple for heap scheduling.
+        Higher token gain per unit cost and larger gain are preferred.
+        Tie-breakers: guided score (if any) and max_depth.
+        """
+        node_id_i = int(node_id)
+        # Estimated token gain if we fully explore this node's subtree.
+        if oracle_reward_mask is not None:
+            m = oracle_reward_mask.get(node_id_i, RangeSet.empty())
+        else:
+            an = self.arena.get(node_id_i)
+            m = an.llm_bv_descendant if an else RangeSet.empty()
+        gain = 0
+        if m is not None and not m.is_empty():
+            gain = int(len(m.intersection(remaining_mask)))
+        cost = self._oracle_node_cost(node_id_i, analysis_node_costs)
+        gs = int(guided_scores.get(node_id_i, 0)) if guided_scores is not None else 0
+        # Negative for min-heap; depth tiebreaker to encourage shallower early
+        return (-float(gain) / max(1.0, float(cost)), -int(gain), -int(gs), -int(self.max_depth.get(node_id_i, 0)), int(depth))
+
     def _get_mask_run(
         self,
         guided_scores: Optional[Dict[int, int]] = None,
@@ -1383,7 +1489,9 @@ class Model(GraphProvider):
         record_end_unions: bool = False,
         oracle_target_mask: Optional[LLMTokenSet] = None,
         oracle_reward_mask: Optional[Dict[int, LLMTokenSet]] = None,
-    ) -> Tuple[Dict, Dict]:
+        oracle_node_costs: Optional[Dict[int, Dict[str, int]]] = None,
+        ) -> Tuple[Dict, Dict]:
+
         """Internal engine behind get_mask.
         If guided_scores/edge_order_map are provided, they influence traversal priority and edge ordering.
         If record_end_unions is True:
@@ -1435,9 +1543,15 @@ class Model(GraphProvider):
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
             if not gss_init.is_empty():
-                base_pri = (-self.max_depth.get(r, 0), 0, 0)
-                if guided_scores is not None:
-                    # Higher guided_scores -> earlier (we negate to get min-heap behavior)
+                # Dynamic, target-aware seeding priority if reward masks present
+                if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                    priority = self._priority_for_node(
+                        r, 0, RangeSet.empty() if oracle_target_mask is None else oracle_target_mask,
+                        guided_scores=guided_scores,
+                        oracle_reward_mask=oracle_reward_mask,
+                        analysis_node_costs=oracle_node_costs,
+                    )
+                elif guided_scores is not None:
                     priority = (-int(guided_scores.get(r, 0)),) + base_pri
                 else:
                     priority = base_pri
@@ -1540,14 +1654,36 @@ class Model(GraphProvider):
 
                         if isinstance(yielded, Enqueue):
                             new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
-                            base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                            if guided_scores is not None:
+                            # Dynamic, target-aware child priority if enabled and reward masks present
+                            if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                                child_priority = self._priority_for_node(
+                                    new_node_id,
+                                    new_depth,
+                                    remaining_mask,
+                                    guided_scores=guided_scores,
+                                    oracle_reward_mask=oracle_reward_mask,
+                                    analysis_node_costs=oracle_node_costs,
+                                )
+                            elif guided_scores is not None:
+                                base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
                                 child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
                             else:
                                 child_priority = base_child_pri
                             heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
                         elif isinstance(yielded, Suspend):
-                            heapq.heappush(work_heap, HeapItem(yielded.priority, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
+                            # Recompute scheduling priority for the suspended work dynamically based on remaining_mask
+                            if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                                susp_pri = self._priority_for_node(
+                                    yielded.node_id,
+                                    yielded.depth,
+                                    remaining_mask,
+                                    guided_scores=guided_scores,
+                                    oracle_reward_mask=oracle_reward_mask,
+                                    analysis_node_costs=oracle_node_costs,
+                                )
+                            else:
+                                susp_pri = yielded.priority
+                            heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
                             break
 
                     except StopIteration:
@@ -1626,22 +1762,82 @@ class Model(GraphProvider):
         # Compute target-aware reward masks (oracle pruning)
         reward_masks = self._oracle_compute_reward_masks(end_events) if self.oracle_reward_prune else {}
 
-        # Build a base target-aware guidance
-        guided_scores, edge_order_map = self._oracle_build_guidance_from_plan(plan, jitter=0)
+        # Optional: report hotspots to investigate potential "mega nodes"
+        if self.oracle_debug:
+            self._oracle_report_hotspots(plan, top_k=self.oracle_hotspot_report_top_k)
 
-        # Randomized search over guidance to minimize edges traversed
-        best_scores = guided_scores
+        # Prepare candidate end-node sequences:
+        #  - minimal cover
+        #  - token-mass order
+        #  - random permutations of top-K end nodes by token mass
+        end_items: List[Tuple[int, LLMTokenSet]] = []
+        for nid, delta in end_events:
+            if delta is not None and not delta.is_empty():
+                end_items.append((int(nid), delta))
+        end_items_unique = {}
+        for nid, m in end_items:
+            prev = end_items_unique.get(int(nid))
+            end_items_unique[int(nid)] = m if prev is None else prev.union(m)
+        end_items = [(nid, m) for nid, m in end_items_unique.items()]
+        # Minimal cover sequence (greedy/exact from recorded end masks)
+        min_cover_seq = self._compute_oracle_min_cover(end_items)
+        # Token-mass sorted sequence
+        mass_sorted_seq = [nid for nid, _ in sorted(end_items, key=lambda t: len(t[1]), reverse=True)]
+        # Random permutations of top-K ends
+        topK = min(max(1, int(self.oracle_permute_top_ends)), len(mass_sorted_seq))
+        top_list = mass_sorted_seq[:topK]
+        rng = random.Random(1337)
+        trial_sequences: List[List[int]] = []
+        # Always include baseline sequences
+        if min_cover_seq:
+            trial_sequences.append(min_cover_seq)
+        if mass_sorted_seq:
+            trial_sequences.append(mass_sorted_seq)
+        # Also include a guidance derived from plan (as a baseline candidate)
+        plan_guided_scores, plan_edge_order_map = self._oracle_build_guidance_from_plan(plan, jitter=0)
+        # Add random permutations
+        for _ in range(max(0, int(self.oracle_trials))):
+            perm = top_list[:]
+            rng.shuffle(perm)
+            # Fill remaining ends in mass order
+            rest = [x for x in mass_sorted_seq if x not in perm]
+            trial_sequences.append(perm + rest)
+        # Deduplicate sequences
+        dedup = []
+        seen = set()
+        for seq in trial_sequences:
+            key = tuple(seq)
+            if key not in seen:
+                seen.add(key)
+                dedup.append(seq)
+        trial_sequences = dedup
+
+        # Evaluate candidates (including the plan-based one)
+        best_scores = plan_guided_scores
+        best_edge_map = plan_edge_order_map
         best_edges = None
-        best_edge_map = edge_order_map
         best_time_ms = None
-
-        trials = max(1, int(self.oracle_trials))
-        for t in range(trials):
-            # Inject jitter to explore different orderings
-            trial_scores, trial_edge_map = self._oracle_build_guidance_from_plan(
-                plan, jitter=self.oracle_jitter if self.oracle_jitter > 0 else 0
+        # First evaluate the plan-derived candidate
+        prev_suppress = self.suppress_stats_report
+        try:
+            self.suppress_stats_report = True
+            Stats.get().reset()
+            _out, _ = self._get_mask_run(
+                guided_scores=plan_guided_scores,
+                edge_order_map=plan_edge_order_map,
+                record_end_unions=False,
+                oracle_target_mask=target_mask,
+                oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+                oracle_node_costs=plan.get("node_costs", {}),
             )
-            # Evaluate this guidance
+            edges = int(Stats.get().counts.get('get_mask.traversal.edges_traversed', 0))
+            time_ms = float(Stats.get().times.get('get_mask.main_loop', 0.0) * 1000.0)
+            best_edges, best_time_ms = edges, time_ms
+        finally:
+            self.suppress_stats_report = prev_suppress
+
+        for seq in trial_sequences:
+            trial_scores, trial_edge_map = self._oracle_prepare_guidance(seq)
             prev_suppress = self.suppress_stats_report
             try:
                 self.suppress_stats_report = True
@@ -1652,6 +1848,7 @@ class Model(GraphProvider):
                     record_end_unions=False,
                     oracle_target_mask=target_mask,
                     oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+                    oracle_node_costs=plan.get("node_costs", {}),
                 )
                 edges = int(Stats.get().counts.get('get_mask.traversal.edges_traversed', 0))
                 time_ms = float(Stats.get().times.get('get_mask.main_loop', 0.0) * 1000.0)
@@ -1665,7 +1862,7 @@ class Model(GraphProvider):
                 best_edge_map = trial_edge_map
 
         if self.oracle_debug:
-            print(f"[oracle] trials={trials}, best_edges_traversed={best_edges}, best_main_loop_ms={best_time_ms:.3f}")
+            print(f"[oracle] candidates={len(trial_sequences)+1}, best_edges_traversed={best_edges}, best_main_loop_ms={best_time_ms:.3f}")
 
         # Final guided run with the best plan, stats reset as requested
         Stats.get().reset()
@@ -1675,6 +1872,7 @@ class Model(GraphProvider):
             record_end_unions=False,
             oracle_target_mask=target_mask,
             oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+            oracle_node_costs=plan.get("node_costs", {}),
         )
         return out
 
@@ -1682,3 +1880,4 @@ class Model(GraphProvider):
         """Called at the end of a benchmark run to perform any final actions, like printing stats."""
         print("\n--- Final Stats Report from Model ---")
         Stats.get().report()
+
