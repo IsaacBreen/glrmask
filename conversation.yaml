@@ -338,13 +338,13 @@ local_system:
                   merge_nodes_ultrafast: false,
                   prune_nodes_not_reaching_end: true,
                   generalize_sids: true,
-                  simplify_llm_token_bvs: false,
+                  simplify_llm_token_bvs: true,
                   refine_token_atoms: true,
                   refine_token_atoms_exact: true,
                   refine_token_atoms_max_blocks: 2048,
                   // New: enable global-atoms bisimulation merge by default with conservative caps
                   merge_nodes_global_atoms: true,
-                  merge_nodes_global_atoms_max_iters: 6,
+                  merge_nodes_global_atoms_max_iters: 2,
                   merge_nodes_global_atoms_max_atoms_per_pop: 4096,
                   factor_common_destinations: true,
                   factor_common_destinations_min_incoming: 12,
@@ -929,6 +929,16 @@ local_system:
                           run_pass!("Compressing edges + unary chains (post-pop0-struct-merge)", {
                               compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
                               compress_unary_chains_trie3(roots, &trie3_god);
+                          });
+                      }
+                      // Defensive: immediately refine token atoms to allow reversing any local structure
+                      // that the compression step couldn't improve under the global cost metric.
+                      // This gives the pipeline a way to re-split token sets when that reduces local cost.
+                      if config.refine_token_atoms {
+                          run_pass!("Refining token-set atoms (defensive, post-compress)", {
+                              refine_edges_to_token_atoms_trie3(
+                                  roots, &trie3_god, max_llm_token_id, max_state_id, config.refine_token_atoms_max_blocks
+                              );
                           });
                       }
                   }
@@ -3411,7 +3421,7 @@ local_system:
           if all_nodes.is_empty() { return; }
 
           #[cfg(not(rustrover))]
-          let it = tqdm!(all_nodes.iter(), desc = "Trie3 Compress Edges", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
+          let it = tqdm!(all_nodes.iter(), desc = "Trie3 Compress Edges (cost-aware)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
           #[cfg(rustrover)]
           let it = all_nodes.iter();
           for node_idx in it {
@@ -3420,19 +3430,40 @@ local_system:
                   continue;
               }
 
-              // Take existing children for processing.
-              let old_children = std::mem::take(w.children_mut());
+              // Work from a snapshot so we can compute both old/new costs and adopt only if better.
+              let old_snapshot = w.children().clone();
 
-              // First stage: group by (pop, canonicalized destination map), while unioning LLM token masks for identical dest-maps.
-              // Canonicalization: BTreeMap<Trie2Index, StateIDBV> (sorted by destination) -> Vec<(Trie2Index, StateIDBV)> as a stable key.
+              // Local helpers for bounded range-count and cost metric
+              #[inline]
+              fn ranges_len_bounded(m: &LLMTokenBV, max_id: usize) -> usize {
+                  let mut c = m.clone();
+                  c.constrain(max_id);
+                  c.inner().ranges_len()
+              }
               use std::collections::BTreeMap as BTM;
+              #[inline]
+              fn children_cost(
+                  children: &BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>,
+                  max_llm_token_id: usize
+              ) -> (usize, usize, usize) {
+                  let mut ranges_sum = 0usize;
+                  let mut dests_sum = 0usize;
+                  for ((_, l), dm) in children {
+                      ranges_sum += ranges_len_bounded(l, max_llm_token_id);
+                      dests_sum += dm.len();
+                  }
+                  (ranges_sum + dests_sum, ranges_sum, dests_sum)
+              }
+
+              // Compute old cost
+              let old_cost = children_cost(&old_snapshot, max_llm_token_id).0;
+
+              // First stage: group by (pop, canonicalized dest-map), unioning L masks for identical dest-maps.
               use std::collections::HashMap as HM;
-
-              // by_pop: pop -> { canonical_dest_map_vec -> union_of_llm_bv }
               let mut by_pop: BTM<isize, HM<Vec<(Trie2Index, StateIDBV)>, LLMTokenBV>> = BTM::new();
-
-              for ((pop, mut llm_bv), dest_map) in old_children {
+              for ((pop, llm_bv_orig), dest_map_orig) in &old_snapshot {
                   // Constrain token bitset to bound and skip empties.
+                  let mut llm_bv = llm_bv_orig.clone();
                   llm_bv.constrain(max_llm_token_id);
                   if llm_bv.is_empty() {
                       continue;
@@ -3440,10 +3471,11 @@ local_system:
 
                   // Aggregate destinations by unioning SIDs and removing empties.
                   let mut dest_agg: BTM<Trie2Index, StateIDBV> = BTM::new();
-                  for (dst, mut sids) in dest_map {
+                  for (dst, sids0) in dest_map_orig {
+                      let mut sids = sids0.clone();
                       sids.constrain(max_state_id);
                       if sids.is_empty() { continue; }
-                      dest_agg.entry(dst)
+                      dest_agg.entry(*dst)
                           .and_modify(|e| *e |= &sids)
                           .or_insert(sids);
                   }
@@ -3451,18 +3483,16 @@ local_system:
                       continue;
                   }
 
-                  // Canonical destination vector (sorted by dst) for use as a key (Vec implements Hash/Eq/Ord given elements do).
+                  // Canonical destination vector (sorted by dst) for use as a key.
                   let dest_vec: Vec<(Trie2Index, StateIDBV)> = dest_agg.into_iter().collect();
 
                   // Merge edges that have the same pop and identical destination map by unioning their LLM masks.
-                  let entry = by_pop.entry(pop).or_default().entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
+                  let entry = by_pop.entry(*pop).or_default().entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
                   *entry |= &llm_bv;
               }
 
-              // Second stage: for each pop, combine groups that happen to yield identical final LLMTokenBV
-              // by unioning their destination maps. This ensures we never create two entries keyed by the
-              // same (pop, LLMTokenBV); the union is semantically equivalent to having parallel edges for
-              // that same token-set.
+              // Second stage: for each pop, combine groups that yield identical final L masks
+              // by unioning their destination maps (one entry per (pop, llm_bv)).
               let mut new_children: BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTM::new();
               for (pop, groups) in by_pop {
                   // llm_bv -> aggregated destination map (as BTreeMap for determinism)
@@ -3492,8 +3522,6 @@ local_system:
                           }
                       }
                       if !ordered_dm.is_empty() {
-                          // If an entry for (pop, llm_bv) already exists, union destination maps' SIDs (shouldn't happen,
-                          // but this keeps the structure robust).
                           let entry = new_children.entry((pop, llm_bv)).or_insert_with(OrderedHashMap::new);
                           for (dst, sids) in ordered_dm {
                               entry.entry(dst)
@@ -3504,13 +3532,24 @@ local_system:
                   }
               }
 
-              // Recompute live tokens as the union of all outgoing LLM masks.
-              let mut new_live = LLMTokenBV::zeros();
-              for ((_, llm_bv), _) in &new_children {
-                  new_live |= llm_bv;
+              // Compare costs and adopt only if better.
+              let new_cost = children_cost(&new_children, max_llm_token_id).0;
+              if new_cost < old_cost {
+                  let mut new_live = LLMTokenBV::zeros();
+                  for ((_, llm_bv), _) in &new_children {
+                      new_live |= llm_bv;
+                  }
+                  w.value.live_tokens = new_live;
+                  *w.children_mut() = new_children;
+              } else {
+                  // Keep old structure; normalize live_tokens from old children.
+                  let mut live = LLMTokenBV::zeros();
+                  for ((_, llm_bv), _) in &old_snapshot {
+                      live |= llm_bv;
+                  }
+                  w.value.live_tokens = live;
+                  // w.children() already equals old_snapshot
               }
-              w.value.live_tokens = new_live;
-              *w.children_mut() = new_children;
           }
 
           crate::debug!(2, "Finished compressing Trie3 edges.");
@@ -3961,13 +4000,46 @@ local_system:
               }
           }
 
-          // Partition refinement
+          // Precompute, once, for every unique (pop, LLMTokenBV) mask pointer, which atoms (by index) it overlaps.
+          // This avoids scanning all atoms for every edge repeatedly.
+          use std::collections::BTreeMap as BTM;
+          let mut unique_bvs_per_pop: BTM<isize, Vec<LLMTokenBV>> = BTM::new();
+          let mut seen_ptrs_per_pop: BTM<isize, HashSet<*const RangeSetBlaze<usize>>> = BTM::new();
+          for edges in &raw_edges {
+              for (p, llm_bv, _v, _sids) in edges {
+                  if !atoms_by_pop.contains_key(p) { continue; }
+                  let ptr = Arc::as_ptr(&llm_bv.inner);
+                  let seen = seen_ptrs_per_pop.entry(*p).or_default();
+                  if seen.insert(ptr) {
+                      unique_bvs_per_pop.entry(*p).or_default().push(llm_bv.clone());
+                  }
+              }
+          }
+          let mut atom_idxs_by_pop_ptr: BTM<isize, HashMap<*const RangeSetBlaze<usize>, Vec<usize>>> = BTM::new();
+          for (p, bvs) in unique_bvs_per_pop {
+              if let Some(atoms) = atoms_by_pop.get(&p) {
+                  let mut map: HashMap<*const RangeSetBlaze<usize>, Vec<usize>> = HashMap::new();
+                  for bv in bvs {
+                      let ptr = Arc::as_ptr(&bv.inner);
+                      let mut idxs: Vec<usize> = Vec::new();
+                      for (j, a) in atoms.iter().enumerate() {
+                          if !(&bv & a).is_empty() {
+                              idxs.push(j);
+                          }
+                      }
+                      map.insert(ptr, idxs);
+                  }
+                  atom_idxs_by_pop_ptr.insert(p, map);
+              }
+          }
+
+          // Partition refinement (optimized)
           let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
           for it in 0..max_iters {
-              // Signature: (end_flag, Vec<(pop, Vec< Vec<(dest_class, StateIDBV)> >>)>)
-              // For each (pop, atom_j), we compute a canonical vector of (dest_class, aggregated SIDs).
-              use std::collections::HashMap as HM;
-              let mut sig_to_id: HM<(bool, Vec<(isize, Vec<Vec<(usize, StateIDBV)> >)>), usize> = HM::new();
+              // Signature (compact): (end_flag, Vec<((pop, atom_idx), Vec<(dest_class, StateIDBV)>)>)
+              // Only atoms actually hit by this node are included; canonicalization is via sorted BTreeMaps below.
+              type SigKey = (bool, Vec<((isize, usize), Vec<(usize, StateIDBV)>)>);
+              let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
               let mut next_id = 0usize;
               let mut new_class = vec![0usize; n];
               let mut changes = 0usize;
@@ -3977,41 +4049,45 @@ local_system:
               #[cfg(rustrover)]
               let itn = 0..n;
               for u in itn {
-                  // For each pop, build a vector per atom index: aggregated (dest_class -> SIDs)
-                  let mut per_pop: BTreeMap<isize, Vec<Vec<(usize, StateIDBV)>>> = BTreeMap::new();
-                  for (pop, atoms) in &atoms_by_pop {
-                      per_pop.insert(*pop, vec![Vec::new(); atoms.len()]);
+                  // 1) Aggregate once per (pop, LLM mask pointer) to dest_class -> SIDs.
+                  // This removes duplicate work across atoms for the same mask.
+                  let mut per_bv_aggr: HashMap<(isize, *const RangeSetBlaze<usize>), BTreeMap<usize, StateIDBV>> = HashMap::new();
+                  for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
+                      if !atoms_by_pop.contains_key(p) { continue; }
+                      let dest_class = prev_class[*v_dense];
+                      let ptr = Arc::as_ptr(&llm_bv.inner);
+                      per_bv_aggr
+                          .entry((*p, ptr))
+                          .or_insert_with(BTreeMap::new)
+                          .entry(dest_class)
+                          .and_modify(|e| *e |= sids)
+                          .or_insert_with(|| sids.clone());
                   }
 
-                  // Temporary aggregation: per (pop, atom_idx) -> BTreeMap<dest_class, SIDs>
-                  // We'll finalize into sorted vectors for determinism.
-                  let mut agg_maps: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
-                  for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
-                      if let Some(atoms) = atoms_by_pop.get(p) {
-                          for (j, a) in atoms.iter().enumerate() {
-                              if (llm_bv & a).is_empty() { continue; }
-                              let dest_class = prev_class[*v_dense];
-                              let key = (*p, j);
-                              agg_maps.entry(key)
-                                  .or_insert_with(BTreeMap::new)
-                                  .entry(dest_class)
-                                  .and_modify(|e| *e |= sids)
-                                  .or_insert_with(|| sids.clone());
+                  // 2) Fan out each (pop, mask-pointer) aggregated map to only the atoms it overlaps.
+                  // Temporary aggregation: (pop, atom_idx) -> BTreeMap<dest_class, SIDs>, sorted for determinism.
+                  let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
+                  for ((pop, ptr), dm) in per_bv_aggr {
+                      if let Some(pop_map) = atom_idxs_by_pop_ptr.get(&pop) {
+                          if let Some(atom_idxs) = pop_map.get(&ptr) {
+                              for &j in atom_idxs {
+                                  let entry = per_atom_aggr.entry((pop, j)).or_insert_with(BTreeMap::new);
+                                  for (dest_class, sids) in &dm {
+                                      entry.entry(*dest_class)
+                                          .and_modify(|e| *e |= sids)
+                                          .or_insert_with(|| sids.clone());
+                                  }
+                              }
                           }
                       }
                   }
-                  // Finalize to vectors
-                  for ((pop, j), m) in agg_maps {
-                      let vec_m: Vec<(usize, StateIDBV)> = m.into_iter().collect();
-                      if let Some(blocks) = per_pop.get_mut(&pop) {
-                          if j < blocks.len() {
-                              blocks[j] = vec_m;
-                          }
-                      }
+
+                  // 3) Build compact signature. We only include non-empty atoms that this node touches.
+                  let mut sig_entries: Vec<((isize, usize), Vec<(usize, StateIDBV)>)> = Vec::with_capacity(per_atom_aggr.len());
+                  for (key, m) in per_atom_aggr {
+                      sig_entries.push((key, m.into_iter().collect()));
                   }
-                  // Build signature
-                  let mut sig_vec: Vec<(isize, Vec<Vec<(usize, StateIDBV)>>)> = per_pop.into_iter().collect();
-                  let sig = (ends[u], sig_vec);
+                  let sig: SigKey = (ends[u], sig_entries);
                   let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
                   new_class[u] = cid;
                   if new_class[u] != prev_class[u] { changes += 1; }
@@ -4141,13 +4217,13 @@ local_system:
                   merge_nodes_ultrafast: false,
                   prune_nodes_not_reaching_end: true,
                   generalize_sids: true,
-                  simplify_llm_token_bvs: false,
+                  simplify_llm_token_bvs: true,
                   refine_token_atoms: true,
                   refine_token_atoms_exact: true,
                   refine_token_atoms_max_blocks: 2048,
                   // New: enable global-atoms bisimulation merge by default with conservative caps
                   merge_nodes_global_atoms: true,
-                  merge_nodes_global_atoms_max_iters: 6,
+                  merge_nodes_global_atoms_max_iters: 2,
                   merge_nodes_global_atoms_max_atoms_per_pop: 4096,
                   factor_common_destinations: true,
                   factor_common_destinations_min_incoming: 12,
@@ -4730,9 +4806,10 @@ local_system:
                       });
                       if config.compress_edges {
                           run_pass!("Compressing edges + unary chains (post-pop0-struct-merge)", {
-                          compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                          compress_unary_chains_trie3(roots, &trie3_god);
-                      });
+                              compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                              compress_unary_chains_trie3(roots, &trie3_god);
+                          });
+                      }
                       // Defensive: immediately refine token atoms to allow reversing any local structure
                       // that the compression step couldn't improve under the global cost metric.
                       // This gives the pipeline a way to re-split token sets when that reduces local cost.
@@ -8024,13 +8101,13 @@ messages:
                   merge_nodes_ultrafast: false,
                   prune_nodes_not_reaching_end: true,
                   generalize_sids: true,
-                  simplify_llm_token_bvs: false,
+                  simplify_llm_token_bvs: true,
                   refine_token_atoms: true,
                   refine_token_atoms_exact: true,
                   refine_token_atoms_max_blocks: 2048,
                   // New: enable global-atoms bisimulation merge by default with conservative caps
                   merge_nodes_global_atoms: true,
-                  merge_nodes_global_atoms_max_iters: 6,
+                  merge_nodes_global_atoms_max_iters: 2,
                   merge_nodes_global_atoms_max_atoms_per_pop: 4096,
                   factor_common_destinations: true,
                   factor_common_destinations_min_incoming: 12,
@@ -8615,6 +8692,16 @@ messages:
                           run_pass!("Compressing edges + unary chains (post-pop0-struct-merge)", {
                               compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
                               compress_unary_chains_trie3(roots, &trie3_god);
+                          });
+                      }
+                      // Defensive: immediately refine token atoms to allow reversing any local structure
+                      // that the compression step couldn't improve under the global cost metric.
+                      // This gives the pipeline a way to re-split token sets when that reduces local cost.
+                      if config.refine_token_atoms {
+                          run_pass!("Refining token-set atoms (defensive, post-compress)", {
+                              refine_edges_to_token_atoms_trie3(
+                                  roots, &trie3_god, max_llm_token_id, max_state_id, config.refine_token_atoms_max_blocks
+                              );
                           });
                       }
                   }
@@ -11097,7 +11184,7 @@ messages:
           if all_nodes.is_empty() { return; }
 
           #[cfg(not(rustrover))]
-          let it = tqdm!(all_nodes.iter(), desc = "Trie3 Compress Edges", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
+          let it = tqdm!(all_nodes.iter(), desc = "Trie3 Compress Edges (cost-aware)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
           #[cfg(rustrover)]
           let it = all_nodes.iter();
           for node_idx in it {
@@ -11106,19 +11193,40 @@ messages:
                   continue;
               }
 
-              // Take existing children for processing.
-              let old_children = std::mem::take(w.children_mut());
+              // Work from a snapshot so we can compute both old/new costs and adopt only if better.
+              let old_snapshot = w.children().clone();
 
-              // First stage: group by (pop, canonicalized destination map), while unioning LLM token masks for identical dest-maps.
-              // Canonicalization: BTreeMap<Trie2Index, StateIDBV> (sorted by destination) -> Vec<(Trie2Index, StateIDBV)> as a stable key.
+              // Local helpers for bounded range-count and cost metric
+              #[inline]
+              fn ranges_len_bounded(m: &LLMTokenBV, max_id: usize) -> usize {
+                  let mut c = m.clone();
+                  c.constrain(max_id);
+                  c.inner().ranges_len()
+              }
               use std::collections::BTreeMap as BTM;
+              #[inline]
+              fn children_cost(
+                  children: &BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>,
+                  max_llm_token_id: usize
+              ) -> (usize, usize, usize) {
+                  let mut ranges_sum = 0usize;
+                  let mut dests_sum = 0usize;
+                  for ((_, l), dm) in children {
+                      ranges_sum += ranges_len_bounded(l, max_llm_token_id);
+                      dests_sum += dm.len();
+                  }
+                  (ranges_sum + dests_sum, ranges_sum, dests_sum)
+              }
+
+              // Compute old cost
+              let old_cost = children_cost(&old_snapshot, max_llm_token_id).0;
+
+              // First stage: group by (pop, canonicalized dest-map), unioning L masks for identical dest-maps.
               use std::collections::HashMap as HM;
-
-              // by_pop: pop -> { canonical_dest_map_vec -> union_of_llm_bv }
               let mut by_pop: BTM<isize, HM<Vec<(Trie2Index, StateIDBV)>, LLMTokenBV>> = BTM::new();
-
-              for ((pop, mut llm_bv), dest_map) in old_children {
+              for ((pop, llm_bv_orig), dest_map_orig) in &old_snapshot {
                   // Constrain token bitset to bound and skip empties.
+                  let mut llm_bv = llm_bv_orig.clone();
                   llm_bv.constrain(max_llm_token_id);
                   if llm_bv.is_empty() {
                       continue;
@@ -11126,10 +11234,11 @@ messages:
 
                   // Aggregate destinations by unioning SIDs and removing empties.
                   let mut dest_agg: BTM<Trie2Index, StateIDBV> = BTM::new();
-                  for (dst, mut sids) in dest_map {
+                  for (dst, sids0) in dest_map_orig {
+                      let mut sids = sids0.clone();
                       sids.constrain(max_state_id);
                       if sids.is_empty() { continue; }
-                      dest_agg.entry(dst)
+                      dest_agg.entry(*dst)
                           .and_modify(|e| *e |= &sids)
                           .or_insert(sids);
                   }
@@ -11137,18 +11246,16 @@ messages:
                       continue;
                   }
 
-                  // Canonical destination vector (sorted by dst) for use as a key (Vec implements Hash/Eq/Ord given elements do).
+                  // Canonical destination vector (sorted by dst) for use as a key.
                   let dest_vec: Vec<(Trie2Index, StateIDBV)> = dest_agg.into_iter().collect();
 
                   // Merge edges that have the same pop and identical destination map by unioning their LLM masks.
-                  let entry = by_pop.entry(pop).or_default().entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
+                  let entry = by_pop.entry(*pop).or_default().entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
                   *entry |= &llm_bv;
               }
 
-              // Second stage: for each pop, combine groups that happen to yield identical final LLMTokenBV
-              // by unioning their destination maps. This ensures we never create two entries keyed by the
-              // same (pop, LLMTokenBV); the union is semantically equivalent to having parallel edges for
-              // that same token-set.
+              // Second stage: for each pop, combine groups that yield identical final L masks
+              // by unioning their destination maps (one entry per (pop, llm_bv)).
               let mut new_children: BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTM::new();
               for (pop, groups) in by_pop {
                   // llm_bv -> aggregated destination map (as BTreeMap for determinism)
@@ -11178,8 +11285,6 @@ messages:
                           }
                       }
                       if !ordered_dm.is_empty() {
-                          // If an entry for (pop, llm_bv) already exists, union destination maps' SIDs (shouldn't happen,
-                          // but this keeps the structure robust).
                           let entry = new_children.entry((pop, llm_bv)).or_insert_with(OrderedHashMap::new);
                           for (dst, sids) in ordered_dm {
                               entry.entry(dst)
@@ -11190,13 +11295,24 @@ messages:
                   }
               }
 
-              // Recompute live tokens as the union of all outgoing LLM masks.
-              let mut new_live = LLMTokenBV::zeros();
-              for ((_, llm_bv), _) in &new_children {
-                  new_live |= llm_bv;
+              // Compare costs and adopt only if better.
+              let new_cost = children_cost(&new_children, max_llm_token_id).0;
+              if new_cost < old_cost {
+                  let mut new_live = LLMTokenBV::zeros();
+                  for ((_, llm_bv), _) in &new_children {
+                      new_live |= llm_bv;
+                  }
+                  w.value.live_tokens = new_live;
+                  *w.children_mut() = new_children;
+              } else {
+                  // Keep old structure; normalize live_tokens from old children.
+                  let mut live = LLMTokenBV::zeros();
+                  for ((_, llm_bv), _) in &old_snapshot {
+                      live |= llm_bv;
+                  }
+                  w.value.live_tokens = live;
+                  // w.children() already equals old_snapshot
               }
-              w.value.live_tokens = new_live;
-              *w.children_mut() = new_children;
           }
 
           crate::debug!(2, "Finished compressing Trie3 edges.");
@@ -11496,61 +11612,9 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_utils.rs
-  - user: |-
-      ```bash
-      Trie3 Merge Structural Iter 4: 34977/34977 [00:00<00:00, 57368.98it/s][DEBUG] 2] src/constraint_precompute3_utils.rs:652: Pass 30 ('Merging nodes (structural, post-pop0-elim)') finished in 3.1218705s
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:652: Stats after pass 30:
-      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
-      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
-      --- Precomputation 3 Statistics ---
-
-      Node Counts Breakdown:
-        There are:
-        - 34148 unique nodes, of which
-          - 165 are roots
-          - 33983 are non-roots, of which
-              - 33982 are internal (non-root, non-leaf)
-              - 1 are leaves (non-root)
-
-      Final Graph Structure (after sharing and deduplication):
-        Unique Nodes: 34148
-        Total Edges: 608701
-        Nodes with End Marker: 1
-        Average edge fanout:    6.15
-        Total ranges in all HybridBitsets: 1855183
-      ---------------------------------
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:656: Running optimization pass 31: Compressing edges + unary chains (post-pop0-struct-merge)...
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:3129: Compressing Trie3 edges (group identical dest-maps and union token masks)...
-      Trie3 Compress Edges: 34148/34148 [00:00<00:00, 71383.13it/s][DEBUG] 2] src/constraint_precompute3_utils.rs:3238: Finished compressing Trie3 edges.
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:3250: Contracting unary chains in Trie3...
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:3368: Unary-chain contraction rewired 185 edges.
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:656: Pass 31 ('Compressing edges + unary chains (post-pop0-struct-merge)') finished in 580.400833ms
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:656: Stats after pass 31:
-      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
-      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
-      --- Precomputation 3 Statistics ---
-
-      Node Counts Breakdown:
-        There are:
-        - 33963 unique nodes, of which
-          - 165 are roots
-          - 33798 are non-roots, of which
-              - 33797 are internal (non-root, non-leaf)
-              - 1 are leaves (non-root)
-
-      Final Graph Structure (after sharing and deduplication):
-        Unique Nodes: 33963
-        Total Edges: 556482
-        Nodes with End Marker: 1
-        Average edge fanout:    11.49
-        Total ranges in all HybridBitsets: 1153641
-      ---------------------------------
-      ```
-      What happened here? The number of edges shot up but the number of nodes barely increased. This seems inefficient.
-      Furthermore, perhaps even worse, it seems that no other optimization pass was able to reverse this. Why? That shows our optimization passes are no that capable.
-
-      Fix it. Not just by avoiding blowing up the number of edges, but also by ensuring that at least one optimization pass is capable of reversing this.
-      If we can't reverse this simple change, then there are probbaly a LOT of other opportunities that we're missing.
+  - user: Merging nodes (global-atoms bisimulation) just takes far too long. Like
+      15 minutes for 2 itertaions. It needs to be faster. The other passes are on
+      the order of 10 ms to 1 second.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -11570,306 +11634,287 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s a targeted fix that makes “Compress edges” cost-aware (it will never adopt a transformation that increases the total “cost” for a node), and also adds a defensive refinement pass immediately after compressing edges so the optimization pipeline can actively reverse any local structure that still looks suboptimal.
+      Below are concrete, step-by-step changes to make the global-atoms bisimulation merge dramatically faster by avoiding O(edges × atoms) work per iteration:
 
-      Plan
+      Step-by-step instructions
 
-      1) Make compress_trie3_edges cost-aware
-      - Problem: The current compress step groups by destination maps and merges any groups that share the same (pop, LLMTokenBV), potentially leading to large destination maps per key. That can increase “fanout per key” even when total edges decrease.
-      - Fix: For each node, compute a simple cost metric before and after compression and only adopt the compressed version if it strictly reduces that cost.
-        - Cost per node = sum over keys of (ranges_len(LLMTokenBV constrained) + number_of_destinations).
-        - This matches the cost metric used elsewhere (e.g., token atom refinement) and prevents regressions like “avg fanout blow-ups”.
-      - Implementation: Build the “new_children” candidate from a snapshot of the existing children. Compute old_cost from the snapshot, and new_cost from the candidate. Adopt new only if new_cost < old_cost; otherwise, leave the node unchanged. In both cases, recompute live_tokens from the chosen children.
+      1) File to edit
+      - src/constraint_precompute3_utils.rs
 
-      2) Add a defensive refine pass immediately after the “post-pop0-struct-merge” compress stage
-      - Problem: Even when compression improves total cost globally, some nodes can still be left in a structure that subsequent passes don’t obviously reverse in the immediate next step.
-      - Fix: Run refine_edges_to_token_atoms_trie3 right after compress + unary-chains in the “post-pop0-struct-merge” window. This provides a local “reversal” path that can split token sets into semantic atoms again if that reduces local cost.
+      2) Replace the inner algorithm of merge_nodes_trie3_global_atoms to avoid per-edge-per-atom scans
+      - The current implementation builds a huge per-pop vector for every node and iterates all atoms for every edge mask. This is the bottleneck.
+      - Implement the following optimizations:
+        - Precompute, once, for every unique (pop, LLMTokenBV) mask pointer across the entire graph, which global atoms it overlaps. This replaces repeated intersection checks with a single lookup.
+        - For each node and iteration, first aggregate the node’s outgoing edges by (pop, LLM mask pointer) to a single destination-class map. Then, fan out that aggregated map only to those atoms that overlap the mask (using the precomputed lookup).
+        - Build signatures only from non-empty atom entries actually touched by the node, using a compact canonical structure:
+          (end_flag, Vec<((pop, atom_idx), Vec<(dest_class, StateIDBV)>)>)
+          This avoids allocating vectors of length “atoms_per_pop” filled with empties.
+      - Keep the rest of the function (rewiring to representatives, rebuilding representative edges, GC, and depth recomputation) unchanged.
 
-      What this achieves
-      - The compress pass never makes the graph worse under a concrete, measurable metric.
-      - If a pathological case slips through a local minimum, the immediate refine pass can split token sets again and re-balance large destination maps when that’s semantically beneficial.
-      - This avoids the “blows up and can’t be undone” failure mode while still keeping the powerful compression benefits.
+      3) What to change in code (summary)
+      - Inside merge_nodes_trie3_global_atoms, after raw_edges are collected, add a precomputation block:
+        - Gather unique LLMTokenBV pointers per pop.
+        - Build a map: (pop, llm_ptr) -> [atom indices] (those atoms that intersect the mask).
+      - In the refinement loop:
+        - Replace the previous construction of per_pop empty vectors and nested aggregation with:
+          - A per-node, per (pop, mask-pointer) aggregation into dest_class -> SIDs.
+          - A second phase that distributes each aggregated map to only the overlapping atoms via the precomputed index.
+          - Build a compact signature keyed by ((pop, atom_idx), canonical dest vector), without emitting empty atoms or empty pops.
+      - This reduces both compute and memory pressure significantly.
 
-      Step-by-step edit instructions
+      4) No external dependencies, no config changes required
+      - The patch is self-contained and uses the same imports already available in the file.
+      - It preserves correctness and semantics while being much faster.
 
-      File: src/constraint_precompute3_utils.rs
-
-      1) Update compress_trie3_edges to be cost-aware:
-      - Replace the body of compress_trie3_edges to:
-        - Work from a snapshot (clone) of children to compute a candidate compressed structure.
-        - Compute old_cost and new_cost using a per-node metric: sum over keys (llm ranges_len bounded + dest_map_size).
-        - Only adopt the new structure if new_cost < old_cost; otherwise keep the old children.
-        - Recompute live_tokens from whichever structure is used.
-
-      2) Add a defensive refine pass after “Compressing edges + unary chains (post-pop0-struct-merge)”:
-      - In optimize_trie3_size(), immediately after the block that runs compress_trie3_edges + compress_unary_chains_trie3 for “post-pop0-struct-merge”, insert a new run_pass that calls refine_edges_to_token_atoms_trie3. Use the existing config.refine_token_atoms flag and config.refine_token_atoms_max_blocks to keep behavior consistent with other refine phases.
-
-      Git patches
+      Git diff patches
 
       ```diff
       diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
       --- a/src/constraint_precompute3_utils.rs
       +++ b/src/constraint_precompute3_utils.rs
-      @@ -1005,6 +1005,15 @@ pub fn optimize_trie3_size(
-                           compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                           compress_unary_chains_trie3(roots, &trie3_god);
-                       });
-      +                // Defensive: immediately refine token atoms to allow reversing any local structure
-      +                // that the compression step couldn't improve under the global cost metric.
-      +                // This gives the pipeline a way to re-split token sets when that reduces local cost.
-      +                if config.refine_token_atoms {
-      +                    run_pass!("Refining token-set atoms (defensive, post-compress)", {
-      +                        refine_edges_to_token_atoms_trie3(
-      +                            roots, &trie3_god, max_llm_token_id, max_state_id, config.refine_token_atoms_max_blocks
-      +                        );
-      +                    });
-      +                }
-                   }
-                   if config.merge_nodes_exact.enabled {
-                       run_pass!("Merging nodes (exact, post-pop0-elim)", {
-      @@ -3129,81 +3138,112 @@ fn refine_edges_to_token_atoms_trie3_exact(
-           crate::debug!(2, "Finished exact token-atom refinement.");
-       }
-       
-       pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_llm_token_id: usize, max_state_id: usize) {
-           crate::debug!(2, "Compressing Trie3 edges (group identical dest-maps and union token masks)...");
+      @@ -49,112 +49,187 @@
+       pub fn merge_nodes_trie3_global_atoms(
+           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+           trie3_god: &Trie3GodWrapper,
+           max_llm_token_id: usize,
+           max_iters: usize,
+           max_atoms_per_pop: usize,
+       ) {
+           crate::debug!(2, "Merging nodes (global-atoms bisimulation) in precomputed trie 3 (iters={}, cap={} atoms/pop).",
+               max_iters, max_atoms_per_pop);
        
            let roots_vec: Vec<_> = roots.values().cloned().collect();
            let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
            if all_nodes.is_empty() { return; }
        
-           #[cfg(not(rustrover))]
-      -    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Compress Edges", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
-      +    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Compress Edges (cost-aware)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
-           #[cfg(rustrover)]
-           let it = all_nodes.iter();
-      -    for node_idx in it {
-      -        let mut w = node_idx.write(trie3_god).expect("write");
-      -        if w.children().is_empty() {
-      -            continue;
-      -        }
-      -
-      -        // Take existing children for processing.
-      -        let old_children = std::mem::take(w.children_mut());
-      -
-      -        // First stage: group by (pop, canonicalized destination map), while unioning LLM token masks for identical dest-maps.
-      -        // Canonicalization: BTreeMap<Trie2Index, StateIDBV> (sorted by destination) -> Vec<(Trie2Index, StateIDBV)> as a stable key.
-      -        use std::collections::BTreeMap as BTM;
-      -        use std::collections::HashMap as HM;
-      -
-      -        // by_pop: pop -> { canonical_dest_map_vec -> union_of_llm_bv }
-      -        let mut by_pop: BTM<isize, HM<Vec<(Trie2Index, StateIDBV)>, LLMTokenBV>> = BTM::new();
-      -
-      -        for ((pop, mut llm_bv), dest_map) in old_children {
-      -            // Constrain token bitset to bound and skip empties.
-      -            llm_bv.constrain(max_llm_token_id);
-      -            if llm_bv.is_empty() {
-      -                continue;
-      -            }
-      -
-      -            // Aggregate destinations by unioning SIDs and removing empties.
-      -            let mut dest_agg: BTM<Trie2Index, StateIDBV> = BTM::new();
-      -            for (dst, mut sids) in dest_map {
-      -                sids.constrain(max_state_id);
-      -                if sids.is_empty() { continue; }
-      -                dest_agg.entry(dst)
-      -                    .and_modify(|e| *e |= &sids)
-      -                    .or_insert(sids);
-      -            }
-      -            if dest_agg.is_empty() {
-      -                continue;
-      -            }
-      -
-      -            // Canonical destination vector (sorted by dst) for use as a key (Vec implements Hash/Eq/Ord given elements do).
-      -            let dest_vec: Vec<(Trie2Index, StateIDBV)> = dest_agg.into_iter().collect();
-      -
-      -            // Merge edges that have the same pop and identical destination map by unioning their LLM masks.
-      -            let entry = by_pop.entry(pop).or_default().entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
-      -            *entry |= &llm_bv;
-      -        }
-      -
-      -        // Second stage: for each pop, combine groups that happen to yield identical final LLMTokenBV
-      -        // by unioning their destination maps. This ensures we never create two entries keyed by the
-      -        // same (pop, LLMTokenBV); the union is semantically equivalent to having parallel edges for
-      -        // that same token-set.
-      -        let mut new_children: BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTM::new();
-      -        for (pop, groups) in by_pop {
-      -            // llm_bv -> aggregated destination map (as BTreeMap for determinism)
-      -            let mut out_by_llm: BTM<LLMTokenBV, BTM<Trie2Index, StateIDBV>> = BTM::new();
-      -
-      -            for (dest_vec, llm_bv) in groups {
-      -                if llm_bv.is_empty() {
-      -                    continue;
-      -                }
-      -                let dest_out = out_by_llm.entry(llm_bv).or_insert_with(BTM::new);
-      -                for (dst, sids) in dest_vec {
-      -                    dest_out.entry(dst)
-      -                        .and_modify(|e| *e |= &sids)
-      -                        .or_insert(sids);
-      -                }
-      -            }
-      -
-      -            // Emit final edges: (pop, llm_bv) -> OrderedHashMap<dst, StateIDBV>
-      -            for (llm_bv, dest_btree) in out_by_llm {
-      -                if llm_bv.is_empty() {
-      -                    continue;
-      -                }
-      -                let mut ordered_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
-      -                for (dst, sids) in dest_btree {
-      -                    if !sids.is_empty() {
-      -                        ordered_dm.insert(dst, sids);
-      -                    }
-      -                }
-      -                if !ordered_dm.is_empty() {
-      -                    // If an entry for (pop, llm_bv) already exists, union destination maps' SIDs (shouldn't happen,
-      -                    // but this keeps the structure robust).
-      -                    let entry = new_children.entry((pop, llm_bv)).or_insert_with(OrderedHashMap::new);
-      -                    for (dst, sids) in ordered_dm {
-      -                        entry.entry(dst)
-      -                            .and_modify(|e| *e |= &sids)
-      -                            .or_insert(sids);
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        // Recompute live tokens as the union of all outgoing LLM masks.
-      -        let mut new_live = LLMTokenBV::zeros();
-      -        for ((_, llm_bv), _) in &new_children {
-      -            new_live |= llm_bv;
-      -        }
-      -        w.value.live_tokens = new_live;
-      -        *w.children_mut() = new_children;
-      -    }
-      +    for node_idx in it {
-      +        let mut w = node_idx.write(trie3_god).expect("write");
-      +        if w.children().is_empty() {
-      +            continue;
-      +        }
-      +
-      +        // Work from a snapshot so we can compute both old/new costs and adopt only if better.
-      +        let old_snapshot = w.children().clone();
-      +
-      +        // Local helpers for bounded range-count and cost metric
-      +        #[inline]
-      +        fn ranges_len_bounded(m: &LLMTokenBV, max_id: usize) -> usize {
-      +            let mut c = m.clone();
-      +            c.constrain(max_id);
-      +            c.inner().ranges_len()
-      +        }
-      +        use std::collections::BTreeMap as BTM;
-      +        #[inline]
-      +        fn children_cost(
-      +            children: &BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>,
-      +            max_llm_token_id: usize
-      +        ) -> (usize, usize, usize) {
-      +            let mut ranges_sum = 0usize;
-      +            let mut dests_sum = 0usize;
-      +            for ((_, l), dm) in children {
-      +                ranges_sum += ranges_len_bounded(l, max_llm_token_id);
-      +                dests_sum += dm.len();
+           // Derive global atoms by pop.
+           let atoms_by_pop = build_global_token_atoms_by_pop(trie3_god, &all_nodes, max_llm_token_id, max_atoms_per_pop);
+           if atoms_by_pop.is_empty() {
+               crate::debug!(3, "Global-atoms merge: no edges present; skipping.");
+               return;
+           }
+       
+           // Dense ids for nodes
+           let n = all_nodes.len();
+           let mut dense_of: HashMap<Trie2Index, usize> = HashMap::with_capacity(n);
+           let mut old_of: Vec<Trie2Index> = Vec::with_capacity(n);
+           for (i, idx) in all_nodes.iter().enumerate() {
+               dense_of.insert(*idx, i);
+               old_of.push(*idx);
+           }
+       
+           // Ends and raw edges (pop, llm_bv, dest_dense, sids)
+           type RawEdge3 = (isize, LLMTokenBV, usize, StateIDBV);
+           let mut ends: Vec<bool> = vec![false; n];
+           let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
+           for (u_dense, u_idx) in old_of.iter().enumerate() {
+               let g = u_idx.read(trie3_god).expect("read");
+               ends[u_dense] = g.value.end;
+               for (ek, dm) in g.children() {
+                   for (dst, sids) in dm {
+                       if let Some(v_dense) = dense_of.get(dst) {
+                           raw_edges[u_dense].push((ek.0, ek.1.clone(), *v_dense, sids.clone()));
+                       }
+                   }
+               }
+           }
+       
+      -    // Partition refinement
+      +    // Precompute, once, for every unique (pop, LLMTokenBV) mask pointer, which atoms (by index) it overlaps.
+      +    // This avoids scanning all atoms for every edge repeatedly.
+      +    use std::collections::BTreeMap as BTM;
+      +    let mut unique_bvs_per_pop: BTM<isize, Vec<LLMTokenBV>> = BTM::new();
+      +    let mut seen_ptrs_per_pop: BTM<isize, HashSet<*const RangeSetBlaze<usize>>> = BTM::new();
+      +    for edges in &raw_edges {
+      +        for (p, llm_bv, _v, _sids) in edges {
+      +            if !atoms_by_pop.contains_key(p) { continue; }
+      +            let ptr = Arc::as_ptr(&llm_bv.inner);
+      +            let seen = seen_ptrs_per_pop.entry(*p).or_default();
+      +            if seen.insert(ptr) {
+      +                unique_bvs_per_pop.entry(*p).or_default().push(llm_bv.clone());
       +            }
-      +            (ranges_sum + dests_sum, ranges_sum, dests_sum)
-      +        }
-      +
-      +        // Compute old cost
-      +        let old_cost = children_cost(&old_snapshot, max_llm_token_id).0;
-      +
-      +        // First stage: group by (pop, canonicalized dest-map), unioning L masks for identical dest-maps.
-      +        use std::collections::HashMap as HM;
-      +        let mut by_pop: BTM<isize, HM<Vec<(Trie2Index, StateIDBV)>, LLMTokenBV>> = BTM::new();
-      +        for ((pop, llm_bv_orig), dest_map_orig) in &old_snapshot {
-      +            // Constrain token bitset to bound and skip empties.
-      +            let mut llm_bv = llm_bv_orig.clone();
-      +            llm_bv.constrain(max_llm_token_id);
-      +            if llm_bv.is_empty() {
-      +                continue;
-      +            }
-      +
-      +            // Aggregate destinations by unioning SIDs and removing empties.
-      +            let mut dest_agg: BTM<Trie2Index, StateIDBV> = BTM::new();
-      +            for (dst, sids0) in dest_map_orig {
-      +                let mut sids = sids0.clone();
-      +                sids.constrain(max_state_id);
-      +                if sids.is_empty() { continue; }
-      +                dest_agg.entry(*dst)
-      +                    .and_modify(|e| *e |= &sids)
-      +                    .or_insert(sids);
-      +            }
-      +            if dest_agg.is_empty() {
-      +                continue;
-      +            }
-      +
-      +            // Canonical destination vector (sorted by dst) for use as a key.
-      +            let dest_vec: Vec<(Trie2Index, StateIDBV)> = dest_agg.into_iter().collect();
-      +
-      +            // Merge edges that have the same pop and identical destination map by unioning their LLM masks.
-      +            let entry = by_pop.entry(*pop).or_default().entry(dest_vec).or_insert_with(LLMTokenBV::zeros);
-      +            *entry |= &llm_bv;
-      +        }
-      +
-      +        // Second stage: for each pop, combine groups that yield identical final L masks
-      +        // by unioning their destination maps (one entry per (pop, llm_bv)).
-      +        let mut new_children: BTM<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTM::new();
-      +        for (pop, groups) in by_pop {
-      +            // llm_bv -> aggregated destination map (as BTreeMap for determinism)
-      +            let mut out_by_llm: BTM<LLMTokenBV, BTM<Trie2Index, StateIDBV>> = BTM::new();
-      +
-      +            for (dest_vec, llm_bv) in groups {
-      +                if llm_bv.is_empty() {
-      +                    continue;
-      +                }
-      +                let dest_out = out_by_llm.entry(llm_bv).or_insert_with(BTM::new);
-      +                for (dst, sids) in dest_vec {
-      +                    dest_out.entry(dst)
-      +                        .and_modify(|e| *e |= &sids)
-      +                        .or_insert(sids);
-      +                }
-      +            }
-      +
-      +            // Emit final edges: (pop, llm_bv) -> OrderedHashMap<dst, StateIDBV>
-      +            for (llm_bv, dest_btree) in out_by_llm {
-      +                if llm_bv.is_empty() {
-      +                    continue;
-      +                }
-      +                let mut ordered_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
-      +                for (dst, sids) in dest_btree {
-      +                    if !sids.is_empty() {
-      +                        ordered_dm.insert(dst, sids);
-      +                    }
-      +                }
-      +                if !ordered_dm.is_empty() {
-      +                    let entry = new_children.entry((pop, llm_bv)).or_insert_with(OrderedHashMap::new);
-      +                    for (dst, sids) in ordered_dm {
-      +                        entry.entry(dst)
-      +                            .and_modify(|e| *e |= &sids)
-      +                            .or_insert(sids);
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        // Compare costs and adopt only if better.
-      +        let new_cost = children_cost(&new_children, max_llm_token_id).0;
-      +        if new_cost < old_cost {
-      +            let mut new_live = LLMTokenBV::zeros();
-      +            for ((_, llm_bv), _) in &new_children {
-      +                new_live |= llm_bv;
-      +            }
-      +            w.value.live_tokens = new_live;
-      +            *w.children_mut() = new_children;
-      +        } else {
-      +            // Keep old structure; normalize live_tokens from old children.
-      +            let mut live = LLMTokenBV::zeros();
-      +            for ((_, llm_bv), _) in &old_snapshot {
-      +                live |= llm_bv;
-      +            }
-      +            w.value.live_tokens = live;
-      +            // w.children() already equals old_snapshot
       +        }
       +    }
+      +    let mut atom_idxs_by_pop_ptr: BTM<isize, HashMap<*const RangeSetBlaze<usize>, Vec<usize>>> = BTM::new();
+      +    for (p, bvs) in unique_bvs_per_pop {
+      +        if let Some(atoms) = atoms_by_pop.get(&p) {
+      +            let mut map: HashMap<*const RangeSetBlaze<usize>, Vec<usize>> = HashMap::new();
+      +            for bv in bvs {
+      +                let ptr = Arc::as_ptr(&bv.inner);
+      +                let mut idxs: Vec<usize> = Vec::new();
+      +                for (j, a) in atoms.iter().enumerate() {
+      +                    if !(&bv & a).is_empty() {
+      +                        idxs.push(j);
+      +                    }
+      +                }
+      +                map.insert(ptr, idxs);
+      +            }
+      +            atom_idxs_by_pop_ptr.insert(p, map);
+      +        }
+      +    }
+      +
+      +    // Partition refinement (optimized)
+           let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+           for it in 0..max_iters {
+      -        // Signature: (end_flag, Vec<(pop, Vec< Vec<(dest_class, StateIDBV)> >>)>)
+      -        // For each (pop, atom_j), we compute a canonical vector of (dest_class, aggregated SIDs).
+      -        use std::collections::HashMap as HM;
+      -        let mut sig_to_id: HM<(bool, Vec<(isize, Vec<Vec<(usize, StateIDBV)> >)>), usize> = HM::new();
+      +        // Signature (compact): (end_flag, Vec<((pop, atom_idx), Vec<(dest_class, StateIDBV)>)>)
+      +        // Only atoms actually hit by this node are included; canonicalization is via sorted BTreeMaps below.
+      +        type SigKey = (bool, Vec<((isize, usize), Vec<(usize, StateIDBV)>)>);
+      +        let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
+               let mut next_id = 0usize;
+               let mut new_class = vec![0usize; n];
+               let mut changes = 0usize;
        
-           crate::debug!(2, "Finished compressing Trie3 edges.");
+               #[cfg(not(rustrover))]
+      -        let itn = tqdm!(0..n, desc = format!("Trie3 Merge Global-Atoms Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+      +        let itn = tqdm!(0..n, desc = format!("Trie3 Merge Global-Atoms Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+               #[cfg(rustrover)]
+               let itn = 0..n;
+               for u in itn {
+      -            // For each pop, build a vector per atom index: aggregated (dest_class -> SIDs)
+      -            let mut per_pop: BTreeMap<isize, Vec<Vec<(usize, StateIDBV)>>> = BTreeMap::new();
+      -            for (pop, atoms) in &atoms_by_pop {
+      -                per_pop.insert(*pop, vec![Vec::new(); atoms.len()]);
+      -            }
+      -
+      -            // Temporary aggregation: per (pop, atom_idx) -> BTreeMap<dest_class, SIDs>
+      -            // We'll finalize into sorted vectors for determinism.
+      -            let mut agg_maps: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
+      -            for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
+      -                if let Some(atoms) = atoms_by_pop.get(p) {
+      -                    for (j, a) in atoms.iter().enumerate() {
+      -                        if (llm_bv & a).is_empty() { continue; }
+      -                        let dest_class = prev_class[*v_dense];
+      -                        let key = (*p, j);
+      -                        agg_maps.entry(key)
+      -                            .or_insert_with(BTreeMap::new)
+      -                            .entry(dest_class)
+      -                            .and_modify(|e| *e |= sids)
+      -                            .or_insert_with(|| sids.clone());
+      -                    }
+      -                }
+      -            }
+      -            // Finalize to vectors
+      -            for ((pop, j), m) in agg_maps {
+      -                let vec_m: Vec<(usize, StateIDBV)> = m.into_iter().collect();
+      -                if let Some(blocks) = per_pop.get_mut(&pop) {
+      -                    if j < blocks.len() {
+      -                        blocks[j] = vec_m;
+      -                    }
+      -                }
+      -            }
+      -            // Build signature
+      -            let mut sig_vec: Vec<(isize, Vec<Vec<(usize, StateIDBV)>>)> = per_pop.into_iter().collect();
+      -            let sig = (ends[u], sig_vec);
+      -            let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
+      +            // 1) Aggregate once per (pop, LLM mask pointer) to dest_class -> SIDs.
+      +            // This removes duplicate work across atoms for the same mask.
+      +            let mut per_bv_aggr: HashMap<(isize, *const RangeSetBlaze<usize>), BTreeMap<usize, StateIDBV>> = HashMap::new();
+      +            for (p, llm_bv, v_dense, sids) in &raw_edges[u] {
+      +                if !atoms_by_pop.contains_key(p) { continue; }
+      +                let dest_class = prev_class[*v_dense];
+      +                let ptr = Arc::as_ptr(&llm_bv.inner);
+      +                per_bv_aggr
+      +                    .entry((*p, ptr))
+      +                    .or_insert_with(BTreeMap::new)
+      +                    .entry(dest_class)
+      +                    .and_modify(|e| *e |= sids)
+      +                    .or_insert_with(|| sids.clone());
+      +            }
+      +
+      +            // 2) Fan out each (pop, mask-pointer) aggregated map to only the atoms it overlaps.
+      +            // Temporary aggregation: (pop, atom_idx) -> BTreeMap<dest_class, SIDs>, sorted for determinism.
+      +            let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, StateIDBV>> = BTreeMap::new();
+      +            for ((pop, ptr), dm) in per_bv_aggr {
+      +                if let Some(pop_map) = atom_idxs_by_pop_ptr.get(&pop) {
+      +                    if let Some(atom_idxs) = pop_map.get(&ptr) {
+      +                        for &j in atom_idxs {
+      +                            let entry = per_atom_aggr.entry((pop, j)).or_insert_with(BTreeMap::new);
+      +                            for (dest_class, sids) in &dm {
+      +                                entry.entry(*dest_class)
+      +                                    .and_modify(|e| *e |= sids)
+      +                                    .or_insert_with(|| sids.clone());
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            // 3) Build compact signature. We only include non-empty atoms that this node touches.
+      +            let mut sig_entries: Vec<((isize, usize), Vec<(usize, StateIDBV)>)> = Vec::with_capacity(per_atom_aggr.len());
+      +            for (key, m) in per_atom_aggr {
+      +                sig_entries.push((key, m.into_iter().collect()));
+      +            }
+      +            let sig: SigKey = (ends[u], sig_entries);
+      +            let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
+                   new_class[u] = cid;
+                   if new_class[u] != prev_class[u] { changes += 1; }
+               }
+               crate::debug!(3, "Global-atoms merge iter {}: classes={}, changes={}", it + 1, new_class.iter().max().map(|m| m + 1).unwrap_or(0), changes);
+               prev_class = new_class;
+               if changes == 0 { break; }
+           }
+       
+           // Representatives for final classes
+           let final_partition = prev_class;
+           let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
+           let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
+           for (u_dense, &class_id) in final_partition.iter().enumerate() {
+               if representatives[class_id].is_none() {
+                   representatives[class_id] = Some(old_of[u_dense]);
+               }
+           }
+           let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::with_capacity(n);
+           for (u_dense, &class_id) in final_partition.iter().enumerate() {
+               node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
+           }
+       
+           // Rewrite all edges in the graph to class representatives
+           rewire_all_edges_to_representatives(trie3_god, roots, &node_to_rep);
+       
+           // Rebuild representative edges deterministically by aggregating to dest classes and mapping to reps.
+           for class_id in 0..num_classes {
+               if let Some(rep_idx) = representatives[class_id] {
+                   // Use a single exemplar node from the class to rebuild representative edges
+                   let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
+                   // Aggregate by (pop, llm_bv, dest_class) unioning SIDs
+                   let mut aggr: BTreeMap<(isize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
+                   for (p, llm_bv, v_dense, sids) in &raw_edges[u_dense] {
+                       let dest_class = final_partition[*v_dense];
+                       aggr.entry((*p, llm_bv.clone(), dest_class))
+                           .and_modify(|e| *e |= sids)
+                           .or_insert_with(|| sids.clone());
+                   }
+                   let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+                   for ((p, bv_key, dest_class), sids) in aggr {
+                       if let Some(dst_rep) = representatives[dest_class] {
+                           new_children.entry((p, bv_key.clone()))
+                               .or_insert_with(OrderedHashMap::new)
+                               .entry(dst_rep)
+                               .and_modify(|e| *e |= &sids)
+                               .or_insert(sids);
+                       }
+                   }
+                   // Recompute live tokens
+                   let mut new_live = LLMTokenBV::zeros();
+                   for ((_, l), _) in &new_children { new_live |= l; }
+                   let mut w = rep_idx.write(trie3_god).expect("write");
+                   *w.children_mut() = new_children;
+                   w.value.live_tokens = new_live;
+               }
+           }
+       
+           // Remap roots to representatives
+           for r in roots.values_mut() {
+               *r = *node_to_rep.get(r).unwrap();
+           }
+           // Cleanup
+           let roots_vec2: Vec<_> = roots.values().cloned().collect();
+           Trie::gc(trie3_god, &roots_vec2);
+           Trie::recompute_all_max_depths(trie3_god, &roots_vec2);
        }
       ```
     metadata:
@@ -11882,7 +11927,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Make Trie3 edge compression cost-aware
-      and add defensive token atom refinement post-compression"'
+  - user: 'Changes committed with message: "Perf: Optimize global-atoms bisimulation
+      merge by precomputing atom intersections and using compact signatures."'
     metadata:
 ...
