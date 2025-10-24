@@ -1077,13 +1077,13 @@ class Model(GraphProvider):
                 for (dest_id, llm_bv_tuple), heads in transitions.items():
                     llm_bv, llm_bv_not = llm_bv_tuple
 
-                # Optimization A: Skip edges that can't contribute new tokens at all
-                stats.start('get_mask.main_loop.edge.early_skip_check')
-                if rs_isdisjoint(llm_bv, remaining_mask):
+                    # Optimization A: Skip edges that can't contribute new tokens at all
+                    stats.start('get_mask.main_loop.edge.early_skip_check')
+                    if rs_isdisjoint(llm_bv, remaining_mask):
+                        stats.stop('get_mask.main_loop.edge.early_skip_check')
+                        stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+                        continue
                     stats.stop('get_mask.main_loop.edge.early_skip_check')
-                    stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
-                    continue
-                stats.stop('get_mask.main_loop.edge.early_skip_check')
 
                     # Isolate GSS for this group of heads
                     gss_for_heads = popped.isolate_many(heads)
