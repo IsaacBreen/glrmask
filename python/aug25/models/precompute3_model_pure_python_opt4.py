@@ -328,6 +328,7 @@ class Model(GraphProvider):
     all_internal_llm_tokens_bitset: LLMTokenSet
     ignore_terminal_id: Optional[int]
     state: Dict[int, GSS]
+    stats: Dict[str, int] = field(default_factory=lambda: collections.defaultdict(int), init=False, repr=False)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -518,7 +519,7 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
-    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
+    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, stats: Dict[str, int]) -> Generator[Union[Enqueue, Suspend], None, None]:
         a_node = self.arena.get(node_id)
         if not a_node:
             return
@@ -530,18 +531,27 @@ class Model(GraphProvider):
         pop_cache = {}
 
         for edge_i, edge in enumerate(a_node.children):
+            stats['edges_processed'] += 1
             if edge.pop == 0:
                 if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                if edge.dest_states_union.isdisjoint(peek0_rs): continue
+                if edge.dest_states_union.isdisjoint(peek0_rs):
+                    stats['pruned_by_peek0_disjoint'] += 1
+                    continue
 
-            if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+            if edge.pop in pop_cache:
+                stats['pop_cache_hits'] += 1
+                popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
             else:
+                stats['pop_cache_misses'] += 1
+                stats['gss_popn_calls'] += 1
                 popped = gss_node.popn(edge.pop)
                 if popped.is_empty():
+                    stats['pruned_by_pop_empty'] += 1
                     pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
                     continue
                 popped_acc = popped.reduce_acc()
                 if not popped_acc or popped_acc.llm_mask.is_empty():
+                    stats['pruned_by_acc_empty'] += 1
                     pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
                     continue
                 # Avoid double-peek: call once and reuse both list and RangeSetStates
@@ -549,16 +559,23 @@ class Model(GraphProvider):
                 peek_rs = RangeSetStates.from_indices(peeked)
                 pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
 
-            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
+            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
+                stats['pruned_by_dest_disjoint'] += 1
+                continue
 
             if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
+                if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+                    stats['pruned_by_llm_mask_disjoint'] += 1
+                    continue
                 @_acc_memoize(use_value_cache=False)
                 def intersect(acc: PyAcc):
                     new_mask = acc.llm_mask.intersection(edge.llm_bv)
                     return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                stats['gss_apply_and_prune_calls'] += 1
                 popped = popped.apply_and_prune(intersect)
-                if popped.is_empty(): continue
+                if popped.is_empty():
+                    stats['pruned_by_apply_and_prune'] += 1
+                    continue
             if not peeked: continue
 
             grouped: Dict[int, List[int]] = {}
@@ -575,6 +592,7 @@ class Model(GraphProvider):
             for dest_j in sorted(grouped.keys()):
                 if dests_proc >= max_dests:
                     priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+                    stats['suspensions'] += 1
                     yield Suspend(priority)
                     dests_proc = 0
                 dest = edge.dests[dest_j]
@@ -583,19 +601,24 @@ class Model(GraphProvider):
                 if len(values_to_keep) == len(peeked):
                     child_gss = popped
                 else:
+                    stats['gss_isolate_many_calls'] += 1
                     child_gss = popped.isolate_many(values_to_keep)
                 if child_gss.is_empty(): continue
                 d: NodeID = int(dest.dest_idx)
+                stats['enqueues'] += 1
                 yield Enqueue(d, child_gss)
                 dests_proc += 1
+                stats['dests_processed'] += 1
 
             if edges_proc >= max_edges:
                 priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
+                stats['suspensions'] += 1
                 yield Suspend(priority)
                 edges_proc = 0
             edges_proc += 1
 
     def get_mask(self) -> LLMTokenSet:
+        self.stats.clear()
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         work_heap = []
         t0 = time.perf_counter()
@@ -631,16 +654,20 @@ class Model(GraphProvider):
 
         remaining_mask = all_ones
         while work_heap:
+            self.stats['max_heap_size'] = max(self.stats.get('max_heap_size', 0), len(work_heap) + 1)
+            self.stats['work_items_processed'] += 1
             heap_item = heapq.heappop(work_heap)
             priority, work = heap_item.priority, heap_item.item
 
             if isinstance(work, WorkItemSuspended):
+                self.stats['work_item_suspended'] += 1
                 gen = work.generator
                 work_llm_mask = work.llm_mask
 
                 if work_llm_mask.isdisjoint(remaining_mask):
                     continue
             elif isinstance(work, WorkItemNew):
+                self.stats['work_item_new'] += 1
                 node_id, gss_node = work.node_id, work.gss
                 assert isinstance(node_id, int)
                 assert isinstance(gss_node, GSS)
@@ -657,7 +684,7 @@ class Model(GraphProvider):
                 if not a_node or not a_node.children or work_llm_mask.isdisjoint(remaining_mask):
                     continue
 
-                gen = self._process_internal_node_gen(node_id, gss_node)
+                gen = self._process_internal_node_gen(node_id, gss_node, self.stats)
             else:
                 raise ValueError(f'Unexpected work item: {work}')
 
@@ -683,5 +710,11 @@ class Model(GraphProvider):
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
         t3 = time.perf_counter()
-        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
+        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms", end='')
+
+        print("\n--- Get Mask Stats ---")
+        for k, v in sorted(self.stats.items()):
+            print(f"{k}: {v}")
+        print("----------------------")
+
         return original_indices
