@@ -2118,51 +2118,19 @@ fn simplify_llm_token_bvs_trie3(
     max_llm_token_id: usize,
 ) {
     crate::debug!(2, "Simplifying LLM token bitsets in Trie3 to reduce range counts...");
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-    if all_nodes.is_empty() {
-        return;
-    }
-
-    let universe = LLMTokenBV::ones(max_llm_token_id + 1);
-
-    #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Simplify LLM BVs", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
-    #[cfg(rustrover)]
-    let it = all_nodes.iter();
-
-    for node_idx in it {
-        let mut w = node_idx.write(trie3_god).expect("write");
-        if w.children().is_empty() {
-            continue;
-        }
-
-        // Recompute live_tokens on the fly to ensure it's accurate for this pass.
-        let live_u = {
-            let mut u = LLMTokenBV::zeros();
-            for ((_, llm_bv), _) in w.children() { u |= llm_bv; }
-            u
-        };
-        if live_u.is_all() { // If all tokens are live, no simplification is possible.
-            continue;
-        }
-        let dead_u = &universe - &live_u;
-
-        let old_children = std::mem::take(w.children_mut());
-        let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
-
-        for ((pop, l), dm) in old_children {
-            let mut l_new = l.clone();
-            l_new |= &dead_u;
-
-            let entry = new_children.entry((pop, l_new)).or_default();
-            for (dest, sids) in dm {
-                entry.entry(dest).and_modify(|e| *e |= &sids).or_insert(sids);
-            }
-        }
-        *w.children_mut() = new_children;
-    }
-    crate::debug!(2, "Finished simplifying LLM token bitsets.");
+    // The previous implementation was found to be unsound. It modified edge masks by unioning
+    // them with tokens that were "dead" (not accepted) at that node. This incorrectly changed
+    // the trie's semantics by making previously rejected tokens accepted.
+    //
+    // The logic relied on a fragile invariant where the node's `live_tokens` field would
+    // enforce the original token constraints. However, this invariant is broken by subsequent
+    // optimization passes that recompute `live_tokens` from the modified (and now incorrect)
+    // edge masks.
+    //
+    // A correct implementation of this kind of simplification is complex and overlaps
+    // significantly with `refine_edges_to_token_atoms_trie3`. Given the semantic errors,
+    // this pass is currently disabled by making it a no-op.
+    let _ = (roots, trie3_god, max_llm_token_id);
 }
 
 fn prune_nodes_not_reaching_end_trie3(
