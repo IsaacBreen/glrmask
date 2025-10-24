@@ -6,6 +6,7 @@ import itertools
 import json
 import os
 import math
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple, Generator, Any
@@ -393,6 +394,10 @@ class Model(GraphProvider):
     oracle_token_weight: float = 0.01
     oracle_apply_weight: float = 2.0; oracle_isolate_weight: float = 1.0
 
+    # Oracle search tunables
+    oracle_trials: int = 8
+    oracle_jitter: int = 7
+    oracle_reward_prune: bool = True
     @staticmethod
     def from_json_string(s: str) -> 'Model':
         Stats.get().reset()
@@ -811,6 +816,7 @@ class Model(GraphProvider):
         edge_order_override_map: Optional[Dict[int, List[int]]] = None,
         dest_scores: Optional[Dict[int, int]] = None,
         oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
+        node_allowed_mask: Optional[LLMTokenSet] = None,
     ) -> Generator[Union[Enqueue, Suspend], None, None]:
         stats = Stats.get()
         a_node = self.arena.get(node_id)
@@ -818,6 +824,9 @@ class Model(GraphProvider):
             return
 
         # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
+        # Strengthen remaining-mask with node-specific allowance (oracle reward) when provided.
+        active_remaining_mask = remaining_mask if node_allowed_mask is None else remaining_mask.intersection(node_allowed_mask)
+
         max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
         edges_proc, dests_proc = 0, 0
         peek0_rs = None
@@ -843,7 +852,7 @@ class Model(GraphProvider):
         for edge_i, edge in edge_iterator:
             if edge.pop in skip_pops:
                 continue
-            if edge.llm_bv.isdisjoint(remaining_mask):
+            if edge.llm_bv.isdisjoint(active_remaining_mask):
                 stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
                 continue
             if edge.llm_bv.isdisjoint(gss_mask):
@@ -902,7 +911,10 @@ class Model(GraphProvider):
                     skip_pops.add(edge.pop)
                     continue
                 pop_llm_union = a_node.pop_to_llm_union.get(edge.pop)
-                if pop_llm_union is not None and popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union):
+                # Extra prune when node_allowed_mask present: if the bucket's llm union has no overlap with
+                # active_remaining_mask, skip the whole pop bucket.
+                if pop_llm_union is not None and (
+                    (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)):
                     stats.inc('get_mask.main_loop.bucket_pruned_llm')
                     skip_pops.add(edge.pop)
                     continue
@@ -998,6 +1010,104 @@ class Model(GraphProvider):
                     parents[int(dest.dest_idx)].add(int(u))
         self.reverse_adj = dict(parents)
         return self.reverse_adj
+
+    def _oracle_compute_reward_masks(self, end_events: List[Tuple[int, LLMTokenSet]]) -> Dict[int, LLMTokenSet]:
+        """Compute target-specific reward masks per node:
+        For each node u, reward[u] is the set of tokens that appear in some end_event and
+        can flow from u to that end through edges whose llm_bv admit those tokens.
+        Monotone fixed-point: initialized at end nodes with their delta masks, then
+        propagated upstream via edge.llm_bv intersections.
+        """
+        reward: Dict[int, LLMTokenSet] = {}
+        # Seed from end events: coalesce by end-node id
+        for nid, delta in end_events:
+            if delta is None or delta.is_empty():
+                continue
+            k = int(nid)
+            prev = reward.get(k)
+            reward[k] = delta if prev is None else prev.union(delta)
+
+        if not reward:
+            return {}
+
+        # Fixed-point propagation upstream
+        changed = True
+        while changed:
+            changed = False
+            for u, node in self.arena.items():
+                if not node.children:
+                    continue
+                accum = RangeSet.empty()
+                for edge in node.children:
+                    # Union of reward at all children along this edge
+                    child_union = RangeSet.empty()
+                    for d in edge.dests:
+                        cm = reward.get(int(d.dest_idx))
+                        if cm is not None and not cm.is_empty():
+                            child_union |= cm
+                    if not child_union.is_empty():
+                        thru = child_union.intersection(edge.llm_bv)
+                        if not thru.is_empty():
+                            accum |= thru
+                if accum.is_empty():
+                    continue
+                prev = reward.get(int(u))
+                updated = accum if prev is None else prev.union(accum)
+                if prev != updated:
+                    reward[int(u)] = updated
+                    changed = True
+        return reward
+
+    def _oracle_build_guidance_advanced(
+        self,
+        plan: Dict,
+        reward_masks: Dict[int, LLMTokenSet],
+        target_mask: LLMTokenSet,
+        jitter: int = 0,
+    ) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
+        """Target-aware guidance.
+        - Node scores ~ (reward tokens at node)/(estimated node cost).
+        - Edge order per node is by the sum of reward tokens at child destinations.
+        - Optional jitter adds small random noise to break ties differently across trials.
+        """
+        node_costs_raw: Dict[int, Dict[str, int]] = {int(k): v for k, v in plan.get('node_costs', {}).items()}
+        def node_cost(u: int) -> float:
+            c = node_costs_raw.get(int(u), {"edges": 0, "apply": 0, "isolate": 0})
+            return float(c.get("edges", 0)) + self.oracle_apply_weight * float(c.get("apply", 0)) + self.oracle_isolate_weight * float(c.get("isolate", 0)) + 1.0
+
+        scores: Dict[int, int] = {}
+        # Node scores: tokens per cost (scaled)
+        for u, m in reward_masks.items():
+            if m is None or m.is_empty():
+                continue
+            tok = len(m.intersection(target_mask))
+            if tok <= 0:
+                continue
+            base = int(1000.0 * float(tok) / node_cost(int(u)))
+            if jitter > 0:
+                base += random.randint(0, int(jitter))
+            if base > 0:
+                scores[int(u)] = base
+
+        # Edge ordering: by sum of child reward tokens (intersected with target)
+        edge_order_map: Dict[int, List[int]] = {}
+        for u, node in self.arena.items():
+            if not node.children:
+                continue
+            weighted: List[Tuple[int, int]] = []
+            for idx, edge in enumerate(node.children):
+                s = 0
+                for d in edge.dests:
+                    cm = reward_masks.get(int(d.dest_idx))
+                    if cm is not None and not cm.is_empty():
+                        s += int(len(cm.intersection(target_mask)))
+                if jitter > 0 and s > 0:
+                    s += random.randint(0, int(jitter))
+                weighted.append((idx, s))
+            if any(w > 0 for _, w in weighted):
+                weighted.sort(key=lambda t: t[1], reverse=True)
+                edge_order_map[int(u)] = [idx for (idx, _) in weighted]
+        return scores, edge_order_map
 
     def _oracle_build_guidance_from_plan(self, plan: Dict) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
         """Build a stronger oracle guidance from planning analysis:
@@ -1269,6 +1379,8 @@ class Model(GraphProvider):
         guided_scores: Optional[Dict[int, int]] = None,
         edge_order_map: Optional[Dict[int, List[int]]] = None,
         record_end_unions: bool = False,
+        oracle_target_mask: Optional[LLMTokenSet] = None,
+        oracle_reward_mask: Optional[Dict[int, LLMTokenSet]] = None,
     ) -> Tuple[Dict, Dict]:
         """Internal engine behind get_mask.
         If guided_scores/edge_order_map are provided, they influence traversal priority and edge ordering.
@@ -1296,8 +1408,9 @@ class Model(GraphProvider):
                     return NotImplemented
 
                 return self.priority < other.priority
-
-        all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
+        # When oracle_target_mask is provided, restrict the universe to the exact final target discovered in planning.
+        all_ones = oracle_target_mask if oracle_target_mask is not None else self.all_internal_llm_tokens_bitset
+        final_mask = RangeSet.empty()
         work_heap = []
         end_union_events: List[Tuple[int, LLMTokenSet]] = []
 
@@ -1377,7 +1490,10 @@ class Model(GraphProvider):
 
                 a_node = self.arena.get(node_id)
                 # Stronger upper bound than llm_bv_union: descendant closure
-                node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
+                if oracle_reward_mask is not None and a_node:
+                    node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
+                else:
+                    node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
                 work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
 
                 if not a_node or not a_node.children:
@@ -1405,6 +1521,7 @@ class Model(GraphProvider):
                     edge_order_override_map=edge_order_map,
                     dest_scores=guided_scores,
                     oracle_counters=analysis_node_costs if record_end_unions else None,
+                    node_allowed_mask=node_desc_mask if oracle_reward_mask is not None else None,
                 )
                 # Record frontier for planning if requested
                 if record_end_unions and a_node:
@@ -1488,72 +1605,75 @@ class Model(GraphProvider):
         finally:
             self.suppress_stats_report = prev_suppress
 
-        # 2) Build stronger guidance from the oracle plan:
-        #    (a) exact/greedy minimal end-node cover for maximal token coverage
-        #    (b) frontier-weighted greedy ordering using per-node costs
-        #    (c) token-weighted edge ordering toward the selected ends
         if not isinstance(plan, dict):
             plan = {}
 
-        end_events = plan.get("end_events", [])
-        # Compute minimal end-node cover (exact under threshold, greedy otherwise)
-        selected_end_nodes = self._compute_oracle_min_cover(end_events)
-        # Base guidance from the selected ends: push ancestors of those ends earlier
-        cover_scores, cover_edge_map = self._oracle_prepare_guidance(selected_end_nodes)
-        # Frontier-weighted greedy guidance using node frontiers and per-node costs
-        frontier_scores, frontier_edge_map = self._oracle_build_guidance_from_plan(plan)
-
-        # Union both score maps, biasing toward cover-based scores
-        guided_scores: Dict[int, int] = dict(frontier_scores)
-        for k, v in cover_scores.items():
-            guided_scores[k] = guided_scores.get(k, 0) + (2 * int(v))
-
-        # Build a target token mask (union of masks from selected ends)
-        items_by_end: Dict[int, LLMTokenSet] = {}
-        for nid, mask in end_events:
-            if mask is None or mask.is_empty():
-                continue
-            prev = items_by_end.get(int(nid))
-            items_by_end[int(nid)] = mask if prev is None else prev.union(mask)
+        end_events: List[Tuple[int, LLMTokenSet]] = plan.get("end_events", [])
+        # Build exact per-call target mask as union of end-event deltas
         target_mask = RangeSet.empty()
-        for eid in selected_end_nodes:
-            m = items_by_end.get(int(eid))
-            if m is not None:
-                target_mask |= m
+        for nid, delta in end_events:
+            if delta is not None and not delta.is_empty():
+                target_mask |= delta
 
-        # Start with frontier-based edge ordering, then refine with token-weighted ordering
-        edge_order_map: Dict[int, List[int]] = dict(frontier_edge_map)
-        for u, node in self.arena.items():
-            if not node.children:
-                continue
-            scored: List[Tuple[int, int]] = []
-            for idx, edge in enumerate(node.children):
-                # Sum of child destination node scores
-                s = 0
-                for d in edge.dests:
-                    s += int(guided_scores.get(int(d.dest_idx), 0))
-                # Token weight: how much this edge can contribute toward the selected ends
-                tok_gain = len(edge.llm_bv.intersection(target_mask)) if target_mask is not None else 0
-                # Combine (favor node score strongly, then token gain as tie-breaker)
-                combined = (s * 1000) + int(tok_gain)
-                scored.append((idx, combined))
-            if any(score > 0 for (_, score) in scored):
-                scored.sort(key=lambda t: t[1], reverse=True)
-                edge_order_map[int(u)] = [idx for (idx, _) in scored]
+        # If nothing to cover, run a trivial guided pass
+        if target_mask.is_empty():
+            Stats.get().reset()
+            out, _ = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=False)
+            return out
+
+        # Compute target-aware reward masks (oracle pruning)
+        reward_masks = self._oracle_compute_reward_masks(end_events) if self.oracle_reward_prune else {}
+
+        # Build a base target-aware guidance
+        guided_scores, edge_order_map = self._oracle_build_guidance_advanced(plan, reward_masks, target_mask, jitter=0)
+
+        # Randomized search over guidance to minimize edges traversed
+        best_scores = guided_scores
+        best_edges = None
+        best_edge_map = edge_order_map
+        best_time_ms = None
+
+        trials = max(1, int(self.oracle_trials))
+        for t in range(trials):
+            # Inject jitter to explore different orderings
+            trial_scores, trial_edge_map = self._oracle_build_guidance_advanced(
+                plan, reward_masks, target_mask, jitter=self.oracle_jitter if self.oracle_jitter > 0 else 0
+            )
+            # Evaluate this guidance
+            prev_suppress = self.suppress_stats_report
+            try:
+                self.suppress_stats_report = True
+                Stats.get().reset()
+                _out, _ = self._get_mask_run(
+                    guided_scores=trial_scores,
+                    edge_order_map=trial_edge_map,
+                    record_end_unions=False,
+                    oracle_target_mask=target_mask,
+                    oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+                )
+                edges = int(Stats.get().counts.get('get_mask.traversal.edges_traversed', 0))
+                time_ms = float(Stats.get().times.get('get_mask.main_loop', 0.0) * 1000.0)
+            finally:
+                self.suppress_stats_report = prev_suppress
+
+            if best_edges is None or edges < best_edges or (edges == best_edges and (best_time_ms is None or time_ms < best_time_ms)):
+                best_edges = edges
+                best_time_ms = time_ms
+                best_scores = trial_scores
+                best_edge_map = trial_edge_map
 
         if self.oracle_debug:
-            n_events = len(end_events)
-            distinct_end_ids = len({int(nid) for nid, m in end_events if m is not None and not m.is_empty()})
-            n_frontiers = len(plan.get("frontiers", {}))
-            n_costs = len(plan.get("node_costs", {}))
-            print(f"[oracle] planning: collected {n_events} end-events from {distinct_end_ids} distinct end nodes, "
-                  f"{n_frontiers} node-frontiers, {n_costs} node-cost entries; "
-                  f"min-cover size = {len(selected_end_nodes)}; "
-                  f"produced guided scores for {len(guided_scores)} nodes and edge ordering for {len(edge_order_map)} nodes (token-weighted).")
+            print(f"[oracle] trials={trials}, best_edges_traversed={best_edges}, best_main_loop_ms={best_time_ms:.3f}")
 
-        # 3) Reset stats per request, then run the guided traversal
+        # Final guided run with the best plan, stats reset as requested
         Stats.get().reset()
-        out, _ = self._get_mask_run(guided_scores=guided_scores, edge_order_map=edge_order_map, record_end_unions=False)
+        out, _ = self._get_mask_run(
+            guided_scores=best_scores,
+            edge_order_map=best_edge_map,
+            record_end_unions=False,
+            oracle_target_mask=target_mask,
+            oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+        )
         return out
 
     def finalize(self):
