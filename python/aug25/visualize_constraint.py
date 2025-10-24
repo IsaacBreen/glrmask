@@ -22,7 +22,7 @@ import gzip
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List, Set, Optional
 
 try:
     import graphviz
