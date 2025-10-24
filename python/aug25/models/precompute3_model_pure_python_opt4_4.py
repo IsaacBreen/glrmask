@@ -127,143 +127,10 @@ class ParserTable:
     table: Dict[int, Row]
 
 @dataclass
-class ArenaEdgeDest:
-    dest_idx: NodeID
-    state_bv: StateIDSet
-
-@dataclass
-class LoadedArenaEdgeDest:
-    dest_idx: NodeID
-    state_bv: StateIDSet
-
-@dataclass
-class LoadedArenaEdge:
-    pop: int
-    llm_bv: LLMTokenSet
-    dests: List[LoadedArenaEdgeDest]
-
-@dataclass
-class LoadedArenaNode:
-    children: List[LoadedArenaEdge]
-    clean_end: bool
-
-@dataclass
-class IntermediateArenaEdgeDest:
-    dest_idx: NodeID
-    state_bv: StateIDSet
-
-@dataclass
-class IntermediateArenaEdge:
-    pop: int
-    llm_bv: LLMTokenSet
-    dests: IntermediateArenaEdgeDest
-
-@dataclass
-class IntermediateArenaNode:
-    children: List[IntermediateArenaEdge]
-    clean_end: bool
-
-@dataclass
-class ArenaEdge:
-    pop: int
-    llm_bv: LLMTokenSet
-    dests: List[ArenaEdgeDest] = field(default_factory=list)
-    dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
-    llm_bv_not: Optional[LLMTokenSet] = None
-    state_to_dest: Optional[Dict[int, List[int]]] = None
-
-    def ensure_index(self) -> None:
-        if self.state_to_dest is not None:
-            return
-
-        mapping: Dict[int, List[int]] = collections.defaultdict(list)
-        for j, dest in enumerate(self.dests):
-            for sid in dest.state_bv.iter_indices():
-                mapping[sid].append(j)
-        self.state_to_dest = dict(mapping)
-
-@dataclass
 class ArenaNode:
-    children: List[ArenaEdge] = field(default_factory=list)
+    edges: Dict[int, Dict[int, Dict[NodeID, Tuple[LLMTokenSet, LLMTokenSet]]]] = field(default_factory=dict)
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
-
-def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
-    for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
-        if not node.children:
-            continue
-        # Sort edges by destination depth (desc) and then pop count (asc)
-        node.children.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
-
-def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, IntermediateArenaNode]:
-    """Stage 1: Convert from the loaded format to a flattened intermediate format."""
-    intermediate_arena: Dict[NodeID, IntermediateArenaNode] = {}
-    for uid, loaded_node in tqdm(loaded_arena.items(), desc="Stage 1: Loading and flattening arena"):
-        intermediate_children: List[IntermediateArenaEdge] = []
-        for loaded_edge in loaded_node.children:
-            for d in loaded_edge.dests:
-                intermediate_children.append(IntermediateArenaEdge(
-                    pop=loaded_edge.pop,
-                    llm_bv=loaded_edge.llm_bv,
-                    dests=IntermediateArenaEdgeDest(d.dest_idx, d.state_bv),
-                ))
-        intermediate_arena[uid] = IntermediateArenaNode(
-            children=intermediate_children,
-            clean_end=loaded_node.clean_end,
-        )
-    return intermediate_arena
-
-def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
-    """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
-    arena: Dict[NodeID, ArenaNode] = {}
-    for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
-        new_children: List[ArenaEdge] = []
-        llm_bv_union = RangeSet.empty()
-
-        if not intermediate_node.children:
-            arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
-            continue
-
-        children_it = iter(intermediate_node.children)
-        first = next(children_it)
-        edge_dests = []
-        prev_pop = first.pop
-        prev_llm_bv = first.llm_bv
-        edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
-        def flush() -> None:
-            nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
-            dest_states_union = RangeSetStates.empty()
-            for d in edge_dests:
-                dest_states_union |= d.state_bv
-            llm_bv_union |= prev_llm_bv
-            new_children.append(ArenaEdge(
-                pop=prev_pop,
-                llm_bv=prev_llm_bv,
-                dests=edge_dests,
-                dest_states_union=dest_states_union,
-            ))
-        for edge in children_it:
-            if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
-                flush()
-                prev_pop = edge.pop
-                prev_llm_bv = edge.llm_bv
-                edge_dests = []
-            edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-        flush()
-
-        arena[uid] = ArenaNode(
-            children=new_children,
-            llm_bv_union=llm_bv_union,
-            clean_end=intermediate_node.clean_end,
-        )
-    return arena
-
-def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Dict[NodeID, ArenaNode]:
-    """Orchestrates the full conversion from loaded data to the final arena format."""
-    intermediate_arena = _load_and_flatten_arena(loaded_arena)
-    _optimize_intermediate_arena(intermediate_arena, max_depth)
-    final_arena = _merge_and_finalize_arena(intermediate_arena)
-    return final_arena
 
 @dataclass(frozen=True, eq=False)
 class PyAcc:
@@ -333,30 +200,45 @@ class Model(GraphProvider):
     def from_json_string(s: str) -> 'Model':
         data = json.loads(s)
 
+        # Vocab and bitsets
+        vocab = data['precompute3_vocab']
+        all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
+        all_ones = all_internal_llm_tokens_bitset
+
         # Arena
         roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
         arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
         max_depth: Dict[NodeID, int] = {}
         dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
 
-        loaded_arena: Dict[NodeID, LoadedArenaNode] = {}
-        for uid, node_data in arena_dict.items():
+        arena: Dict[NodeID, ArenaNode] = {}
+        for uid, node_data in tqdm(arena_dict.items(), desc="Loading Arena"):
             max_depth[uid] = int(node_data.get("max_depth", 0) or 0)
             children_data = node_data.get("children") or []
 
-            loaded_children: List[LoadedArenaEdge] = []
-            for (pop, llm_json), dest_map_json in children_data:
-                llm_bv = RangeSet.from_ranges(bs_from_json(dumps(llm_json)).to_ranges())
-                dests: List[ArenaEdgeDest] = []
-                for dest_idx, state_json in dest_map_json:
-                    state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
-                    dests.append(LoadedArenaEdgeDest(int(dest_idx), state_bv))
-                loaded_children.append(LoadedArenaEdge(int(pop), llm_bv, dests))
-
             clean_end = node_data.get("value", {}).get("clean_end", False)
-            loaded_arena[uid] = LoadedArenaNode(children=loaded_children, clean_end=clean_end)
-
-        arena = _convert_arena(loaded_arena, max_depth)
+            new_node = ArenaNode(clean_end=clean_end)
+            edges = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(RangeSet.empty)))
+            llm_bv_union = RangeSet.empty()
+            for (pop, llm_json), dest_map_json in children_data:
+                pop_val = int(pop)
+                llm_bv = RangeSet.from_ranges(bs_from_json(dumps(llm_json)).to_ranges())
+                llm_bv_union |= llm_bv
+                for dest_idx, state_json in dest_map_json:
+                    dest_idx_val = int(dest_idx)
+                    state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
+                    for sid in state_bv.iter_indices():
+                        edges[pop_val][sid][dest_idx_val] |= llm_bv
+            final_edges = {}
+            for p, s_map in edges.items():
+                final_edges[p] = {}
+                for s, d_map in s_map.items():
+                    final_edges[p][s] = {}
+                    for d, llm_bv in d_map.items():
+                        final_edges[p][s][d] = (llm_bv, all_ones.difference(llm_bv))
+            new_node.edges = final_edges
+            new_node.llm_bv_union = llm_bv_union
+            arena[uid] = new_node
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
         dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
@@ -382,8 +264,6 @@ class Model(GraphProvider):
         constraint = ffi.GrammarConstraint.from_json_string(s)
         pmc_ffi = constraint.possible_matches()
         possible_matches_cache = {int(t): {int(i): RangeSet.from_ranges(b.to_ranges()) for i, b in inner.items()} for t, inner in pmc_ffi.items()}
-        vocab = data['precompute3_vocab']
-        all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
         # Initial state
         initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
@@ -399,20 +279,7 @@ class Model(GraphProvider):
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
             state={tokenizer.initial_state_id(): initial_gss},
         )
-        model._compute_edge_accelerators()
-        model.optimize_traversal()
         return model
-
-    def _compute_edge_accelerators(self) -> None:
-        all_ones = self.all_internal_llm_tokens_bitset
-        for node in self.arena.values():
-            for edge in node.children:
-                edge.llm_bv_not = all_ones.difference(edge.llm_bv)
-
-    def optimize_traversal(self) -> None:
-        for node in self.arena.values():
-            for edge in node.children:
-                edge.ensure_index()
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
@@ -431,12 +298,11 @@ class Model(GraphProvider):
     def iter_edges(self, node: NodeID, token: int):
         a_node = self.arena.get(node)
         if not a_node: return
-        for edge in a_node.children:
-            if edge.llm_bv.contains(token):
-                for dest in edge.dests:
-                    for start, end in dest.state_bv.to_ranges():
-                        for sid in range(start, end + 1):
-                            yield (edge.pop, sid, dest.dest_idx)
+        for pop, state_map in a_node.edges.items():
+            for sid, dest_map in state_map.items():
+                for dest_idx, (llm_bv, _) in dest_map.items():
+                    if llm_bv.contains(token):
+                        yield (pop, sid, dest_idx)
 
     def commit(self, token_id: int):
         token_bytes = self.id_to_token[token_id]
@@ -523,77 +389,53 @@ class Model(GraphProvider):
         if not a_node:
             return
 
-        # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
-        max_edges, max_dests = (1, 1)
-        edges_proc, dests_proc = 0, 0
-        peek0_rs = None
         pop_cache = {}
 
-        for edge_i, edge in enumerate(a_node.children):
-            if edge.pop == 0:
-                if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                if edge.dest_states_union.isdisjoint(peek0_rs): continue
-
-            if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+        for pop, state_map in a_node.edges.items():
+            if pop in pop_cache:
+                popped, popped_acc, peeked = pop_cache[pop]
             else:
-                popped = gss_node.popn(edge.pop)
+                popped = gss_node.popn(pop)
                 if popped.is_empty():
-                    pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+                    pop_cache[pop] = (popped, None, [])
                     continue
                 popped_acc = popped.reduce_acc()
                 if not popped_acc or popped_acc.llm_mask.is_empty():
-                    pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                    pop_cache[pop] = (GSS.empty(), None, [])
                     continue
-                # Avoid double-peek: call once and reuse both list and RangeSetStates
                 peeked = popped.peek()
-                peek_rs = RangeSetStates.from_indices(peeked)
-                pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                pop_cache[pop] = (popped, popped_acc, peeked)
 
-            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
+            if not popped_acc or not peeked:
+                continue
 
-            if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
-                @_acc_memoize(use_value_cache=False)
-                def intersect(acc: PyAcc):
-                    new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                    return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                popped = popped.apply_and_prune(intersect)
-                if popped.is_empty(): continue
-            if not peeked: continue
-
-            grouped: Dict[int, List[int]] = {}
-            m = edge.state_to_dest
+            # Group by (llm_bv, llm_bv_not) -> dest -> states
+            llm_bv_pair_to_dest_states = collections.defaultdict(lambda: collections.defaultdict(list))
             for sid in peeked:
-                dest_list = m.get(sid)
-                if not dest_list: continue
-                for dest_j in dest_list:
-                    lst = grouped.get(dest_j)
-                    if lst is None: grouped[dest_j] = [sid]
-                    else: lst.append(sid)
+                if sid in state_map:
+                    dest_map = state_map[sid]
+                    for dest_idx, llm_bv_pair in dest_map.items():
+                        llm_bv_pair_to_dest_states[llm_bv_pair][dest_idx].append(sid)
 
-            # Iterate grouped dests in ascending order for locality
-            for dest_j in sorted(grouped.keys()):
-                if dests_proc >= max_dests:
-                    priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                    yield Suspend(priority)
-                    dests_proc = 0
-                dest = edge.dests[dest_j]
-                values_to_keep = grouped[dest_j]
-                # If all heads survive, reuse popped directly
-                if len(values_to_keep) == len(peeked):
-                    child_gss = popped
-                else:
-                    child_gss = popped.isolate_many(values_to_keep)
-                if child_gss.is_empty(): continue
-                d: NodeID = int(dest.dest_idx)
-                yield Enqueue(d, child_gss)
-                dests_proc += 1
+            for (llm_bv, llm_bv_not), dest_states in llm_bv_pair_to_dest_states.items():
+                popped_filtered = popped
+                if not popped_acc.llm_mask.isdisjoint(llm_bv_not):
+                    if popped_acc.llm_mask.isdisjoint(llm_bv):
+                        continue
 
-            if edges_proc >= max_edges:
-                priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                yield Suspend(priority)
-                edges_proc = 0
-            edges_proc += 1
+                    @_acc_memoize(use_value_cache=False)
+                    def intersect(acc: PyAcc):
+                        new_mask = acc.llm_mask.intersection(llm_bv)
+                        return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+
+                    popped_filtered = popped.apply_and_prune(intersect)
+                    if popped_filtered.is_empty():
+                        continue
+
+                for dest_idx, states in dest_states.items():
+                    child_gss = popped_filtered.isolate_many(states)
+                    if not child_gss.is_empty():
+                        yield Enqueue(dest_idx, child_gss)
 
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
@@ -654,7 +496,7 @@ class Model(GraphProvider):
                 a_node = self.arena.get(node_id)
                 work_llm_mask = a_node.llm_bv_union.intersection(gss_acc.llm_mask)
 
-                if not a_node or not a_node.children or work_llm_mask.isdisjoint(remaining_mask):
+                if not a_node or not a_node.edges or work_llm_mask.isdisjoint(remaining_mask):
                     continue
 
                 gen = self._process_internal_node_gen(node_id, gss_node)
