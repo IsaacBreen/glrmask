@@ -23,18 +23,10 @@ import json
 import sys
 from pathlib import Path
 from typing import Dict, Any, List, Set, Optional
+import subprocess
+import tempfile
 
-try:
-    import graphviz
-    from tqdm import tqdm
-except ImportError:
-    print(
-        "Error: Missing required packages 'graphviz' and 'tqdm'.\n"
-        "Please install them by running: pip install graphviz tqdm",
-        file=sys.stderr
-    )
-    sys.exit(1)
-
+from tqdm import tqdm
 
 def format_ranges(ranges: list[list[int]], max_len: int = 40) -> str:
     """
@@ -64,12 +56,13 @@ def visualize_constraint(
     file_format: str,
     rankdir: str,
     splines: str,
+    output_mode: str,
     selected_roots: Optional[List[int]] = None,
 ):
     """
-    Loads a constraint file and generates a Graphviz visualization.
+    Loads a constraint file, generates Graphviz DOT source, and handles output.
     """
-    print(f"Loading constraint file: {constraint_path}")
+    print(f"Loading constraint file: {constraint_path}", file=sys.stderr)
     try:
         if constraint_path.suffix == ".gz":
             with gzip.open(constraint_path, "rt", encoding="utf-8") as f:
@@ -88,7 +81,7 @@ def visualize_constraint(
         return
 
     values_dict: Dict[int, Dict[str, Any]] = {int(k): v for k, v in values_list}
-    print(f"Loaded {len(values_dict)} nodes from trie.")
+    print(f"Loaded {len(values_dict)} nodes from trie.", file=sys.stderr)
 
     # Identify root and end nodes
     roots_map = data.get("precomputed3", [])
@@ -97,25 +90,24 @@ def visualize_constraint(
         nid for nid, node in values_dict.items()
         if node.get("value", {}).get("clean_end", False)
     }
-    print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.")
+    print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.", file=sys.stderr)
 
-    # Initialize Graphviz Digraph
-    dot = graphviz.Digraph(
-        'GrammarConstraintTrie',
-        comment='Visualization of the grammar constraint graph'
-    )
-    dot.attr(
-        'graph',
-        rankdir=rankdir,
-        splines=splines,
-        nodesep='0.6',
-        ranksep='1.2',
-        label=f"Trie from {constraint_path.name}\\n(max_depth={max_depth})",
-        labelloc='t',
-        fontsize='20',
-    )
-    dot.attr('node', shape='box', style='rounded,filled', fontname='Helvetica')
-    dot.attr('edge', fontname='Helvetica', fontsize='10')
+    # --- Build DOT source manually ---
+    dot_lines = ['digraph GrammarConstraintTrie {']
+    
+    # Graph attributes
+    graph_attrs = [
+        f'rankdir="{rankdir}"',
+        f'splines="{splines}"',
+        'nodesep="0.6"',
+        'ranksep="1.2"',
+        f'label="{constraint_path.name}\\n(max_depth={max_depth})"',
+        'labelloc="t"',
+        'fontsize="20"',
+    ]
+    dot_lines.append(f"  graph [{', '.join(graph_attrs)}];")
+    dot_lines.append('  node [shape="box", style="rounded,filled", fontname="Helvetica"];')
+    dot_lines.append('  edge [fontname="Helvetica", fontsize="10"];')
 
     # BFS traversal to build the graph
     q = collections.deque()
@@ -124,14 +116,14 @@ def visualize_constraint(
 
     start_roots = selected_roots if selected_roots is not None else sorted(list(all_root_ids))
     if selected_roots is not None:
-        print(f"Displaying selected roots: {start_roots}")
+        print(f"Displaying selected roots: {start_roots}", file=sys.stderr)
 
     for root_id in start_roots:
         if root_id in values_dict and root_id not in seen_nodes:
             q.append((root_id, 0))
             seen_nodes.add(root_id)
 
-    print("Traversing graph to build visualization...")
+    print("Traversing graph to build visualization...", file=sys.stderr)
     pbar = tqdm(total=len(q), desc="Nodes processed")
 
     while q:
@@ -146,24 +138,19 @@ def visualize_constraint(
         shape = 'box'
 
         if is_root and is_end:
-            fillcolor = 'gold'
-            shape = 'doubleoctagon'
-            label = f"Root & End {node_id}"
+            fillcolor, shape, label = 'gold', 'doubleoctagon', f"Root & End {node_id}"
         elif is_root:
-            fillcolor = 'lightgreen'
-            label = f"Root {node_id}"
+            fillcolor, label = 'lightgreen', f"Root {node_id}"
         elif is_end:
-            fillcolor = 'lightpink'
-            shape = 'doubleoctagon'
-            label = f"End {node_id}"
+            fillcolor, shape, label = 'lightpink', 'doubleoctagon', f"End {node_id}"
 
-        dot.node(str(node_id), label=label, fillcolor=fillcolor, shape=shape)
+        dot_lines.append(f'  "{node_id}" [label={json.dumps(label)}, fillcolor="{fillcolor}", shape="{shape}"];')
 
         if max_depth is not None and depth >= max_depth:
             # Add a special node to indicate truncation
             trunc_node_id = f"trunc_{node_id}"
-            dot.node(trunc_node_id, label="...", shape='plaintext')
-            dot.edge(str(node_id), trunc_node_id, style='dashed', arrowhead='none')
+            dot_lines.append(f'  "{trunc_node_id}" [label="...", shape="plaintext"];')
+            dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dashed", arrowhead="none"];')
             continue
 
         node_data = values_dict.get(node_id)
@@ -183,9 +170,9 @@ def visualize_constraint(
 
                 llm_summary = format_ranges(llm_bv_json)
                 state_summary = format_ranges(state_bv_json)
-                edge_label = f" pop={pop}\nLLM: {llm_summary}\nStates: {state_summary} "
-
-                dot.edge(str(node_id), str(dest_id), label=edge_label)
+                edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
+                
+                dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label={json.dumps(edge_label)}];')
 
                 if dest_id in values_dict and dest_id not in seen_nodes:
                     q.append((dest_id, depth + 1))
@@ -193,28 +180,62 @@ def visualize_constraint(
                     pbar.total = len(seen_nodes) + len(q)
     
     pbar.close()
+    dot_lines.append('}')
+    dot_source = "\n".join(dot_lines)
 
-    # Render the graph
-    print(f"\nRendering graph to {output_path} (format: {file_format})...")
-    try:
-        dot.render(
-            output_path.with_suffix(''),
-            format=file_format,
-            view=False,
-            cleanup=True
-        )
-        print("Visualization saved successfully.")
-    except graphviz.backend.execute.ExecutableNotFound:
-        print(
-            "\nError: Graphviz executable not found.",
-            "Please install Graphviz on your system.",
-            "  - On macOS (using Homebrew): brew install graphviz",
-            "  - On Ubuntu/Debian: sudo apt-get install graphviz",
-            "  - For other systems, see: https://graphviz.org/download/",
-            file=sys.stderr
-        )
-    except Exception as e:
-        print(f"An error occurred during rendering: {e}", file=sys.stderr)
+    # --- Handle output ---
+    if output_mode == 'clipboard':
+        try:
+            import pyperclip
+            pyperclip.copy(dot_source)
+            print("DOT source copied to clipboard.", file=sys.stderr)
+        except ImportError:
+            print(
+                "Error: 'pyperclip' package not found. Cannot copy to clipboard.\n"
+                "Please install it by running: pip install pyperclip",
+                file=sys.stderr
+            )
+            print("\n--- DOT Source Fallback ---\n", file=sys.stderr)
+            print(dot_source)
+    elif output_mode == 'source':
+        if output_path:
+            output_path.write_text(dot_source, encoding='utf-8')
+            print(f"DOT source saved to {output_path}", file=sys.stderr)
+        else:
+            print(dot_source)
+    elif output_mode == 'render':
+        if not output_path:
+            print("Error: Output path is required for rendering.", file=sys.stderr)
+            return
+
+        print(f"\nRendering graph to {output_path} (format: {file_format})...", file=sys.stderr)
+        tmp_dot_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.dot', delete=False, encoding='utf-8') as f:
+                f.write(dot_source)
+                tmp_dot_path = f.name
+            
+            cmd = ['dot', f'-T{file_format}', '-o', str(output_path), tmp_dot_path]
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"An error occurred during rendering with 'dot':", file=sys.stderr)
+                print(result.stderr, file=sys.stderr)
+            else:
+                print("Visualization saved successfully.", file=sys.stderr)
+
+        except FileNotFoundError:
+            print(
+                "\nError: Graphviz 'dot' command not found.",
+                "Please install Graphviz on your system.",
+                "  - On macOS (using Homebrew): brew install graphviz",
+                "  - On Ubuntu/Debian: sudo apt-get install graphviz",
+                "  - For other systems, see: https://graphviz.org/download/",
+                file=sys.stderr
+            )
+        finally:
+            if tmp_dot_path:
+                Path(tmp_dot_path).unlink()
 
 
 def main():
@@ -240,8 +261,8 @@ def main():
         "-o", "--output",
         type=Path,
         default=None,
-        help="Output file path for the graph. The format is determined by the extension "
-             "or --format. (default: <constraint_name>.png)"
+        help="Output file path. For render mode, format is determined by extension. "
+             "For source mode, content is DOT source. Not used with --clipboard."
     )
     parser.add_argument(
         "-d", "--max-depth",
@@ -254,7 +275,7 @@ def main():
         type=str,
         default='png',
         choices=['png', 'svg', 'pdf', 'dot'],
-        help="Output file format. (default: png)"
+        help="Output file format for rendering. (default: png)"
     )
     parser.add_argument(
         "--rankdir",
@@ -276,10 +297,26 @@ def main():
         choices=['curved', 'line', 'ortho', 'polyline', 'spline'],
         help="Graphviz spline type for edge routing. 'curved' is more stable. (default: curved)"
     )
+    parser.add_argument(
+        "--source-only",
+        action='store_true',
+        help="Output the DOT source code to stdout or the --output file instead of rendering an image."
+    )
+    parser.add_argument(
+        "--clipboard",
+        action='store_true',
+        help="Copy the DOT source code to the clipboard. Requires 'pyperclip'."
+    )
     args = parser.parse_args()
 
     if not args.constraint_file.exists():
         parser.error(f"Constraint file not found: {args.constraint_file}")
+
+    output_mode = 'render'
+    if args.clipboard:
+        output_mode = 'clipboard'
+    elif args.source_only:
+        output_mode = 'source'
 
     selected_roots = None
     if args.roots:
@@ -289,12 +326,13 @@ def main():
             parser.error("Invalid value for --roots. Must be a comma-separated list of integers.")
 
     output_path = args.output
-    if output_path is None:
-        base_name = args.constraint_file.name.replace('.json.gz', '').replace('.json', '')
-        output_path = Path(f"{base_name}.{args.format}")
-    
-    # Ensure output directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_mode == 'render':
+        if output_path is None:
+            base_name = args.constraint_file.name.replace('.json.gz', '').replace('.json', '')
+            output_path = Path(f"{base_name}.{args.format}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    elif output_mode == 'source' and output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
     visualize_constraint(
         constraint_path=args.constraint_file,
@@ -303,6 +341,7 @@ def main():
         file_format=args.format,
         rankdir=args.rankdir,
         splines=args.splines,
+        output_mode=output_mode,
         selected_roots=selected_roots,
     )
 
