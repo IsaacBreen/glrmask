@@ -337,15 +337,15 @@ def main():
             action='store_true',
             help="Copy the DOT source code to the clipboard. Requires 'pyperclip'."
         )
-        parser.add_argument(
-            "--max-edges-per-node",
-            type=int,
-            default=None,
-            help="Maximum number of edges to draw from a single node. Keeps lowest-pop edges. (default: no limit)"
-        )
-        args = parser.parse_args()
+    parser.add_argument(
+        "--max-edges-per-node",
+        type=int,
+        default=None,
+        help="Maximum number of edges to draw from a single node. Keeps lowest-pop edges. (default: no limit)"
+    )
+    args = parser.parse_args()
 
-        if not args.constraint_file.exists():
+    if not args.constraint_file.exists():
         parser.error(f"Constraint file not found: {args.constraint_file}")
 
     output_mode = 'render'
