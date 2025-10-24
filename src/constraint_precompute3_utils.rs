@@ -920,9 +920,10 @@ pub fn optimize_trie3_size(
                 });
                 if config.compress_edges {
                     run_pass!("Compressing edges + unary chains (post-pop0-struct-merge)", {
-                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                    compress_unary_chains_trie3(roots, &trie3_god);
-                });
+                        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                        compress_unary_chains_trie3(roots, &trie3_god);
+                    });
+                }
                 // Defensive: immediately refine token atoms to allow reversing any local structure
                 // that the compression step couldn't improve under the global cost metric.
                 // This gives the pipeline a way to re-split token sets when that reduces local cost.
