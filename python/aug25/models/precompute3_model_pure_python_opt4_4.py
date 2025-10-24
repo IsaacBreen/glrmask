@@ -198,6 +198,7 @@ class Model(GraphProvider):
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
+        st = s
         data = json.loads(s)
 
         # Vocab and bitsets
@@ -261,7 +262,7 @@ class Model(GraphProvider):
         parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
         # Misc data (some still requires FFI for loading)
-        constraint = ffi.GrammarConstraint.from_json_string(s)
+        constraint = ffi.GrammarConstraint.from_json_string(st)
         pmc_ffi = constraint.possible_matches()
         possible_matches_cache = {int(t): {int(i): RangeSet.from_ranges(b.to_ranges()) for i, b in inner.items()} for t, inner in pmc_ffi.items()}
 
