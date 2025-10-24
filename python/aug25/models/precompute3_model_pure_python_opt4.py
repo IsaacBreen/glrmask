@@ -386,6 +386,12 @@ class Model(GraphProvider):
     oracle_exact_cover_threshold: int = 24
     oracle_debug: bool = True
     suppress_stats_report: bool = False
+    # Advanced oracle planning tunables
+    # Weight of pruning benefit (in units of "node cost") when ordering end nodes
+    oracle_prune_weight: float = 1.0
+    # Weight of token coverage when ordering end nodes
+    oracle_token_weight: float = 0.01
+    oracle_apply_weight: float = 2.0; oracle_isolate_weight: float = 1.0
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -804,6 +810,7 @@ class Model(GraphProvider):
         isolate_cache: Optional[Dict] = None,
         edge_order_override_map: Optional[Dict[int, List[int]]] = None,
         dest_scores: Optional[Dict[int, int]] = None,
+        oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
     ) -> Generator[Union[Enqueue, Suspend], None, None]:
         stats = Stats.get()
         a_node = self.arena.get(node_id)
@@ -825,6 +832,9 @@ class Model(GraphProvider):
         if ordered_indices:
             # Oracle-guided order. We still need to iterate non-guided edges if any.
             all_indices = set(range(len(a_node.children)))
+            # Initialize per-node oracle counters lazily
+            local_ctr = None
+            if oracle_counters is not None: local_ctr = oracle_counters.setdefault(int(node_id), {"edges": 0, "apply": 0, "isolate": 0})
             other_indices = sorted(list(all_indices - set(ordered_indices)))
             edge_iterator = ((i, a_node.children[i]) for i in ordered_indices + other_indices)
         else:
@@ -839,6 +849,9 @@ class Model(GraphProvider):
                 stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
                 continue
 
+            # Initialize local counters if not yet
+            if oracle_counters is not None and 'edges' not in (local_ctr or {}): local_ctr = oracle_counters.setdefault(int(node_id), {"edges": 0, "apply": 0, "isolate": 0})
+
             if edge.pop == 0:
                 if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
                 if edge.dest_states_union.isdisjoint(peek0_rs):
@@ -847,6 +860,7 @@ class Model(GraphProvider):
 
             stats.inc('get_mask.traversal.edges_traversed')
             stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
+            if oracle_counters is not None and local_ctr is not None: local_ctr["edges"] += 1
 
             if edge.pop in pop_cache:
                 popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
@@ -915,6 +929,7 @@ class Model(GraphProvider):
                     def intersect(acc: PyAcc):
                         new_mask = acc.llm_mask.intersection(edge.llm_bv)
                         return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                    if oracle_counters is not None and local_ctr is not None: local_ctr["apply"] += 1
                     stats.start('get_mask.main_loop.edge.apply_and_prune')
                     tmp = popped.apply_and_prune(intersect)
                     stats.stop('get_mask.main_loop.edge.apply_and_prune')
@@ -961,6 +976,7 @@ class Model(GraphProvider):
                         stats.start('get_mask.main_loop.edge.isolate_many')
                         child_gss = source_after_apply.isolate_many(values_to_keep)
                         stats.stop('get_mask.main_loop.edge.isolate_many')
+                        if oracle_counters is not None and local_ctr is not None: local_ctr["isolate"] += 1
                         if isolate_cache is not None:
                             isolate_cache[key_isolate] = child_gss
                 if child_gss.is_empty(): continue
@@ -969,6 +985,7 @@ class Model(GraphProvider):
                 dests_proc += 1
 
             if edges_proc >= max_edges:
+                # Suspend work after a batch to allow priority reordering at the heap level
                 priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
                 yield Suspend(priority, depth)
                 edges_proc = 0
@@ -984,6 +1001,141 @@ class Model(GraphProvider):
                     parents[int(dest.dest_idx)].add(int(u))
         self.reverse_adj = dict(parents)
         return self.reverse_adj
+
+    def _oracle_build_guidance_from_plan(self, plan: Dict) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
+        """Build a stronger oracle guidance from planning analysis:
+        - plan['end_events']: list[(end_node_id, delta_mask)]
+        - plan['frontiers']: node_id -> RangeSet (descendant closure ∩ gss_acc at visit)
+        - plan['node_costs']: node_id -> {edges:int, apply:int, isolate:int}
+        Returns (guided_scores, edge_order_map).
+        """
+        # 1) Coalesce end masks
+        items_by_end: Dict[int, LLMTokenSet] = {}
+        universe = RangeSet.empty()
+        for nid, delta in plan.get('end_events', []):
+            if delta is None or delta.is_empty():
+                continue
+            prev = items_by_end.get(int(nid))
+            if prev is None:
+                items_by_end[int(nid)] = delta
+            else:
+                items_by_end[int(nid)] = prev.union(delta)
+        for v in items_by_end.values():
+            universe |= v
+        end_items: List[Tuple[int, LLMTokenSet]] = list(items_by_end.items())
+        frontiers: Dict[int, LLMTokenSet] = {int(k): v for k, v in plan.get('frontiers', {}).items()}
+        node_costs_raw: Dict[int, Dict[str, int]] = {int(k): v for k, v in plan.get('node_costs', {}).items()}
+        # 2) Build node cost weights
+        def node_weight(u: int) -> float:
+            c = node_costs_raw.get(int(u), {"edges": 0, "apply": 0, "isolate": 0})
+            return float(c.get("edges", 0)) + self.oracle_apply_weight * float(c.get("apply", 0)) + self.oracle_isolate_weight * float(c.get("isolate", 0))
+        # 3) Greedy end sequence maximizing pruning benefit + token coverage
+        selected_order: List[int] = []
+        if not end_items or universe.is_empty():
+            # No guidance available; fall back to simple scoring
+            return self._oracle_prepare_guidance([])
+        # Maintain accumulated coverage
+        X = RangeSet.empty()
+        covered_nodes: Set[int] = set()
+        # Precompute list of candidate ids for iteration stability
+        candidate_ids: Set[int] = set(n for n, _ in end_items)
+        while len(selected_order) < len(end_items):
+            # Compute remaining tokens once
+            remaining_tok = universe.difference(X)
+            best_id = None
+            best_score = -1.0
+            best_mask = None
+            for nid, mask in end_items:
+                if nid in selected_order:
+                    continue
+                # Token gain component
+                tok_gain = len(remaining_tok.intersection(mask))
+                # Pruning gain: how many not-yet-covered nodes become covered if we add this end
+                prune_gain_weight = 0.0
+                if frontiers:
+                    newX = X.union(mask)
+                    for u, fmask in frontiers.items():
+                        if u in covered_nodes:
+                            continue
+                        # If frontier is already covered by X, mark covered
+                        if fmask.difference(X).is_empty():
+                            covered_nodes.add(u)
+                            continue
+                        # If it would be covered after adding this end
+                        if fmask.difference(newX).is_empty():
+                            prune_gain_weight += node_weight(u)
+                score = self.oracle_prune_weight * prune_gain_weight + self.oracle_token_weight * float(tok_gain)
+                if score > best_score:
+                    best_score, best_id, best_mask = score, nid, mask
+            if best_id is None:
+                break
+            selected_order.append(best_id)
+            X = X.union(best_mask)
+            # Update covered nodes after applying best_mask
+            for u, fmask in frontiers.items():
+                if u in covered_nodes:
+                    continue
+                if fmask.difference(X).is_empty():
+                    covered_nodes.add(u)
+            if X == universe:
+                # All tokens covered; remaining ends ordering doesn't impact pruning significantly
+                break
+        # If we didn't include all ends that contribute to the final mask, append the rest in any order
+        if X != universe:
+            # Add remaining ends that still add any new tokens to cover the universe
+            remaining = universe.difference(X)
+            for nid, mask in end_items:
+                if nid in selected_order:
+                    continue
+                if not remaining.intersection(mask).is_empty():
+                    selected_order.append(nid)
+                    X = X.union(mask)
+                    remaining = universe.difference(X)
+                    if remaining.is_empty():
+                        break
+            # Add any residual ends (no new tokens): they won't affect pruning/coverage
+            for nid, _ in end_items:
+                if nid not in selected_order:
+                    selected_order.append(nid)
+        # 4) Convert sequence into per-node "prune step"
+        # When does each node u become prunable (frontier covered)?
+        prune_step: Dict[int, int] = {}
+        acc = RangeSet.empty()
+        # Build lookup of end id -> mask
+        end_mask_map: Dict[int, LLMTokenSet] = dict(end_items)
+        for idx, eid in enumerate(selected_order, start=1):
+            m = end_mask_map.get(eid)
+            if m is None:
+                continue
+            acc = acc.union(m)
+            for u, fmask in frontiers.items():
+                if u in prune_step:
+                    continue
+                if fmask.difference(acc).is_empty():
+                    prune_step[u] = idx
+        # Nodes never covered get a very late step value
+        default_step = len(selected_order) + 1 if selected_order else 1
+        # 5) Build guided node scores (higher means schedule earlier)
+        scores: Dict[int, int] = {}
+        for u in self.arena.keys():
+            step = prune_step.get(int(u), default_step)
+            # Earlier step -> higher score. Use a large constant base to avoid negatives in priority.
+            scores[int(u)] = max(0, (len(selected_order) + 1) - int(step))
+        # 6) Edge ordering: sort each node's edges by sum of child destination scores (desc)
+        edge_order_map: Dict[int, List[int]] = {}
+        for u, node in self.arena.items():
+            if not node.children:
+                continue
+            edge_scores: List[Tuple[int, int]] = []
+            for idx, edge in enumerate(node.children):
+                s = 0
+                for d in edge.dests:
+                    s += int(scores.get(int(d.dest_idx), 0))
+                edge_scores.append((idx, s))
+            if any(s > 0 for (_, s) in edge_scores):
+                ordered = sorted(edge_scores, key=lambda t: t[1], reverse=True)
+                edge_order_map[int(u)] = [idx for (idx, _) in ordered]
+        return scores, edge_order_map
 
     def _compute_oracle_min_cover(self, end_union_events: List[Tuple[int, LLMTokenSet]]) -> List[int]:
         """Given a list of (end_node_id, delta_mask) events collected from a full planning run,
@@ -1142,7 +1294,10 @@ class Model(GraphProvider):
     ) -> Tuple[Union[RangeSetOut, Dict], List[Tuple[int, LLMTokenSet]]]:
         """Internal engine behind get_mask.
         If guided_scores/edge_order_map are provided, they influence traversal priority and edge ordering.
-        If record_end_unions is True, returns a list of (end_node_id, delta_mask) for planning analysis.
+        If record_end_unions is True:
+          - Returns: (timed_output_dict, oracle_data) where oracle_data is a dict with:
+              'end_events': list of (end_node_id, delta_mask),
+              'frontiers': node_id -> RangeSet, 'node_costs': node_id -> dict(counts)
         Returns (timed_output_dict, end_union_events)."""
         stats = Stats.get()
         stats.start('get_mask')
@@ -1161,6 +1316,7 @@ class Model(GraphProvider):
             def __lt__(self, other: 'HeapItem') -> bool:
                 if not isinstance(other, HeapItem):
                     return NotImplemented
+
                 return self.priority < other.priority
 
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
@@ -1168,6 +1324,9 @@ class Model(GraphProvider):
         end_union_events: List[Tuple[int, LLMTokenSet]] = []
 
         @_acc_memoize(use_value_cache=False)
+        # Planning: remove impossible tokens implied by terminal disallows at the roots
+        # and start with all remaining tokens allowed (all_ones minus disallowed).
+        # This is exact and independent of traversal order.
         def initialize_acc(acc: PyAcc) -> PyAcc:
             disallowed = RangeSet.empty()
             for tsid, terms in acc.terminals_union.items():
@@ -1185,6 +1344,7 @@ class Model(GraphProvider):
             if not gss_init.is_empty():
                 base_pri = (-self.max_depth.get(r, 0), 0, 0)
                 if guided_scores is not None:
+                    # Higher guided_scores -> earlier (we negate to get min-heap behavior)
                     priority = (-int(guided_scores.get(r, 0)),) + base_pri
                 else:
                     priority = base_pri
@@ -1193,6 +1353,9 @@ class Model(GraphProvider):
 
         stats.start('get_mask.main_loop')
         remaining_mask = all_ones
+        # Oracle planning accumulators
+        analysis_frontiers: Dict[int, LLMTokenSet] = {} if record_end_unions else None
+        analysis_node_costs: Dict[int, Dict[str, int]] = {} if record_end_unions else None
         while work_heap:
             if remaining_mask.is_empty():
                 stats.inc('get_mask.early_exit_full_mask')
@@ -1240,6 +1403,12 @@ class Model(GraphProvider):
                 work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
 
                 if not a_node or not a_node.children:
+                    # Still record frontier mask for planning if requested
+                    if record_end_unions and a_node:
+                        if analysis_frontiers is not None:
+                            if not work_llm_mask.is_empty():
+                                prev = analysis_frontiers.get(int(node_id))
+                                analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
                     continue
                 # Closure-based pruning
                 if work_llm_mask.isdisjoint(remaining_mask):
@@ -1257,7 +1426,13 @@ class Model(GraphProvider):
                     isolate_cache=isolate_many_cache,
                     edge_order_override_map=edge_order_map,
                     dest_scores=guided_scores,
+                    oracle_counters=analysis_node_costs if record_end_unions else None,
                 )
+                # Record frontier for planning if requested
+                if record_end_unions and a_node:
+                    if analysis_frontiers is not None and not work_llm_mask.is_empty():
+                        prev = analysis_frontiers.get(int(node_id))
+                        analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
             else:
                 raise ValueError(f'Unexpected work item: {work}')
 
@@ -1307,6 +1482,14 @@ class Model(GraphProvider):
             if Stats.get().times['get_mask.main_loop']*1000 > 1:
                 Stats.get().report()
 
+        if record_end_unions:
+            oracle_data = {
+                "end_events": end_union_events,
+                "frontiers": analysis_frontiers or {},
+                "node_costs": analysis_node_costs or {},
+            }
+        else:
+            oracle_data = []
         return {
             "type": "timed_output",
             "output": original_indices,
@@ -1319,22 +1502,26 @@ class Model(GraphProvider):
             out, _ = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=False)
             return out
 
-        # 1) Planning pass: collect end-node delta masks
+        # 1) Planning pass: collect detailed analysis (end-node masks, node frontiers, per-node costs)
         prev_suppress = self.suppress_stats_report
         try:
             self.suppress_stats_report = True
-            _, end_events = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=True)
+            _, plan = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=True)
         finally:
             self.suppress_stats_report = prev_suppress
 
-        # 2) Compute a minimal cover of final mask by end nodes
-        selected_end_nodes = self._compute_oracle_min_cover(end_events)
+        # 2) Build stronger guidance from the oracle plan (frontier-weighted greedy order)
+        guided_scores, edge_order_map = self._oracle_build_guidance_from_plan(plan if isinstance(plan, dict) else {})
         if self.oracle_debug:
-            print(f"[oracle] planning: collected {len(end_events)} end-events; "
-                  f"selected {len(selected_end_nodes)} end nodes by set cover.")
+            n_events = len(plan.get("end_events", [])) if isinstance(plan, dict) else 0
+            n_frontiers = len(plan.get("frontiers", {})) if isinstance(plan, dict) else 0
+            n_costs = len(plan.get("node_costs", {})) if isinstance(plan, dict) else 0
+            print(f"[oracle] planning: collected {n_events} end-events, "
+                  f"{n_frontiers} node-frontiers, {n_costs} node-cost entries; "
+                  f"produced guided scores for {len(guided_scores)} nodes and edge ordering for {len(edge_order_map)} nodes.")
 
-        # 3) Prepare guided scoring and edge ordering
-        guided_scores, edge_order_map = self._oracle_prepare_guidance(selected_end_nodes)
+        # 3) Reset stats per request, then run the guided traversal
+        # (We use the stronger oracle guidance just computed.)
 
         # 4) Reset stats per request, then run the guided traversal
         Stats.get().reset()
