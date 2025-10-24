@@ -3,6 +3,7 @@ from pathlib import Path
 import collections
 import gzip
 import json
+from typing import Dict
 
 # Add project root to sys.path to resolve local imports
 _project_root = Path(__file__).resolve().parents[2]
