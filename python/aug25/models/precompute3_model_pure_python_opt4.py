@@ -1543,6 +1543,7 @@ class Model(GraphProvider):
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
             if not gss_init.is_empty():
+                base_pri = (-self.max_depth.get(r, 0), 0, 0)
                 # Dynamic, target-aware seeding priority if reward masks present
                 if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
                     priority = self._priority_for_node(
@@ -1552,6 +1553,7 @@ class Model(GraphProvider):
                         analysis_node_costs=oracle_node_costs,
                     )
                 elif guided_scores is not None:
+                    # Higher guided_scores -> earlier (we negate to get min-heap behavior)
                     priority = (-int(guided_scores.get(r, 0)),) + base_pri
                 else:
                     priority = base_pri
