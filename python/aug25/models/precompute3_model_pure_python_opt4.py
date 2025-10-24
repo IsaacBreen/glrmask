@@ -1029,71 +1029,52 @@ class Model(GraphProvider):
         # 3) Greedy end sequence maximizing pruning benefit + token coverage
         selected_order: List[int] = []
         if not end_items or universe.is_empty():
-            # No guidance available; fall back to simple scoring
             return self._oracle_prepare_guidance([])
-        # Maintain accumulated coverage
+
         X = RangeSet.empty()
         covered_nodes: Set[int] = set()
-        # Precompute list of candidate ids for iteration stability
-        candidate_ids: Set[int] = set(n for n, _ in end_items)
-        while len(selected_order) < len(end_items):
-            # Compute remaining tokens once
+        candidate_pool = list(end_items)
+
+        # Pre-calculate nodes covered by an empty mask
+        for u, fmask in frontiers.items():
+            if fmask.is_empty():
+                covered_nodes.add(u)
+
+        while candidate_pool:
             remaining_tok = universe.difference(X)
-            best_id = None
-            best_score = -1.0
-            best_mask = None
-            for nid, mask in end_items:
-                if nid in selected_order:
-                    continue
-                # Token gain component
+            best_id, best_mask, best_idx, best_score = None, None, -1, -1.0
+
+            for i, (nid, mask) in enumerate(candidate_pool):
                 tok_gain = len(remaining_tok.intersection(mask))
-                # Pruning gain: how many not-yet-covered nodes become covered if we add this end
                 prune_gain_weight = 0.0
                 if frontiers:
                     newX = X.union(mask)
                     for u, fmask in frontiers.items():
-                        if u in covered_nodes:
-                            continue
-                        # If frontier is already covered by X, mark covered
-                        if fmask.difference(X).is_empty():
-                            covered_nodes.add(u)
-                            continue
-                        # If it would be covered after adding this end
-                        if fmask.difference(newX).is_empty():
+                        if u not in covered_nodes and fmask.issubset(newX):
                             prune_gain_weight += node_weight(u)
+                
                 score = self.oracle_prune_weight * prune_gain_weight + self.oracle_token_weight * float(tok_gain)
                 if score > best_score:
-                    best_score, best_id, best_mask = score, nid, mask
+                    best_score, best_id, best_mask, best_idx = score, nid, mask, i
+
             if best_id is None:
                 break
+
             selected_order.append(best_id)
+            candidate_pool.pop(best_idx)
+            
             X = X.union(best_mask)
-            # Update covered nodes after applying best_mask
+            newly_covered = set()
             for u, fmask in frontiers.items():
-                if u in covered_nodes:
-                    continue
-                if fmask.difference(X).is_empty():
-                    covered_nodes.add(u)
-            if X == universe:
-                # All tokens covered; remaining ends ordering doesn't impact pruning significantly
+                if u not in covered_nodes and fmask.issubset(X):
+                    newly_covered.add(u)
+            covered_nodes.update(newly_covered)
+
+            if X.issuperset(universe):
                 break
-        # If we didn't include all ends that contribute to the final mask, append the rest in any order
-        if X != universe:
-            # Add remaining ends that still add any new tokens to cover the universe
-            remaining = universe.difference(X)
-            for nid, mask in end_items:
-                if nid in selected_order:
-                    continue
-                if not remaining.intersection(mask).is_empty():
-                    selected_order.append(nid)
-                    X = X.union(mask)
-                    remaining = universe.difference(X)
-                    if remaining.is_empty():
-                        break
-            # Add any residual ends (no new tokens): they won't affect pruning/coverage
-            for nid, _ in end_items:
-                if nid not in selected_order:
-                    selected_order.append(nid)
+        
+        for nid, _ in candidate_pool:
+            selected_order.append(nid)
         # 4) Convert sequence into per-node "prune step"
         # When does each node u become prunable (frontier covered)?
         prune_step: Dict[int, int] = {}
@@ -1354,7 +1335,7 @@ class Model(GraphProvider):
         analysis_frontiers: Dict[int, LLMTokenSet] = {} if record_end_unions else None
         analysis_node_costs: Dict[int, Dict[str, int]] = {} if record_end_unions else None
         while work_heap:
-            if remaining_mask.is_empty():
+            if not record_end_unions and remaining_mask.is_empty():
                 stats.inc('get_mask.early_exit_full_mask')
                 break
 
