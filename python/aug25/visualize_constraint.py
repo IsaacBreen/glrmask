@@ -232,8 +232,8 @@ def visualize_constraint(
 
             llm_summary = format_ranges(pruned_llm_bv)
             state_summary = format_ranges(pruned_state_bv)
-            edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
-            dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
+            edge_label = f"pop={pop}\nLLM: {llm_summary}\nStates: {state_summary}"
+            dot_lines.append(f'  "{node_id}" -> "{dest_id}" [xlabel={json.dumps(edge_label)}];')
 
             if dest_id in values_dict and dest_id not in seen_nodes:
                 q.append((dest_id, depth + 1))

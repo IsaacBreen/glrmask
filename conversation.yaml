@@ -1,398 +1,9 @@
 local_system:
   attached_files:
     - python/aug25/visualize_constraint.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
-    python/aug25/visualize_constraint.py: |
-      #!/usr/bin/env python
-      """
-      A script to visualize a grammar constraint file using Graphviz.
-
-      This tool loads a pre-compiled grammar constraint, traverses its internal graph
-      structure (trie), and generates a visual representation as an image or DOT file.
-      It helps in debugging and understanding the structure of the constraint model.
-
-      Example Usage:
-        python python/aug25/visualize_constraint.py \\
-          --constraint-file /path/to/your/constraint.json.gz \\
-          --output my_graph.png \\
-          --max-depth 5 \\
-          --rankdir LR
-
-      Requires the 'graphviz' Python package:
-        pip install graphviz
-      """
-      import argparse
-      import collections
-      import gzip
-      import json
-      import sys
-      from pathlib import Path
-      from typing import Dict, Any, List, Set, Optional
-      import subprocess
-      import tempfile
-
-      from tqdm import tqdm
-
-      def format_ranges(ranges: list[list[int]], max_len: int = 40) -> str:
-          """
-          Converts a list of [start, end] ranges into a compact, readable string.
-          Truncates the string if it exceeds max_len.
-          """
-          if not ranges:
-              return "{}"
-
-          parts = []
-          for start, end in ranges:
-              if start == end:
-                  parts.append(str(start))
-              else:
-                  parts.append(f"{start}..{end}")
-
-          result = ", ".join(parts)
-          if len(result) > max_len:
-              return result[:max_len - 3] + "..."
-          return result
-
-
-      def visualize_constraint(
-          constraint_path: Path,
-          output_path: Path,
-          max_depth: int,
-          file_format: str,
-          rankdir: str,
-          splines: str,
-          output_mode: str,
-          max_edges_per_node: Optional[int] = None,
-          selected_roots: Optional[List[int]] = None,
-      ):
-          """
-          Loads a constraint file, generates Graphviz DOT source, and handles output.
-          """
-          print(f"Loading constraint file: {constraint_path}", file=sys.stderr)
-          try:
-              if constraint_path.suffix == ".gz":
-                  with gzip.open(constraint_path, "rt", encoding="utf-8") as f:
-                      data = json.load(f)
-              else:
-                  with open(constraint_path, "r", encoding="utf-8") as f:
-                      data = json.load(f)
-          except Exception as e:
-              print(f"Error loading or parsing JSON file: {e}", file=sys.stderr)
-              return
-
-          trie_data = data.get("trie3_god", {})
-          values_list = trie_data.get("values", [])
-          if not values_list:
-              print("Error: No 'trie3_god.values' found in the constraint file.", file=sys.stderr)
-              return
-
-          values_dict: Dict[int, Dict[str, Any]] = {int(k): v for k, v in values_list}
-          print(f"Loaded {len(values_dict)} nodes from trie.", file=sys.stderr)
-
-          # Identify root and end nodes
-          roots_map = data.get("precomputed3", [])
-          all_root_ids: Set[int] = {int(r) for _s, r in roots_map}
-          end_ids: Set[int] = {
-              nid for nid, node in values_dict.items()
-              if node.get("value", {}).get("clean_end", False)
-          }
-          print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.", file=sys.stderr)
-
-          # --- Build DOT source manually ---
-          dot_lines = ['digraph GrammarConstraintTrie {']
-          
-          # Graph attributes
-          graph_attrs = [
-              f'rankdir="{rankdir}"',
-              f'splines="{splines}"',
-              'nodesep="0.6"',
-              'ranksep="1.2"',
-              f'label="{constraint_path.name}\\n(max_depth={max_depth})"',
-              'labelloc="t"',
-              'fontsize="20"',
-          ]
-          dot_lines.append(f"  graph [{', '.join(graph_attrs)}];")
-          dot_lines.append('  node [shape="box", style="rounded,filled", fontname="Helvetica"];')
-          dot_lines.append('  edge [fontname="Helvetica", fontsize="10"];')
-
-          # BFS traversal to build the graph
-          q = collections.deque()
-          seen_nodes: Set[int] = set()
-          seen_edges: Set[str] = set()
-
-          start_roots = selected_roots if selected_roots is not None else sorted(list(all_root_ids))
-          if selected_roots is not None:
-              print(f"Displaying selected roots: {start_roots}", file=sys.stderr)
-
-          for root_id in start_roots:
-              if root_id in values_dict and root_id not in seen_nodes:
-                  q.append((root_id, 0))
-                  seen_nodes.add(root_id)
-
-          print("Traversing graph to build visualization...", file=sys.stderr)
-          pbar = tqdm(total=len(q), desc="Nodes processed")
-
-          while q:
-              node_id, depth = q.popleft()
-              pbar.update(1)
-
-              # Determine node style
-              is_root = node_id in all_root_ids
-              is_end = node_id in end_ids
-              label = f"Node {node_id}"
-              fillcolor = 'lightblue'
-              shape = 'box'
-
-              if is_root and is_end:
-                  fillcolor, shape, label = 'gold', 'doubleoctagon', f"Root & End {node_id}"
-              elif is_root:
-                  fillcolor, label = 'lightgreen', f"Root {node_id}"
-              elif is_end:
-                  fillcolor, shape, label = 'lightpink', 'doubleoctagon', f"End {node_id}"
-
-              dot_lines.append(f'  "{node_id}" [label={json.dumps(label)}, fillcolor="{fillcolor}", shape="{shape}"];')
-
-              if max_depth is not None and depth >= max_depth:
-                  # Add a special node to indicate truncation
-                  trunc_node_id = f"trunc_{node_id}"
-                  dot_lines.append(f'  "{trunc_node_id}" [label="...", shape="plaintext"];')
-                  dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dashed", arrowhead="none"];')
-                  continue
-
-              node_data = values_dict.get(node_id)
-              if not node_data:
-                  continue
-
-              # Process edges
-              # Collect all potential outgoing edges from this node
-              all_edges = []
-              for child_group in node_data.get("children", []):
-                  (pop, llm_bv_json), dests = child_group
-                  for dest_id_int, state_bv_json in dests:
-                      all_edges.append({
-                          'pop': pop,
-                          'llm_bv_json': llm_bv_json,
-                          'dest_id': int(dest_id_int),
-                          'state_bv_json': state_bv_json,
-                      })
-
-              edges_to_process = all_edges
-              truncated_edges = False
-              if max_edges_per_node is not None and len(all_edges) > max_edges_per_node:
-                  # Sort by pop value (ascending) to keep the lowest ones
-                  all_edges.sort(key=lambda e: e['pop'])
-                  edges_to_process = all_edges[:max_edges_per_node]
-                  truncated_edges = True
-
-              # Process edges (the potentially truncated list)
-              for edge_info in edges_to_process:
-                  pop = edge_info['pop']
-                  llm_bv_json = edge_info['llm_bv_json']
-                  dest_id = edge_info['dest_id']
-                  state_bv_json = edge_info['state_bv_json']
-                  
-                  edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
-                  if edge_key in seen_edges:
-                      continue
-                  seen_edges.add(edge_key)
-
-                  llm_summary = format_ranges(llm_bv_json)
-                  state_summary = format_ranges(state_bv_json)
-                  edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
-                  dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
-
-                  if dest_id in values_dict and dest_id not in seen_nodes:
-                      q.append((dest_id, depth + 1))
-                      seen_nodes.add(dest_id)
-                      pbar.total = len(seen_nodes) + len(q)
-              
-              if truncated_edges:
-                  # Add a truncation indicator node for edges
-                  trunc_node_id = f"trunc_edges_{node_id}"
-                  num_omitted = len(all_edges) - len(edges_to_process)
-                  dot_lines.append(f'  "{trunc_node_id}" [label="... ({num_omitted} more edges)", shape="plaintext"];')
-                  dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dotted", arrowhead="none"];')
-          
-          pbar.close()
-          dot_lines.append('}')
-          dot_source = "\n".join(dot_lines)
-
-          # --- Handle output ---
-          if output_mode == 'clipboard':
-              try:
-                  import pyperclip
-                  pyperclip.copy(dot_source)
-                  print("DOT source copied to clipboard.", file=sys.stderr)
-              except ImportError:
-                  print(
-                      "Error: 'pyperclip' package not found. Cannot copy to clipboard.\n"
-                      "Please install it by running: pip install pyperclip",
-                      file=sys.stderr
-                  )
-                  print("\n--- DOT Source Fallback ---\n", file=sys.stderr)
-                  print(dot_source)
-          elif output_mode == 'source':
-              if output_path:
-                  output_path.write_text(dot_source, encoding='utf-8')
-                  print(f"DOT source saved to {output_path}", file=sys.stderr)
-              else:
-                  print(dot_source)
-          elif output_mode == 'render':
-              if not output_path:
-                  print("Error: Output path is required for rendering.", file=sys.stderr)
-                  return
-
-              print(f"\nRendering graph to {output_path} (format: {file_format})...", file=sys.stderr)
-              tmp_dot_path = None
-              try:
-                  with tempfile.NamedTemporaryFile(mode='w', suffix='.dot', delete=False, encoding='utf-8') as f:
-                      f.write(dot_source)
-                      tmp_dot_path = f.name
-                  
-                  cmd = ['dot', f'-T{file_format}', '-o', str(output_path), tmp_dot_path]
-                  result = subprocess.run(cmd, check=False, capture_output=True, text=True)
-                  
-                  if result.returncode != 0:
-                      print(f"An error occurred during rendering with 'dot':", file=sys.stderr)
-                      print(result.stderr, file=sys.stderr)
-                  else:
-                      print("Visualization saved successfully.", file=sys.stderr)
-
-              except FileNotFoundError:
-                  print(
-                      "\nError: Graphviz 'dot' command not found.",
-                      "Please install Graphviz on your system.",
-                      "  - On macOS (using Homebrew): brew install graphviz",
-                      "  - On Ubuntu/Debian: sudo apt-get install graphviz",
-                      "  - For other systems, see: https://graphviz.org/download/",
-                      file=sys.stderr
-                  )
-              finally:
-                  if tmp_dot_path:
-                      Path(tmp_dot_path).unlink()
-
-
-      def main():
-          """
-          Command-line interface for the visualization script.
-          """
-          parser = argparse.ArgumentParser(
-              description="Visualize a grammar constraint trie using Graphviz.",
-              formatter_class=argparse.RawTextHelpFormatter,
-              epilog=(
-                  "Example:\n"
-                  "  python %(prog)s --constraint-file path/to/constraint.json.gz "
-                  "--output graph.png --max-depth 5"
-              )
-          )
-          parser.add_argument(
-              "-f", "--constraint-file",
-              type=Path,
-              required=True,
-              help="Path to the pre-compiled .json.gz or .json grammar constraint file."
-          )
-          parser.add_argument(
-              "-o", "--output",
-              type=Path,
-              default=None,
-              help="Output file path. For render mode, format is determined by extension. "
-                   "For source mode, content is DOT source. Not used with --clipboard."
-          )
-          parser.add_argument(
-              "-d", "--max-depth",
-              type=int,
-              default=5,
-              help="Maximum depth to traverse from root nodes. (default: 5)"
-          )
-          parser.add_argument(
-              "--format",
-              type=str,
-              default='png',
-              choices=['png', 'svg', 'pdf', 'dot'],
-              help="Output file format for rendering. (default: png)"
-          )
-          parser.add_argument(
-              "--rankdir",
-              type=str,
-              default='TB',
-              choices=['TB', 'LR'],
-              help="Direction of graph layout (Top-to-Bottom or Left-to-Right). (default: TB)"
-          )
-          parser.add_argument(
-              "--roots",
-              type=str,
-              default=None,
-              help="Comma-separated list of root node IDs to display. If not set, all roots are shown."
-          )
-          parser.add_argument(
-              "--splines",
-              type=str,
-              default='curved',
-              choices=['curved', 'line', 'ortho', 'polyline', 'spline'],
-              help="Graphviz spline type for edge routing. 'curved' is more stable. (default: curved)"
-          )
-          parser.add_argument(
-              "--source-only",
-              action='store_true',
-              help="Output the DOT source code to stdout or the --output file instead of rendering an image."
-          )
-          parser.add_argument(
-              "--clipboard",
-                  action='store_true',
-                  help="Copy the DOT source code to the clipboard. Requires 'pyperclip'."
-              )
-          parser.add_argument(
-              "--max-edges-per-node",
-              type=int,
-              default=None,
-              help="Maximum number of edges to draw from a single node. Keeps lowest-pop edges. (default: no limit)"
-          )
-          args = parser.parse_args()
-
-          if not args.constraint_file.exists():
-              parser.error(f"Constraint file not found: {args.constraint_file}")
-
-          output_mode = 'render'
-          if args.clipboard:
-              output_mode = 'clipboard'
-          elif args.source_only:
-              output_mode = 'source'
-
-          selected_roots = None
-          if args.roots:
-              try:
-                  selected_roots = [int(r.strip()) for r in args.roots.split(',')]
-              except ValueError:
-                  parser.error("Invalid value for --roots. Must be a comma-separated list of integers.")
-
-          output_path = args.output
-          if output_mode == 'render':
-              if output_path is None:
-                  base_name = args.constraint_file.name.replace('.json.gz', '').replace('.json', '')
-                  output_path = Path(f"{base_name}.{args.format}")
-              output_path.parent.mkdir(parents=True, exist_ok=True)
-          elif output_mode == 'source' and output_path:
-              output_path.parent.mkdir(parents=True, exist_ok=True)
-
-          visualize_constraint(
-              constraint_path=args.constraint_file,
-              output_path=output_path,
-              max_depth=args.max_depth,
-              file_format=args.format,
-                  rankdir=args.rankdir,
-                  splines=args.splines,
-                  output_mode=output_mode,
-                  max_edges_per_node=args.max_edges_per_node,
-                  selected_roots=selected_roots,
-              )
-
-
-
-      if __name__ == "__main__":
-          main()
-  prev_file_contents:
     python/aug25/visualize_constraint.py: |
       #!/usr/bin/env python
       """
@@ -854,50 +465,8 @@ local_system:
 
       if __name__ == "__main__":
           main()
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-  default_end_line:
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - cp
-  code_completion_model:
-    - cp
-  commit_message_model:
-    - gemini/gemini-flash-lite-latest
-  diff_correction_model:
-    - gf
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```python "python/aug25/visualize_constraint.py"
+  prev_file_contents:
+    python/aug25/visualize_constraint.py: |
       #!/usr/bin/env python
       """
       A script to visualize a grammar constraint file using Graphviz.
@@ -922,7 +491,7 @@ messages:
       import json
       import sys
       from pathlib import Path
-      from typing import Dict, Any, List, Set, Optional
+      from typing import Dict, Any, List, Set, Optional, Tuple
       import subprocess
       import tempfile
 
@@ -949,6 +518,24 @@ messages:
           return result
 
 
+      def prune_ranges(ranges: List[List[int]], filter_range: Optional[Tuple[int, int]]) -> List[List[int]]:
+          """Prunes a list of [start, end] ranges to only include parts within the filter_range."""
+          if not filter_range:
+              return ranges
+
+          min_val, max_val = filter_range
+          pruned = []
+          for start, end in ranges:
+              # Find the intersection of [start, end] and [min_val, max_val]
+              overlap_start = max(start, min_val)
+              overlap_end = min(end, max_val)
+
+              if overlap_start <= overlap_end:
+                  pruned.append([overlap_start, overlap_end])
+
+          return pruned
+
+
       def visualize_constraint(
           constraint_path: Path,
           output_path: Path,
@@ -959,6 +546,8 @@ messages:
           output_mode: str,
           max_edges_per_node: Optional[int] = None,
           selected_roots: Optional[List[int]] = None,
+          llm_token_range: Optional[Tuple[int, int]] = None,
+          state_bv_range: Optional[Tuple[int, int]] = None,
       ):
           """
           Loads a constraint file, generates Graphviz DOT source, and handles output.
@@ -989,7 +578,7 @@ messages:
           all_root_ids: Set[int] = {int(r) for _s, r in roots_map}
           end_ids: Set[int] = {
               nid for nid, node in values_dict.items()
-              if node.get("value", {}).get("clean_end", False)
+              if not node.get("children")  # A node with no children is an end node
           }
           print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.", file=sys.stderr)
 
@@ -1071,30 +660,49 @@ messages:
                           'state_bv_json': state_bv_json,
                       })
 
-              edges_to_process = all_edges
+              # First, filter edges based on token/state ranges
+              filtered_edges = []
+              for edge in all_edges:
+                  pruned_llm_bv = prune_ranges(edge['llm_bv_json'], llm_token_range)
+                  pruned_state_bv = prune_ranges(edge['state_bv_json'], state_bv_range)
+
+                  if pruned_llm_bv and pruned_state_bv:
+                      # Store the original and pruned BVs for processing
+                      filtered_edge_info = edge.copy()
+                      filtered_edge_info['pruned_llm_bv'] = pruned_llm_bv
+                      filtered_edge_info['pruned_state_bv'] = pruned_state_bv
+                      filtered_edges.append(filtered_edge_info)
+
+              # Now, apply max_edges_per_node limit to the filtered list
+              edges_to_process = filtered_edges
               truncated_edges = False
-              if max_edges_per_node is not None and len(all_edges) > max_edges_per_node:
+              if max_edges_per_node is not None and len(filtered_edges) > max_edges_per_node:
                   # Sort by pop value (ascending) to keep the lowest ones
-                  all_edges.sort(key=lambda e: e['pop'])
-                  edges_to_process = all_edges[:max_edges_per_node]
+                  filtered_edges.sort(key=lambda e: e['pop'])
+                  edges_to_process = filtered_edges[:max_edges_per_node]
                   truncated_edges = True
 
-              # Process edges (the potentially truncated list)
+              # Process edges (the filtered and potentially truncated list)
               for edge_info in edges_to_process:
                   pop = edge_info['pop']
-                  llm_bv_json = edge_info['llm_bv_json']
                   dest_id = edge_info['dest_id']
-                  state_bv_json = edge_info['state_bv_json']
                   
+                  # Use the pre-pruned BVs for display
+                  pruned_llm_bv = edge_info['pruned_llm_bv']
+                  pruned_state_bv = edge_info['pruned_state_bv']
+
+                  # Use original BVs for a unique edge key
+                  llm_bv_json = edge_info['llm_bv_json']
+                  state_bv_json = edge_info['state_bv_json']
                   edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
                   if edge_key in seen_edges:
                       continue
                   seen_edges.add(edge_key)
 
-                  llm_summary = format_ranges(llm_bv_json)
-                  state_summary = format_ranges(state_bv_json)
-                  edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
-                  dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
+                  llm_summary = format_ranges(pruned_llm_bv)
+                  state_summary = format_ranges(pruned_state_bv)
+                  edge_label = f"pop={pop}\nLLM: {llm_summary}\nStates: {state_summary}"
+                  dot_lines.append(f'  "{node_id}" -> "{dest_id}" [xlabel={json.dumps(edge_label)}];')
 
                   if dest_id in values_dict and dest_id not in seen_nodes:
                       q.append((dest_id, depth + 1))
@@ -1104,7 +712,7 @@ messages:
               if truncated_edges:
                   # Add a truncation indicator node for edges
                   trunc_node_id = f"trunc_edges_{node_id}"
-                  num_omitted = len(all_edges) - len(edges_to_process)
+                  num_omitted = len(filtered_edges) - len(edges_to_process)
                   dot_lines.append(f'  "{trunc_node_id}" [label="... ({num_omitted} more edges)", shape="plaintext"];')
                   dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dotted", arrowhead="none"];')
           
@@ -1242,10 +850,42 @@ messages:
               default=None,
               help="Maximum number of edges to draw from a single node. Keeps lowest-pop edges. (default: no limit)"
           )
+          parser.add_argument(
+              "--llm-token-range",
+              type=str,
+              default=None,
+              help="Only show LLM tokens in this range. Format: 'min,max'. Example: '0,1000'."
+          )
+          parser.add_argument(
+              "--state-bv-range",
+              type=str,
+              default=None,
+              help="Only show state bitvector values in this range. Format: 'min,max'. Example: '0,50'."
+          )
           args = parser.parse_args()
 
           if not args.constraint_file.exists():
               parser.error(f"Constraint file not found: {args.constraint_file}")
+
+          llm_token_range = None
+          if args.llm_token_range:
+              try:
+                  min_val, max_val = map(int, args.llm_token_range.split(','))
+                  if min_val > max_val:
+                      parser.error(f"Invalid range for --llm-token-range: min ({min_val}) cannot be greater than max ({max_val}).")
+                  llm_token_range = (min_val, max_val)
+              except (ValueError, TypeError):
+                  parser.error(f"Invalid format for --llm-token-range. Expected 'min,max', got '{args.llm_token_range}'.")
+
+          state_bv_range = None
+          if args.state_bv_range:
+              try:
+                  min_val, max_val = map(int, args.state_bv_range.split(','))
+                  if min_val > max_val:
+                      parser.error(f"Invalid range for --state-bv-range: min ({min_val}) cannot be greater than max ({max_val}).")
+                  state_bv_range = (min_val, max_val)
+              except (ValueError, TypeError):
+                  parser.error(f"Invalid format for --state-bv-range. Expected 'min,max', got '{args.state_bv_range}'.")
 
           output_mode = 'render'
           if args.clipboard:
@@ -1279,6 +919,512 @@ messages:
                   output_mode=output_mode,
                   max_edges_per_node=args.max_edges_per_node,
                   selected_roots=selected_roots,
+                  llm_token_range=llm_token_range,
+                  state_bv_range=state_bv_range,
+              )
+
+
+
+      if __name__ == "__main__":
+          main()
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+  default_end_line:
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - gp
+  code_completion_model:
+    - cp
+  commit_message_model:
+    - gemini/gemini-flash-lite-latest
+  diff_correction_model:
+    - gf
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```python "python/aug25/visualize_constraint.py"
+      #!/usr/bin/env python
+      """
+      A script to visualize a grammar constraint file using Graphviz.
+
+      This tool loads a pre-compiled grammar constraint, traverses its internal graph
+      structure (trie), and generates a visual representation as an image or DOT file.
+      It helps in debugging and understanding the structure of the constraint model.
+
+      Example Usage:
+        python python/aug25/visualize_constraint.py \\
+          --constraint-file /path/to/your/constraint.json.gz \\
+          --output my_graph.png \\
+          --max-depth 5 \\
+          --rankdir LR
+
+      Requires the 'graphviz' Python package:
+        pip install graphviz
+      """
+      import argparse
+      import collections
+      import gzip
+      import json
+      import sys
+      from pathlib import Path
+      from typing import Dict, Any, List, Set, Optional, Tuple
+      import subprocess
+      import tempfile
+
+      from tqdm import tqdm
+
+      def format_ranges(ranges: list[list[int]], max_len: int = 40) -> str:
+          """
+          Converts a list of [start, end] ranges into a compact, readable string.
+          Truncates the string if it exceeds max_len.
+          """
+          if not ranges:
+              return "{}"
+
+          parts = []
+          for start, end in ranges:
+              if start == end:
+                  parts.append(str(start))
+              else:
+                  parts.append(f"{start}..{end}")
+
+          result = ", ".join(parts)
+          if len(result) > max_len:
+              return result[:max_len - 3] + "..."
+          return result
+
+
+      def prune_ranges(ranges: List[List[int]], filter_range: Optional[Tuple[int, int]]) -> List[List[int]]:
+          """Prunes a list of [start, end] ranges to only include parts within the filter_range."""
+          if not filter_range:
+              return ranges
+
+          min_val, max_val = filter_range
+          pruned = []
+          for start, end in ranges:
+              # Find the intersection of [start, end] and [min_val, max_val]
+              overlap_start = max(start, min_val)
+              overlap_end = min(end, max_val)
+
+              if overlap_start <= overlap_end:
+                  pruned.append([overlap_start, overlap_end])
+
+          return pruned
+
+
+      def visualize_constraint(
+          constraint_path: Path,
+          output_path: Path,
+          max_depth: int,
+          file_format: str,
+          rankdir: str,
+          splines: str,
+          output_mode: str,
+          max_edges_per_node: Optional[int] = None,
+          selected_roots: Optional[List[int]] = None,
+          llm_token_range: Optional[Tuple[int, int]] = None,
+          state_bv_range: Optional[Tuple[int, int]] = None,
+      ):
+          """
+          Loads a constraint file, generates Graphviz DOT source, and handles output.
+          """
+          print(f"Loading constraint file: {constraint_path}", file=sys.stderr)
+          try:
+              if constraint_path.suffix == ".gz":
+                  with gzip.open(constraint_path, "rt", encoding="utf-8") as f:
+                      data = json.load(f)
+              else:
+                  with open(constraint_path, "r", encoding="utf-8") as f:
+                      data = json.load(f)
+          except Exception as e:
+              print(f"Error loading or parsing JSON file: {e}", file=sys.stderr)
+              return
+
+          trie_data = data.get("trie3_god", {})
+          values_list = trie_data.get("values", [])
+          if not values_list:
+              print("Error: No 'trie3_god.values' found in the constraint file.", file=sys.stderr)
+              return
+
+          values_dict: Dict[int, Dict[str, Any]] = {int(k): v for k, v in values_list}
+          print(f"Loaded {len(values_dict)} nodes from trie.", file=sys.stderr)
+
+          # Identify root and end nodes
+          roots_map = data.get("precomputed3", [])
+          all_root_ids: Set[int] = {int(r) for _s, r in roots_map}
+          end_ids: Set[int] = {
+              nid for nid, node in values_dict.items()
+              if not node.get("children")  # A node with no children is an end node
+          }
+          print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.", file=sys.stderr)
+
+          # --- Build DOT source manually ---
+          dot_lines = ['digraph GrammarConstraintTrie {']
+          
+          # Graph attributes
+          graph_attrs = [
+              f'rankdir="{rankdir}"',
+              f'splines="{splines}"',
+              'nodesep="0.6"',
+              'ranksep="1.2"',
+              f'label="{constraint_path.name}\\n(max_depth={max_depth})"',
+              'labelloc="t"',
+              'fontsize="20"',
+          ]
+          dot_lines.append(f"  graph [{', '.join(graph_attrs)}];")
+          dot_lines.append('  node [shape="box", style="rounded,filled", fontname="Helvetica"];')
+          dot_lines.append('  edge [fontname="Helvetica", fontsize="10"];')
+
+          # BFS traversal to build the graph
+          q = collections.deque()
+          seen_nodes: Set[int] = set()
+          seen_edges: Set[str] = set()
+
+          start_roots = selected_roots if selected_roots is not None else sorted(list(all_root_ids))
+          if selected_roots is not None:
+              print(f"Displaying selected roots: {start_roots}", file=sys.stderr)
+
+          for root_id in start_roots:
+              if root_id in values_dict and root_id not in seen_nodes:
+                  q.append((root_id, 0))
+                  seen_nodes.add(root_id)
+
+          print("Traversing graph to build visualization...", file=sys.stderr)
+          pbar = tqdm(total=len(q), desc="Nodes processed")
+
+          while q:
+              node_id, depth = q.popleft()
+              pbar.update(1)
+
+              # Determine node style
+              is_root = node_id in all_root_ids
+              is_end = node_id in end_ids
+              label = f"Node {node_id}"
+              fillcolor = 'lightblue'
+              shape = 'box'
+
+              if is_root and is_end:
+                  fillcolor, shape, label = 'gold', 'doubleoctagon', f"Root & End {node_id}"
+              elif is_root:
+                  fillcolor, label = 'lightgreen', f"Root {node_id}"
+              elif is_end:
+                  fillcolor, shape, label = 'lightpink', 'doubleoctagon', f"End {node_id}"
+
+              dot_lines.append(f'  "{node_id}" [label={json.dumps(label)}, fillcolor="{fillcolor}", shape="{shape}"];')
+
+              if max_depth is not None and depth >= max_depth:
+                  # Add a special node to indicate truncation
+                  trunc_node_id = f"trunc_{node_id}"
+                  dot_lines.append(f'  "{trunc_node_id}" [label="...", shape="plaintext"];')
+                  dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dashed", arrowhead="none"];')
+                  continue
+
+              node_data = values_dict.get(node_id)
+              if not node_data:
+                  continue
+
+              # Process edges
+              # Collect all potential outgoing edges from this node
+              all_edges = []
+              for child_group in node_data.get("children", []):
+                  (pop, llm_bv_json), dests = child_group
+                  for dest_id_int, state_bv_json in dests:
+                      all_edges.append({
+                          'pop': pop,
+                          'llm_bv_json': llm_bv_json,
+                          'dest_id': int(dest_id_int),
+                          'state_bv_json': state_bv_json,
+                      })
+
+              # First, filter edges based on token/state ranges
+              filtered_edges = []
+              for edge in all_edges:
+                  pruned_llm_bv = prune_ranges(edge['llm_bv_json'], llm_token_range)
+                  pruned_state_bv = prune_ranges(edge['state_bv_json'], state_bv_range)
+
+                  if pruned_llm_bv and pruned_state_bv:
+                      # Store the original and pruned BVs for processing
+                      filtered_edge_info = edge.copy()
+                      filtered_edge_info['pruned_llm_bv'] = pruned_llm_bv
+                      filtered_edge_info['pruned_state_bv'] = pruned_state_bv
+                      filtered_edges.append(filtered_edge_info)
+
+              # Now, apply max_edges_per_node limit to the filtered list
+              edges_to_process = filtered_edges
+              truncated_edges = False
+              if max_edges_per_node is not None and len(filtered_edges) > max_edges_per_node:
+                  # Sort by pop value (ascending) to keep the lowest ones
+                  filtered_edges.sort(key=lambda e: e['pop'])
+                  edges_to_process = filtered_edges[:max_edges_per_node]
+                  truncated_edges = True
+
+              # Process edges (the filtered and potentially truncated list)
+              for edge_info in edges_to_process:
+                  pop = edge_info['pop']
+                  dest_id = edge_info['dest_id']
+                  
+                  # Use the pre-pruned BVs for display
+                  pruned_llm_bv = edge_info['pruned_llm_bv']
+                  pruned_state_bv = edge_info['pruned_state_bv']
+
+                  # Use original BVs for a unique edge key
+                  llm_bv_json = edge_info['llm_bv_json']
+                  state_bv_json = edge_info['state_bv_json']
+                  edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
+                  if edge_key in seen_edges:
+                      continue
+                  seen_edges.add(edge_key)
+
+                  llm_summary = format_ranges(pruned_llm_bv)
+                  state_summary = format_ranges(pruned_state_bv)
+                  edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
+                  dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
+
+                  if dest_id in values_dict and dest_id not in seen_nodes:
+                      q.append((dest_id, depth + 1))
+                      seen_nodes.add(dest_id)
+                      pbar.total = len(seen_nodes) + len(q)
+              
+              if truncated_edges:
+                  # Add a truncation indicator node for edges
+                  trunc_node_id = f"trunc_edges_{node_id}"
+                  num_omitted = len(filtered_edges) - len(edges_to_process)
+                  dot_lines.append(f'  "{trunc_node_id}" [label="... ({num_omitted} more edges)", shape="plaintext"];')
+                  dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dotted", arrowhead="none"];')
+          
+          pbar.close()
+          dot_lines.append('}')
+          dot_source = "\n".join(dot_lines)
+
+          # --- Handle output ---
+          if output_mode == 'clipboard':
+              try:
+                  import pyperclip
+                  pyperclip.copy(dot_source)
+                  print("DOT source copied to clipboard.", file=sys.stderr)
+              except ImportError:
+                  print(
+                      "Error: 'pyperclip' package not found. Cannot copy to clipboard.\n"
+                      "Please install it by running: pip install pyperclip",
+                      file=sys.stderr
+                  )
+                  print("\n--- DOT Source Fallback ---\n", file=sys.stderr)
+                  print(dot_source)
+          elif output_mode == 'source':
+              if output_path:
+                  output_path.write_text(dot_source, encoding='utf-8')
+                  print(f"DOT source saved to {output_path}", file=sys.stderr)
+              else:
+                  print(dot_source)
+          elif output_mode == 'render':
+              if not output_path:
+                  print("Error: Output path is required for rendering.", file=sys.stderr)
+                  return
+
+              print(f"\nRendering graph to {output_path} (format: {file_format})...", file=sys.stderr)
+              tmp_dot_path = None
+              try:
+                  with tempfile.NamedTemporaryFile(mode='w', suffix='.dot', delete=False, encoding='utf-8') as f:
+                      f.write(dot_source)
+                      tmp_dot_path = f.name
+                  
+                  cmd = ['dot', f'-T{file_format}', '-o', str(output_path), tmp_dot_path]
+                  result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+                  
+                  if result.returncode != 0:
+                      print(f"An error occurred during rendering with 'dot':", file=sys.stderr)
+                      print(result.stderr, file=sys.stderr)
+                  else:
+                      print("Visualization saved successfully.", file=sys.stderr)
+
+              except FileNotFoundError:
+                  print(
+                      "\nError: Graphviz 'dot' command not found.",
+                      "Please install Graphviz on your system.",
+                      "  - On macOS (using Homebrew): brew install graphviz",
+                      "  - On Ubuntu/Debian: sudo apt-get install graphviz",
+                      "  - For other systems, see: https://graphviz.org/download/",
+                      file=sys.stderr
+                  )
+              finally:
+                  if tmp_dot_path:
+                      Path(tmp_dot_path).unlink()
+
+
+      def main():
+          """
+          Command-line interface for the visualization script.
+          """
+          parser = argparse.ArgumentParser(
+              description="Visualize a grammar constraint trie using Graphviz.",
+              formatter_class=argparse.RawTextHelpFormatter,
+              epilog=(
+                  "Example:\n"
+                  "  python %(prog)s --constraint-file path/to/constraint.json.gz "
+                  "--output graph.png --max-depth 5"
+              )
+          )
+          parser.add_argument(
+              "-f", "--constraint-file",
+              type=Path,
+              required=True,
+              help="Path to the pre-compiled .json.gz or .json grammar constraint file."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              default=None,
+              help="Output file path. For render mode, format is determined by extension. "
+                   "For source mode, content is DOT source. Not used with --clipboard."
+          )
+          parser.add_argument(
+              "-d", "--max-depth",
+              type=int,
+              default=5,
+              help="Maximum depth to traverse from root nodes. (default: 5)"
+          )
+          parser.add_argument(
+              "--format",
+              type=str,
+              default='png',
+              choices=['png', 'svg', 'pdf', 'dot'],
+              help="Output file format for rendering. (default: png)"
+          )
+          parser.add_argument(
+              "--rankdir",
+              type=str,
+              default='TB',
+              choices=['TB', 'LR'],
+              help="Direction of graph layout (Top-to-Bottom or Left-to-Right). (default: TB)"
+          )
+          parser.add_argument(
+              "--roots",
+              type=str,
+              default=None,
+              help="Comma-separated list of root node IDs to display. If not set, all roots are shown."
+          )
+          parser.add_argument(
+              "--splines",
+              type=str,
+              default='curved',
+              choices=['curved', 'line', 'ortho', 'polyline', 'spline'],
+              help="Graphviz spline type for edge routing. 'curved' is more stable. (default: curved)"
+          )
+          parser.add_argument(
+              "--source-only",
+              action='store_true',
+              help="Output the DOT source code to stdout or the --output file instead of rendering an image."
+          )
+          parser.add_argument(
+              "--clipboard",
+                  action='store_true',
+                  help="Copy the DOT source code to the clipboard. Requires 'pyperclip'."
+              )
+          parser.add_argument(
+              "--max-edges-per-node",
+              type=int,
+              default=None,
+              help="Maximum number of edges to draw from a single node. Keeps lowest-pop edges. (default: no limit)"
+          )
+          parser.add_argument(
+              "--llm-token-range",
+              type=str,
+              default=None,
+              help="Only show LLM tokens in this range. Format: 'min,max'. Example: '0,1000'."
+          )
+          parser.add_argument(
+              "--state-bv-range",
+              type=str,
+              default=None,
+              help="Only show state bitvector values in this range. Format: 'min,max'. Example: '0,50'."
+          )
+          args = parser.parse_args()
+
+          if not args.constraint_file.exists():
+              parser.error(f"Constraint file not found: {args.constraint_file}")
+
+          llm_token_range = None
+          if args.llm_token_range:
+              try:
+                  min_val, max_val = map(int, args.llm_token_range.split(','))
+                  if min_val > max_val:
+                      parser.error(f"Invalid range for --llm-token-range: min ({min_val}) cannot be greater than max ({max_val}).")
+                  llm_token_range = (min_val, max_val)
+              except (ValueError, TypeError):
+                  parser.error(f"Invalid format for --llm-token-range. Expected 'min,max', got '{args.llm_token_range}'.")
+
+          state_bv_range = None
+          if args.state_bv_range:
+              try:
+                  min_val, max_val = map(int, args.state_bv_range.split(','))
+                  if min_val > max_val:
+                      parser.error(f"Invalid range for --state-bv-range: min ({min_val}) cannot be greater than max ({max_val}).")
+                  state_bv_range = (min_val, max_val)
+              except (ValueError, TypeError):
+                  parser.error(f"Invalid format for --state-bv-range. Expected 'min,max', got '{args.state_bv_range}'.")
+
+          output_mode = 'render'
+          if args.clipboard:
+              output_mode = 'clipboard'
+          elif args.source_only:
+              output_mode = 'source'
+
+          selected_roots = None
+          if args.roots:
+              try:
+                  selected_roots = [int(r.strip()) for r in args.roots.split(',')]
+              except ValueError:
+                  parser.error("Invalid value for --roots. Must be a comma-separated list of integers.")
+
+          output_path = args.output
+          if output_mode == 'render':
+              if output_path is None:
+                  base_name = args.constraint_file.name.replace('.json.gz', '').replace('.json', '')
+                  output_path = Path(f"{base_name}.{args.format}")
+              output_path.parent.mkdir(parents=True, exist_ok=True)
+          elif output_mode == 'source' and output_path:
+              output_path.parent.mkdir(parents=True, exist_ok=True)
+
+          visualize_constraint(
+              constraint_path=args.constraint_file,
+              output_path=output_path,
+              max_depth=args.max_depth,
+              file_format=args.format,
+                  rankdir=args.rankdir,
+                  splines=args.splines,
+                  output_mode=output_mode,
+                  max_edges_per_node=args.max_edges_per_node,
+                  selected_roots=selected_roots,
+                  llm_token_range=llm_token_range,
+                  state_bv_range=state_bv_range,
               )
 
 
@@ -1289,9 +1435,7 @@ messages:
       ```
     metadata:
       filename: python/aug25/visualize_constraint.py
-  - user: Allow for specifying that we only care about LLM tokens within a given range,
-      and state bvs within a given range. Prune edge llm and state bvs accordingly,
-      and prune edges where either of those after pruning is empty.
+  - user: For some reason edge labels aren't actually on edges. Fix it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1311,439 +1455,54 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to add filtering for LLM token and state bitvector ranges, followed by the corresponding git diff.
+      Of course. The issue with edge labels not appearing correctly is often due to how Graphviz places labels on the edge paths, especially with curved or short edges. Using an "external label" (`xlabel`) positions the label near the edge instead of directly on it, which greatly improves visibility. Additionally, ensuring the label string is correctly formatted and escaped will prevent parsing errors.
+
+      Here are the step-by-step instructions to fix the issue, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **File: `python/aug25/visualize_constraint.py`**
+      1.  **Open the file `python/aug25/visualize_constraint.py`.**
 
-          a.  **Import `Tuple`:** At the top of the file, modify the import from `typing` to include `Tuple`.
-              ```python
-              from typing import Dict, Any, List, Set, Optional, Tuple
-              ```
+      2.  **Navigate to the `visualize_constraint` function.** Inside this function, find the loop where edges are processed, which starts with `for edge_info in edges_to_process:`.
 
-          b.  **Add `prune_ranges` helper function:** After the `format_ranges` function, add the following new function to handle range pruning:
-              ```python
-              def prune_ranges(ranges: List[List[int]], filter_range: Optional[Tuple[int, int]]) -> List[List[int]]:
-                  """Prunes a list of [start, end] ranges to only include parts within the filter_range."""
-                  if not filter_range:
-                      return ranges
-              
-                  min_val, max_val = filter_range
-                  pruned = []
-                  for start, end in ranges:
-                      # Find the intersection of [start, end] and [min_val, max_val]
-                      overlap_start = max(start, min_val)
-                      overlap_end = min(end, max_val)
-              
-                      if overlap_start <= overlap_end:
-                          pruned.append([overlap_start, overlap_end])
-              
-                  return pruned
-              ```
+      3.  **Locate and modify the edge label generation.** Around lines 261-262, you will find the following code:
 
-          c.  **Update `visualize_constraint` signature:** Modify the function definition to accept the new range arguments.
-              Change the signature from:
-              ```python
-              def visualize_constraint(
-                  constraint_path: Path,
-                  output_path: Path,
-                  max_depth: int,
-                  file_format: str,
-                  rankdir: str,
-                  splines: str,
-                  output_mode: str,
-                  max_edges_per_node: Optional[int] = None,
-                  selected_roots: Optional[List[int]] = None,
-              ):
-              ```
-              To:
-              ```python
-              def visualize_constraint(
-                  constraint_path: Path,
-                  output_path: Path,
-                  max_depth: int,
-                  file_format: str,
-                  rankdir: str,
-                  splines: str,
-                  output_mode: str,
-                  max_edges_per_node: Optional[int] = None,
-                  selected_roots: Optional[List[int]] = None,
-                  llm_token_range: Optional[Tuple[int, int]] = None,
-                  state_bv_range: Optional[Tuple[int, int]] = None,
-              ):
-              ```
-
-          d.  **Apply filtering logic:** Inside the `visualize_constraint` function, within the `for edge_info in edges_to_process:` loop, insert the pruning logic.
-              Replace this block:
-              ```python
-              for edge_info in edges_to_process:
-                  pop = edge_info['pop']
-                  llm_bv_json = edge_info['llm_bv_json']
-                  dest_id = edge_info['dest_id']
-                  state_bv_json = edge_info['state_bv_json']
-                  
-                  edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
-                  if edge_key in seen_edges:
-                      continue
-                  seen_edges.add(edge_key)
-
-                  llm_summary = format_ranges(llm_bv_json)
-                  state_summary = format_ranges(state_bv_json)
+          ```python
                   edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
                   dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
-              ```
-              With this updated version that prunes and filters edges:
-              ```python
-              for edge_info in edges_to_process:
-                  pop = edge_info['pop']
-                  llm_bv_json = edge_info['llm_bv_json']
-                  dest_id = edge_info['dest_id']
-                  state_bv_json = edge_info['state_bv_json']
-                  
-                  # Prune BVs based on specified ranges
-                  pruned_llm_bv = prune_ranges(llm_bv_json, llm_token_range)
-                  pruned_state_bv = prune_ranges(state_bv_json, state_bv_range)
+          ```
 
-                  # Skip edges where either BV becomes empty after pruning
-                  if not pruned_llm_bv or not pruned_state_bv:
-                      continue
+      4.  **Replace those two lines** with the corrected version below:
 
-                  edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
-                  if edge_key in seen_edges:
-                      continue
-                  seen_edges.add(edge_key)
+          ```python
+                  edge_label = f"pop={pop}\nLLM: {llm_summary}\nStates: {state_summary}"
+                  dot_lines.append(f'  "{node_id}" -> "{dest_id}" [xlabel={json.dumps(edge_label)}];')
+          ```
 
-                  llm_summary = format_ranges(pruned_llm_bv)
-                  state_summary = format_ranges(pruned_state_bv)
-                  edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
-                  dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
-              ```
-
-          e.  **Add new command-line arguments in `main`:** In the `main` function, add the arguments for token and state ranges. After the `--max-edges-per-node` argument, add:
-              ```python
-              parser.add_argument(
-                  "--llm-token-range",
-                  type=str,
-                  default=None,
-                  help="Only show LLM tokens in this range. Format: 'min,max'. Example: '0,1000'."
-              )
-              parser.add_argument(
-                  "--state-bv-range",
-                  type=str,
-                  default=None,
-                  help="Only show state bitvector values in this range. Format: 'min,max'. Example: '0,50'."
-              )
-              ```
-
-          f.  **Parse new arguments in `main`:** After the `args = parser.parse_args()` line and before the `if not args.constraint_file.exists():` line, add the following logic to parse the new range arguments:
-              ```python
-              llm_token_range = None
-              if args.llm_token_range:
-                  try:
-                      min_val, max_val = map(int, args.llm_token_range.split(','))
-                      if min_val > max_val:
-                          parser.error(f"Invalid range for --llm-token-range: min ({min_val}) cannot be greater than max ({max_val}).")
-                      llm_token_range = (min_val, max_val)
-                  except (ValueError, TypeError):
-                      parser.error(f"Invalid format for --llm-token-range. Expected 'min,max', got '{args.llm_token_range}'.")
-          
-              state_bv_range = None
-              if args.state_bv_range:
-                  try:
-                      min_val, max_val = map(int, args.state_bv_range.split(','))
-                      if min_val > max_val:
-                          parser.error(f"Invalid range for --state-bv-range: min ({min_val}) cannot be greater than max ({max_val}).")
-                      state_bv_range = (min_val, max_val)
-                  except (ValueError, TypeError):
-                      parser.error(f"Invalid format for --state-bv-range. Expected 'min,max', got '{args.state_bv_range}'.")
-              ```
-
-          g.  **Update `visualize_constraint` call in `main`:** Pass the new parsed ranges to the function at the end of `main`.
-              Change the call to:
-              ```python
-              visualize_constraint(
-                  constraint_path=args.constraint_file,
-                  output_path=output_path,
-                  max_depth=args.max_depth,
-                  file_format=args.format,
-                  rankdir=args.rankdir,
-                  splines=args.splines,
-                  output_mode=output_mode,
-                  max_edges_per_node=args.max_edges_per_node,
-                  selected_roots=selected_roots,
-                  llm_token_range=llm_token_range,
-                  state_bv_range=state_bv_range,
-              )
-              ```
+          These changes accomplish two things:
+          *   They switch from `label` to `xlabel` to ensure the label is placed accessibly next to the edge.
+          *   They use `json.dumps()` to safely quote and escape the label content, which is a more robust method and consistent with how node labels are handled in the script. The `edge_label` string is also updated to use `\n` for newlines, as `json.dumps` will handle the necessary escaping.
 
       ### Git Diff
 
+      Here is the git diff to apply the changes automatically.
+
       ```diff
+      diff --git a/python/aug25/visualize_constraint.py b/python/aug25/visualize_constraint.py
       --- a/python/aug25/visualize_constraint.py
       +++ b/python/aug25/visualize_constraint.py
-      @@ -13,7 +13,7 @@
-       import json
-       import sys
-       from pathlib import Path
-      -from typing import Dict, Any, List, Set, Optional
-      +from typing import Dict, Any, List, Set, Optional, Tuple
-       import subprocess
-       import tempfile
-       
-      @@ -38,6 +38,25 @@
-               return result[:max_len - 3] + "..."
-           return result
-       
-      +
-      +def prune_ranges(ranges: List[List[int]], filter_range: Optional[Tuple[int, int]]) -> List[List[int]]:
-      +    """Prunes a list of [start, end] ranges to only include parts within the filter_range."""
-      +    if not filter_range:
-      +        return ranges
-      +
-      +    min_val, max_val = filter_range
-      +    pruned = []
-      +    for start, end in ranges:
-      +        # Find the intersection of [start, end] and [min_val, max_val]
-      +        overlap_start = max(start, min_val)
-      +        overlap_end = min(end, max_val)
-      +
-      +        if overlap_start <= overlap_end:
-      +            pruned.append([overlap_start, overlap_end])
-      +
-      +    return pruned
-      +
-       
-       def visualize_constraint(
-           constraint_path: Path,
-      @@ -49,6 +68,8 @@
-           output_mode: str,
-           max_edges_per_node: Optional[int] = None,
-           selected_roots: Optional[List[int]] = None,
-      +    llm_token_range: Optional[Tuple[int, int]] = None,
-      +    state_bv_range: Optional[Tuple[int, int]] = None,
-       ):
-           """
-           Loads a constraint file, generates Graphviz DOT source, and handles output.
-      @@ -163,16 +184,25 @@
-                   dest_id = edge_info['dest_id']
-                   state_bv_json = edge_info['state_bv_json']
-                   
-      +            # Prune BVs based on specified ranges
-      +            pruned_llm_bv = prune_ranges(llm_bv_json, llm_token_range)
-      +            pruned_state_bv = prune_ranges(state_bv_json, state_bv_range)
-      +
-      +            # Skip edges where either BV becomes empty after pruning
-      +            if not pruned_llm_bv or not pruned_state_bv:
-      +                continue
-      +
-                   edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
-                   if edge_key in seen_edges:
-                       continue
+      @@ -258,9 +258,8 @@
                    seen_edges.add(edge_key)
        
-      -            llm_summary = format_ranges(llm_bv_json)
-      -            state_summary = format_ranges(state_bv_json)
-      +            llm_summary = format_ranges(pruned_llm_bv)
-      +            state_summary = format_ranges(pruned_state_bv)
-                   edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
-                   dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
+                   llm_summary = format_ranges(pruned_llm_bv)
+                   state_summary = format_ranges(pruned_state_bv)
+      -            edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
+      -            dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
+      +            edge_label = f"pop={pop}\nLLM: {llm_summary}\nStates: {state_summary}"
+      +            dot_lines.append(f'  "{node_id}" -> "{dest_id}" [xlabel={json.dumps(edge_label)}];')
        
                    if dest_id in values_dict and dest_id not in seen_nodes:
                        q.append((dest_id, depth + 1))
-                       seen_nodes.add(dest_id)
-                       pbar.total = len(seen_nodes) + len(q)
-               
-               if truncated_edges:
-                   # Add a truncation indicator node for edges
-                   trunc_node_id = f"trunc_edges_{node_id}"
-                   num_omitted = len(all_edges) - len(edges_to_process)
-                   dot_lines.append(f'  "{trunc_node_id}" [label="... ({num_omitted} more edges)", shape="plaintext"];')
-                   dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dotted", arrowhead="none"];')
-           
-           pbar.close()
-           dot_lines.append('}')
-           dot_source = "\n".join(dot_lines)
-       
-           # --- Handle output ---
-           if output_mode == 'clipboard':
-               try:
-                   import pyperclip
-                   pyperclip.copy(dot_source)
-                   print("DOT source copied to clipboard.", file=sys.stderr)
-               except ImportError:
-                   print(
-                       "Error: 'pyperclip' package not found. Cannot copy to clipboard.\n"
-                       "Please install it by running: pip install pyperclip",
-                       file=sys.stderr
-                   )
-                   print("\n--- DOT Source Fallback ---\n", file=sys.stderr)
-                   print(dot_source)
-           elif output_mode == 'source':
-               if output_path:
-                   output_path.write_text(dot_source, encoding='utf-8')
-                   print(f"DOT source saved to {output_path}", file=sys.stderr)
-               else:
-                   print(dot_source)
-           elif output_mode == 'render':
-               if not output_path:
-                   print("Error: Output path is required for rendering.", file=sys.stderr)
-                   return
-       
-               print(f"\nRendering graph to {output_path} (format: {file_format})...", file=sys.stderr)
-               tmp_dot_path = None
-               try:
-                   with tempfile.NamedTemporaryFile(mode='w', suffix='.dot', delete=False, encoding='utf-8') as f:
-                       f.write(dot_source)
-                       tmp_dot_path = f.name
-                   
-                   cmd = ['dot', f'-T{file_format}', '-o', str(output_path), tmp_dot_path]
-                   result = subprocess.run(cmd, check=False, capture_output=True, text=True)
-                   
-                   if result.returncode != 0:
-                       print(f"An error occurred during rendering with 'dot':", file=sys.stderr)
-                       print(result.stderr, file=sys.stderr)
-                   else:
-                       print("Visualization saved successfully.", file=sys.stderr)
-       
-               except FileNotFoundError:
-                   print(
-                       "\nError: Graphviz 'dot' command not found.",
-                       "Please install Graphviz on your system.",
-                       "  - On macOS (using Homebrew): brew install graphviz",
-                       "  - On Ubuntu/Debian: sudo apt-get install graphviz",
-                       "  - For other systems, see: https://graphviz.org/download/",
-                       file=sys.stderr
-                   )
-               finally:
-                   if tmp_dot_path:
-                       Path(tmp_dot_path).unlink()
-       
-       
-       def main():
-           """
-           Command-line interface for the visualization script.
-           """
-           parser = argparse.ArgumentParser(
-               description="Visualize a grammar constraint trie using Graphviz.",
-               formatter_class=argparse.RawTextHelpFormatter,
-               epilog=(
-                   "Example:\n"
-                   "  python %(prog)s --constraint-file path/to/constraint.json.gz "
-                   "--output graph.png --max-depth 5"
-               )
-           )
-           parser.add_argument(
-               "-f", "--constraint-file",
-               type=Path,
-               required=True,
-               help="Path to the pre-compiled .json.gz or .json grammar constraint file."
-           )
-           parser.add_argument(
-               "-o", "--output",
-               type=Path,
-               default=None,
-               help="Output file path. For render mode, format is determined by extension. "
-                    "For source mode, content is DOT source. Not used with --clipboard."
-           )
-           parser.add_argument(
-               "-d", "--max-depth",
-               type=int,
-               default=5,
-               help="Maximum depth to traverse from root nodes. (default: 5)"
-           )
-           parser.add_argument(
-               "--format",
-               type=str,
-               default='png',
-               choices=['png', 'svg', 'pdf', 'dot'],
-               help="Output file format for rendering. (default: png)"
-           )
-           parser.add_argument(
-               "--rankdir",
-               type=str,
-               default='TB',
-               choices=['TB', 'LR'],
-               help="Direction of graph layout (Top-to-Bottom or Left-to-Right). (default: TB)"
-           )
-           parser.add_argument(
-               "--roots",
-               type=str,
-               default=None,
-               help="Comma-separated list of root node IDs to display. If not set, all roots are shown."
-           )
-           parser.add_argument(
-               "--splines",
-               type=str,
-               default='curved',
-               choices=['curved', 'line', 'ortho', 'polyline', 'spline'],
-               help="Graphviz spline type for edge routing. 'curved' is more stable. (default: curved)"
-           )
-           parser.add_argument(
-               "--source-only",
-               action='store_true',
-               help="Output the DOT source code to stdout or the --output file instead of rendering an image."
-           )
-           parser.add_argument(
-               "--clipboard",
-                   action='store_true',
-                   help="Copy the DOT source code to the clipboard. Requires 'pyperclip'."
-               )
-           parser.add_argument(
-               "--max-edges-per-node",
-               type=int,
-               default=None,
-               help="Maximum number of edges to draw from a single node. Keeps lowest-pop edges. (default: no limit)"
-           )
-      +    parser.add_argument(
-      +        "--llm-token-range",
-      +        type=str,
-      +        default=None,
-      +        help="Only show LLM tokens in this range. Format: 'min,max'. Example: '0,1000'."
-      +    )
-      +    parser.add_argument(
-      +        "--state-bv-range",
-      +        type=str,
-      +        default=None,
-      +        help="Only show state bitvector values in this range. Format: 'min,max'. Example: '0,50'."
-      +    )
-           args = parser.parse_args()
-       
-           if not args.constraint_file.exists():
-               parser.error(f"Constraint file not found: {args.constraint_file}")
-       
-      +    llm_token_range = None
-      +    if args.llm_token_range:
-      +        try:
-      +            min_val, max_val = map(int, args.llm_token_range.split(','))
-      +            if min_val > max_val:
-      +                parser.error(f"Invalid range for --llm-token-range: min ({min_val}) cannot be greater than max ({max_val}).")
-      +            llm_token_range = (min_val, max_val)
-      +        except (ValueError, TypeError):
-      +            parser.error(f"Invalid format for --llm-token-range. Expected 'min,max', got '{args.llm_token_range}'.")
-      +
-      +    state_bv_range = None
-      +    if args.state_bv_range:
-      +        try:
-      +            min_val, max_val = map(int, args.state_bv_range.split(','))
-      +            if min_val > max_val:
-      +                parser.error(f"Invalid range for --state-bv-range: min ({min_val}) cannot be greater than max ({max_val}).")
-      +            state_bv_range = (min_val, max_val)
-      +        except (ValueError, TypeError):
-      +            parser.error(f"Invalid format for --state-bv-range. Expected 'min,max', got '{args.state_bv_range}'.")
-      +
-           output_mode = 'render'
-           if args.clipboard:
-               output_mode = 'clipboard'
-      @@ -414,6 +466,8 @@
-                   output_mode=output_mode,
-                   max_edges_per_node=args.max_edges_per_node,
-                   selected_roots=selected_roots,
-      +            llm_token_range=llm_token_range,
-      +            state_bv_range=state_bv_range,
-               )
-       
-       
 
       ```
     metadata:
@@ -1756,327 +1515,7 @@ messages:
       Applying patch to 'python/aug25/visualize_constraint.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/visualize_constraint.py.
     metadata:
-  - user: 'Changes committed with message: "Feature: Add optional range filtering
-      for LLM token and state bitvectors in constraint visualization"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/visualize_constraint.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |
-      It seems maybe --max-edges-per-node is being applied before filtering state bv/llm? IDK. But it's behaving weird.
-    metadata:
-  - assistant: |-
-      You've correctly identified a subtle but important logical error. The `--max-edges-per-node` limit was indeed being applied *before* the LLM token and state bitvector filtering, which could lead to confusing output where fewer edges than the limit are shown, even if other valid edges were available.
-
-      The fix is to re-order these operations: first, we'll filter the edges based on your range criteria, and *then* we'll apply the `max-edges-per-node` limit to the already-filtered set.
-
-      Here are the steps to correct this.
-
-      ### Step-by-step Instructions
-
-      1.  **File: `python/aug25/visualize_constraint.py`**
-
-          a.  **Refactor Edge Processing Logic:** In the `visualize_constraint` function, locate the entire block of code responsible for processing edges for a given node. This section starts with the comment `# Process edges` (around line 138) and ends with the `if truncated_edges:` block (around line 197).
-
-          b.  **Replace the entire block** with the following corrected logic. This new code filters the edges first and then applies the truncation limit.
-
-              ```python
-                      # Process edges
-                      # Collect all potential outgoing edges from this node
-                      all_edges = []
-                      for child_group in node_data.get("children", []):
-                          (pop, llm_bv_json), dests = child_group
-                          for dest_id_int, state_bv_json in dests:
-                              all_edges.append({
-                                  'pop': pop,
-                                  'llm_bv_json': llm_bv_json,
-                                  'dest_id': int(dest_id_int),
-                                  'state_bv_json': state_bv_json,
-                              })
-              
-                      # First, filter edges based on token/state ranges
-                      filtered_edges = []
-                      for edge in all_edges:
-                          pruned_llm_bv = prune_ranges(edge['llm_bv_json'], llm_token_range)
-                          pruned_state_bv = prune_ranges(edge['state_bv_json'], state_bv_range)
-              
-                          if pruned_llm_bv and pruned_state_bv:
-                              # Store the original and pruned BVs for processing
-                              filtered_edge_info = edge.copy()
-                              filtered_edge_info['pruned_llm_bv'] = pruned_llm_bv
-                              filtered_edge_info['pruned_state_bv'] = pruned_state_bv
-                              filtered_edges.append(filtered_edge_info)
-              
-                      # Now, apply max_edges_per_node limit to the filtered list
-                      edges_to_process = filtered_edges
-                      truncated_edges = False
-                      if max_edges_per_node is not None and len(filtered_edges) > max_edges_per_node:
-                          # Sort by pop value (ascending) to keep the lowest ones
-                          filtered_edges.sort(key=lambda e: e['pop'])
-                          edges_to_process = filtered_edges[:max_edges_per_node]
-                          truncated_edges = True
-              
-                      # Process edges (the filtered and potentially truncated list)
-                      for edge_info in edges_to_process:
-                          pop = edge_info['pop']
-                          dest_id = edge_info['dest_id']
-                          
-                          # Use the pre-pruned BVs for display
-                          pruned_llm_bv = edge_info['pruned_llm_bv']
-                          pruned_state_bv = edge_info['pruned_state_bv']
-              
-                          # Use original BVs for a unique edge key
-                          llm_bv_json = edge_info['llm_bv_json']
-                          state_bv_json = edge_info['state_bv_json']
-                          edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
-                          if edge_key in seen_edges:
-                              continue
-                          seen_edges.add(edge_key)
-              
-                          llm_summary = format_ranges(pruned_llm_bv)
-                          state_summary = format_ranges(pruned_state_bv)
-                          edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
-                          dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
-              
-                          if dest_id in values_dict and dest_id not in seen_nodes:
-                              q.append((dest_id, depth + 1))
-                              seen_nodes.add(dest_id)
-                              pbar.total = len(seen_nodes) + len(q)
-                      
-                      if truncated_edges:
-                          # Add a truncation indicator node for edges
-                          trunc_node_id = f"trunc_edges_{node_id}"
-                          num_omitted = len(filtered_edges) - len(edges_to_process)
-                          dot_lines.append(f'  "{trunc_node_id}" [label="... ({num_omitted} more edges)", shape="plaintext"];')
-                          dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dotted", arrowhead="none"];')
-              ```
-
-      ### Git Diff
-
-      Here is the git diff to apply the change.
-
-      ```diff
-      --- a/python/aug25/visualize_constraint.py
-      +++ b/python/aug25/visualize_constraint.py
-      @@ -138,59 +138,67 @@
-               if not node_data:
-                   continue
-       
-      -        # Process edges
-      -        # Collect all potential outgoing edges from this node
-      -        all_edges = []
-      -        for child_group in node_data.get("children", []):
-      -            (pop, llm_bv_json), dests = child_group
-      -            for dest_id_int, state_bv_json in dests:
-      -                all_edges.append({
-      -                    'pop': pop,
-      -                    'llm_bv_json': llm_bv_json,
-      -                    'dest_id': int(dest_id_int),
-      -                    'state_bv_json': state_bv_json,
-      -                })
-      -
-      -        edges_to_process = all_edges
-      -        truncated_edges = False
-      -        if max_edges_per_node is not None and len(all_edges) > max_edges_per_node:
-      -            # Sort by pop value (ascending) to keep the lowest ones
-      -            all_edges.sort(key=lambda e: e['pop'])
-      -            edges_to_process = all_edges[:max_edges_per_node]
-      -            truncated_edges = True
-      -
-      -        # Process edges (the potentially truncated list)
-      -        for edge_info in edges_to_process:
-      -            pop = edge_info['pop']
-      -            llm_bv_json = edge_info['llm_bv_json']
-      -            dest_id = edge_info['dest_id']
-      -            state_bv_json = edge_info['state_bv_json']
-      -            
-      -            # Prune BVs based on specified ranges
-      -            pruned_llm_bv = prune_ranges(llm_bv_json, llm_token_range)
-      -            pruned_state_bv = prune_ranges(state_bv_json, state_bv_range)
-      -
-      -            # Skip edges where either BV becomes empty after pruning
-      -            if not pruned_llm_bv or not pruned_state_bv:
-      -                continue
-      -
-      -            edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
-      -            if edge_key in seen_edges:
-      -                continue
-      -            seen_edges.add(edge_key)
-      -
-      -            llm_summary = format_ranges(pruned_llm_bv)
-      -            state_summary = format_ranges(pruned_state_bv)
-      -            edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
-      -            dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
-      -
-      -            if dest_id in values_dict and dest_id not in seen_nodes:
-      -                q.append((dest_id, depth + 1))
-      -                seen_nodes.add(dest_id)
-      -                pbar.total = len(seen_nodes) + len(q)
-      -        
-      -        if truncated_edges:
-      -            # Add a truncation indicator node for edges
-      -            trunc_node_id = f"trunc_edges_{node_id}"
-      -            num_omitted = len(all_edges) - len(edges_to_process)
-      -            dot_lines.append(f'  "{trunc_node_id}" [label="... ({num_omitted} more edges)", shape="plaintext"];')
-      -            dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dotted", arrowhead="none"];')
-      +        # Process edges
-      +        # Collect all potential outgoing edges from this node
-      +        all_edges = []
-      +        for child_group in node_data.get("children", []):
-      +            (pop, llm_bv_json), dests = child_group
-      +            for dest_id_int, state_bv_json in dests:
-      +                all_edges.append({
-      +                    'pop': pop,
-      +                    'llm_bv_json': llm_bv_json,
-      +                    'dest_id': int(dest_id_int),
-      +                    'state_bv_json': state_bv_json,
-      +                })
-      +
-      +        # First, filter edges based on token/state ranges
-      +        filtered_edges = []
-      +        for edge in all_edges:
-      +            pruned_llm_bv = prune_ranges(edge['llm_bv_json'], llm_token_range)
-      +            pruned_state_bv = prune_ranges(edge['state_bv_json'], state_bv_range)
-      +
-      +            if pruned_llm_bv and pruned_state_bv:
-      +                # Store the original and pruned BVs for processing
-      +                filtered_edge_info = edge.copy()
-      +                filtered_edge_info['pruned_llm_bv'] = pruned_llm_bv
-      +                filtered_edge_info['pruned_state_bv'] = pruned_state_bv
-      +                filtered_edges.append(filtered_edge_info)
-      +
-      +        # Now, apply max_edges_per_node limit to the filtered list
-      +        edges_to_process = filtered_edges
-      +        truncated_edges = False
-      +        if max_edges_per_node is not None and len(filtered_edges) > max_edges_per_node:
-      +            # Sort by pop value (ascending) to keep the lowest ones
-      +            filtered_edges.sort(key=lambda e: e['pop'])
-      +            edges_to_process = filtered_edges[:max_edges_per_node]
-      +            truncated_edges = True
-      +
-      +        # Process edges (the filtered and potentially truncated list)
-      +        for edge_info in edges_to_process:
-      +            pop = edge_info['pop']
-      +            dest_id = edge_info['dest_id']
-      +            
-      +            # Use the pre-pruned BVs for display
-      +            pruned_llm_bv = edge_info['pruned_llm_bv']
-      +            pruned_state_bv = edge_info['pruned_state_bv']
-      +
-      +            # Use original BVs for a unique edge key
-      +            llm_bv_json = edge_info['llm_bv_json']
-      +            state_bv_json = edge_info['state_bv_json']
-      +            edge_key = f"{node_id}->{dest_id}|{pop}|{json.dumps(llm_bv_json)}|{json.dumps(state_bv_json)}"
-      +            if edge_key in seen_edges:
-      +                continue
-      +            seen_edges.add(edge_key)
-      +
-      +            llm_summary = format_ranges(pruned_llm_bv)
-      +            state_summary = format_ranges(pruned_state_bv)
-      +            edge_label = f" pop={pop}\\nLLM: {llm_summary}\\nStates: {state_summary} "
-      +            dot_lines.append(f'  "{node_id}" -> "{dest_id}" [label="{edge_label}"];')
-      +
-      +            if dest_id in values_dict and dest_id not in seen_nodes:
-      +                q.append((dest_id, depth + 1))
-      +                seen_nodes.add(dest_id)
-      +                pbar.total = len(seen_nodes) + len(q)
-      +        
-      +        if truncated_edges:
-      +            # Add a truncation indicator node for edges
-      +            trunc_node_id = f"trunc_edges_{node_id}"
-      +            num_omitted = len(filtered_edges) - len(edges_to_process)
-      +            dot_lines.append(f'  "{trunc_node_id}" [label="... ({num_omitted} more edges)", shape="plaintext"];')
-      +            dot_lines.append(f'  "{node_id}" -> "{trunc_node_id}" [style="dotted", arrowhead="none"];')
-           
-           pbar.close()
-           dot_lines.append('}')
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/visualize_constraint.py
-      Applying patch to 'python/aug25/visualize_constraint.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/visualize_constraint.py.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Apply max-edges-per-node limit after
-      filtering by LLM/state ranges"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/visualize_constraint.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Are end nodes labelled properly?
-    metadata:
-  - assistant: |-
-      You've raised an excellent point. The current logic for identifying "end nodes" is too specific and likely incorrect for general use. It checks for a `clean_end` flag, which might not be present in all constraint files.
-
-      A more accurate and robust definition of an end node in this trie structure is a node that has no outgoing edges (i.e., no `children`). I will correct the logic to use this definition.
-
-      ### Step-by-step Instructions
-
-      1.  **File: `python/aug25/visualize_constraint.py`**
-
-          a.  **Locate the end node identification logic:** Find the section around line 80 where `end_ids` is defined.
-
-          b.  **Replace the definition:** Change the list comprehension from checking for the `clean_end` flag to checking if the `children` key is missing or empty.
-
-          Replace this:
-          ```python
-          end_ids: Set[int] = {
-              nid for nid, node in values_dict.items()
-              if node.get("value", {}).get("clean_end", False)
-          }
-          ```
-          With this corrected version:
-          ```python
-          end_ids: Set[int] = {
-              nid for nid, node in values_dict.items()
-              if not node.get("children")  # A node with no children is an end node
-          }
-          ```
-
-      This change will correctly identify any node that terminates a path in the trie as an "end node" and label it appropriately in the visualization.
-
-      ### Git Diff
-
-      Here is the corresponding git diff to apply the fix.
-
-      ```diff
-      --- a/python/aug25/visualize_constraint.py
-      +++ b/python/aug25/visualize_constraint.py
-      @@ -79,8 +79,8 @@
-           roots_map = data.get("precomputed3", [])
-           all_root_ids: Set[int] = {int(r) for _s, r in roots_map}
-           end_ids: Set[int] = {
-      -        nid for nid, node in values_dict.items()
-      -        if node.get("value", {}).get("clean_end", False)
-      +        nid for nid, node in values_dict.items()
-      +        if not node.get("children")  # A node with no children is an end node
-           }
-           print(f"Found {len(all_root_ids)} total root nodes and {len(end_ids)} end nodes.", file=sys.stderr)
-       
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/visualize_constraint.py
-      Applying patch to 'python/aug25/visualize_constraint.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/visualize_constraint.py.
-    metadata:
-  - user: "Changes committed with message: \"Fix: Identify end nodes by absence of
-      children instead of 'clean_end' flag\""
+  - user: 'Changes committed with message: "Fix: Use xlabel and json.dumps for visible
+      edge labels in constraint visualization"'
     metadata:
 ...
