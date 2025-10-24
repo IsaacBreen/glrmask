@@ -439,6 +439,12 @@ pub fn optimize_trie3_size(
             });
         }
 
+        // New: Collapse all END nodes early to maximize downstream sharing.
+        run_pass!("Canonicalizing END nodes (pre-merge)", {
+            canonicalize_end_nodes_trie3(roots, trie3_god);
+            });
+        }
+
         if config.merge_equivalent_llm_tokens {
             run_pass!("Merging equivalent LLM tokens", {
                 merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
@@ -1131,6 +1137,117 @@ fn detect_true_cycle_recursive_trie3_new(
     path.pop();
     states.insert(node_idx, VISITED);
     None
+}
+
+/// Rewire every destination in the graph to point to its class representative.
+/// This is the crucial step that actually collapses structurally equivalent nodes:
+/// once all edges point to representatives, non-representatives become unreachable
+/// (after roots are remapped) and can be GC'd.
+fn rewire_all_edges_to_representatives(
+    trie3_god: &Trie3GodWrapper,
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    node_to_rep: &HashMap<Trie2Index, Trie2Index>,
+) {
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    for n in &all_nodes {
+        let mut w = n.write(trie3_god).expect("write");
+        let old_children = std::mem::take(w.children_mut());
+        let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+        for (ek, dm) in old_children {
+            let mut new_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
+            for (dst, sids) in dm {
+                let rep_dst = *node_to_rep.get(&dst).unwrap_or(&dst);
+                new_dm.entry(rep_dst)
+                    .and_modify(|e| *e |= &sids)
+                    .or_insert(sids);
+            }
+            if !new_dm.is_empty() {
+                new_children.insert(ek, new_dm);
+            }
+        }
+        // Recompute live tokens as the union of outgoing LLM masks.
+        let mut new_live = LLMTokenBV::zeros();
+        for ((_, llm_bv), _) in &new_children {
+            new_live |= llm_bv;
+        }
+        w.value.live_tokens = new_live;
+        *w.children_mut() = new_children;
+    }
+}
+
+/// Canonicalize all END nodes to a single representative.
+/// - Picks the first reachable END node as canonical
+/// - Clears its children and sets live_tokens to 0
+/// - Rewrites every edge targeting any END node to target the canonical END
+/// - Remaps END roots to the canonical END
+/// - GC and recompute depths
+fn canonicalize_end_nodes_trie3(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+) {
+    crate::debug!(2, "Canonicalizing END nodes in Trie3...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    let mut end_nodes: Vec<PrecomputeNode3Index> = Vec::new();
+    for n in &all_nodes {
+        let r = n.read(trie3_god).expect("read");
+        if r.value.end {
+            end_nodes.push(*n);
+        }
+    }
+    if end_nodes.len() <= 1 {
+        crate::debug!(3, "END canonicalization skipped: {} END node(s).", end_nodes.len());
+        return;
+    }
+
+    let canonical = end_nodes[0];
+    // Ensure canonical is a clean terminal.
+    if let Some(mut w) = canonical.write(trie3_god) {
+        *w.children_mut() = BTreeMap::new();
+        w.value.live_tokens = LLMTokenBV::zeros();
+    }
+    let end_set: HashSet<PrecomputeNode3Index> = end_nodes.into_iter().collect();
+
+    // Rewire all edges that point to any END node -> canonical END
+    for n in &all_nodes {
+        let mut w = n.write(trie3_god).expect("write");
+        let old_children = std::mem::take(w.children_mut());
+        let mut new_children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+        for (ek, dm) in old_children {
+            let mut new_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
+            for (dst, sids) in dm {
+                let new_dst = if end_set.contains(&dst) { canonical } else { dst };
+                new_dm.entry(new_dst)
+                    .and_modify(|e| *e |= &sids)
+                    .or_insert(sids);
+            }
+            if !new_dm.is_empty() {
+                new_children.insert(ek, new_dm);
+            }
+        }
+        let mut new_live = LLMTokenBV::zeros();
+        for ((_, llm_bv), _) in &new_children {
+            new_live |= llm_bv;
+        }
+        w.value.live_tokens = new_live;
+        *w.children_mut() = new_children;
+    }
+
+    // Remap END roots to canonical
+    for r in roots.values_mut() {
+        if end_set.contains(r) {
+            *r = canonical;
+        }
+    }
+    let roots_vec2: Vec<_> = roots.values().cloned().collect();
+    Trie::gc(trie3_god, &roots_vec2);
+    Trie::recompute_all_max_depths(trie3_god, &roots_vec2);
+    crate::debug!(2, "Canonicalized END nodes to representative {}.", canonical);
 }
 
 type CycleReport3 = (Vec<(PrecomputeNode3Index, Option<(isize, LLMTokenBV)>)>, usize);
@@ -2089,6 +2206,9 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
         node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
     }
 
+    // Rewrite all edges in the graph to point to the representatives.
+    rewire_all_edges_to_representatives(trie3_god, roots, &node_to_rep);
+
     for class_id in 0..num_classes {
         if let Some(rep_idx) = representatives[class_id] {
             let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
@@ -2124,7 +2244,9 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
         *root_idx = *node_to_rep.get(root_idx).unwrap();
     }
 
+    // GC unreachable non-representatives and recompute depths.
     let final_roots_vec: Vec<_> = roots.values().cloned().collect();
+    Trie::gc(trie3_god, &final_roots_vec);
     Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
 }
 
@@ -2227,6 +2349,9 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
         node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
     }
 
+    // Rewrite all edges in the graph to point to the representatives.
+    rewire_all_edges_to_representatives(trie3_god, roots, &node_to_rep);
+
     for class_id in 0..num_classes {
         if let Some(rep_idx) = representatives[class_id] {
             // Use a single exemplar node from the class to rebuild the representative's edges
@@ -2270,6 +2395,7 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
     }
 
     let final_roots_vec: Vec<_> = roots.values().cloned().collect();
+    Trie::gc(trie3_god, &final_roots_vec);
     Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
 }
 
@@ -2581,6 +2707,17 @@ pub fn merge_nodes_trie3_ultrafast(
         }
     }
 
+    // Build a mapping from node index to its representative index for rewiring.
+    let mut node_to_rep_map: HashMap<Trie2Index, Trie2Index> = HashMap::with_capacity(n);
+    for u_dense in 0..n {
+        let u_idx = old_of[u_dense];
+        let rep_dense = node_to_rep_dense[u_dense] as usize;
+        let rep_idx = old_of[rep_dense];
+        node_to_rep_map.insert(u_idx, rep_idx);
+    }
+    // Rewire all graph edges to point to representatives.
+    rewire_all_edges_to_representatives(trie3_god, roots, &node_to_rep_map);
+
     // Rewrite representatives' children to point to representatives and recompute live tokens
     #[cfg(not(rustrover))]
     let it = tqdm!(rep_set.iter(), desc = "Trie3 Merge Ultra (Rewrite reps)", total = rep_set.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
@@ -2607,14 +2744,6 @@ pub fn merge_nodes_trie3_ultrafast(
                 new_children.insert((pop, llm_bv), dest_map);
             }
         }
-
-        // Recompute live tokens as union of outgoing LLM masks
-        let mut new_live = LLMTokenBV::zeros();
-        for ((_, llm_bv), _) in &new_children {
-            new_live |= llm_bv;
-        }
-        *w.children_mut() = new_children;
-        w.value.live_tokens = new_live;
     }
 
     // Remap roots to their representatives
@@ -2627,6 +2756,7 @@ pub fn merge_nodes_trie3_ultrafast(
 
     // Finalize
     let final_roots_vec: Vec<_> = roots.values().cloned().collect();
+    Trie::gc(trie3_god, &final_roots_vec);
     Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
     crate::debug!(2, "Ultrafast merge completed: representatives kept = {}", rep_set.len());
 }
