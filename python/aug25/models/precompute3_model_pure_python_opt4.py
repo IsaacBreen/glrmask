@@ -1053,7 +1053,7 @@ class Model(GraphProvider):
                     continue
                 prev = reward.get(int(u))
                 updated = accum if prev is None else prev.union(accum)
-                if prev != updated:
+                if prev is None or prev != updated:
                     reward[int(u)] = updated
                     changed = True
         return reward
