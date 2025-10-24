@@ -384,7 +384,7 @@ class Model(GraphProvider):
     # Oracle analysis mode
     oracle_mode: bool = True
     oracle_exact_cover_threshold: int = 24
-    oracle_debug: bool = False
+    oracle_debug: bool = True
     suppress_stats_report: bool = False
 
     @staticmethod
