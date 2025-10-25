@@ -188,10 +188,9 @@ pub fn dump_precomputed_special(gc: &GrammarConstraint) {
     println!("--- Special Precomputation Dump ---");
 
     // For resolving NT IDs to names
-    let nt_map_rev = parser.non_terminal_map.right_to_left_map();
     let get_nt_name = |nt_id: &NonTerminalID| -> String {
-        nt_map_rev
-            .get(nt_id)
+        parser.non_terminal_map
+            .get_by_right(nt_id)
             .map(|nt| nt.to_string())
             .unwrap_or_else(|| format!("NT({})", nt_id.0))
     };
@@ -203,10 +202,9 @@ pub fn dump_precomputed_special(gc: &GrammarConstraint) {
     };
 
     // For resolving Terminal IDs to names
-    let term_map_rev = parser.terminal_map.right_to_left_map();
     let get_term_name = |term_id: &TerminalID| -> String {
-        term_map_rev
-            .get(term_id)
+        parser.terminal_map
+            .get_by_right(term_id)
             .map(|t| t.to_string())
             .unwrap_or_else(|| format!("T({})", term_id.0))
     };
