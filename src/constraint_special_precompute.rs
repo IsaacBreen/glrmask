@@ -27,6 +27,7 @@
 //! and is validated by dumping and inspection. When we switch get_mask4 to this dataset,
 //! the match to get_mask3's output provides a simple equivalence check.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::constraint::{
