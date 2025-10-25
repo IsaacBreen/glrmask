@@ -188,6 +188,104 @@ class ArenaNode:
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
 
+@dataclass(frozen=True)
+class TraversalData:
+    nodes: List[NodeID]
+    pos_of_u: Dict[NodeID, int]
+    comp_id: List[int]
+    sccs: List[List[int]]  # Each inner list holds positions into `nodes`
+    topo: List[int]        # Topological ordering of SCC IDs
+
+def _compute_traversal_data(arena: Dict[NodeID, ArenaNode]) -> TraversalData:
+    # Build a stable node list and a position map
+    nodes: List[NodeID] = sorted(arena.keys())
+    n = len(nodes)
+    pos_of_u: Dict[NodeID, int] = {u: i for i, u in enumerate(nodes)}
+
+    # Adjacency over positions
+    adj: List[List[int]] = [[] for _ in range(n)]
+    radj: List[List[int]] = [[] for _ in range(n)]
+    for i, u in enumerate(nodes):
+        a_node = arena.get(u)
+        if not a_node:
+            continue
+        for edge in a_node.children:
+            for dest in edge.dests:
+                v = int(dest.dest_idx)
+                j = pos_of_u.get(v)
+                if j is not None:
+                    adj[i].append(j)
+                    radj[j].append(i)
+
+    # Kosaraju (iterative) for SCCs
+    visited = [False] * n
+    order: List[int] = []
+    for u in range(n):
+        if not visited[u]:
+            stack: List[Tuple[int, int]] = [(u, 0)]
+            visited[u] = True
+            while stack:
+                node, next_i = stack[-1]
+                if next_i < len(adj[node]):
+                    v = adj[node][next_i]
+                    stack[-1] = (node, next_i + 1)
+                    if not visited[v]:
+                        visited[v] = True
+                        stack.append((v, 0))
+                else:
+                    order.append(node)
+                    stack.pop()
+
+    comp_id: List[Optional[int]] = [None] * n
+    cid = 0
+    for u in reversed(order):
+        if comp_id[u] is None:
+            stack = [u]
+            comp_id[u] = cid
+            while stack:
+                x = stack.pop()
+                for v in radj[x]:
+                    if comp_id[v] is None:
+                        comp_id[v] = cid
+                        stack.append(v)
+            cid += 1
+
+    # Build SCC lists
+    sccs: List[List[int]] = [[] for _ in range(cid)]
+    for i in range(n):
+        sccs[comp_id[i]].append(i)  # type: ignore[arg-type]
+
+    # Condensation DAG and topo sort
+    scc_adj: List[Set[int]] = [set() for _ in range(cid)]
+    indeg: List[int] = [0] * cid
+    for u in range(n):
+        cu = comp_id[u]  # type: ignore[index]
+        for v in adj[u]:
+            cv = comp_id[v]  # type: ignore[index]
+            if cu != cv and cv not in scc_adj[cu]:  # type: ignore[index]
+                scc_adj[cu].add(cv)  # type: ignore[index]
+                indeg[cv] += 1
+
+    topo: List[int] = []
+    from collections import deque
+    q = deque([s for s in range(cid) if indeg[s] == 0])
+    while q:
+        s = q.popleft()
+        topo.append(s)
+        for t in scc_adj[s]:
+            indeg[t] -= 1
+            if indeg[t] == 0:
+                q.append(t)
+
+    # Mypy/type ignore above because we know comp_id is fully assigned.
+    return TraversalData(
+        nodes=nodes,
+        pos_of_u=pos_of_u,
+        comp_id=[int(c) for c in comp_id],  # type: ignore[arg-type]
+        sccs=sccs,
+        topo=topo,
+    )
+
 def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
         if not node.children:
@@ -313,14 +411,6 @@ class WorkItemSuspended:
     generator: Generator
     llm_mask: LLMTokenSet
 
-@dataclass
-class TraversalData:
-    nodes: List[NodeID]
-    pos_of_u: Dict[NodeID, int]
-    comp_id: List[int]
-    sccs: List[List[int]]
-    topo: List[int]
-
 
 @dataclass
 class Model(GraphProvider):
@@ -336,7 +426,7 @@ class Model(GraphProvider):
     all_internal_llm_tokens_bitset: LLMTokenSet
     ignore_terminal_id: Optional[int]
     state: Dict[int, GSS]
-    traversal_data: Optional[TraversalData] = field(init=False, default=None)
+    traversal: TraversalData
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -366,6 +456,8 @@ class Model(GraphProvider):
             loaded_arena[uid] = LoadedArenaNode(children=loaded_children, clean_end=clean_end)
 
         arena = _convert_arena(loaded_arena, max_depth)
+        # Precompute SCC traversal data over the static arena graph.
+        traversal = _compute_traversal_data(arena)
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
         dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
@@ -407,10 +499,10 @@ class Model(GraphProvider):
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
             state={tokenizer.initial_state_id(): initial_gss},
+            traversal=traversal,
         )
         model._compute_edge_accelerators()
         model.optimize_traversal()
-        model._compute_traversal_data()
         return model
 
     def _compute_edge_accelerators(self) -> None:
@@ -423,89 +515,6 @@ class Model(GraphProvider):
         for node in self.arena.values():
             for edge in node.children:
                 edge.ensure_index()
-
-    def _compute_traversal_data(self):
-        nodes = sorted(list(self.arena.keys()))
-        if not nodes:
-            self.traversal_data = None
-            return
-        n = len(nodes)
-        pos_of_u = {node_id: i for i, node_id in enumerate(nodes)}
-
-        adj = [[] for _ in range(n)]
-        radj = [[] for _ in range(n)]
-        for i, node_id in enumerate(nodes):
-            a_node = self.arena.get(node_id)
-            if not a_node: continue
-            for edge in a_node.children:
-                for dest in edge.dests:
-                    if dest.dest_idx in pos_of_u:
-                        j = pos_of_u[dest.dest_idx]
-                        adj[i].append(j)
-                        radj[j].append(i)
-
-        # Kosaraju's algorithm: first DFS (post-order)
-        visited = [False] * n
-        order = []
-        for i in range(n):
-            if not visited[i]:
-                stack = [(i, iter(adj[i]))]
-                visited[i] = True
-                while stack:
-                    u, children_iter = stack[-1]
-                    try:
-                        v = next(children_iter)
-                        if not visited[v]:
-                            visited[v] = True
-                            stack.append((v, iter(adj[v])))
-                    except StopIteration:
-                        order.append(u)
-                        stack.pop()
-
-        # Kosaraju's algorithm: second DFS on reverse graph
-        comp_id = [-1] * n
-        cid = 0
-        for i in range(n - 1, -1, -1):
-            u = order[i]
-            if comp_id[u] == -1:
-                stack = [u]
-                comp_id[u] = cid
-                while stack:
-                    v = stack.pop()
-                    for w in radj[v]:
-                        if comp_id[w] == -1:
-                            comp_id[w] = cid
-                            stack.append(w)
-                cid += 1
-
-        scc_count = cid
-        sccs = [[] for _ in range(scc_count)]
-        for i in range(n):
-            sccs[comp_id[i]].append(i)
-
-        # Build condensation graph and topologically sort
-        scc_adj = [set() for _ in range(scc_count)]
-        indeg = [0] * scc_count
-        for u in range(n):
-            cu = comp_id[u]
-            for v in adj[u]:
-                cv = comp_id[v]
-                if cu != cv:
-                    if cv not in scc_adj[cu]:
-                        scc_adj[cu].add(cv)
-                        indeg[cv] += 1
-
-        topo = []
-        q_scc = collections.deque([s for s in range(scc_count) if indeg[s] == 0])
-        while q_scc:
-            s = q_scc.popleft()
-            topo.append(s)
-            for t in sorted(list(scc_adj[s])):
-                indeg[t] -= 1
-                if indeg[t] == 0:
-                    q_scc.append(t)
-
-        self.traversal_data = TraversalData(nodes, pos_of_u, comp_id, sccs, topo)
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
@@ -611,16 +620,17 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
-    def _process_internal_node(self, node_id: NodeID, gss_node: GSS) -> List[Enqueue]:
+    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, max_edges: int = 1, max_dests: int = 1) -> Generator[Union[Enqueue, Suspend], None, None]:
         a_node = self.arena.get(node_id)
         if not a_node:
-            return []
+            return
 
-        enqueues = []
+        # Budget controls to slice work; now configurable by caller.
+        edges_proc, dests_proc = 0, 0
         peek0_rs = None
         pop_cache = {}
 
-        for edge in a_node.children:
+        for edge_i, edge in enumerate(a_node.children):
             if edge.pop == 0:
                 if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
                 if edge.dest_states_union.isdisjoint(peek0_rs): continue
@@ -635,6 +645,7 @@ class Model(GraphProvider):
                 if not popped_acc or popped_acc.llm_mask.is_empty():
                     pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
                     continue
+                # Avoid double-peek: call once and reuse both list and RangeSetStates
                 peeked = popped.peek()
                 peek_rs = RangeSetStates.from_indices(peeked)
                 pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
@@ -661,22 +672,37 @@ class Model(GraphProvider):
                     if lst is None: grouped[dest_j] = [sid]
                     else: lst.append(sid)
 
+            # Iterate grouped dests in ascending order for locality
             for dest_j in sorted(grouped.keys()):
+                if dests_proc >= max_dests:
+                    priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+                    yield Suspend(priority)
+                    dests_proc = 0
                 dest = edge.dests[dest_j]
                 values_to_keep = grouped[dest_j]
+                # If all heads survive, reuse popped directly
                 if len(values_to_keep) == len(peeked):
                     child_gss = popped
                 else:
                     child_gss = popped.isolate_many(values_to_keep)
                 if child_gss.is_empty(): continue
                 d: NodeID = int(dest.dest_idx)
-                enqueues.append(Enqueue(d, child_gss))
-        return enqueues
+                yield Enqueue(d, child_gss)
+                dests_proc += 1
+
+            if edges_proc >= max_edges:
+                priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
+                yield Suspend(priority)
+                edges_proc = 0
+            edges_proc += 1
 
     def get_mask(self) -> LLMTokenSet:
-        all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
+        # SCC-aware scheduler similar to Rust special_map_grouped: process SCCs in topological order,
+        # run a local worklist until stabilization inside each SCC, and propagate across SCC boundaries
+        # without looping back prematurely.
+        all_ones = self.all_internal_llm_tokens_bitset
+        final_mask = RangeSet.empty()
         t0 = time.perf_counter()
-
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -685,71 +711,93 @@ class Model(GraphProvider):
                 if tsid in self.possible_matches_cache:
                     term_map = self.possible_matches_cache[tsid]
                     for term_id in terms.iter_indices():
-                        if term_id in term_map: disallowed |= term_map[term_id]
+                        if term_id in term_map:
+                            disallowed |= term_map[term_id]
             return PyAcc({}, all_ones.difference(disallowed))
 
-        values: Dict[NodeID, GSS] = {}
+        # Seed per-node pending values from current parser states.
         init_cache = {}
-        for sid, gss in self.state.items():
-            r = self.roots_map[int(sid)]
+        pending: Dict[NodeID, GSS] = {}
+        for tsid, gss in self.state.items():
+            root_id = self.roots_map[int(tsid)]
             gss_init = gss.apply(initialize_acc, init_cache)
             if not gss_init.is_empty():
-                if r in values:
-                    values[r] = values[r].merge(gss_init)
+                if root_id in pending:
+                    pending[root_id] = pending[root_id].merge(gss_init)
                 else:
-                    values[r] = gss_init
+                    pending[root_id] = gss_init
         t1 = time.perf_counter()
 
-        if self.traversal_data and values:
-            td = self.traversal_data
-            nodes, pos_of_u, comp_id, sccs, topo = td.nodes, td.pos_of_u, td.comp_id, td.sccs, td.topo
-            remaining_mask = all_ones
-            in_queue: Set[NodeID] = set()
+        tr = self.traversal
+        remaining_mask = all_ones
+        in_queue: Set[NodeID] = set()
 
-            for scc_id in topo:
-                local_queue = collections.deque()
-                for pos in sccs[scc_id]:
-                    node_id = nodes[pos]
-                    if node_id in values and node_id not in in_queue:
-                        in_queue.add(node_id)
-                        local_queue.append(node_id)
+        for s in tr.topo:
+            scc_positions = tr.sccs[s]
+            # Initialize local queue with nodes in this SCC having pending inputs.
+            from collections import deque
+            queue: collections.deque[NodeID] = deque()
+            in_queue.clear()
+            for pos in scc_positions:
+                u = tr.nodes[pos]
+                if u in pending:
+                    queue.append(u)
+                    in_queue.add(u)
 
-                while local_queue:
-                    node_id = local_queue.popleft()
-                    in_queue.remove(node_id)
-                    gss_node = values.pop(node_id)
-                    gss_acc = gss_node.reduce_acc()
+            while queue:
+                u = queue.popleft()
+                in_queue.discard(u)
+                gss_node = pending.pop(u, None)
+                if gss_node is None or gss_node.is_empty():
+                    continue
 
-                    if self.is_end(node_id):
-                        if not final_mask.issuperset(gss_acc.llm_mask):
-                            final_mask |= gss_acc.llm_mask
-                            remaining_mask = all_ones.difference(final_mask)
+                gss_acc = gss_node.reduce_acc()
+                if not gss_acc or gss_acc.llm_mask.is_empty():
+                    continue
 
-                    a_node = self.arena.get(node_id)
-                    if not a_node: continue
-                    work_llm_mask = a_node.llm_bv_union.intersection(gss_acc.llm_mask)
-                    if work_llm_mask.isdisjoint(remaining_mask):
-                        if node_id in values and node_id not in in_queue:
-                            in_queue.add(node_id)
-                            local_queue.append(node_id)
+                # Record final mask if this node is an end.
+                if self.is_end(u):
+                    if not final_mask.issuperset(gss_acc.llm_mask):
+                        final_mask |= gss_acc.llm_mask
+                        remaining_mask = all_ones.difference(final_mask)
+
+                a_node = self.arena.get(u)
+                if not a_node or not a_node.children:
+                    continue
+                work_llm_mask = a_node.llm_bv_union.intersection(gss_acc.llm_mask)
+                if work_llm_mask.isdisjoint(remaining_mask):
+                    continue
+
+                # Drive the internal generator with large budgets (effectively "no suspend").
+                gen = self._process_internal_node_gen(u, gss_node, max_edges=(1 << 60), max_dests=(1 << 60))
+                while True:
+                    try:
+                        yielded = next(gen)
+                    except StopIteration:
+                        break
+
+                    if isinstance(yielded, Enqueue):
+                        child_id, child_gss = yielded.node_id, yielded.gss
+                        if child_gss.is_empty():
+                            continue
+                        if child_id in pending:
+                            pending[child_id] = pending[child_id].merge(child_gss)
+                        else:
+                            pending[child_id] = child_gss
+
+                        # If the child is in the same SCC, schedule immediately.
+                        pos_d = tr.pos_of_u.get(child_id)
+                        if pos_d is not None and tr.comp_id[pos_d] == s:
+                            if child_id not in_queue:
+                                queue.append(child_id)
+                                in_queue.add(child_id)
+                    elif isinstance(yielded, Suspend):
+                        # With very high budgets we don't expect to suspend; ignore safely.
                         continue
 
-                    for item in self._process_internal_node(node_id, gss_node):
-                        child_id, new_gss = item.node_id, item.gss
-                        if child_id in values: values[child_id] = values[child_id].merge(new_gss)
-                        else: values[child_id] = new_gss
-
-                        child_pos = pos_of_u.get(child_id)
-                        if child_pos is not None and comp_id[child_pos] == scc_id:
-                            if child_id not in in_queue:
-                                in_queue.add(child_id)
-                                local_queue.append(child_id)
-
-                    if node_id in values and node_id not in in_queue:
-                        in_queue.add(node_id)
-                        local_queue.append(node_id)
         t2 = time.perf_counter()
 
+        # Map internal mask to original indices
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
