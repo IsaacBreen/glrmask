@@ -217,6 +217,7 @@ class TraversalData:
     pos_of_u: Dict[NodeID, int]
     comp_id: List[int]
     sccs: List[List[int]]
+    topo: List[int]
 # --- Accumulator memoization decorator ---
 def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
     """
@@ -1228,7 +1229,6 @@ class Model(GraphProvider):
                             values[d] = child_gss
 
                         # If child is in the same SCC, schedule immediately
-                        child_pos = self._compute_traversal_data([u]).pos_of_u.get(d) if False else None  # placeholder to avoid mypy complaints
                         # Use precomputed pos map
                         pos_d = pos_of_u.get(d)
                         if pos_d is not None:
