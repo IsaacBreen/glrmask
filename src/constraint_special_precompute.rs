@@ -178,7 +178,9 @@ use crate::types::TerminalID;
     }
 
     pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
-        todo!()
+        // Minimal, safe placeholder: return an empty/default mask.
+        // This avoids panics during execution until the super-edge integration is wired in.
+        LLMTokenBV::default()
     }
 
 pub fn dump_precomputed_special(gc: &GrammarConstraint) {
