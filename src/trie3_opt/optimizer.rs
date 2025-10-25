@@ -27,6 +27,7 @@ use crate::trie3_opt::passes::full::{
     prune_end_reach::prune_nodes_not_reaching_end_trie3,
     reorder::reorder_llm_tokens_for_range_minimization_trie3,
     simplify::simplify_llm_token_bvs_trie3,
+    generalize::propagate_and_generalize_sids_trie3,
     stats::{compute_and_print_precompute_stats3, debug_remove_pop_gt_0_edges_trie3},
     tokens::merge_equivalent_llm_tokens_trie3,
 };
@@ -169,10 +170,9 @@ pub fn optimize_trie3_size(
 
         if config.generalize_sids {
             run_pass!("Generalizing StateID bitvectors", {
-                todo!()
-                // propagate_and_generalize_sids_trie3(
-                //     roots, trie3_god, parser, max_state_id,
-                // );
+                propagate_and_generalize_sids_trie3(
+                    roots, trie3_god, parser, max_state_id,
+                );
             });
         }
 

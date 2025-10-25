@@ -19,3 +19,4 @@ pub mod merges;
 pub mod pop0;
 pub mod cycles;
 pub mod factor_root;
+pub mod generalize;
