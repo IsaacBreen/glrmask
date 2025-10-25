@@ -206,7 +206,7 @@ class Inspector:
         return ConstraintModel(
             roots_map=roots_map, arena=arena, tokenizer=tokenizer, parser_table=parser_table,
             possible_matches=possible_matches,
-            llm_token_map=dict(data['llm_token_map']),
+            llm_token_map={bytes(k).decode('utf-8', 'replace'): v for k, v in data['llm_token_map']},
             internal_to_original_map={int(k): v for k, v in dict(vocab['internal_to_original']).items()},
             internal_max_llm_token=vocab['internal_max_llm_token']
         )
