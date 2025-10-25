@@ -413,7 +413,7 @@ pub fn dump_precomputed_special(gc: &GrammarConstraint) {
         };
 
         println!(
-            "{:<20} | S{:<13} | {:<20} | {}",
+            "{:<20} | S{:<14} | {:<20} | {}",
             get_opt_nt_name(src_nt),
             initial_state.0,
             get_term_name(terminal),
