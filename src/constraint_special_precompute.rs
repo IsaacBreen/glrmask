@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use crate::datastructures::trie::Trie;
 use std::sync::Arc;
 
 use crate::constraint::{
@@ -67,7 +68,7 @@ fn get_gotos<'a>(parser: &'a GLRParser, state_id: StateID, nt_id: NonTerminalID)
 
 pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
     let mut normal_edges = HashSet::new();
-    let mut super_edges = HashSet::new();
+    let super_edges = RefCell::new(HashSet::new());
     let parser = &gc.parser;
 
     let mut non_terminals: Vec<Option<NonTerminalID>> = parser
@@ -185,58 +186,48 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
     // Stage 2: Super Edges
     let trie1_god = &gc.trie1_god;
     let precomputed1 = &gc.precomputed1;
+    let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
 
-    let mut pci1_state: HashMap<PrecomputeNode1Index, BTreeSet<(Option<NonTerminalID>, StateID)>> =
-        HashMap::new();
-    let mut q: VecDeque<PrecomputeNode1Index> = precomputed1.values().cloned().collect();
-    let mut visited_q = HashSet::new();
-    for root in &q {
-        visited_q.insert(*root);
+    if trie1_roots.is_empty() {
+        return SpecialPrecomputation {
+            normal_edges,
+            super_edges: super_edges.into_inner(),
+        };
     }
 
-    // Initialize roots
+    let traversal_data = Trie::compute_traversal_data(trie1_god, &trie1_roots)
+        .expect("Failed to compute traversal data for trie1 in special precomputation");
+
     let mut initial_special_state = BTreeSet::new();
     for &state_id in &states {
         initial_special_state.insert((None, state_id));
     }
-    for root_idx in precomputed1.values() {
-        pci1_state.insert(*root_idx, initial_special_state.clone());
-    }
 
-    let mut processed_nodes = HashSet::new();
+    let initial_nodes_and_values: Vec<_> = precomputed1
+        .values()
+        .map(|root_idx| (*root_idx, initial_special_state.clone()))
+        .collect();
 
-    while let Some(pci1_idx) = q.pop_front() {
-        if !processed_nodes.insert(pci1_idx) {
-            continue;
-        }
-
-        let current_special_states = match pci1_state.get(&pci1_idx) {
-            Some(s) if !s.is_empty() => s.clone(),
-            _ => continue,
-        };
-
-        let guard = pci1_idx.read(trie1_god).unwrap();
-        for (edge_terminal_opt, destinations_map) in guard.children() {
+    Trie::special_map_grouped(
+        trie1_god,
+        &traversal_data,
+        initial_nodes_and_values,
+        // step
+        |pci1_idx, current_special_states, edge_terminal_opt, destinations_map| {
+            let mut results = Vec::new();
             let terminal = match edge_terminal_opt {
                 Some(t) => *t,
                 None => {
                     // Pass through
                     for (dest_pci1, _edge_bv) in destinations_map {
-                        let dest_states = pci1_state.entry(*dest_pci1).or_default();
-                        let old_len = dest_states.len();
-                        dest_states.extend(current_special_states.clone());
-                        let changed = dest_states.len() > old_len;
-
-                        if changed && visited_q.insert(*dest_pci1) {
-                            q.push_back(*dest_pci1);
-                        }
+                        results.push((*dest_pci1, current_special_states.clone()));
                     }
-                    continue;
+                    return results;
                 }
             };
 
             let mut next_special_states_for_escape = BTreeSet::new();
-            for (src_nt, initial_state) in &current_special_states {
+            for (src_nt, initial_state) in current_special_states {
                 // Find matching normal edges
                 for (ne_src_nt, ne_initial_state, ne_terminal, ne_dest) in &normal_edges {
                     if ne_src_nt == src_nt
@@ -247,7 +238,7 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
                             SpecialPrecomputeDest::Reduce { pop, dest_nt } => {
                                 for (dest_pci1, edge_bv) in destinations_map {
                                     if !edge_bv.is_empty() {
-                                        super_edges.insert((
+                                        super_edges.borrow_mut().insert((
                                             *src_nt,
                                             terminal,
                                             (*pop, *dest_nt),
@@ -270,22 +261,22 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
 
             if !next_special_states_for_escape.is_empty() {
                 for (dest_pci1, _edge_bv) in destinations_map {
-                    let dest_states = pci1_state.entry(*dest_pci1).or_default();
-                    let old_len = dest_states.len();
-                    dest_states.extend(next_special_states_for_escape.clone());
-                    let changed = dest_states.len() > old_len;
-
-                    if changed && visited_q.insert(*dest_pci1) {
-                        q.push_back(*dest_pci1);
-                    }
+                    results.push((*dest_pci1, next_special_states_for_escape.clone()));
                 }
             }
-        }
-    }
+            results
+        },
+        // merge
+        |set1, set2| {
+            set1.extend(set2);
+        },
+        // process
+        |_, _| true,
+    );
 
     SpecialPrecomputation {
         normal_edges,
-        super_edges,
+        super_edges: super_edges.into_inner(),
     }
 }
 

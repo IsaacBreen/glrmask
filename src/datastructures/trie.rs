@@ -1951,9 +1951,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     )
     where
         V: Clone,
-        S: FnMut(
-            &V, &EK, &OrderedHashMap<Trie2Index, EV>
-        ) -> I,
+        S: FnMut(Trie2Index, &V, &EK, &OrderedHashMap<Trie2Index, EV>) -> I,
         I: IntoIterator<Item = (Trie2Index, V)>,
     {
         // ------------------------------------------------------------------
@@ -2038,7 +2036,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                         let _ = pb.update(valid_edges_count);
                     }
 
-                    let new_values_for_children = step(&agg_v, &ek, &dest_map);
+                    let new_values_for_children = step(node_idx, &agg_v, &ek, &dest_map);
                     for (child_idx, new_v) in new_values_for_children {
                         let child_u = child_idx.as_usize();
                         if stopped_nodes.contains(&child_u) {
