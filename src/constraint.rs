@@ -299,6 +299,25 @@ pub type PrecomputeNode0Index = Trie2Index;
 pub type PrecomputeNode1Index = Trie2Index;
 pub type PrecomputeNode2Index = Trie2Index;
 
+// Types for special precomputation
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SpecialPrecomputeDest {
+    Reduce { pop: usize, dest_nt: NonTerminalID },
+    Escape { push_states: Vec<StateID> },
+}
+
+// (Option<NonTerminalID>, StateID, TerminalID, SpecialPrecomputeDest)
+pub type SpecialPrecomputeNormalEdge = (Option<NonTerminalID>, StateID, TerminalID, SpecialPrecomputeDest);
+
+// (Option<NonTerminalID>, TerminalID, (usize, NonTerminalID), LLMTokenBV, PrecomputeNode1Index, PrecomputeNode1Index)
+pub type SpecialPrecomputeSuperEdge = (Option<NonTerminalID>, TerminalID, (usize, NonTerminalID), LLMTokenBV, PrecomputeNode1Index, PrecomputeNode1Index);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpecialPrecomputation {
+    pub normal_edges: HashSet<SpecialPrecomputeNormalEdge>,
+    pub super_edges: HashSet<SpecialPrecomputeSuperEdge>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMVocab {
     pub llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
@@ -725,6 +744,7 @@ pub struct GrammarConstraint {
     pub precompute_vocab1: StageVocab,
     pub precompute2_vocab: StageVocab,
     pub precompute3_vocab: StageVocab,
+    pub special_precomputation: SpecialPrecomputation,
 }
 
 impl GrammarConstraint {
@@ -757,6 +777,7 @@ impl GrammarConstraint {
         assert_eq!(self.post_commit_allow_check_mode, other.post_commit_allow_check_mode);
         assert_eq!(self.state_map_by_llm, other.state_map_by_llm);
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
+        assert_eq!(self.special_precomputation, other.special_precomputation);
     }
 }
 
@@ -876,6 +897,7 @@ impl JSONConvertible for GrammarConstraint {
                     precompute_vocab1: precompute_vocab,
                     precompute2_vocab,
                     precompute3_vocab,
+                    special_precomputation: SpecialPrecomputation::default(),
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -1142,6 +1164,7 @@ impl GrammarConstraint {
                 precompute_vocab1: precompute_vocab,
                 precompute2_vocab,
                 precompute3_vocab,
+                special_precomputation: SpecialPrecomputation::default(),
             };
         }
 
@@ -1181,6 +1204,7 @@ impl GrammarConstraint {
                 precompute_vocab1: precompute_vocab,
                 precompute2_vocab,
                 precompute3_vocab,
+                special_precomputation: SpecialPrecomputation::default(),
             };
         }
 
@@ -1269,6 +1293,7 @@ impl GrammarConstraint {
             precompute_vocab1: precompute_vocab,
             precompute2_vocab,
             precompute3_vocab,
+            special_precomputation: SpecialPrecomputation::default(),
         };
 
         gc
@@ -1395,6 +1420,7 @@ impl GrammarConstraint {
                 precompute_vocab1: precompute_vocab,
                 precompute2_vocab,
                 precompute3_vocab,
+                special_precomputation: SpecialPrecomputation::default(),
             };
         }
 
@@ -1453,6 +1479,7 @@ impl GrammarConstraint {
                 precompute_vocab1: precompute_vocab,
                 precompute2_vocab,
                 precompute3_vocab,
+                special_precomputation: SpecialPrecomputation::default(),
             };
         }
 
@@ -1522,6 +1549,7 @@ impl GrammarConstraint {
             precompute_vocab1: precompute_vocab,
             precompute2_vocab,
             precompute3_vocab,
+            special_precomputation: SpecialPrecomputation::default(),
         };
 
         gc
@@ -2391,6 +2419,12 @@ impl GrammarConstraint {
         }
 
         (precomputed3, trie3_god)
+    }
+
+    pub fn precompute_special(
+        &self,
+    ) -> SpecialPrecomputation {
+        SpecialPrecomputation::default()
     }
 
     pub fn all_internal_llm_tokens_bitset_precompute0(&self) -> LLMTokenBV {
