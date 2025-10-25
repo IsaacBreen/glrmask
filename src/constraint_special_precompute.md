@@ -56,10 +56,9 @@ Once we pop below zero, we add an edge to the set.
 
 What about shift?
 Once we hit a shift, what should we do?
-Shift to the stack. Stack size can either be 2 or 3.
-Shifts can be characterized by nonterminal, terminal, state, shift state, and optional middle state.
-By 'state' here I mean 'state used to initialize stack'.
-`HashSet<(Option<NonTerminalID>, StateID, TerminalID, Vec<StateID>)>`
+Shift to the stack. (Fun fact: stack size will either be 2 or 3. But that doesn't matter.)
+`HashSet<(Option<NonTerminalID>, StateID, TerminalID, (usize, NonTerminalID) | Vec<StateID>)>`
+So, the first nonterminal is the current node (src), state ID is the revealed state ID, and the vector is the top two states - a goto state and the shifted state.
 
 
 **Second stage**
