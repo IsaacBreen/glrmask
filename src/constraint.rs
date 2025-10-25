@@ -36,7 +36,7 @@ use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_on_stored
 use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
-use crate::datastructures::trie::{EdgeInserter, PrettyPrintOptions, Trie, Trie2Index};
+use crate::datastructures::trie::{EdgeInserter, PrettyPrintOptions, Trie, Trie2Index, TrieTraversalData};
 use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::EntryApi;
@@ -718,6 +718,7 @@ pub struct GrammarConstraint {
     pub(crate) trie1_god: Trie1GodWrapper,
     pub trie2_god: Trie2GodWrapper,
     pub trie3_god: Trie3GodWrapper,
+    pub trie3_traversal_data: Option<TrieTraversalData>,
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
     // Stage-local vocabularies for internal<->original mappings
     pub precompute0_vocab: StageVocab,
@@ -820,6 +821,10 @@ impl JSONConvertible for GrammarConstraint {
                                     .and_then(|n| Trie2GodWrapper::from_json(n))?;
                 let trie3_god = obj.remove("trie3_god").ok_or_else(|| "Missing field trie3_god".to_string())
                                     .and_then(|n| Trie3GodWrapper::from_json(n))?;
+
+                let trie3_roots: Vec<_> = precomputed3.values().cloned().collect();
+                let trie3_traversal_data = Trie::compute_traversal_data(&trie3_god, &trie3_roots);
+
                 let post_commit_allow_check_mode = match obj.remove("post_commit_allow_check_mode") {
                     Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
                     None => TerminalAllowanceCheckMode::default(),
@@ -863,6 +868,7 @@ impl JSONConvertible for GrammarConstraint {
                     trie1_god,
                     trie2_god,
                     trie3_god,
+                    trie3_traversal_data,
                     post_commit_allow_check_mode,
                     state_map_by_llm,
                     terminal_map_by_llm,
@@ -1128,6 +1134,7 @@ impl GrammarConstraint {
                 trie1_god: Trie1GodWrapper::new(),
                 trie2_god: Trie2GodWrapper::new(),
                 trie3_god: Trie3GodWrapper::new(),
+                trie3_traversal_data: None,
                 post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
                 state_map_by_llm,
                 terminal_map_by_llm,
@@ -1166,6 +1173,7 @@ impl GrammarConstraint {
                 trie1_god: Trie1GodWrapper::new(),
                 trie2_god: Trie2GodWrapper::new(),
                 trie3_god: Trie3GodWrapper::new(),
+                trie3_traversal_data: None,
                 post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
                 state_map_by_llm,
                 terminal_map_by_llm,
@@ -1229,6 +1237,9 @@ impl GrammarConstraint {
         crate::constraint_extra::calculate_final_stats3(&precomputed3, &mut stats3, &trie3_god);
         crate::constraint_extra::print_precompute_stats3(&stats3, &trie3_god);
 
+        let trie3_roots: Vec<_> = precomputed3.values().cloned().collect();
+        let trie3_traversal_data = Trie::compute_traversal_data(&trie3_god, &trie3_roots);
+
         // Self::_dump_precomputed3(
         //     &precomputed3,
         //     &precompute3_vocab.original_to_internal,
@@ -1250,6 +1261,7 @@ impl GrammarConstraint {
             trie1_god,
             trie2_god,
             trie3_god,
+            trie3_traversal_data,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             state_map_by_llm,
             terminal_map_by_llm,
@@ -1375,6 +1387,7 @@ impl GrammarConstraint {
                 trie1_god: Trie1GodWrapper::new(),
                 trie2_god: Trie2GodWrapper::new(),
                 trie3_god: Trie3GodWrapper::new(),
+                trie3_traversal_data: None,
                 post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
                 state_map_by_llm,
                 terminal_map_by_llm,
@@ -1432,6 +1445,7 @@ impl GrammarConstraint {
                 trie1_god: Trie1GodWrapper::new(),
                 trie2_god: Trie2GodWrapper::new(),
                 trie3_god: Trie3GodWrapper::new(),
+                trie3_traversal_data: None,
                 post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
                 state_map_by_llm,
                 terminal_map_by_llm,
@@ -1483,6 +1497,9 @@ impl GrammarConstraint {
         crate::constraint_extra::calculate_final_stats3(&precomputed3, &mut stats3, &trie3_god);
         crate::constraint_extra::print_precompute_stats3(&stats3, &trie3_god);
 
+        let trie3_roots: Vec<_> = precomputed3.values().cloned().collect();
+        let trie3_traversal_data = Trie::compute_traversal_data(&trie3_god, &trie3_roots);
+
         let mut gc = Self {
             tokenizer,
             parser,
@@ -1497,6 +1514,7 @@ impl GrammarConstraint {
             trie1_god,
             trie2_god,
             trie3_god,
+            trie3_traversal_data,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             state_map_by_llm,
             terminal_map_by_llm,
@@ -2126,9 +2144,14 @@ impl GrammarConstraint {
         // Shared end node for Trie1-end positions
         let trie3_end = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
 
+        let trie1_roots_for_traversal: Vec<_> = initial_values_for_map.iter().map(|(idx, _)| *idx).collect();
+        let traversal_data = Trie::compute_traversal_data(&trie1_god, &trie1_roots_for_traversal)
+            .expect("Failed to compute traversal data for trie1 in precompute3");
+
         crate::debug!(2, "Entering precompute3 special_map_grouped");
-        Trie::special_map_grouped( // TODO: fix this
+        Trie::special_map_grouped(
             &trie1_god,
+            &traversal_data,
             initial_values_for_map,
             // step: merge current set into a single node, then attach the terminal template or direct LLM edges
             |(current_tokens, current_nodes_set), edge_grammar_token_opt, destinations_map| {
@@ -3395,6 +3418,14 @@ impl<'a> GrammarConstraintState<'a> {
         if self.state.is_empty() {
             return self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
         }
+        let traversal_data = match &self.parent.trie3_traversal_data {
+            Some(data) => data,
+            None => {
+                crate::debug!(2, "No traversal data for get_mask3, returning empty mask.");
+                return self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+            }
+        };
+
         let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
         crate::debug!(10, "\n--- Seeding work queue ---");
         for (&tokenizer_state_id, glr_state) in &self.state {
@@ -3437,6 +3468,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         Trie::special_map_grouped(
             &self.parent.trie3_god,
+            traversal_data,
             initial_values_for_map,
             // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
             |glr_s, (pop, llm_token_bv_from_edge), dest_map| {
