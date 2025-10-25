@@ -138,35 +138,6 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
                         continue;
                     }
 
-                    // Handle a single reduce alternative relative to the baseline
-                    let mut handle_reduce = |len: usize, reduce_nt: NonTerminalID| {
-                        // States currently above the baseline on this path
-                        let above_baseline = stack.len() - baseline_len;
-                        if len > above_baseline {
-                            // This reduction crosses below the baseline boundary.
-                            let pop_below_baseline = len - above_baseline;
-                            let dest = SpecialPrecomputeDest::Reduce {
-                                pop: pop_below_baseline,
-                                dest_nt: reduce_nt,
-                            };
-                            normal_edges.insert((*src_nt, revealed_state, terminal, dest));
-                        } else {
-                            // Pop stays at/above baseline: apply pop, then goto, and continue BFS.
-                            let mut after_pop = stack.clone();
-                            after_pop.truncate(after_pop.len() - len);
-                            let new_top = *after_pop.last().unwrap();
-                            for goto in get_gotos(parser, new_top, reduce_nt) {
-                                if let Some(goto_state) = goto.state_id {
-                                    let mut after_goto = after_pop.clone();
-                                    after_goto.push(goto_state);
-                                    if visited.insert(after_goto.clone()) {
-                                        q.push_back(after_goto);
-                                    }
-                                }
-                            }
-                        }
-                    };
-
                     for action in actions {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
@@ -184,7 +155,31 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
                                 len,
                                 ..
                             } => {
-                                handle_reduce(*len, *nonterminal_id);
+                                // Inlined handle_reduce
+                                let len = *len;
+                                let reduce_nt = *nonterminal_id;
+                                let above_baseline = stack.len() - baseline_len;
+                                if len > above_baseline {
+                                    let pop_below_baseline = len - above_baseline;
+                                    let dest = SpecialPrecomputeDest::Reduce {
+                                        pop: pop_below_baseline,
+                                        dest_nt: reduce_nt,
+                                    };
+                                    normal_edges.insert((*src_nt, revealed_state, terminal, dest));
+                                } else {
+                                    let mut after_pop = stack.clone();
+                                    after_pop.truncate(after_pop.len() - len);
+                                    let new_top = *after_pop.last().unwrap();
+                                    for goto in get_gotos(parser, new_top, reduce_nt) {
+                                        if let Some(goto_state) = goto.state_id {
+                                            let mut after_goto = after_pop.clone();
+                                            after_goto.push(goto_state);
+                                            if visited.insert(after_goto.clone()) {
+                                                q.push_back(after_goto);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(next_state) = shift {
@@ -197,7 +192,31 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
                                 }
                                 for (len, nts) in reduces {
                                     for (nt, _) in nts {
-                                        handle_reduce(*len, *nt);
+                                        // Inlined handle_reduce
+                                        let len = *len;
+                                        let reduce_nt = *nt;
+                                        let above_baseline = stack.len() - baseline_len;
+                                        if len > above_baseline {
+                                            let pop_below_baseline = len - above_baseline;
+                                            let dest = SpecialPrecomputeDest::Reduce {
+                                                pop: pop_below_baseline,
+                                                dest_nt: reduce_nt,
+                                            };
+                                            normal_edges.insert((*src_nt, revealed_state, terminal, dest));
+                                        } else {
+                                            let mut after_pop = stack.clone();
+                                            after_pop.truncate(after_pop.len() - len);
+                                            let new_top = *after_pop.last().unwrap();
+                                            for goto in get_gotos(parser, new_top, reduce_nt) {
+                                                if let Some(goto_state) = goto.state_id {
+                                                    let mut after_goto = after_pop.clone();
+                                                    after_goto.push(goto_state);
+                                                    if visited.insert(after_goto.clone()) {
+                                                        q.push_back(after_goto);
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
