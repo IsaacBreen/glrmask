@@ -137,7 +137,11 @@ local_system:
                               let actions = get_actions(parser, top_state, terminal);
 
                               for action in actions {
-                                  let mut handle_reduce = |len: usize, reduce_nt: NonTerminalID| {
+                                  let mut handle_reduce = |
+                                      normal_edges: &mut HashSet<SpecialPrecomputeNormalEdge>,
+                                      len: usize,
+                                      reduce_nt: NonTerminalID,
+                                  | {
                                       if stack.len() <= len {
                                           let pop_below = len - stack.len();
                                           let dest = SpecialPrecomputeDest::Reduce {
@@ -178,7 +182,7 @@ local_system:
                                           len,
                                           ..
                                       } => {
-                                          handle_reduce(*len, *nonterminal_id);
+                                          handle_reduce(&mut normal_edges, *len, *nonterminal_id);
                                       }
                                       Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                           if let Some(next_state) = shift {
@@ -191,7 +195,7 @@ local_system:
                                           }
                                           for (len, nts) in reduces {
                                               for (nt, _) in nts {
-                                                  handle_reduce(*len, *nt);
+                                                  handle_reduce(&mut normal_edges, *len, *nt);
                                               }
                                           }
                                       }
@@ -256,19 +260,7 @@ local_system:
               terminal_id: TerminalID,
           ) -> Vec<&'a Stage7ShiftsAndReducesLookaheadValue> {
               let mut actions = Vec::new();
-              if parser.is_combined_state(state_id) {
-                  if let Some(row_actions) = parser
-                      .combined_rows
-                      .get(&state_id)
-                      .and_then(|r| r.shifts_and_reduces.get(&terminal_id))
-                  {
-                      actions.extend(row_actions.iter().map(|(a, _bv)| a));
-                  }
-              } else if parser.is_hallucinated_state(state_id) {
-                  if let Some(row_actions) = parser.hallucinated_row.shifts_and_reduces.get(&terminal_id) {
-                      actions.extend(row_actions.iter().map(|(a, _bv)| a));
-                  }
-              } else if let Some(row) = parser.table.get(&state_id) {
+              if let Some(row) = parser.table.get(&state_id) {
                   if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
                       actions.push(action);
                   }
@@ -278,21 +270,7 @@ local_system:
 
           // Helper to get gotos for a state and non-terminal
           fn get_gotos<'a>(parser: &'a GLRParser, state_id: StateID, nt_id: NonTerminalID) -> Vec<&'a Goto> {
-              if parser.is_combined_state(state_id) {
-                  parser
-                      .combined_rows
-                      .get(&state_id)
-                      .and_then(|r| r.gotos.get(&nt_id))
-                      .map(|v| v.iter().map(|(g, _bv)| g).collect())
-                      .unwrap_or_default()
-              } else if parser.is_hallucinated_state(state_id) {
-                  parser
-                      .hallucinated_row
-                      .gotos
-                      .get(&nt_id)
-                      .map(|v| v.iter().map(|(g, _bv)| g).collect())
-                      .unwrap_or_default()
-              } else if let Some(row) = parser.table.get(&state_id) {
+              if let Some(row) = parser.table.get(&state_id) {
                   row.gotos.get(&nt_id).map(|g| vec![g]).unwrap_or_default()
               } else {
                   vec![]
@@ -310,8 +288,6 @@ local_system:
               let terminals: Vec<TerminalID> = parser.terminal_map.right_values().copied().collect();
 
               let mut states: Vec<StateID> = parser.table.keys().copied().collect();
-              states.extend(parser.combined_rows.keys().copied());
-              states.push(parser.hallucinated_state_id);
               states.sort();
               states.dedup();
 
@@ -599,7 +575,11 @@ messages:
                               let actions = get_actions(parser, top_state, terminal);
 
                               for action in actions {
-                                  let mut handle_reduce = |len: usize, reduce_nt: NonTerminalID| {
+                                  let mut handle_reduce = |
+                                      normal_edges: &mut HashSet<SpecialPrecomputeNormalEdge>,
+                                      len: usize,
+                                      reduce_nt: NonTerminalID,
+                                  | {
                                       if stack.len() <= len {
                                           let pop_below = len - stack.len();
                                           let dest = SpecialPrecomputeDest::Reduce {
@@ -640,7 +620,7 @@ messages:
                                           len,
                                           ..
                                       } => {
-                                          handle_reduce(*len, *nonterminal_id);
+                                          handle_reduce(&mut normal_edges, *len, *nonterminal_id);
                                       }
                                       Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                           if let Some(next_state) = shift {
@@ -653,7 +633,7 @@ messages:
                                           }
                                           for (len, nts) in reduces {
                                               for (nt, _) in nts {
-                                                  handle_reduce(*len, *nt);
+                                                  handle_reduce(&mut normal_edges, *len, *nt);
                                               }
                                           }
                                       }
@@ -676,22 +656,7 @@ messages:
       ```
     metadata:
       filename: src/constraint_special_precompute.rs
-  - user: |+
-      error[E0499]: cannot borrow `normal_edges` as mutable more than once at a time
-         --> src/constraint_special_precompute.rs:183:41
-          |
-      133 | ...                   let mut handle_reduce = |len: usize, reduce_nt: NonTerminalID| {
-          |                                               -------------------------------------- first mutable borrow occurs here
-      ...
-      140 | ...                           normal_edges.insert((*src_nt, initial_state, terminal, dest));
-          |                               ------------ first borrow occurs due to use of `normal_edges` in closure
-      ...
-      183 | ...                               normal_edges.insert((*src_nt, initial_state, terminal, dest));
-          |                                   ^^^^^^^^^^^^ second mutable borrow occurs here
-      ...
-      187 | ...                                   handle_reduce(*len, *nt);
-          |                                       ------------- first borrow later used here
-
+  - user: Ignore combined and hallucinated states. Only normal states will exist.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -711,96 +676,132 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The compiler error `E0499: cannot borrow \`normal_edges\` as mutable more than once at a time` occurs because the closure `handle_reduce` implicitly captures a mutable reference to `normal_edges`, and then you attempt to use `normal_edges.insert(...)` directly in the `match` block, which constitutes a second, conflicting mutable borrow.
+      This change modifies the logic in `src/constraint_special_precompute.rs` to exclusively use "normal" states from `parser.table`, ignoring combined and hallucinated states as requested.
 
-      The fix is to explicitly pass a mutable reference to `normal_edges` into the `handle_reduce` closure, which prevents the closure from capturing it for the entire scope, thus resolving the borrow conflict.
+      ### Step-by-step instructions
 
-      Here are the step-by-step edits:
+      **File: `src/constraint_special_precompute.rs`**
 
-      ### Step-by-step Instructions
+      1.  **Update `get_actions` function:**
+          In the `get_actions` function (around line 41), remove the logic that handles combined and hallucinated states.
 
-      In the file `src/constraint_special_precompute.rs`:
+          *   **Delete lines 44-53:**
+              ```rust
+              if parser.is_combined_state(state_id) {
+                  if let Some(row_actions) = parser
+                      .combined_rows
+                      .get(&state_id)
+                      .and_then(|r| r.shifts_and_reduces.get(&terminal_id))
+                  {
+                      actions.extend(row_actions.iter().map(|(a, _bv)| a));
+                  }
+              } else if parser.is_hallucinated_state(state_id) {
+                  if let Some(row_actions) = parser.hallucinated_row.shifts_and_reduces.get(&terminal_id) {
+                      actions.extend(row_actions.iter().map(|(a, _bv)| a));
+                  }
+              } else if let Some(row) = parser.table.get(&state_id) {
+              ```
+          *   **Replace with:**
+              ```rust
+              if let Some(row) = parser.table.get(&state_id) {
+              ```
+          *   The function should now start with the `if let Some(row) = parser.table.get(&state_id)` block.
 
-      1.  **Update the signature of `handle_reduce`** (around line 133) to accept a mutable reference to `normal_edges` as its first argument.
+      2.  **Update `get_gotos` function:**
+          In the `get_gotos` function (around line 61), remove the logic that handles combined and hallucinated states.
 
-          Change:
-          ```rust
-          // src/constraint_special_precompute.rs:133
-          let mut handle_reduce = |len: usize, reduce_nt: NonTerminalID| {
-          ```
-          To:
-          ```rust
-          // src/constraint_special_precompute.rs:133
-          let mut handle_reduce = |
-              normal_edges: &mut HashSet<SpecialPrecomputeNormalEdge>,
-              len: usize,
-              reduce_nt: NonTerminalID,
-          | {
-          ```
+          *   **Delete lines 62-75:**
+              ```rust
+              if parser.is_combined_state(state_id) {
+                  parser
+                      .combined_rows
+                      .get(&state_id)
+                      .and_then(|r| r.gotos.get(&nt_id))
+                      .map(|v| v.iter().map(|(g, _bv)| g).collect())
+                      .unwrap_or_default()
+              } else if parser.is_hallucinated_state(state_id) {
+                  parser
+                      .hallucinated_row
+                      .gotos
+                      .get(&nt_id)
+                      .map(|v| v.iter().map(|(g, _bv)| g).collect())
+                      .unwrap_or_default()
+              } else if let Some(row) = parser.table.get(&state_id) {
+              ```
+          *   **Replace with:**
+              ```rust
+              if let Some(row) = parser.table.get(&state_id) {
+              ```
+          *   The function should now start with the `if let Some(row) = parser.table.get(&state_id)` block.
 
-      2.  **Update the call to `handle_reduce` in the `Reduce` arm** (around line 178) to pass a mutable reference to `normal_edges`.
+      3.  **Update `precompute_special` function:**
+          In the `precompute_special` function (around line 88), remove the lines that add combined and hallucinated states to the `states` vector.
 
-          Change:
-          ```rust
-          // src/constraint_special_precompute.rs:178
-          handle_reduce(*len, *nonterminal_id);
-          ```
-          To:
-          ```rust
-          // src/constraint_special_precompute.rs:178
-          handle_reduce(&mut normal_edges, *len, *nonterminal_id);
-          ```
+          *   **Delete lines 89-90:**
+              ```rust
+              states.extend(parser.combined_rows.keys().copied());
+              states.push(parser.hallucinated_state_id);
+              ```
 
-      3.  **Update the call to `handle_reduce` in the `Split` arm** (around line 194) to pass a mutable reference to `normal_edges`.
-
-          Change:
-          ```rust
-          // src/constraint_special_precompute.rs:194
-          handle_reduce(*len, *nt);
-          ```
-          To:
-          ```rust
-          // src/constraint_special_precompute.rs:194
-          handle_reduce(&mut normal_edges, *len, *nt);
-          ```
-
-      ### Git Diff
+      ### Git Diffs
 
       ```diff
       diff --git a/src/constraint_special_precompute.rs b/src/constraint_special_precompute.rs
       --- a/src/constraint_special_precompute.rs
       +++ b/src/constraint_special_precompute.rs
-      @@ -130,7 +130,11 @@
-                               let actions = get_actions(parser, top_state, terminal);
+      @@ -41,18 +41,9 @@
+               terminal_id: TerminalID,
+           ) -> Vec<&'a Stage7ShiftsAndReducesLookaheadValue> {
+               let mut actions = Vec::new();
+      -        if parser.is_combined_state(state_id) {
+      -            if let Some(row_actions) = parser
+      -                .combined_rows
+      -                .get(&state_id)
+      -                .and_then(|r| r.shifts_and_reduces.get(&terminal_id))
+      -            {
+      -                actions.extend(row_actions.iter().map(|(a, _bv)| a));
+      -            }
+      -        } else if parser.is_hallucinated_state(state_id) {
+      -            if let Some(row_actions) = parser.hallucinated_row.shifts_and_reduces.get(&terminal_id) {
+      -                actions.extend(row_actions.iter().map(|(a, _bv)| a));
+      -            }
+      -        } else if let Some(row) = parser.table.get(&state_id) {
+      +        if let Some(row) = parser.table.get(&state_id) {
+                   if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
+                       actions.push(action);
+                   }
+      @@ -64,20 +55,9 @@
        
-                               for action in actions {
-      -                            let mut handle_reduce = |len: usize, reduce_nt: NonTerminalID| {
-      +                            let mut handle_reduce = |
-      +                                normal_edges: &mut HashSet<SpecialPrecomputeNormalEdge>,
-      +                                len: usize,
-      +                                reduce_nt: NonTerminalID,
-      +                            | {
-                                       if stack.len() <= len {
-                                           let pop_below = len - stack.len();
-                                           let dest = SpecialPrecomputeDest::Reduce {
-      @@ -177,7 +181,7 @@
-                                           len,
-                                           ..
-                                       } => {
-      -                                    handle_reduce(*len, *nonterminal_id);
-      +                                    handle_reduce(&mut normal_edges, *len, *nonterminal_id);
-                                       }
-                                       Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                           if let Some(next_state) = shift {
-      @@ -190,7 +194,7 @@
-                                           }
-                                           for (len, nts) in reduces {
-                                               for (nt, _) in nts {
-      -                                            handle_reduce(*len, *nt);
-      +                                            handle_reduce(&mut normal_edges, *len, *nt);
-                                               }
-                                           }
-                                       }
+           // Helper to get gotos for a state and non-terminal
+           fn get_gotos<'a>(parser: &'a GLRParser, state_id: StateID, nt_id: NonTerminalID) -> Vec<&'a Goto> {
+      -        if parser.is_combined_state(state_id) {
+      -            parser
+      -                .combined_rows
+      -                .get(&state_id)
+      -                .and_then(|r| r.gotos.get(&nt_id))
+      -                .map(|v| v.iter().map(|(g, _bv)| g).collect())
+      -                .unwrap_or_default()
+      -        } else if parser.is_hallucinated_state(state_id) {
+      -            parser
+      -                .hallucinated_row
+      -                .gotos
+      -                .get(&nt_id)
+      -                .map(|v| v.iter().map(|(g, _bv)| g).collect())
+      -                .unwrap_or_default()
+      -        } else if let Some(row) = parser.table.get(&state_id) {
+      +        if let Some(row) = parser.table.get(&state_id) {
+                   row.gotos.get(&nt_id).map(|g| vec![g]).unwrap_or_default()
+               } else {
+                   vec![]
+      @@ -94,8 +74,6 @@
+               let terminals: Vec<TerminalID> = parser.terminal_map.right_values().copied().collect();
+       
+               let mut states: Vec<StateID> = parser.table.keys().copied().collect();
+      -        states.extend(parser.combined_rows.keys().copied());
+      -        states.push(parser.hallucinated_state_id);
+               states.sort();
+               states.dedup();
+       
       ```
     metadata:
   - user: |
@@ -812,7 +813,7 @@ messages:
       Applying patch to 'src/constraint_special_precompute.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_special_precompute.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Resolve E0499 by explicitly passing
-      mutable reference to normal_edges into handle_reduce closure"'
+  - user: 'Changes committed with message: "Refactor: Restrict special precomputation
+      to normal states only"'
     metadata:
 ...

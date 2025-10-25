@@ -41,19 +41,7 @@ use crate::types::TerminalID;
         terminal_id: TerminalID,
     ) -> Vec<&'a Stage7ShiftsAndReducesLookaheadValue> {
         let mut actions = Vec::new();
-        if parser.is_combined_state(state_id) {
-            if let Some(row_actions) = parser
-                .combined_rows
-                .get(&state_id)
-                .and_then(|r| r.shifts_and_reduces.get(&terminal_id))
-            {
-                actions.extend(row_actions.iter().map(|(a, _bv)| a));
-            }
-        } else if parser.is_hallucinated_state(state_id) {
-            if let Some(row_actions) = parser.hallucinated_row.shifts_and_reduces.get(&terminal_id) {
-                actions.extend(row_actions.iter().map(|(a, _bv)| a));
-            }
-        } else if let Some(row) = parser.table.get(&state_id) {
+        if let Some(row) = parser.table.get(&state_id) {
             if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
                 actions.push(action);
             }
@@ -63,21 +51,7 @@ use crate::types::TerminalID;
 
     // Helper to get gotos for a state and non-terminal
     fn get_gotos<'a>(parser: &'a GLRParser, state_id: StateID, nt_id: NonTerminalID) -> Vec<&'a Goto> {
-        if parser.is_combined_state(state_id) {
-            parser
-                .combined_rows
-                .get(&state_id)
-                .and_then(|r| r.gotos.get(&nt_id))
-                .map(|v| v.iter().map(|(g, _bv)| g).collect())
-                .unwrap_or_default()
-        } else if parser.is_hallucinated_state(state_id) {
-            parser
-                .hallucinated_row
-                .gotos
-                .get(&nt_id)
-                .map(|v| v.iter().map(|(g, _bv)| g).collect())
-                .unwrap_or_default()
-        } else if let Some(row) = parser.table.get(&state_id) {
+        if let Some(row) = parser.table.get(&state_id) {
             row.gotos.get(&nt_id).map(|g| vec![g]).unwrap_or_default()
         } else {
             vec![]
@@ -95,8 +69,6 @@ use crate::types::TerminalID;
         let terminals: Vec<TerminalID> = parser.terminal_map.right_values().copied().collect();
 
         let mut states: Vec<StateID> = parser.table.keys().copied().collect();
-        states.extend(parser.combined_rows.keys().copied());
-        states.push(parser.hallucinated_state_id);
         states.sort();
         states.dedup();
 
