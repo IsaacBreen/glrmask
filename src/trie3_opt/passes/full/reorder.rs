@@ -5,7 +5,7 @@ use ordered_hash_map::OrderedHashMap;
 use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StageVocab, Trie3GodWrapper};
 use crate::datastructures::EntryApi;
 use crate::datastructures::trie::Trie;
-use crate::passes::full::stats::count_total_ranges_trie3;
+use crate::trie3_opt::passes::full::stats::count_total_ranges_trie3;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 /// Reorder internal LLM tokens in Trie3 with a simple heuristic to cluster co-occurring tokens.

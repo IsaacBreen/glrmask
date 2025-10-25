@@ -66,7 +66,8 @@ use crate::constraint::{
 use crate::datastructures::trie::Trie;
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{Goto, NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID};
-use crate::types::{TerminalID, TokenizerStateID};
+use crate::tokenizer::TokenizerStateID;
+use crate::types::{TerminalID};
 
 /// Escape or ReduceCross resulting from (src_nt, revealed_state, terminal) on the parser table.
 ///

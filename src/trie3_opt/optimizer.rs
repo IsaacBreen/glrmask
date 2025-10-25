@@ -1,10 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use crate::constraint::{
-    PrecomputeNode3Index, PrecomputedNode3Contents as PrecomputedNodeContents, LLMTokenBV,
-    StateIDBV, Trie3GodWrapper,
-};
+use crate::constraint::{PrecomputeNode3Index, LLMTokenBV, StateIDBV, Trie3GodWrapper, PrecomputedNodeContents};
 use crate::constraint_extra::{PrecomputeStats, calculate_final_stats3, print_precompute_stats3};
 use crate::datastructures::EntryApi;
 use crate::datastructures::trie::{PathComparison, Trie};
@@ -172,9 +169,10 @@ pub fn optimize_trie3_size(
 
         if config.generalize_sids {
             run_pass!("Generalizing StateID bitvectors", {
-                super::passes::full::generalize_sids::propagate_and_generalize_sids_trie3(
-                    roots, trie3_god, parser, max_state_id,
-                );
+                todo!()
+                // propagate_and_generalize_sids_trie3(
+                //     roots, trie3_god, parser, max_state_id,
+                // );
             });
         }
 

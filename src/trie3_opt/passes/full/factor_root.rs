@@ -1,4 +1,4 @@
-use std::collections::BTreeMap as OrderedBTreeMap;
+use std::collections::{BTreeMap as OrderedBTreeMap, BTreeMap};
 
 use ordered_hash_map::OrderedHashMap;
 
@@ -157,7 +157,7 @@ pub fn factor_root_fanout_via_atoms(
 
                 // Create an intermediate node with a single outgoing key (pop, b).
                 let mid = PrecomputeNode3Index::new(
-                    trie3_god.insert(Trie::new(PrecomputedNode3Contents::internal())),
+                    trie3_god.insert(Trie::new(PrecomputedNodeContents::internal())),
                 );
                 {
                     let mut mw = mid.write(trie3_god).expect("write");

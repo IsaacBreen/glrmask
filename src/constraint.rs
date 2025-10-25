@@ -67,7 +67,9 @@ use std::io::{Read, Write};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
-use crate::trie3_opt::constraint_precompute3_utils::{clone_trie3_graph, optimize_trie3_size, Trie3Config};
+use crate::trie3_opt::full::clone::clone_trie3_graph;
+use crate::trie3_opt::full::config::Trie3Config;
+use crate::trie3_opt::optimize_trie3_size;
 
 #[derive(Default, Debug)]
 struct DfsStats {

@@ -5,7 +5,7 @@ use ordered_hash_map::OrderedHashMap;
 use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
 use crate::datastructures::EntryApi;
 use crate::datastructures::trie::{Trie, Trie2Index};
-use crate::passes::full::rewire::rewire_all_edges_to_representatives;
+use crate::trie3_opt::passes::full::rewire::rewire_all_edges_to_representatives;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 /// Extremely fast, cycle-safe node merging using WL-style refinement with a cheap signature

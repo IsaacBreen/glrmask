@@ -7,8 +7,8 @@ use range_set_blaze::RangeSetBlaze;
 use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::datastructures::EntryApi;
-use crate::passes::full::atoms::build_global_token_atoms_by_pop;
-use crate::passes::full::rewire::rewire_all_edges_to_representatives;
+use crate::trie3_opt::passes::full::atoms::build_global_token_atoms_by_pop;
+use crate::trie3_opt::passes::full::rewire::rewire_all_edges_to_representatives;
 
 /// NEW MERGE PASS:
 /// Global-atoms bisimulation merge. Compared to existing WL / structural merges, this pass:
