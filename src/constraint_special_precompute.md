@@ -65,10 +65,10 @@ By 'state' here I mean 'state used to initialize stack'.
 **Second stage**
 Here's the second stage. It's basically for 'super' edges.
 Now suppose we do special map over precompute1 tree. Edge processing like this.
+The special map values are `HashSet<(Vec<StateID>, LLMTokenBV, PrecomputeNode1Index)>`
 - We have a terminal and a LLM bv for this precompute1 edge, and we know pci1'
 - Loop through our state vec/LLM bv/pci1
     - start at the start node.
-
     - process start reduce edges
         - initialize a queue of `(Option<NonTerminalID>, Vec<StateID>, LLMTokenBV)`
         - Initialize with None, this state vec, this bv
@@ -78,6 +78,8 @@ Now suppose we do special map over precompute1 tree. Edge processing like this.
                 - If the stack is empty, add a super edge from the src nt ID to the dst, with this terminal, the remainder of the pop n (could be zero), the same LLM bv, pci1 as the first index, and the dest is pci1'
             - Look for all escape edges whose nonterminal/terminal/state match.
                 - Add to the output set. Push the edge's final state ID vec to the current state vec (ie extend). Intersect the LLM token bv. Keep pci1 the same.
+
+The precompute merge fn simply merges the hashsets.
 
 ...
 

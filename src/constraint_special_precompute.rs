@@ -185,9 +185,7 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
 
     // Stage 2: Super Edges
     let trie1_god = &gc.trie1_god;
-    let precomputed1 = &gc.precomputed1;
-    let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
-
+    let trie1_roots: Vec<_> = gc.precomputed1.values().cloned().collect();
     if trie1_roots.is_empty() {
         return SpecialPrecomputation {
             normal_edges,
@@ -195,80 +193,120 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
         };
     }
 
-    let traversal_data = Trie::compute_traversal_data(trie1_god, &trie1_roots)
-        .expect("Failed to compute traversal data for trie1 in special precomputation");
+    // The value type for special_map
+    type SpecialMapValue = HashSet<(Vec<StateID>, LLMTokenBV, PrecomputeNode1Index)>;
 
-    let mut initial_special_state = BTreeSet::new();
-    for &state_id in &states {
-        initial_special_state.insert((None, state_id));
+    // Initial values for the traversal
+    let mut initial_values_map: BTreeMap<PrecomputeNode1Index, SpecialMapValue> = BTreeMap::new();
+    for pci1_root in trie1_roots.iter().cloned() {
+        let initial_set = initial_values_map.entry(pci1_root).or_default();
+        initial_set.insert((
+            vec![parser.start_state_id],
+            gc.all_internal_llm_tokens_bitset_precompute1(),
+            pci1_root,
+        ));
+    }
+    let initial_values: Vec<_> = initial_values_map.into_iter().collect();
+
+    // We need to group normal_edges for efficient lookup.
+    let mut normal_edges_map: HashMap<
+        (Option<NonTerminalID>, StateID, TerminalID),
+        Vec<&SpecialPrecomputeDest>,
+    > = HashMap::new();
+    for edge in &normal_edges {
+        normal_edges_map
+            .entry((edge.0, edge.1, edge.2))
+            .or_default()
+            .push(&edge.3);
     }
 
-    let initial_nodes_and_values: Vec<_> = precomputed1
-        .values()
-        .map(|root_idx| (*root_idx, initial_special_state.clone()))
-        .collect();
+    let traversal_data = Trie::compute_traversal_data(trie1_god, &trie1_roots).unwrap();
 
     Trie::special_map_grouped(
         trie1_god,
         &traversal_data,
-        initial_nodes_and_values,
+        initial_values,
         // step
-        |current_special_states, edge_terminal_opt, destinations_map| {
-            let mut results = Vec::new();
-            let terminal = match edge_terminal_opt {
+        |current_set, terminal_opt, dest_map| {
+            let mut results_for_dests: HashMap<PrecomputeNode1Index, SpecialMapValue> =
+                HashMap::new();
+            let terminal = match terminal_opt {
                 Some(t) => *t,
-                None => {
-                    // Pass through
-                    for (dest_pci1, _edge_bv) in destinations_map {
-                        results.push((*dest_pci1, current_special_states.clone()));
-                    }
-                    return results;
-                }
+                None => return vec![], // No grammar token on edge, no grammar actions to take.
             };
 
-            let mut next_special_states_for_escape = BTreeSet::new();
-            for (src_nt, initial_state) in current_special_states {
-                // Find matching normal edges
-                for (ne_src_nt, ne_initial_state, ne_terminal, ne_dest) in &normal_edges {
-                    if ne_src_nt == src_nt
-                        && *ne_initial_state == *initial_state
-                        && *ne_terminal == terminal
-                    {
-                        match ne_dest {
-                            SpecialPrecomputeDest::Reduce { pop, dest_nt } => {
-                                for (dest_pci1, edge_bv) in destinations_map {
-                                    if !edge_bv.is_empty() {
-                                        super_edges.borrow_mut().insert((
-                                            *src_nt,
-                                            terminal,
-                                            (*pop, *dest_nt),
-                                            edge_bv.clone(),
-                                            pci1_idx,
-                                            *dest_pci1,
-                                        ));
+            for (stack, llm_bv, pci1_start) in current_set {
+                for (pci1_dest, edge_llm_bv) in dest_map.iter() {
+                    let intersected_bv = llm_bv & edge_llm_bv;
+                    if intersected_bv.is_empty() {
+                        continue;
+                    }
+
+                    let mut q: VecDeque<(Option<NonTerminalID>, Vec<StateID>, LLMTokenBV)> =
+                        VecDeque::new();
+                    q.push_back((None, stack.clone(), intersected_bv.clone()));
+
+                    let mut visited_q_states = HashSet::new();
+
+                    while let Some((src_nt, current_stack, current_bv)) = q.pop_front() {
+                        if !visited_q_states.insert((src_nt, current_stack.clone())) {
+                            continue;
+                        }
+
+                        if current_stack.is_empty() {
+                            continue;
+                        }
+                        let top_state = *current_stack.last().unwrap();
+
+                        if let Some(dests) = normal_edges_map.get(&(src_nt, top_state, terminal))
+                        {
+                            for dest in dests {
+                                match dest {
+                                    SpecialPrecomputeDest::Reduce { pop, dest_nt } => {
+                                        if current_stack.len() <= *pop {
+                                            let pop_remainder = pop - current_stack.len();
+                                            let super_edge = (
+                                                src_nt,
+                                                terminal,
+                                                (pop_remainder, *dest_nt),
+                                                current_bv.clone(),
+                                                *pci1_start,
+                                                *pci1_dest,
+                                            );
+                                            super_edges.borrow_mut().insert(super_edge);
+                                        } else {
+                                            let mut new_stack = current_stack.clone();
+                                            new_stack.truncate(new_stack.len() - *pop);
+                                            q.push_back((
+                                                Some(*dest_nt),
+                                                new_stack,
+                                                current_bv.clone(),
+                                            ));
+                                        }
                                     }
-                                }
-                            }
-                            SpecialPrecomputeDest::Escape { push_states } => {
-                                if let Some(new_top_state) = push_states.last() {
-                                    next_special_states_for_escape.insert((*src_nt, *new_top_state));
+                                    SpecialPrecomputeDest::Escape { push_states } => {
+                                        let mut new_stack = current_stack.clone();
+                                        new_stack.extend(push_states);
+                                        results_for_dests
+                                            .entry(*pci1_dest)
+                                            .or_default()
+                                            .insert((
+                                                new_stack,
+                                                current_bv.clone(),
+                                                *pci1_start,
+                                            ));
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-
-            if !next_special_states_for_escape.is_empty() {
-                for (dest_pci1, _edge_bv) in destinations_map {
-                    results.push((*dest_pci1, next_special_states_for_escape.clone()));
-                }
-            }
-            results
+            results_for_dests.into_iter().collect::<Vec<_>>()
         },
         // merge
         |set1, set2| {
-            set1.extend(set2);
+            set1.extend(set2.into_iter());
         },
         // process
         |_, _| true,
