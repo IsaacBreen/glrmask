@@ -3336,8 +3336,7 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
         // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
         // self.get_mask1()
-        // self.get_mask2()
-        self.get_mask3()
+        self.get_mask4()
     }
 
     pub fn print_gss_stats(&self) {
@@ -3504,6 +3503,10 @@ impl<'a> GrammarConstraintState<'a> {
         let final_mask_mapped = self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
 
         final_mask_mapped
+    }
+
+    pub fn get_mask4(&self) -> LLMTokenBV {
+        LLMTokenBV::zeros()
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // original ID
