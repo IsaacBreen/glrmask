@@ -548,21 +548,114 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
     sp
 }
 
-// ---------- Runtime: get_mask4 (delegates to get_mask3 for correctness) -----------------------
+// ---------- Runtime: get_mask4 (trie1-free) ---------------------------------------------------
 
-/// Compute the allowed original LLM tokens. Currently, for absolute correctness,
-/// this delegates to the trie3-based implementation (get_mask3).
-///
-/// This guarantees that get_mask4 matches get_mask3 exactly. The SpecialPrecomputation
-/// built above is ready to replace this delegation once the optimized traversal is
-/// enabled.
-///
-/// Mathematical justification:
-/// - get_mask3 is a sound and complete acceptance check for allowed tokens, since trie3
-///   encodes exactly the push/pop semantics and LLM constraints.
-/// - Delegating to get_mask3 therefore proves that get_mask4 is correct by construction.
+/// Compute the allowed original LLM tokens using only the special precomputation dataset.
+/// This function does not read trie1. It explores the (pci1, src_nt) space using cached edges.
 pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
-    gcs.get_mask3()
+    let gc = gcs.parent;
+    let sp = &gc.special_precomputation;
+
+    if sp.super_edges.is_empty() && sp.llm_only_edges.is_empty() {
+        return LLMTokenBV::zeros();
+    }
+
+    // Aggregate final mask in stage-1 internal IDs.
+    let final_mask_internal = RefCell::new(LLMTokenBV::zeros());
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct Key {
+        pci1: PrecomputeNode1Index,
+        src_nt: Option<NonTerminalID>,
+    }
+
+    for (tok_state, glr_state) in gcs.state.iter() {
+        if glr_state.active_state.stack.is_empty() {
+            continue;
+        }
+
+        let Some(&pci1_root) = sp.pci1_roots_by_tokenizer.get(tok_state) else {
+            continue;
+        };
+
+        // Seed queue with (pci1_root, None, all_tokens_at_stage1)
+        let seed_bv = gc.all_internal_llm_tokens_bitset_precompute1();
+        let mut q: VecDeque<(PrecomputeNode1Index, Option<NonTerminalID>, LLMTokenBV)> =
+            VecDeque::new();
+        let mut seen: HashMap<Key, LLMTokenBV> = HashMap::new();
+
+        q.push_back((pci1_root, None, seed_bv.clone()));
+        seen.insert(Key { pci1: pci1_root, src_nt: None }, seed_bv);
+
+        while let Some((pci1, src_nt, cur_bv)) = q.pop_front() {
+            if cur_bv.is_empty() {
+                continue;
+            }
+
+            // Collect tokens if at a cached precompute1 end node.
+            if sp.pci1_end_nodes.contains(&pci1) {
+                *final_mask_internal.borrow_mut() |= &cur_bv;
+            }
+
+            // Follow LLM-only edges (None-key edges)
+            if let Some(indices) = sp.llm_only_index.get(&pci1) {
+                for &i in indices {
+                    let e = &sp.llm_only_edges[i];
+                    let next_bv = &cur_bv & &e.llm_bv;
+                    if next_bv.is_empty() {
+                        continue;
+                    }
+                    let key = Key { pci1: e.pci1_end, src_nt };
+                    let entry = seen.entry(key).or_insert_with(LLMTokenBV::zeros);
+                    let delta = &next_bv - entry;
+                    if !delta.is_empty() {
+                        *entry |= &next_bv;
+                        q.push_back((e.pci1_end, src_nt, next_bv));
+                    }
+                }
+            }
+
+            // Try SuperEdges from (pci1, src_nt)
+            if let Some(indices) = sp.super_index.get(&(pci1, src_nt)) {
+                for &i in indices {
+                    let e = &sp.super_edges[i];
+
+                    let next_bv = &cur_bv & &e.llm_bv;
+                    if next_bv.is_empty() {
+                        continue;
+                    }
+
+                    // Pop-and-peek check against state_req
+                    let popped = glr_state.active_state.stack.popn(e.pop);
+                    let mut ok = false;
+                    'outer: for item in popped.iter() {
+                        for peek in item.peek_iter() {
+                            if e.state_req.contains(peek.edge_value().state_id.0) {
+                                ok = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                    if !ok {
+                        continue;
+                    }
+
+                    // Advance grammar context
+                    let new_src_nt = e.next_nt.or(src_nt);
+                    let key = Key { pci1: e.pci1_end, src_nt: new_src_nt };
+                    let entry = seen.entry(key).or_insert_with(LLMTokenBV::zeros);
+                    let delta = &next_bv - entry;
+                    if !delta.is_empty() {
+                        *entry |= &next_bv;
+                        q.push_back((e.pci1_end, new_src_nt, next_bv));
+                    }
+                }
+            }
+        }
+    }
+
+    // Map back to original LLM token IDs using stage-1 vocab mapping.
+    gc.internal_bv_to_original_precompute1(&final_mask_internal.into_inner())
 }
 
 // ---------- Debug dump (optional diagnostics) --------------------------------------------------
