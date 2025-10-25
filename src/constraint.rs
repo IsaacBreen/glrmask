@@ -680,7 +680,7 @@ impl Default for GrammarConstraintConfig {
             trie0: Trie0Config::off(),
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
-            trie3: Trie3Config::off(),
+            trie3: Trie3Config::default(),
             intermediate_trie3_templates: IntermediateTrie3Config::default(),
             intermediate_trie3_main: IntermediateTrie3Config::default(),
         }
@@ -859,7 +859,7 @@ impl JSONConvertible for GrammarConstraint {
                     None => precompute_vocab.clone(),
 				};
 
-                Ok(GrammarConstraint {
+                let mut gc = GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed0,
@@ -882,7 +882,9 @@ impl JSONConvertible for GrammarConstraint {
                     precompute2_vocab,
                     precompute3_vocab,
                     special_precomputation: SpecialPrecomputation::default(),
-                })
+                };
+                gc.special_precomputation = gc.precompute_special();
+                Ok(gc)
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
         }
@@ -3326,8 +3328,8 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
         // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
         // self.get_mask1()
-        // self.get_mask3()
-        self.get_mask4()
+        self.get_mask3()
+        // self.get_mask4()
     }
 
     pub fn print_gss_stats(&self) {
