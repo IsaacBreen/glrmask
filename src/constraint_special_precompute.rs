@@ -213,7 +213,7 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
         &traversal_data,
         initial_nodes_and_values,
         // step
-        |pci1_idx, current_special_states, edge_terminal_opt, destinations_map| {
+        |current_special_states, edge_terminal_opt, destinations_map| {
             let mut results = Vec::new();
             let terminal = match edge_terminal_opt {
                 Some(t) => *t,
