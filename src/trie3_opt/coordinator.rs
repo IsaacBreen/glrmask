@@ -40,6 +40,19 @@ impl Default for CoordinatorConfig {
     }
 }
 
+impl CoordinatorConfig {
+    pub fn off() -> Self {
+        Self {
+            enable_prune_dead_paths: false,
+            enable_compress_edges: false,
+            enable_merge_structural: false,
+            merge_structural_max_iters: 0,
+            enable_eliminate_pop0_except_roots: false,
+            enable_canonicalize_end_nodes: false,
+        }
+    }
+}
+
 /// Build a default sequence of passes from config.
 fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> {
     let mut pipeline: Vec<Box<dyn OptimizationPass>> = Vec::new();

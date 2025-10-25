@@ -28,8 +28,6 @@ use crate::constraint_precompute2_utils::optimize_trie2_size;
 pub use crate::constraint_precompute2_utils::Trie2Config;
 use crate::constraint_precompute3_challenge_elimination::eliminate_pushes_and_pops;
 use crate::constraint_precompute3_intermediate_utils::{optimize_intermediate_trie3, IntermediateTrie3Config};
-pub use crate::constraint_precompute3_utils::Trie3Config;
-use crate::constraint_precompute3_utils::{clone_trie3_graph, optimize_trie3_size};
 use crate::constraint_special_precompute::SpecialPrecomputation;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
@@ -69,6 +67,8 @@ use std::io::{Read, Write};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
+use crate::trie3_opt::constraint_precompute3_utils::{clone_trie3_graph, optimize_trie3_size};
+use crate::trie3_opt::Trie3Config;
 
 #[derive(Default, Debug)]
 struct DfsStats {

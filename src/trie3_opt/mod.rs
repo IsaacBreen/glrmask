@@ -8,3 +8,5 @@ pub use core::*;
 pub use context::*;
 pub use coordinator::*;
 pub use passes::*;
+
+pub use CoordinatorConfig as Trie3Config;
