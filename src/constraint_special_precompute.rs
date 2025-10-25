@@ -1,61 +1,40 @@
 //! Special precomputation for fast mask (get_mask4).
 //!
-//! What we build
-//! -------------
-//! We construct a compact, self-contained graph whose nodes summarize two axes of context:
+//! Goal
+//! -----
+//! Build a small, self-contained graph that the runtime can traverse without touching Trie1,
+//! yet computes the same token-allowance as the full Trie3 evaluation (get_mask3).
+//!
+//! Model
+//! -----
+//! A runtime position is summarized by two independent axes:
 //!   - grammar context: src_nt ∈ {None} ∪ NonTerminals
 //!   - LLM-token path context: a precompute1 node index (pci1)
 //!
-//! Edges in this graph are of two kinds:
-//!   1) LLM-only edges: (src_nt, pci1_a) --[llm_bv]--> (src_nt, pci1_b)
-//!      - They come from precompute1 "None" edges; they don't change src_nt.
-//!   2) Super edges: (src_nt, pci1_a) --[terminal, pop, dest_nt, state_req, llm_bv]--> (Some(dest_nt), pci1_b)
-//!      - They summarize "reductions below baseline" that become possible upon consuming `terminal`.
-//!      - pop is the number of frames that must be popped below baseline (>= 1).
-//!      - state_req is a bitset of grammar states that must be present at the peek point after popping `pop` frames.
-//!      - They are produced by combining:
-//!          • precompute1 edges labeled with Some(terminal), and
-//!          • a table-derived summary of “reduce-cross” events grouped by (src_nt, terminal).
+//! There are two edge kinds that advance along a precompute1 edge labeled by a grammar terminal:
+//!   1) Shift edge (pop = 0): allowed if the current top-of-stack state ∈ state_req.
+//!      It does NOT change the grammar context (src_nt remains the same).
+//!   2) Reduce-cross edge (pop >= 1): allowed if, after popping `pop` frames from the GLR stack,
+//!      a peek state ∈ state_req. It changes grammar context to Some(dest_nt).
 //!
-//! At runtime, get_mask4 explores only this special graph. It never consults the trie1 arena.
-//! It intersects the running LLMTokenBV as it follows edges and performs GSS pop-and-peek checks
-//! only on super edges. Whenever the current pci1 index is an "end" node (captured ahead of time),
-//! it unions the running LLMTokenBV into the final mask.
+//! Additionally, we copy all “None” edges in precompute1 as LLM-only edges: they intersect tokens
+//! and move pci1 without any grammar checks.
 //!
 //! Correctness sketch
 //! ------------------
-//! Let T be an LLM token, whose internal sub-parts (segments) induce a walk over precompute1.
-//! The precompute1 "None" edges correspond exactly to moving across T's bytes where no grammar
-//! token is consumed; we capture those via LLM-only edges and intersect the running LLM-token set.
+//! Let T be an LLM token. The token imposes a walk over precompute1 starting from the tokenizer's
+//! root pci1 node. Along this path, some edges carry a grammar terminal `a`, others carry None.
+//! - We represent None edges verbatim: intersect current LLM-token BV and move pci1.
+//! - For a terminal edge labeled `a`: either an immediate shift is possible (at or above baseline),
+//!   or crossing below the baseline occurs during reduce chains after `a`.
+//!   Shift is captured by a (pop=0, state_req=shifting_top_states) edge.
+//!   Crossing is captured by grouping all (revealed_state s) that, with terminal `a`, reduce below
+//!   the baseline by `pop` and land in `dest_nt`, with `state_req` encoding the required peek state.
 //!
-//! When a precompute1 edge consumes a grammar terminal `a` (Some(a)), either it shifts (no below-baseline
-//! reduction) or reduces. All “reduce-cross” outcomes for (src_nt, revealed_state, a) that pass below
-//! baseline are summarized by a finite set of (pop, dest_nt) groups, one for each (src_nt, a); each group
-//! accumulates the set of revealed_state values (compressed as a bitset) that allow that crossing.
-//! This grouping is a lossless compression of all per-state facts. Because the “below-baseline” pop count
-//! is defined relative to the current baseline, it is invariant to any number of preceding above-baseline
-//! shifts (including those along earlier terminals); only the revealed_state and the terminal matter.
-//! At runtime, a single pop-and-peek check against `state_req` is sufficient and necessary for validity.
-//!
-//! Therefore, any path over precompute1 that leads to a below-baseline reduction is represented in our
-//! special graph by exactly one super edge (with the same pci1 start/end, LLMBV on the precompute1 edge,
-//! and the (pop, dest_nt, state_req) appropriate to the terminal and src_nt). LLM-only edges preserve
-//! the LLMBV constraints between terminal-consumption sites. Because we union the running LLMBV into the
-//! final mask whenever we reach an end pci1, the set of tokens accepted by get_mask4 equals the set accepted
-//! by the original trie3-based evaluation (get_mask3), assuming identical GLR table and tokenizer.
-//!
-//! Implementation notes
-//! --------------------
-//! - We precompute a "crossing groups" map: for each (src_nt, terminal), a small list of (pop, dest_nt, state_req)
-//!   where state_req is the set of revealed_state values that allow that crossing. This is built by a bounded
-//!   BFS over reduce-only closures per revealed_state and terminal.
-//! - We extract all precompute1 “None” edges as LLM-only edges once.
-//! - For every precompute1 edge labeled Some(terminal), we emit one super edge per crossing group (src_nt, terminal).
-//!   We do not need to explicitly pre-propagate shift “escapes”: their effect is subsumed by the revealed_state groupings.
-//! - We also cache:
-//!     • which pci1 nodes are “end” nodes,
-//!     • the starting pci1 root per tokenizer state,
-//!   so that get_mask4 relies solely on this precomputed structure.
+//! At runtime, following such a special edge is equivalent to executing the corresponding GLR step,
+//! but the only checks required are a pop-and-peek with a small precomputed bitset and intersecting
+//! LLM-token sets. Because we collect tokens whenever we land on a precompute1 end node (as in Trie3),
+//! the final union equals the get_mask3 result mod the chosen LLMBV stage mapping.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -67,29 +46,7 @@ use crate::datastructures::trie::Trie;
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{Goto, NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID};
 use crate::tokenizer::TokenizerStateID;
-use crate::types::{TerminalID};
-
-/// Escape or ReduceCross resulting from (src_nt, revealed_state, terminal) on the parser table.
-///
-/// We only keep ReduceCross in the final graph; Escapes are implicitly accounted for by grouping
-/// below-baseline events by revealed_state and terminal (see correctness sketch above).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NormalEdgeKind {
-    /// We can shift this terminal before crossing below baseline; pushes the listed states.
-    /// Not used in the final graph; kept here for completeness and debug.
-    Escape { push_states: Vec<StateID> },
-    /// We reduce across baseline by `pop` frames (below baseline), landing in `dest_nt`.
-    ReduceCross { pop: usize, dest_nt: NonTerminalID },
-}
-
-/// Raw per-(src_nt, revealed_state, terminal) fact (for debug/inspection).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NormalEdge {
-    pub src_nt: Option<NonTerminalID>,
-    pub revealed_state: StateID,
-    pub terminal: TerminalID,
-    pub kind: NormalEdgeKind,
-}
+use crate::types::TerminalID;
 
 /// A "None-terminal" precompute1 transition: move in trie1 and intersect tokens; no grammar action.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,31 +56,31 @@ pub struct LlmOnlyEdge {
     pub llm_bv: LLMTokenBV,
 }
 
-/// A compact, precomputed "super edge".
+/// A compact, precomputed edge corresponding to consuming a grammar terminal on a trie1 edge.
+/// Two variants:
+/// - Shift: pop = 0, next_nt = None (grammar context unchanged).
+/// - Reduce-cross: pop >= 1, next_nt = Some(dest_nt).
+///
 /// Preconditions for taking this edge at runtime:
 ///   - We are at grammar context `src_nt` and precompute1 node `pci1_start`.
 ///   - Intersect current tokens with `llm_bv` (must be non-empty).
-///   - Pop `pop` frames from GSS baseline and peek a state contained in `state_req`.
-/// Then we land in grammar context Some(dest_nt) and precompute1 node `pci1_end`.
+///   - Perform a GLR pop of `pop` frames and peek a state contained in `state_req`.
+/// Then we land in grammar context `next_nt.or(src_nt)` and precompute1 node `pci1_end`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuperEdge {
     pub src_nt: Option<NonTerminalID>,
     pub terminal: TerminalID,
     pub pop: usize,
-    pub dest_nt: NonTerminalID,
+    pub next_nt: Option<NonTerminalID>, // None for shift; Some(dest_nt) for below-baseline reduce-cross
     pub llm_bv: LLMTokenBV,
     pub pci1_start: PrecomputeNode1Index,
     pub pci1_end: PrecomputeNode1Index,
-    pub state_req: StateIDBV,
+    pub state_req: StateIDBV, // set of required peek states after the pop
 }
 
 /// Container with indices to speed up runtime lookups.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpecialPrecomputation {
-    // Stage1 (debug only)
-    pub normal_edges: Vec<NormalEdge>,
-
-    // Stage2 results
     pub super_edges: Vec<SuperEdge>,
     pub llm_only_edges: Vec<LlmOnlyEdge>,
 
@@ -139,7 +96,6 @@ pub struct SpecialPrecomputation {
 impl SpecialPrecomputation {
     fn new() -> Self {
         Self {
-            normal_edges: Vec::new(),
             super_edges: Vec::new(),
             llm_only_edges: Vec::new(),
             super_index: HashMap::new(),
@@ -188,12 +144,15 @@ fn get_gotos<'a>(parser: &'a GLRParser, state_id: StateID, nt_id: NonTerminalID)
     }
 }
 
-// ---------- Stage 1: Build Normal Edges + Crossing Groups -------------------------------------
+// ---------- Stage 1a: Build Reduce-Cross (below-baseline) crossing groups ---------------------
 
-/// Enumerate per-(src_nt, revealed_state, terminal) facts.
-fn build_normal_edges(parser: &GLRParser) -> Vec<NormalEdge> {
-    let mut out = Vec::new();
-
+/// Group all ReduceCross facts by (src_nt, terminal, pop, dest_nt), compressing required peek states
+/// into a bitset. For src_nt = None the baseline length is 1; for Some(nt) it's 2 (after a goto).
+///
+/// Returns: (src_nt, terminal) -> Vec<(pop, dest_nt, state_req_top_after_pop)>
+fn build_reduce_cross_groups(
+    parser: &GLRParser,
+) -> BTreeMap<(Option<NonTerminalID>, TerminalID), Vec<(usize, NonTerminalID, StateIDBV)>> {
     // Enumerate states deterministically.
     let mut states: Vec<StateID> = parser.table.keys().copied().collect();
     states.sort_unstable();
@@ -210,37 +169,38 @@ fn build_normal_edges(parser: &GLRParser) -> Vec<NormalEdge> {
         .collect();
     src_nts.push(None);
 
+    // Accumulate per (src_nt, terminal, pop, dest_nt) => set(top_state_after_pop).
+    let mut acc: BTreeMap<(Option<NonTerminalID>, TerminalID, usize, NonTerminalID), StateIDBV> =
+        BTreeMap::new();
+
     for src_nt in &src_nts {
         for &revealed_state in &states {
-            for &terminal in &terminals {
-                // Establish initial baseline and starting stacks:
-                // - If src_nt is Some(nt), we do an initial goto (if any). Baseline length is 2.
-                // - If None, baseline is a single frame [revealed_state].
-                let mut initial_stacks: Vec<Vec<StateID>> = Vec::new();
-                let baseline_len: usize;
+            // Initialize baseline stack and baseline length
+            let mut initial_stacks: Vec<Vec<StateID>> = Vec::new();
+            let baseline_len: usize;
 
-                match src_nt {
-                    Some(nt) => {
-                        let gotos = get_gotos(parser, revealed_state, *nt);
-                        if gotos.is_empty() {
-                            continue;
-                        }
-                        for g in gotos {
-                            if let Some(next) = g.state_id {
-                                initial_stacks.push(vec![revealed_state, next]);
-                            }
-                        }
-                        baseline_len = 2;
+            match src_nt {
+                Some(nt) => {
+                    let gotos = get_gotos(parser, revealed_state, *nt);
+                    if gotos.is_empty() {
+                        continue;
                     }
-                    None => {
-                        initial_stacks.push(vec![revealed_state]);
-                        baseline_len = 1;
+                    for g in gotos {
+                        if let Some(next) = g.state_id {
+                            initial_stacks.push(vec![revealed_state, next]);
+                        }
                     }
+                    baseline_len = 2;
                 }
+                None => {
+                    initial_stacks.push(vec![revealed_state]);
+                    baseline_len = 1;
+                }
+            }
 
-                for initial_stack in initial_stacks {
-                    // BFS over reduce-only transformations for this terminal.
-                    // Shift terminates exploration on this terminal and produces an Escape edge.
+            for initial_stack in initial_stacks {
+                // For each terminal, BFS reduce-only closure; shift terminates exploration.
+                for &terminal in &terminals {
                     let mut q: VecDeque<Vec<StateID>> = VecDeque::new();
                     let mut visited: HashSet<Vec<StateID>> = HashSet::new();
                     q.push_back(initial_stack.clone());
@@ -259,18 +219,9 @@ fn build_normal_edges(parser: &GLRParser) -> Vec<NormalEdge> {
 
                         for action in actions {
                             match action {
-                                Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
-                                    // Shift consumes terminal; record Escape with the tail beyond baseline.
-                                    let mut shifted = stack.clone();
-                                    shifted.push(*next_state);
-                                    let tail: Vec<StateID> = shifted[baseline_len..].to_vec();
-                                    out.push(NormalEdge {
-                                        src_nt: *src_nt,
-                                        revealed_state,
-                                        terminal,
-                                        kind: NormalEdgeKind::Escape { push_states: tail },
-                                    });
-                                    // No continuation after shift for this terminal.
+                                Stage7ShiftsAndReducesLookaheadValue::Shift(_next_state) => {
+                                    // Shift: immediate, does not cross baseline; ignore in this reducer-only stage.
+                                    // Do not continue exploration through shift for this terminal.
                                 }
                                 Stage7ShiftsAndReducesLookaheadValue::Reduce {
                                     nonterminal_id,
@@ -283,15 +234,17 @@ fn build_normal_edges(parser: &GLRParser) -> Vec<NormalEdge> {
                                     if len > above_baseline {
                                         // Crosses below baseline
                                         let pop_below = len - above_baseline;
-                                        out.push(NormalEdge {
-                                            src_nt: *src_nt,
-                                            revealed_state,
-                                            terminal,
-                                            kind: NormalEdgeKind::ReduceCross {
-                                                pop: pop_below,
-                                                dest_nt: reduce_nt,
-                                            },
-                                        });
+                                        // After popping pop_below, the top-of-stack at peek is stack[stack.len() - len - 1].
+                                        // That is the state we must require at runtime after pop.
+                                        let peek_index = stack.len().saturating_sub(len);
+                                        if peek_index > 0 {
+                                            let peek_state = stack[peek_index - 1];
+                                            let key =
+                                                (*src_nt, terminal, pop_below, reduce_nt);
+                                            acc.entry(key)
+                                                .or_insert_with(StateIDBV::zeros)
+                                                .insert(peek_state.0);
+                                        }
                                     } else {
                                         // Reduce without crossing baseline; keep exploring reduce chains.
                                         let mut after_pop = stack.clone();
@@ -310,33 +263,26 @@ fn build_normal_edges(parser: &GLRParser) -> Vec<NormalEdge> {
                                     }
                                 }
                                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                    if let Some(next_state) = shift {
-                                        let mut shifted = stack.clone();
-                                        shifted.push(*next_state);
-                                        let tail: Vec<StateID> = shifted[baseline_len..].to_vec();
-                                        out.push(NormalEdge {
-                                            src_nt: *src_nt,
-                                            revealed_state,
-                                            terminal,
-                                            kind: NormalEdgeKind::Escape { push_states: tail },
-                                        });
+                                    if let Some(_next_state) = shift {
+                                        // As with Shift: do not proceed further on this terminal.
                                     }
                                     for (len, nts) in reduces {
                                         for (nt, _) in nts {
                                             let reduce_nt = *nt;
                                             let len = *len;
-                                            let above_baseline = stack.len().saturating_sub(baseline_len);
+                                            let above_baseline =
+                                                stack.len().saturating_sub(baseline_len);
                                             if len > above_baseline {
                                                 let pop_below = len - above_baseline;
-                                                out.push(NormalEdge {
-                                                    src_nt: *src_nt,
-                                                    revealed_state,
-                                                    terminal,
-                                                    kind: NormalEdgeKind::ReduceCross {
-                                                        pop: pop_below,
-                                                        dest_nt: reduce_nt,
-                                                    },
-                                                });
+                                                let peek_index = stack.len().saturating_sub(len);
+                                                if peek_index > 0 {
+                                                    let peek_state = stack[peek_index - 1];
+                                                    let key =
+                                                        (*src_nt, terminal, pop_below, reduce_nt);
+                                                    acc.entry(key)
+                                                        .or_insert_with(StateIDBV::zeros)
+                                                        .insert(peek_state.0);
+                                                }
                                             } else {
                                                 let mut after_pop = stack.clone();
                                                 let new_len = after_pop.len().saturating_sub(len);
@@ -363,26 +309,6 @@ fn build_normal_edges(parser: &GLRParser) -> Vec<NormalEdge> {
         }
     }
 
-    out
-}
-
-/// Group all ReduceCross facts by (src_nt, terminal, pop, dest_nt), compressing revealed_state into a bitset.
-fn build_crossing_groups(
-    parser: &GLRParser,
-    normal_edges: &[NormalEdge],
-) -> BTreeMap<(Option<NonTerminalID>, TerminalID), Vec<(usize, NonTerminalID, StateIDBV)>> {
-    // Accumulate state sets per (src_nt, terminal, pop, dest_nt).
-    let mut acc: BTreeMap<(Option<NonTerminalID>, TerminalID, usize, NonTerminalID), StateIDBV> =
-        BTreeMap::new();
-
-    for e in normal_edges {
-        if let NormalEdgeKind::ReduceCross { pop, dest_nt } = e.kind {
-            let key = (e.src_nt, e.terminal, pop, dest_nt);
-            let entry = acc.entry(key).or_insert_with(StateIDBV::zeros);
-            entry.insert(e.revealed_state.0);
-        }
-    }
-
     // Collect into the desired map: (src_nt, terminal) -> Vec<(pop, dest_nt, state_req)>
     let mut out: BTreeMap<(Option<NonTerminalID>, TerminalID), Vec<(usize, NonTerminalID, StateIDBV)>> =
         BTreeMap::new();
@@ -401,10 +327,89 @@ fn build_crossing_groups(
     out
 }
 
-// ---------- Stage 2: Build special graph from precompute1 + crossing groups -------------------
+// ---------- Stage 1b: Build Shift groups (pop=0, grammar context unchanged) -------------------
 
-/// Extract all "None-terminal" edges in precompute1 (LLM-only transitions).
-fn extract_llm_only_edges(gc: &GrammarConstraint) -> (Vec<LlmOnlyEdge>, BTreeSet<PrecomputeNode1Index>) {
+/// Build shift groups: for each (src_nt, terminal), a bitset of top-of-stack states that allow
+/// an immediate shift action for that terminal. For src_nt = Some(nt), the "top-of-stack" we
+/// check is goto(revealed_state, nt) if it exists.
+fn build_shift_groups(
+    parser: &GLRParser,
+) -> BTreeMap<(Option<NonTerminalID>, TerminalID), StateIDBV> {
+    let mut states: Vec<StateID> = parser.table.keys().copied().collect();
+    states.sort_unstable();
+
+    let terminals: Vec<TerminalID> = parser.terminal_map.right_values().copied().collect();
+
+    let mut src_nts: Vec<Option<NonTerminalID>> = parser
+        .non_terminal_map
+        .right_values()
+        .copied()
+        .map(Some)
+        .collect();
+    src_nts.push(None);
+
+    let mut out: BTreeMap<(Option<NonTerminalID>, TerminalID), StateIDBV> = BTreeMap::new();
+
+    for src_nt in &src_nts {
+        for &revealed_state in &states {
+            // Determine the effective top-of-stack given src_nt.
+            let mut top_states: Vec<StateID> = Vec::new();
+            match src_nt {
+                None => {
+                    top_states.push(revealed_state);
+                }
+                Some(nt) => {
+                    let gotos = get_gotos(parser, revealed_state, *nt);
+                    for g in gotos {
+                        if let Some(next) = g.state_id {
+                            top_states.push(next);
+                        }
+                    }
+                    if top_states.is_empty() {
+                        continue;
+                    }
+                }
+            }
+
+            for &terminal in &terminals {
+                // If any top_state allows a Shift on this terminal, mark that top_state as required.
+                for &top_state in &top_states {
+                    let actions = get_actions(parser, top_state, terminal);
+                    let mut has_shift = false;
+                    for action in actions {
+                        match action {
+                            Stage7ShiftsAndReducesLookaheadValue::Shift(_s) => {
+                                has_shift = true;
+                                break;
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => {
+                                if shift.is_some() {
+                                    has_shift = true;
+                                    break;
+                                }
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => {}
+                        }
+                    }
+                    if has_shift {
+                        out.entry((*src_nt, terminal))
+                            .or_insert_with(StateIDBV::zeros)
+                            .insert(top_state.0);
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+// ---------- Stage 2: Extract Trie1 edges and build special graph -------------------------------
+
+/// Extract all "None-terminal" edges in precompute1 (LLM-only transitions) and cache end nodes.
+fn extract_llm_only_edges(
+    gc: &GrammarConstraint,
+) -> (Vec<LlmOnlyEdge>, BTreeSet<PrecomputeNode1Index>) {
     let mut out = Vec::new();
     let mut end_nodes: BTreeSet<PrecomputeNode1Index> = BTreeSet::new();
 
@@ -447,10 +452,11 @@ fn extract_llm_only_edges(gc: &GrammarConstraint) -> (Vec<LlmOnlyEdge>, BTreeSet
 }
 
 /// Build super edges by walking precompute1 edges labeled with Some(terminal) and combining
-/// with crossing groups from the GLR table.
+/// with (a) reduce-cross groups from the GLR table; and (b) shift groups (pop=0).
 fn build_super_edges_from_trie1(
     gc: &GrammarConstraint,
-    crossing_groups: &BTreeMap<(Option<NonTerminalID>, TerminalID), Vec<(usize, NonTerminalID, StateIDBV)>>,
+    reduce_groups: &BTreeMap<(Option<NonTerminalID>, TerminalID), Vec<(usize, NonTerminalID, StateIDBV)>>,
+    shift_groups: &BTreeMap<(Option<NonTerminalID>, TerminalID), StateIDBV>,
 ) -> Vec<SuperEdge> {
     let mut out = Vec::new();
 
@@ -461,34 +467,73 @@ fn build_super_edges_from_trie1(
     }
     let nodes = Trie::all_nodes(&gc.trie1_god, &roots);
 
-    // For each node, read children; for each Some(terminal) edge, create super edges for all src_nt groups.
+    // For each node, read children; for each Some(terminal) edge, create super edges for all src_nt groupings.
     for idx in nodes {
         if let Some(guard) = idx.read(&gc.trie1_god) {
             for (ek, dest_map) in guard.children() {
-                let terminal_opt = ek.clone();
-                if let Some(term) = terminal_opt {
+                if let Some(term) = ek.clone() {
                     // For each child under this terminal, produce edges keyed by src_nt groupings.
                     for (child_idx, edge_bv) in dest_map.iter() {
-                        // For src_nt in {None} ∪ NonTerminals that have non-empty crossing groups for this terminal:
-                        // This automatically prunes src_nt that do not allow any crossing on this terminal.
-                        // We enumerate keys in crossing_groups and match on `term`.
-                        for ((src_nt, term_k), groups) in crossing_groups {
+                        // 1) Shift (pop=0, grammar context unchanged)
+                        for ((src_nt, term_k), state_bv) in shift_groups {
                             if *term_k != term {
                                 continue;
                             }
+                            if state_bv.is_empty() {
+                                continue;
+                            }
+                            out.push(SuperEdge {
+                                src_nt: *src_nt,
+                                terminal: *term_k,
+                                pop: 0,
+                                next_nt: None,
+                                llm_bv: edge_bv.clone(),
+                                pci1_start: idx,
+                                pci1_end: *child_idx,
+                                state_req: state_bv.clone(),
+                            });
+                        }
+
+                        // 2) Reduce-cross (pop>=1, grammar context becomes Some(dest_nt))
+                        if let Some(groups) = reduce_groups.get(&(None, term)) {
+                            // include for src_nt=None below; will also include others below
                             for (pop, dest_nt, state_req) in groups {
-                                // pop >= 1 by construction (crossing below baseline).
-                                // Create a single super edge summarizing this possibility.
+                                if state_req.is_empty() {
+                                    continue;
+                                }
                                 out.push(SuperEdge {
-                                    src_nt: *src_nt,
-                                    terminal: *term_k,
+                                    src_nt: None,
+                                    terminal: term,
                                     pop: *pop,
-                                    dest_nt: *dest_nt,
+                                    next_nt: Some(*dest_nt),
                                     llm_bv: edge_bv.clone(),
                                     pci1_start: idx,
                                     pci1_end: *child_idx,
                                     state_req: state_req.clone(),
                                 });
+                            }
+                        }
+                        // Also for src_nt = Some(nt) cases
+                        for ((src_nt, term_k), groups) in reduce_groups {
+                            if *term_k != term {
+                                continue;
+                            }
+                            if let Some(nt) = src_nt {
+                                for (pop, dest_nt, state_req) in groups {
+                                    if state_req.is_empty() {
+                                        continue;
+                                    }
+                                    out.push(SuperEdge {
+                                        src_nt: Some(*nt),
+                                        terminal: term,
+                                        pop: *pop,
+                                        next_nt: Some(*dest_nt),
+                                        llm_bv: edge_bv.clone(),
+                                        pci1_start: idx,
+                                        pci1_end: *child_idx,
+                                        state_req: state_req.clone(),
+                                    });
+                                }
                             }
                         }
                     }
@@ -504,9 +549,9 @@ fn build_super_edges_from_trie1(
 pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
     let mut sp = SpecialPrecomputation::new();
 
-    // Stage 1: table-driven normal edges and grouped crossings
-    sp.normal_edges = build_normal_edges(&gc.parser);
-    let crossing_groups = build_crossing_groups(&gc.parser, &sp.normal_edges);
+    // Stage 1: table-driven groups
+    let reduce_groups = build_reduce_cross_groups(&gc.parser);
+    let shift_groups = build_shift_groups(&gc.parser);
 
     // Stage 2a: trie1 "None" edges + end nodes
     let (llm_edges, end_nodes) = extract_llm_only_edges(gc);
@@ -514,7 +559,7 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
     sp.pci1_end_nodes = end_nodes;
 
     // Stage 2b: build super edges from precompute1 edges with Some(terminal)
-    sp.super_edges = build_super_edges_from_trie1(gc, &crossing_groups);
+    sp.super_edges = build_super_edges_from_trie1(gc, &reduce_groups, &shift_groups);
 
     // Roots per tokenizer state
     sp.pci1_roots_by_tokenizer = gc.precomputed1.clone();
@@ -531,10 +576,10 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
 /// Strategy (self-contained; no trie1 access):
 /// - Starting from each active tokenizer state's cached pci1 root and src_nt=None, run a small worklist:
 ///     • Follow LLM-only edges (no grammar action): intersect tokens, move pci1.
-///     • Try super edges when (pci1, src_nt) matches. A super edge passes iff:
-///           - intersected tokens non-empty, and
-///           - GLR pop-and-peek passes: after popping `pop`, a peek state is in `state_req`.
-///       Then move to (Some(dest_nt), pci1_end).
+///     • Try super edges when (pci1, src_nt) matches.
+///           - Intersect tokens with the edge's llm_bv; if empty, skip.
+///           - GLR pop-and-peek passes iff: after popping `pop`, a peek state is in `state_req`.
+///       Then move to (next_nt.or(src_nt), pci1_end).
 ///     • If pci1 is an "end" node, union the state's accumulated token set into final_mask.
 /// - Convert internal tokens to original using the precompute1 vocab mapping.
 pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
@@ -630,15 +675,16 @@ pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
                     }
 
                     // Move along super edge:
+                    let new_src_nt = e.next_nt.or(src_nt);
                     let next_key = Key {
                         pci1: e.pci1_end,
-                        src_nt: Some(e.dest_nt),
+                        src_nt: new_src_nt,
                     };
                     let entry = seen.entry(next_key).or_insert_with(LLMTokenBV::zeros);
                     let delta = &next_bv - entry;
                     if !delta.is_empty() {
                         *entry |= &next_bv;
-                        q.push_back((e.pci1_end, Some(e.dest_nt), next_bv));
+                        q.push_back((e.pci1_end, new_src_nt, next_bv));
                     }
                 }
             }
@@ -678,37 +724,6 @@ pub fn dump_precomputed_special(gc: &GrammarConstraint) {
     println!("Tokenizer states with pci1 roots: {}", sp.pci1_roots_by_tokenizer.len());
     println!("pci1 end nodes cached: {}", sp.pci1_end_nodes.len());
 
-    println!("\nNormal Edges ({}):", sp.normal_edges.len());
-    println!("{:-<120}", "");
-    println!(
-        "{:<10} | {:<8} | {:<20} | {:<75}",
-        "src_nt", "state", "terminal", "kind"
-    );
-    println!("{:-<120}", "");
-    let mut normals = sp.normal_edges.clone();
-    normals.sort_by_key(|e| (e.src_nt.map(|n| n.0), e.revealed_state.0, e.terminal.0));
-    for e in normals.iter().take(2000) { // cap output
-        let kind_s = match e.kind {
-            NormalEdgeKind::Escape { ref push_states } => {
-                let s: Vec<_> = push_states.iter().map(|s| s.0.to_string()).collect();
-                format!("Escape(push=[{}])", s.join(","))
-            }
-            NormalEdgeKind::ReduceCross { pop, dest_nt } => {
-                format!("ReduceCross(pop={}, dest_nt={})", pop, dest_nt.0)
-            }
-        };
-        println!(
-            "{:<10} | {:<8} | {:<20} | {}",
-            nt_name(&e.src_nt),
-            e.revealed_state.0,
-            get_term_name(&e.terminal),
-            kind_s
-        );
-    }
-    if sp.normal_edges.len() > 2000 {
-        println!("... ({} more)", sp.normal_edges.len() - 2000);
-    }
-
     println!("\nLLM-only edges ({}):", sp.llm_only_edges.len());
     println!("{:-<120}", "");
     println!("{:<10} | {:<10} | {:<20}", "pci1_from", "pci1_to", "llm_tokens");
@@ -733,51 +748,55 @@ pub fn dump_precomputed_special(gc: &GrammarConstraint) {
     }
 
     println!("\nSuper Edges ({}):", sp.super_edges.len());
-    println!("{:-<180}", "");
+    println!("{:-<200}", "");
     println!(
-        "{:<10} | {:<16} | {:<10} | {:<10} | {:<10} | {:<10} | {:<18} | {:<15}",
+        "{:<10} | {:<16} | {:<6} | {:<10} | {:<10} | {:<10} | {:<18} | {:<15}",
         "src_nt",
         "terminal",
         "pop",
-        "dest_nt",
+        "next_nt",
         "pci1_from",
         "pci1_to",
         "llm_tokens",
         "state_req(|S|)"
     );
-    println!("{:-<180}", "");
+    println!("{:-<200}", "");
     let mut supers = sp.super_edges.clone();
     supers.sort_by_key(|e| {
         (
             e.src_nt.map(|n| n.0),
             e.terminal.0,
             e.pop,
-            e.dest_nt.0,
+            e.next_nt.map(|n| n.0),
             e.pci1_start.as_usize(),
             e.pci1_end.as_usize(),
         )
     });
-    for e in supers.iter().take(2000) {
+    for e in supers.iter().take(3000) {
         let bv_str = if e.llm_bv.is_all() {
             "ALL".to_string()
         } else {
             format!("{} tokens", e.llm_bv.len())
         };
+        let next_nt_s = e
+            .next_nt
+            .map(|n| parser.non_terminal_map.get_by_right(&n).map(|s| s.to_string()).unwrap_or_else(|| format!("{}", n.0)))
+            .unwrap_or_else(|| "-".to_string());
         let state_req_len = e.state_req.len();
         println!(
-            "{:<10} | {:<16} | {:<10} | {:<10} | {:<10} | {:<10} | {:<18} | {:<15}",
+            "{:<10} | {:<16} | {:<6} | {:<10} | {:<10} | {:<10} | {:<18} | {:<15}",
             nt_name(&e.src_nt),
             get_term_name(&e.terminal),
             e.pop,
-            e.dest_nt.0,
+            next_nt_s,
             e.pci1_start.as_usize(),
             e.pci1_end.as_usize(),
             bv_str,
             state_req_len
         );
     }
-    if sp.super_edges.len() > 2000 {
-        println!("... ({} more)", sp.super_edges.len() - 2000);
+    if sp.super_edges.len() > 3000 {
+        println!("... ({} more)", sp.super_edges.len() - 3000);
     }
 
     println!("\n--- End Special Precomputation Dump ---");
