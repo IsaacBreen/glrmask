@@ -1,29 +1,24 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use crate::datastructures::trie::Trie;
 use std::sync::Arc;
 
-use ordered_hash_map::OrderedHashMap;
-
-use crate::constraint::{GrammarConstraint, GrammarConstraintState, LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper};
-use crate::datastructures::gss_leveled_adapter::{
-    allow_only_llm_tokens_and_prune_arc, prune_llm_tokens_by_disallowed_terminals, GSSNode,
+use crate::constraint::{
+    GrammarConstraint, GrammarConstraintState, LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper,
 };
-use crate::datastructures::trie::Trie;
-use crate::glr::parser::{GLRParser, GLRParserState};
+use crate::glr::parser::{GLRParser, GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::{Goto, NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID};
+use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_and_prune_arc, GSSNode};
 use crate::types::TerminalID;
 
-/// A destination reached by a normal (per-terminal) exploration step:
-/// - Reduce: the path reduces below the baseline by `pop` and transitions to `dest_nt`.
-/// - Escape: the path shifts; the new states to push relative to baseline are `push_states`.
+// Types for special precomputation
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SpecialPrecomputeDest {
     Reduce { pop: usize, dest_nt: NonTerminalID },
     Escape { push_states: Vec<StateID> },
 }
 
-/// A "normal" edge precomputation entry.
-/// (src_node_nonterminal, revealed_state, terminal, dest)
+// (Option<NonTerminalID>, StateID, TerminalID, SpecialPrecomputeDest)
 pub type SpecialPrecomputeNormalEdge = (
     Option<NonTerminalID>,
     StateID,
@@ -31,8 +26,7 @@ pub type SpecialPrecomputeNormalEdge = (
     SpecialPrecomputeDest,
 );
 
-/// A "super edge" summarizes a compound reduction step along a Trie1 edge carrying a token filter:
-/// (src_node_nonterminal, terminal, (pop, dest_nt), llm_token_filter, trie1_start, trie1_end)
+// (Option<NonTerminalID>, TerminalID, (usize, NonTerminalID), LLMTokenBV, PrecomputeNode1Index, PrecomputeNode1Index)
 pub type SpecialPrecomputeSuperEdge = (
     Option<NonTerminalID>,
     TerminalID,
@@ -48,7 +42,7 @@ pub struct SpecialPrecomputation {
     pub super_edges: HashSet<SpecialPrecomputeSuperEdge>,
 }
 
-/// Get actions (shift/reduce/split) for the given state and terminal.
+// Helper to get actions for a state and terminal
 fn get_actions<'a>(
     parser: &'a GLRParser,
     state_id: StateID,
@@ -63,7 +57,7 @@ fn get_actions<'a>(
     actions
 }
 
-/// Get goto transitions for a given state and non-terminal.
+// Helper to get gotos for a state and non-terminal
 fn get_gotos<'a>(parser: &'a GLRParser, state_id: StateID, nt_id: NonTerminalID) -> Vec<&'a Goto> {
     if let Some(row) = parser.table.get(&state_id) {
         row.gotos.get(&nt_id).map(|g| vec![g]).unwrap_or_default()
@@ -72,35 +66,44 @@ fn get_gotos<'a>(parser: &'a GLRParser, state_id: StateID, nt_id: NonTerminalID)
     }
 }
 
-/// Build a compact set of "normal" edges by exploring, per (src_nt, revealed_state, terminal):
-/// - Start stack baseline:
-///   * src_nt=None       => stack=[revealed_state], baseline_len=1
-///   * src_nt=Some(nt)   => stack=[revealed_state, goto(revealed_state, nt)] if exists (else skip)
-/// - BFS transitions:
-///   * Shift(next_state) => Escape edge with push = suffix beyond baseline
-///   * Reduce(len, nt)   => If it crosses baseline, emit Reduce with pop below baseline; else apply goto and continue
-///   * Split             => Do both (shift and reduces)
-fn precompute_normal_edges(parser: &GLRParser) -> HashSet<SpecialPrecomputeNormalEdge> {
+pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
     let mut normal_edges = HashSet::new();
+    let super_edges = RefCell::new(HashSet::new());
+    let parser = &gc.parser;
 
-    // Enumerate nonterminals including the synthetic "start/end" node represented as None.
-    let mut src_nts: Vec<Option<NonTerminalID>> =
-        parser.non_terminal_map.right_values().copied().map(Some).collect();
-    src_nts.push(None);
+    let mut non_terminals: Vec<Option<NonTerminalID>> = parser
+        .non_terminal_map
+        .right_values()
+        .copied()
+        .map(Some)
+        .collect();
+    non_terminals.push(None);
 
-    let mut terminals: Vec<TerminalID> = parser.terminal_map.right_values().copied().collect();
-    terminals.sort_by_key(|t| t.0);
+    let terminals: Vec<TerminalID> = parser.terminal_map.right_values().copied().collect();
 
     let mut states: Vec<StateID> = parser.table.keys().copied().collect();
-    states.sort_by_key(|s| s.0);
+    states.sort();
+    states.dedup();
 
-    for src_nt in &src_nts {
+    // Stage 1 (rewritten): compute normal_edges via baseline-aware BFS.
+    //
+    // For each (src_nt, revealed_state, terminal):
+    // - Build an initial stack and define its baseline length:
+    //   * src_nt = None       -> initial stack = [revealed_state], baseline_len = 1
+    //   * src_nt = Some(nt)   -> initial stack = [revealed_state, goto(revealed_state, nt)] if such goto exists
+    // - BFS over stacks for that terminal. On:
+    //   * Shift: record Escape edge with push_states = new_stack[baseline_len..]
+    //   * Reduce: if it crosses the baseline, record Reduce edge with pop = amount below baseline;
+    //             otherwise perform goto and continue BFS.
+    //   * Split: do both (Shift and Reduce).
+    for src_nt in &non_terminals {
         for &revealed_state in &states {
             for &terminal in &terminals {
                 // Build initial stack with baseline
                 let mut initial_stack_opt: Option<Vec<StateID>> = None;
                 match src_nt {
                     Some(nt) => {
+                        // Internal node: must first goto on the provided nonterminal
                         for goto in get_gotos(parser, revealed_state, *nt) {
                             if let Some(goto_state) = goto.state_id {
                                 initial_stack_opt = Some(vec![revealed_state, goto_state]);
@@ -108,27 +111,29 @@ fn precompute_normal_edges(parser: &GLRParser) -> HashSet<SpecialPrecomputeNorma
                         }
                     }
                     None => {
+                        // Start node
                         initial_stack_opt = Some(vec![revealed_state]);
                     }
                 }
 
                 let Some(initial_stack) = initial_stack_opt else {
+                    // No goto for this (revealed_state, nt); nothing to explore
                     continue;
                 };
-
                 let baseline_len = initial_stack.len();
+
                 let mut q: VecDeque<Vec<StateID>> = VecDeque::new();
-                let mut seen: HashSet<Vec<StateID>> = HashSet::new();
+                let mut visited: HashSet<Vec<StateID>> = HashSet::new();
                 q.push_back(initial_stack.clone());
-                seen.insert(initial_stack);
+                visited.insert(initial_stack.clone());
 
                 while let Some(stack) = q.pop_front() {
                     if stack.is_empty() {
                         continue;
                     }
 
-                    let top = *stack.last().unwrap();
-                    let actions = get_actions(parser, top, terminal);
+                    let top_state = *stack.last().unwrap();
+                    let actions = get_actions(parser, top_state, terminal);
                     if actions.is_empty() {
                         continue;
                     }
@@ -136,50 +141,41 @@ fn precompute_normal_edges(parser: &GLRParser) -> HashSet<SpecialPrecomputeNorma
                     for action in actions {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
-                                let mut next_stack = stack.clone();
-                                next_stack.push(*next_state);
-                                // Push suffix beyond baseline
-                                let suffix = next_stack[baseline_len..].to_vec();
-                                normal_edges.insert((
-                                    *src_nt,
-                                    revealed_state,
-                                    terminal,
-                                    SpecialPrecomputeDest::Escape { push_states: suffix },
-                                ));
-                                // Do not continue after the first consuming shift; baseline modeling accounts for this edge already.
+                                // Lookahead is consumed here. Record the escape edge with the
+                                // suffix needed to push beyond the baseline.
+                                let mut new_stack = stack.clone();
+                                new_stack.push(*next_state);
+                                let to_push = new_stack[baseline_len..].to_vec();
+                                let dest = SpecialPrecomputeDest::Escape { push_states: to_push };
+                                normal_edges.insert((*src_nt, revealed_state, terminal, dest));
+                                // Do not continue after a shift.
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce {
                                 nonterminal_id,
                                 len,
                                 ..
                             } => {
+                                // Inlined handle_reduce
                                 let len = *len;
-                                let red_nt = *nonterminal_id;
-                                let above_baseline = stack.len().saturating_sub(baseline_len);
+                                let reduce_nt = *nonterminal_id;
+                                let above_baseline = stack.len() - baseline_len;
                                 if len > above_baseline {
-                                    // Crosses baseline: below-baseline pop remainder
                                     let pop_below_baseline = len - above_baseline;
-                                    normal_edges.insert((
-                                        *src_nt,
-                                        revealed_state,
-                                        terminal,
-                                        SpecialPrecomputeDest::Reduce {
-                                            pop: pop_below_baseline,
-                                            dest_nt: red_nt,
-                                        },
-                                    ));
+                                    let dest = SpecialPrecomputeDest::Reduce {
+                                        pop: pop_below_baseline,
+                                        dest_nt: reduce_nt,
+                                    };
+                                    normal_edges.insert((*src_nt, revealed_state, terminal, dest));
                                 } else {
-                                    // Still above or at baseline: apply pop + goto and continue BFS
                                     let mut after_pop = stack.clone();
-                                    after_pop.truncate(after_pop.len().saturating_sub(len));
-                                    if let Some(&new_top) = after_pop.last() {
-                                        for goto in get_gotos(parser, new_top, red_nt) {
-                                            if let Some(goto_state) = goto.state_id {
-                                                let mut after_goto = after_pop.clone();
-                                                after_goto.push(goto_state);
-                                                if seen.insert(after_goto.clone()) {
-                                                    q.push_back(after_goto);
-                                                }
+                                    after_pop.truncate(after_pop.len() - len);
+                                    let new_top = *after_pop.last().unwrap();
+                                    for goto in get_gotos(parser, new_top, reduce_nt) {
+                                        if let Some(goto_state) = goto.state_id {
+                                            let mut after_goto = after_pop.clone();
+                                            after_goto.push(goto_state);
+                                            if visited.insert(after_goto.clone()) {
+                                                q.push_back(after_goto);
                                             }
                                         }
                                     }
@@ -187,43 +183,36 @@ fn precompute_normal_edges(parser: &GLRParser) -> HashSet<SpecialPrecomputeNorma
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(next_state) = shift {
-                                    let mut next_stack = stack.clone();
-                                    next_stack.push(*next_state);
-                                    let suffix = next_stack[baseline_len..].to_vec();
-                                    normal_edges.insert((
-                                        *src_nt,
-                                        revealed_state,
-                                        terminal,
-                                        SpecialPrecomputeDest::Escape { push_states: suffix },
-                                    ));
+                                    let mut new_stack = stack.clone();
+                                    new_stack.push(*next_state);
+                                    let to_push = new_stack[baseline_len..].to_vec();
+                                    let dest =
+                                        SpecialPrecomputeDest::Escape { push_states: to_push };
+                                    normal_edges.insert((*src_nt, revealed_state, terminal, dest));
                                 }
                                 for (len, nts) in reduces {
                                     for (nt, _) in nts {
+                                        // Inlined handle_reduce
                                         let len = *len;
-                                        let red_nt = *nt;
-                                        let above_baseline = stack.len().saturating_sub(baseline_len);
+                                        let reduce_nt = *nt;
+                                        let above_baseline = stack.len() - baseline_len;
                                         if len > above_baseline {
                                             let pop_below_baseline = len - above_baseline;
-                                            normal_edges.insert((
-                                                *src_nt,
-                                                revealed_state,
-                                                terminal,
-                                                SpecialPrecomputeDest::Reduce {
-                                                    pop: pop_below_baseline,
-                                                    dest_nt: red_nt,
-                                                },
-                                            ));
+                                            let dest = SpecialPrecomputeDest::Reduce {
+                                                pop: pop_below_baseline,
+                                                dest_nt: reduce_nt,
+                                            };
+                                            normal_edges.insert((*src_nt, revealed_state, terminal, dest));
                                         } else {
                                             let mut after_pop = stack.clone();
-                                            after_pop.truncate(after_pop.len().saturating_sub(len));
-                                            if let Some(&new_top) = after_pop.last() {
-                                                for goto in get_gotos(parser, new_top, red_nt) {
-                                                    if let Some(goto_state) = goto.state_id {
-                                                        let mut after_goto = after_pop.clone();
-                                                        after_goto.push(goto_state);
-                                                        if seen.insert(after_goto.clone()) {
-                                                            q.push_back(after_goto);
-                                                        }
+                                            after_pop.truncate(after_pop.len() - len);
+                                            let new_top = *after_pop.last().unwrap();
+                                            for goto in get_gotos(parser, new_top, reduce_nt) {
+                                                if let Some(goto_state) = goto.state_id {
+                                                    let mut after_goto = after_pop.clone();
+                                                    after_goto.push(goto_state);
+                                                    if visited.insert(after_goto.clone()) {
+                                                        q.push_back(after_goto);
                                                     }
                                                 }
                                             }
@@ -238,163 +227,190 @@ fn precompute_normal_edges(parser: &GLRParser) -> HashSet<SpecialPrecomputeNorma
         }
     }
 
-    normal_edges
-}
-
-/// Public entry: compute special precomputation artifacts.
-/// This rewrite focuses on correctness and determinism:
-/// - Build compact "normal edges" via a baseline-aware BFS.
-/// - "Super edges" are optional summaries across Trie1; for now we keep them empty as
-///   the runtime algorithm below no longer requires them to compute masks.
-pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
-    let parser = &gc.parser;
-    let normal_edges = precompute_normal_edges(parser);
-
-    // This implementation of get_mask4 no longer depends on super edges.
-    // We keep the set for debugging/compatibility and leave it empty.
-    SpecialPrecomputation {
-        normal_edges,
-        super_edges: HashSet::new(),
-    }
-}
-
-/// Compute the current-commit mask (original token space) using Trie1 + GLR simulation.
-/// This version avoids the previous push/pop template machinery and instead:
-/// - Initializes (Trie1-root, GLRState) pairs for each active tokenizer state.
-/// - Traverses Trie1 using special_map_grouped with SCC-aware scheduling:
-///   * For edge Some(terminal): process_token(terminal) on a clone of the GLR state,
-///     then prune the GSS by the edge LLMTokenBV.
-///   * For edge None: only prune by the edge LLMTokenBV.
-/// - Whenever a Trie1 node with end=true is reached, union the GSS's allowed LLM tokens
-///   into the final internal mask.
-/// - Finally, map the internal mask (stage 1) to original-space IDs.
-pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
-    // If there are no active states, return empty mask.
-    if gcs.state.is_empty() {
-        return LLMTokenBV::zeros();
+    // Stage 2: Super Edges
+    let trie1_god = &gc.trie1_god;
+    let trie1_roots: Vec<_> = gc.precomputed1.values().cloned().collect();
+    if trie1_roots.is_empty() {
+        return SpecialPrecomputation {
+            normal_edges,
+            super_edges: super_edges.into_inner(),
+        };
     }
 
-    // Seed initial (Trie1-root -> GLRState) map, pruning disallowed terminals first.
-    let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode1Index, GLRParserState<'_>> = BTreeMap::new();
-    for (&tokenizer_state_id, glr_state) in &gcs.state {
-        if glr_state.active_state.stack.is_empty() {
-            continue;
-        }
-        let mut glr_state_cloned = glr_state.clone();
-        prune_llm_tokens_by_disallowed_terminals(
-            &mut glr_state_cloned.active_state.stack,
-            &gcs.parent.possible_matches,
-            &mut HashMap::new(),
-        );
+    // The value type for special_map
+    type SpecialMapValue = HashSet<(Vec<StateID>, LLMTokenBV, PrecomputeNode1Index)>;
 
-        if let Some(&trie1_root) = gcs.parent.precomputed1.get(&tokenizer_state_id) {
-            initial_values_by_trie_node
-                .entry(trie1_root)
-                .and_modify(|existing_glr| {
-                    existing_glr.merge_with(glr_state_cloned.clone());
-                })
-                .or_insert(glr_state_cloned);
-        }
+    // Initial values for the traversal
+    let mut initial_values_map: BTreeMap<PrecomputeNode1Index, SpecialMapValue> = BTreeMap::new();
+    for pci1_root in trie1_roots.iter().cloned() {
+        let initial_set = initial_values_map.entry(pci1_root).or_default();
+        initial_set.insert((
+            vec![parser.start_state_id],
+            gc.all_internal_llm_tokens_bitset_precompute1(),
+            pci1_root,
+        ));
+    }
+    let initial_values: Vec<_> = initial_values_map.into_iter().collect();
+
+    // We need to group normal_edges for efficient lookup.
+    let mut normal_edges_map: HashMap<
+        (Option<NonTerminalID>, StateID, TerminalID),
+        Vec<&SpecialPrecomputeDest>,
+    > = HashMap::new();
+    for edge in &normal_edges {
+        normal_edges_map
+            .entry((edge.0, edge.1, edge.2))
+            .or_default()
+            .push(&edge.3);
     }
 
-    if initial_values_by_trie_node.is_empty() {
-        return LLMTokenBV::zeros();
-    }
+    let traversal_data = Trie::compute_traversal_data(trie1_god, &trie1_roots).unwrap();
 
-    let trie1_god: &Trie1GodWrapper = &gcs.parent.trie1_god;
-
-    let roots_for_traversal: Vec<_> = initial_values_by_trie_node.keys().cloned().collect();
-    let traversal_data = match Trie::compute_traversal_data(trie1_god, &roots_for_traversal) {
-        Some(d) => d,
-        None => {
-            // No reachable structure; return empty
-            return LLMTokenBV::zeros();
-        }
-    };
-
-    // Prepare final-mask accumulator in internal (stage 1) domain.
-    let final_mask_internal = RefCell::new(LLMTokenBV::zeros());
-
-    // Prepare initial value vector for the grouped traversal
-    let initial_values_vec: Vec<_> = initial_values_by_trie_node.into_iter().collect();
-
-    // Traverse Trie1 with SCC-aware scheduling.
     Trie::special_map_grouped(
         trie1_god,
         &traversal_data,
-        initial_values_vec,
-        // step: (glr_s, edge_key, destinations_map) -> Vec<(child_idx, new_glr_state)>
-        |glr_s, edge_key_opt, destinations_map: &OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>| {
-            let mut out: Vec<(PrecomputeNode1Index, GLRParserState<'_>)> = Vec::new();
+        initial_values,
+        // step
+        |current_set, terminal_opt, dest_map| {
+            let mut results_for_dests: HashMap<PrecomputeNode1Index, SpecialMapValue> =
+                HashMap::new();
+            let terminal = match terminal_opt {
+                Some(t) => *t,
+                None => return vec![], // No grammar token on edge, no grammar actions to take.
+            };
 
-            match edge_key_opt {
-                Some(tid) => {
-                    // Consume grammar terminal along this edge.
-                    for (child_idx, edge_bv) in destinations_map.iter() {
-                        let mut next_state = glr_s.clone();
+            for (stack, llm_bv, pci1_start) in current_set {
+                for (pci1_dest, edge_llm_bv) in dest_map.iter() {
+                    let intersected_bv = llm_bv & edge_llm_bv;
+                    if intersected_bv.is_empty() {
+                        continue;
+                    }
 
-                        // Apply grammar token
-                        next_state.process_token(*tid);
+                    let mut q: VecDeque<(Option<NonTerminalID>, Vec<StateID>, LLMTokenBV)> =
+                        VecDeque::new();
+                    q.push_back((None, stack.clone(), intersected_bv.clone()));
 
-                        // If parse state OK, prune LLM tokens by the edge's bitset
-                        if next_state.is_ok() {
-                            allow_only_llm_tokens_and_prune_arc(
-                                &mut next_state.active_state.stack,
-                                edge_bv,
-                                &mut HashMap::new(),
-                            );
-                            if next_state.is_ok() {
-                                out.push((*child_idx, next_state));
+                    let mut visited_q_states = HashSet::new();
+
+                    while let Some((src_nt, current_stack, current_bv)) = q.pop_front() {
+                        if !visited_q_states.insert((src_nt, current_stack.clone())) {
+                            continue;
+                        }
+
+                        if current_stack.is_empty() {
+                            continue;
+                        }
+                        let top_state = *current_stack.last().unwrap();
+
+                        if let Some(dests) = normal_edges_map.get(&(src_nt, top_state, terminal))
+                        {
+                            for dest in dests {
+                                match dest {
+                                    SpecialPrecomputeDest::Reduce { pop, dest_nt } => {
+                                        if current_stack.len() <= *pop {
+                                            let pop_remainder = pop - current_stack.len();
+                                            let super_edge = (
+                                                src_nt,
+                                                terminal,
+                                                (pop_remainder, *dest_nt),
+                                                current_bv.clone(),
+                                                *pci1_start,
+                                                *pci1_dest,
+                                            );
+                                            super_edges.borrow_mut().insert(super_edge);
+                                        } else {
+                                            let mut new_stack = current_stack.clone();
+                                            new_stack.truncate(new_stack.len() - *pop);
+                                            q.push_back((
+                                                Some(*dest_nt),
+                                                new_stack,
+                                                current_bv.clone(),
+                                            ));
+                                        }
+                                    }
+                                    SpecialPrecomputeDest::Escape { push_states } => {
+                                        let mut new_stack = current_stack.clone();
+                                        new_stack.extend(push_states);
+                                        results_for_dests
+                                            .entry(*pci1_dest)
+                                            .or_default()
+                                            .insert((
+                                                new_stack,
+                                                current_bv.clone(),
+                                                *pci1_start,
+                                            ));
+                                    }
+                                }
                             }
                         }
                     }
                 }
-                None => {
-                    // No grammar token: just filter by LLM token bitset and keep going.
-                    for (child_idx, edge_bv) in destinations_map.iter() {
-                        let mut next_state = glr_s.clone();
-                        allow_only_llm_tokens_and_prune_arc(
-                            &mut next_state.active_state.stack,
-                            edge_bv,
-                            &mut HashMap::new(),
-                        );
-                        if next_state.is_ok() {
-                            out.push((*child_idx, next_state));
-                        }
-                    }
-                }
             }
-
-            out
+            results_for_dests.into_iter().collect::<Vec<_>>()
         },
-        // merge: combine GLR parser states
-        |s1, s2| s1.merge_with(s2),
-        // process: when at an end node, accumulate GSS-allowed tokens into final mask.
-        |precomputed_node_data, glr_s| {
-            if !glr_s.is_ok() {
-                return false;
-            }
-            if precomputed_node_data.value.end {
-                let allowed = glr_s.active_state.stack.allowed_llm_tokens();
-                if !allowed.is_empty() {
-                    *final_mask_internal.borrow_mut() |= &allowed;
-                }
-            }
-            true
+        // merge
+        |set1, set2| {
+            set1.extend(set2.into_iter());
         },
+        // process
+        |_, _| true,
     );
 
-    // Map internal (stage 1) mask to original token IDs.
-    gcs.parent.internal_bv_to_original_precompute1(&final_mask_internal.into_inner())
+    SpecialPrecomputation {
+        normal_edges,
+        super_edges: super_edges.into_inner(),
+    }
 }
 
-/// Debug/inspection helper: dump both normal and super edges if present.
+pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
+    let sp = &gcs.parent.special_precomputation;
+    let final_mask = RefCell::new(LLMTokenBV::zeros());
+
+    let mut q: VecDeque<(GLRParserState, PrecomputeNode1Index, Option<NonTerminalID>)> =
+        VecDeque::new();
+    let mut visited: HashSet<(
+        Arc<GSSNode>,
+        PrecomputeNode1Index,
+        Option<NonTerminalID>,
+    )> = HashSet::new();
+
+    // Initial states
+    for (tokenizer_id, glr_state) in &gcs.state {
+        if let Some(pci1_root) = gcs.parent.precomputed1.get(tokenizer_id) {
+            let key = (glr_state.active_state.stack.clone(), *pci1_root, None);
+            if visited.insert(key) {
+                q.push_back((glr_state.clone(), *pci1_root, None));
+            }
+        }
+    }
+
+    while let Some((glr_state, pci1_idx, src_nt)) = q.pop_front() {
+        if !glr_state.is_ok() {
+            continue;
+        }
+
+        let guard = pci1_idx.read(&gcs.parent.trie1_god).unwrap();
+        if guard.value.end {
+            *final_mask.borrow_mut() |= &glr_state.active_state.stack.allowed_llm_tokens();
+        }
+
+        // Follow super edges
+        // ... (This part is complex and requires careful GSS manipulation, omitted for now)
+
+        // Follow normal precompute1 edges using normal_edges (Escape)
+        // ... (This part is also complex, omitted for now)
+    }
+
+    gcs.parent.internal_bv_to_original_precompute1(&final_mask.into_inner())
+}
+
 pub fn dump_precomputed_special(gc: &GrammarConstraint) {
     let sp = &gc.special_precomputation;
     let parser = &gc.parser;
 
     println!("--- Special Precomputation Dump ---");
 
+    // For resolving NT IDs to names
     let get_nt_name = |nt_id: &NonTerminalID| -> String {
         parser
             .non_terminal_map
@@ -408,6 +424,8 @@ pub fn dump_precomputed_special(gc: &GrammarConstraint) {
             .map(get_nt_name)
             .unwrap_or_else(|| "None".to_string())
     };
+
+    // For resolving Terminal IDs to names
     let get_term_name = |term_id: &TerminalID| -> String {
         parser
             .terminal_map
