@@ -2265,16 +2265,16 @@ local_system:
               for s in topo:
                   # Local fixpoint within this SCC
                   in_queue: Set[NodeID] = set()
-                  local_queue: collections.deque[int] = collections.deque()
+                  local_queue: List[Tuple[int, int]] = []  # (-max_depth, pos)
                   # Seed the local queue: nodes in this SCC that have pending values
                   for pos in sccs[s]:
                       u = nodes[pos]
                       if u in values:
                           in_queue.add(u)
-                          local_queue.append(pos)
+                          heapq.heappush(local_queue, (-self.max_depth.get(u, 0), pos))
 
                   while local_queue:
-                      pos = local_queue.popleft()
+                      _neg_depth, pos = heapq.heappop(local_queue)
                       u = nodes[pos]
                       in_queue.discard(u)
                       if u not in values:
@@ -2403,12 +2403,12 @@ local_system:
                                   if traversal.comp_id[pos_d] == traversal.comp_id[pos]:
                                       if d not in in_queue:
                                           in_queue.add(d)
-                                          local_queue.append(pos_d)
+                                          heapq.heappush(local_queue, (-self.max_depth.get(d, 0), pos_d))
 
                       # If new inputs accumulated for this node while it was processing, re-queue it to continue local fixpoint.
                       if u in values and u not in in_queue:
                           in_queue.add(u)
-                          local_queue.append(pos)
+                          heapq.heappush(local_queue, (-self.max_depth.get(u, 0), pos))
 
               # Final conversion back to original IDs
               stats.start('get_mask.final_conversion')
@@ -4832,5 +4832,96 @@ messages:
     metadata:
   - user: "Changes committed with message: \"Fix: Add 'topo' field to TraversalData
       and remove placeholder line in _get_mask_scc\""
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_2.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Ok, that runs. I should have specified what I meant, though. Previously,
+      it would process nodes in some kind of order. But it'd do it in a 'depth-first'
+      way, trying to get to the bottom ASAP. I don't want to do this anymore. I want
+      to process kind of in BFS, using max_depth as priority, so that we give ourselves
+      as much of a chance as possible to merge multiple paths into this node before
+      we process it. This comes from the fact that a predecessor's max depth is always
+      less than it's subsequent node's.
+    metadata:
+  - assistant: |-
+      Of course. You want to switch from a simple FIFO queue to a priority queue for processing nodes within each Strongly Connected Component (SCC). This will allow you to process nodes in an order that maximizes the chances of merging incoming paths before a node is processed, using `max_depth` as the priority metric. Nodes with a higher `max_depth` (further from an end node) will be processed first.
+
+      Here are the steps to implement this change.
+
+      ### Step-by-step Instructions
+
+      1.  **File**: `python/aug25/models/precompute3_model_pure_python_2.py`
+          -   Locate the `_get_mask_scc` method.
+          -   Inside the `for s in topo:` loop, change the `local_queue` from a `collections.deque` to a list that will be managed as a min-heap by the `heapq` module.
+          -   Modify the logic for adding nodes to `local_queue`: instead of `append`, use `heapq.heappush`. The items pushed onto the heap will be tuples of `(-max_depth, position)` to prioritize higher `max_depth` values.
+          -   Modify the logic for removing nodes from `local_queue`: instead of `popleft`, use `heapq.heappop` and unpack the resulting tuple to get the node's position.
+          -   This change needs to be applied in three places within the SCC processing loop:
+              1.  When initially seeding the queue.
+              2.  When adding a child node from the same SCC to the queue.
+              3.  When re-queuing the current node if new values have arrived for it.
+
+      ### Git Patch
+
+      Here is the git diff to apply these changes.
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python_2.py b/python/aug25/models/precompute3_model_pure_python_2.py
+      --- a/python/aug25/models/precompute3_model_pure_python_2.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_2.py
+      @@ -1113,18 +1113,18 @@
+               for s in topo:
+                   # Local fixpoint within this SCC
+                   in_queue: Set[NodeID] = set()
+      -            local_queue: collections.deque[int] = collections.deque()
+      +            local_queue: List[Tuple[int, int]] = []  # (-max_depth, pos)
+                   # Seed the local queue: nodes in this SCC that have pending values
+                   for pos in sccs[s]:
+                       u = nodes[pos]
+                       if u in values:
+                           in_queue.add(u)
+      -                    local_queue.append(pos)
+      +                    heapq.heappush(local_queue, (-self.max_depth.get(u, 0), pos))
+       
+                   while local_queue:
+      -                pos = local_queue.popleft()
+      +                _neg_depth, pos = heapq.heappop(local_queue)
+                       u = nodes[pos]
+                       in_queue.discard(u)
+                       if u not in values:
+                           continue
+      @@ -1245,12 +1245,12 @@
+                                   # comp_id vectors are aligned with nodes indices
+                                   if traversal.comp_id[pos_d] == traversal.comp_id[pos]:
+                                       if d not in in_queue:
+                                           in_queue.add(d)
+      -                                    local_queue.append(pos_d)
+      +                                    heapq.heappush(local_queue, (-self.max_depth.get(d, 0), pos_d))
+       
+                       # If new inputs accumulated for this node while it was processing, re-queue it to continue local fixpoint.
+                       if u in values and u not in in_queue:
+                           in_queue.add(u)
+      -                    local_queue.append(pos)
+      +                    heapq.heappush(local_queue, (-self.max_depth.get(u, 0), pos))
+       
+               # Final conversion back to original IDs
+               stats.start('get_mask.final_conversion')
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_2.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_2.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_2.py.
+    metadata:
+  - user: 'Changes committed with message: "Implement SCC-aware scheduling for get_mask
+      traversal using max_depth as priority"'
     metadata:
 ...

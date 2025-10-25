@@ -1099,16 +1099,16 @@ class Model(GraphProvider):
         for s in topo:
             # Local fixpoint within this SCC
             in_queue: Set[NodeID] = set()
-            local_queue: collections.deque[int] = collections.deque()
+            local_queue: List[Tuple[int, int]] = []  # (-max_depth, pos)
             # Seed the local queue: nodes in this SCC that have pending values
             for pos in sccs[s]:
                 u = nodes[pos]
                 if u in values:
                     in_queue.add(u)
-                    local_queue.append(pos)
+                    heapq.heappush(local_queue, (-self.max_depth.get(u, 0), pos))
 
             while local_queue:
-                pos = local_queue.popleft()
+                _neg_depth, pos = heapq.heappop(local_queue)
                 u = nodes[pos]
                 in_queue.discard(u)
                 if u not in values:
@@ -1237,12 +1237,12 @@ class Model(GraphProvider):
                             if traversal.comp_id[pos_d] == traversal.comp_id[pos]:
                                 if d not in in_queue:
                                     in_queue.add(d)
-                                    local_queue.append(pos_d)
+                                    heapq.heappush(local_queue, (-self.max_depth.get(d, 0), pos_d))
 
                 # If new inputs accumulated for this node while it was processing, re-queue it to continue local fixpoint.
                 if u in values and u not in in_queue:
                     in_queue.add(u)
-                    local_queue.append(pos)
+                    heapq.heappush(local_queue, (-self.max_depth.get(u, 0), pos))
 
         # Final conversion back to original IDs
         stats.start('get_mask.final_conversion')
