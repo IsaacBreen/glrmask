@@ -1,10 +1,13 @@
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use crate::constraint::{
-    GrammarConstraint, GrammarConstraintState, LLMTokenBV, PrecomputeNode1Index,
+    GrammarConstraint, GrammarConstraintState, LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper,
 };
-use crate::glr::parser::GLRParser;
+use crate::glr::parser::{GLRParser, GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::{Goto, NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID};
+use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_and_prune_arc, GSSNode};
 use crate::types::TerminalID;
 
 // Types for special precomputation
@@ -64,6 +67,7 @@ fn get_gotos<'a>(parser: &'a GLRParser, state_id: StateID, nt_id: NonTerminalID)
 
 pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
     let mut normal_edges = HashSet::new();
+    let mut super_edges = HashSet::new();
     let parser = &gc.parser;
 
     let mut non_terminals: Vec<Option<NonTerminalID>> = parser
@@ -178,14 +182,149 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
         }
     }
 
+    // Stage 2: Super Edges
+    let trie1_god = &gc.trie1_god;
+    let precomputed1 = &gc.precomputed1;
+
+    let mut pci1_state: HashMap<PrecomputeNode1Index, BTreeSet<(Option<NonTerminalID>, StateID)>> =
+        HashMap::new();
+    let mut q: VecDeque<PrecomputeNode1Index> = precomputed1.values().cloned().collect();
+    let mut visited_q = HashSet::new();
+    for root in &q {
+        visited_q.insert(*root);
+    }
+
+    // Initialize roots
+    let mut initial_special_state = BTreeSet::new();
+    for &state_id in &states {
+        initial_special_state.insert((None, state_id));
+    }
+    for root_idx in precomputed1.values() {
+        pci1_state.insert(*root_idx, initial_special_state.clone());
+    }
+
+    let mut processed_nodes = HashSet::new();
+
+    while let Some(pci1_idx) = q.pop_front() {
+        if !processed_nodes.insert(pci1_idx) {
+            continue;
+        }
+
+        let current_special_states = match pci1_state.get(&pci1_idx) {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => continue,
+        };
+
+        let guard = trie1_god.read(pci1_idx).unwrap();
+        for (edge_terminal_opt, destinations_map) in guard.children() {
+            let terminal = match edge_terminal_opt {
+                Some(t) => *t,
+                None => {
+                    // Pass through
+                    for (dest_pci1, _edge_bv) in destinations_map {
+                        let dest_states = pci1_state.entry(*dest_pci1).or_default();
+                        let old_len = dest_states.len();
+                        dest_states.extend(current_special_states.clone());
+                        let changed = dest_states.len() > old_len;
+
+                        if changed && visited_q.insert(*dest_pci1) {
+                            q.push_back(*dest_pci1);
+                        }
+                    }
+                    continue;
+                }
+            };
+
+            let mut next_special_states_for_escape = BTreeSet::new();
+            for (src_nt, initial_state) in &current_special_states {
+                // Find matching normal edges
+                for (ne_src_nt, ne_initial_state, ne_terminal, ne_dest) in &normal_edges {
+                    if ne_src_nt == src_nt
+                        && *ne_initial_state == *initial_state
+                        && *ne_terminal == terminal
+                    {
+                        match ne_dest {
+                            SpecialPrecomputeDest::Reduce { pop, dest_nt } => {
+                                for (dest_pci1, edge_bv) in destinations_map {
+                                    if !edge_bv.is_empty() {
+                                        super_edges.insert((
+                                            *src_nt,
+                                            terminal,
+                                            (*pop, *dest_nt),
+                                            edge_bv.clone(),
+                                            pci1_idx,
+                                            *dest_pci1,
+                                        ));
+                                    }
+                                }
+                            }
+                            SpecialPrecomputeDest::Escape { push_states } => {
+                                if let Some(new_top_state) = push_states.last() {
+                                    next_special_states_for_escape.insert((*src_nt, *new_top_state));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !next_special_states_for_escape.is_empty() {
+                for (dest_pci1, _edge_bv) in destinations_map {
+                    let dest_states = pci1_state.entry(*dest_pci1).or_default();
+                    let old_len = dest_states.len();
+                    dest_states.extend(next_special_states_for_escape.clone());
+                    let changed = dest_states.len() > old_len;
+
+                    if changed && visited_q.insert(*dest_pci1) {
+                        q.push_back(*dest_pci1);
+                    }
+                }
+            }
+        }
+    }
+
     SpecialPrecomputation {
         normal_edges,
-        super_edges: HashSet::new(),
+        super_edges,
     }
 }
 
 pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
-    todo!()
+    let sp = &gcs.parent.special_precomputation;
+    let final_mask = RefCell::new(LLMTokenBV::zeros());
+
+    let mut q: VecDeque<(GLRParserState, PrecomputeNode1Index, Option<NonTerminalID>)> =
+        VecDeque::new();
+    let mut visited = HashSet::new();
+
+    // Initial states
+    for (tokenizer_id, glr_state) in &gcs.state {
+        if let Some(pci1_root) = gcs.parent.precomputed1.get(tokenizer_id) {
+            let key = (glr_state.active_state.stack.clone(), *pci1_root, None);
+            if visited.insert(key) {
+                q.push_back((glr_state.clone(), *pci1_root, None));
+            }
+        }
+    }
+
+    while let Some((glr_state, pci1_idx, src_nt)) = q.pop_front() {
+        if !glr_state.is_ok() {
+            continue;
+        }
+
+        let guard = gcs.parent.trie1_god.read(pci1_idx).unwrap();
+        if guard.value.end {
+            *final_mask.borrow_mut() |= &glr_state.active_state.stack.allowed_llm_tokens();
+        }
+
+        // Follow super edges
+        // ... (This part is complex and requires careful GSS manipulation, omitted for now)
+
+        // Follow normal precompute1 edges using normal_edges (Escape)
+        // ... (This part is also complex, omitted for now)
+    }
+
+    gcs.parent.internal_bv_to_original_precompute1(&final_mask.into_inner())
 }
 
 pub fn dump_precomputed_special(gc: &GrammarConstraint) {
@@ -250,5 +389,34 @@ pub fn dump_precomputed_special(gc: &GrammarConstraint) {
     }
 
     println!("\nSuper Edges ({}):", sp.super_edges.len());
+    println!("{:-<150}", "");
+    println!(
+        "{:<20} | {:<20} | {:<30} | {:<15} | {:<15} | {:<20}",
+        "Source NT", "Terminal", "Destination", "PCI1 Start", "PCI1 End", "LLM Tokens"
+    );
+    println!("{:-<150}", "");
+
+    let mut sorted_super_edges: Vec<_> = sp.super_edges.iter().collect();
+    sorted_super_edges.sort_unstable();
+
+    for (src_nt, terminal, (pop, dest_nt), edge_bv, pci1_start, pci1_end) in sorted_super_edges {
+        let dest_str = format!("Reduce(pop={}, dest_nt={})", pop, get_nt_name(dest_nt));
+        let bv_str = if edge_bv.is_all() {
+            "ALL".to_string()
+        } else {
+            format!("{} tokens", edge_bv.len())
+        };
+
+        println!(
+            "{:<20} | {:<20} | {:<30} | {:<15} | {:<15} | {:<20}",
+            get_opt_nt_name(src_nt),
+            get_term_name(terminal),
+            dest_str,
+            pci1_start.as_usize(),
+            pci1_end.as_usize(),
+            bv_str
+        );
+    }
+
     println!("\n--- End Special Precomputation Dump ---");
 }
