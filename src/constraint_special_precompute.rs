@@ -85,94 +85,119 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
     states.sort();
     states.dedup();
 
+    // Stage 1 (rewritten): compute normal_edges via baseline-aware BFS.
+    //
+    // For each (src_nt, revealed_state, terminal):
+    // - Build an initial stack and define its baseline length:
+    //   * src_nt = None       -> initial stack = [revealed_state], baseline_len = 1
+    //   * src_nt = Some(nt)   -> initial stack = [revealed_state, goto(revealed_state, nt)] if such goto exists
+    // - BFS over stacks for that terminal. On:
+    //   * Shift: record Escape edge with push_states = new_stack[baseline_len..]
+    //   * Reduce: if it crosses the baseline, record Reduce edge with pop = amount below baseline;
+    //             otherwise perform goto and continue BFS.
+    //   * Split: do both (Shift and Reduce).
     for src_nt in &non_terminals {
-        for &initial_state in &states {
+        for &revealed_state in &states {
             for &terminal in &terminals {
-                let mut q: VecDeque<(Vec<StateID>, Vec<StateID>)> = VecDeque::new(); // (stack, pushed_path)
-                let mut visited_stacks = HashSet::new();
-
-                let initial_stacks = if let Some(nt) = src_nt {
-                    let gotos = get_gotos(parser, initial_state, *nt);
-                    let mut stacks = vec![];
-                    for goto in gotos {
-                        if let Some(goto_state) = goto.state_id {
-                            stacks.push((vec![initial_state, goto_state], vec![goto_state]));
+                // Build initial stack with baseline
+                let mut initial_stack_opt: Option<Vec<StateID>> = None;
+                match src_nt {
+                    Some(nt) => {
+                        // Internal node: must first goto on the provided nonterminal
+                        for goto in get_gotos(parser, revealed_state, *nt) {
+                            if let Some(goto_state) = goto.state_id {
+                                initial_stack_opt = Some(vec![revealed_state, goto_state]);
+                            }
                         }
                     }
-                    stacks
-                } else {
-                    vec![(vec![initial_state], vec![])]
-                };
-
-                for (stack, path) in initial_stacks {
-                    if visited_stacks.insert(stack.clone()) {
-                        q.push_back((stack, path));
+                    None => {
+                        // Start node
+                        initial_stack_opt = Some(vec![revealed_state]);
                     }
                 }
 
-                while let Some((stack, pushed_path)) = q.pop_front() {
+                let Some(initial_stack) = initial_stack_opt else {
+                    // No goto for this (revealed_state, nt); nothing to explore
+                    continue;
+                };
+                let baseline_len = initial_stack.len();
+
+                let mut q: VecDeque<Vec<StateID>> = VecDeque::new();
+                let mut visited: HashSet<Vec<StateID>> = HashSet::new();
+                q.push_back(initial_stack.clone());
+                visited.insert(initial_stack.clone());
+
+                while let Some(stack) = q.pop_front() {
+                    if stack.is_empty() {
+                        continue;
+                    }
+
                     let top_state = *stack.last().unwrap();
                     let actions = get_actions(parser, top_state, terminal);
+                    if actions.is_empty() {
+                        continue;
+                    }
 
-                    for action in actions {
-                        let mut handle_reduce =
-                            |normal_edges: &mut HashSet<SpecialPrecomputeNormalEdge>,
-                             len: usize,
-                             reduce_nt: NonTerminalID| {
-                                if stack.len() <= len {
-                                    let pop_below = len - stack.len();
-                                    let dest = SpecialPrecomputeDest::Reduce {
-                                        pop: pop_below,
-                                        dest_nt: reduce_nt,
-                                    };
-                                    normal_edges.insert((*src_nt, initial_state, terminal, dest));
-                                } else {
-                                    let mut new_stack = stack.clone();
-                                    new_stack.truncate(new_stack.len() - len);
-                                    let new_top_state = *new_stack.last().unwrap();
-                                    let gotos = get_gotos(parser, new_top_state, reduce_nt);
-                                    for goto in gotos {
-                                        if let Some(goto_state) = goto.state_id {
-                                            let mut stack_after_goto = new_stack.clone();
-                                            stack_after_goto.push(goto_state);
-                                            let mut path_after_goto = pushed_path.clone();
-                                            path_after_goto.push(goto_state);
-                                            if visited_stacks.insert(stack_after_goto.clone()) {
-                                                q.push_back((stack_after_goto, path_after_goto));
-                                            }
-                                        }
+                    // Handle a single reduce alternative relative to the baseline
+                    let mut handle_reduce = |len: usize, reduce_nt: NonTerminalID| {
+                        // States currently above the baseline on this path
+                        let above_baseline = stack.len() - baseline_len;
+                        if len > above_baseline {
+                            // This reduction crosses below the baseline boundary.
+                            let pop_below_baseline = len - above_baseline;
+                            let dest = SpecialPrecomputeDest::Reduce {
+                                pop: pop_below_baseline,
+                                dest_nt: reduce_nt,
+                            };
+                            normal_edges.insert((*src_nt, revealed_state, terminal, dest));
+                        } else {
+                            // Pop stays at/above baseline: apply pop, then goto, and continue BFS.
+                            let mut after_pop = stack.clone();
+                            after_pop.truncate(after_pop.len() - len);
+                            let new_top = *after_pop.last().unwrap();
+                            for goto in get_gotos(parser, new_top, reduce_nt) {
+                                if let Some(goto_state) = goto.state_id {
+                                    let mut after_goto = after_pop.clone();
+                                    after_goto.push(goto_state);
+                                    if visited.insert(after_goto.clone()) {
+                                        q.push_back(after_goto);
                                     }
                                 }
-                            };
+                            }
+                        }
+                    };
 
+                    for action in actions {
                         match action {
                             Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
-                                let mut new_pushed = pushed_path.clone();
-                                new_pushed.push(*next_state);
-                                let dest = SpecialPrecomputeDest::Escape {
-                                    push_states: new_pushed,
-                                };
-                                normal_edges.insert((*src_nt, initial_state, terminal, dest));
+                                // Lookahead is consumed here. Record the escape edge with the
+                                // suffix needed to push beyond the baseline.
+                                let mut new_stack = stack.clone();
+                                new_stack.push(*next_state);
+                                let to_push = new_stack[baseline_len..].to_vec();
+                                let dest = SpecialPrecomputeDest::Escape { push_states: to_push };
+                                normal_edges.insert((*src_nt, revealed_state, terminal, dest));
+                                // Do not continue after a shift.
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Reduce {
                                 nonterminal_id,
                                 len,
                                 ..
                             } => {
-                                handle_reduce(&mut normal_edges, *len, *nonterminal_id);
+                                handle_reduce(*len, *nonterminal_id);
                             }
                             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                 if let Some(next_state) = shift {
-                                    let mut new_pushed = pushed_path.clone();
-                                    new_pushed.push(*next_state);
-                                    let dest = SpecialPrecomputeDest::Escape {
-                                        push_states: new_pushed,
-                                    };
-                                    normal_edges.insert((*src_nt, initial_state, terminal, dest));
+                                    let mut new_stack = stack.clone();
+                                    new_stack.push(*next_state);
+                                    let to_push = new_stack[baseline_len..].to_vec();
+                                    let dest =
+                                        SpecialPrecomputeDest::Escape { push_states: to_push };
+                                    normal_edges.insert((*src_nt, revealed_state, terminal, dest));
                                 }
                                 for (len, nts) in reduces {
                                     for (nt, _) in nts {
-                                        handle_reduce(&mut normal_edges, *len, *nt);
+                                        handle_reduce(*len, *nt);
                                     }
                                 }
                             }
