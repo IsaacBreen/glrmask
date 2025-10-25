@@ -3,7 +3,8 @@ from pathlib import Path
 import collections
 import gzip
 import json
-from typing import Dict
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional, Union, Set
 
 # Add project root to sys.path to resolve local imports
 _project_root = Path(__file__).resolve().parents[2]
@@ -12,6 +13,89 @@ if str(_project_root) not in sys.path:
 
 # Import the visualizer, which is a standalone script
 from python.aug25.visualize_constraint import visualize_constraint
+
+# --- Data Structures ---
+# These dataclasses model the structure of the constraint JSON file.
+
+# Type aliases for clarity
+RangeSetData = List[List[int]]  # Represents [[start, end], ...]
+NodeID = int
+StateID = int
+TerminalID = int
+NonTerminalID = int
+TokenID = int
+
+# --- Arena Dataclasses ---
+
+@dataclass(frozen=True)
+class ArenaEdgeDest:
+    dest_idx: NodeID
+    state_bv: RangeSetData
+
+@dataclass(frozen=True)
+class ArenaEdge:
+    pop: int
+    llm_bv: RangeSetData
+    dests: List[ArenaEdgeDest]
+
+@dataclass(frozen=True)
+class ArenaNode:
+    children: List[ArenaEdge]
+    clean_end: bool
+    max_depth: int
+
+# --- Tokenizer Dataclasses ---
+
+@dataclass(frozen=True)
+class DFAState:
+    transitions: Dict[int, int]
+    finalizers: Set[int]
+    possible_future_group_ids: Set[int]
+
+@dataclass(frozen=True)
+class Tokenizer:
+    states: List[DFAState]
+    start_state: int
+    non_greedy_finalizers: Set[int]
+
+# --- Parser Dataclasses ---
+
+@dataclass(frozen=True)
+class ReduceAction:
+    nonterminal_id: NonTerminalID
+    len: int
+    production_ids: Tuple[int, ...]
+
+@dataclass(frozen=True)
+class SplitAction:
+    shift: Optional[StateID]
+    reduces: Dict[int, Dict[NonTerminalID, Tuple[int, ...]]]
+
+ParserAction = Union[StateID, ReduceAction, SplitAction]
+
+@dataclass(frozen=True)
+class ParserRow:
+    actions: Dict[TerminalID, ParserAction]
+    gotos: Dict[NonTerminalID, StateID]
+
+@dataclass(frozen=True)
+class ParserTable:
+    start_state_id: StateID
+    table: Dict[StateID, ParserRow]
+    ignore_terminal_id: Optional[TerminalID]
+
+# --- Top-level Model Dataclass ---
+
+@dataclass(frozen=True)
+class ConstraintModel:
+    roots_map: Dict[StateID, NodeID]
+    arena: Dict[NodeID, ArenaNode]
+    tokenizer: Tokenizer
+    parser_table: ParserTable
+    possible_matches: Dict[int, Dict[int, RangeSetData]]
+    llm_token_map: Dict[str, TokenID]
+    internal_to_original_map: Dict[TokenID, List[TokenID]]
+    internal_max_llm_token: int
 
 # Global variable to hold the inspector instance for easy REPL access
 inspector = None
@@ -51,22 +135,81 @@ class Inspector:
     for interactive inspection and analysis.
     """
     def __init__(self, constraint_data: dict, constraint_path: Path):
-        self.data = constraint_data
         self.constraint_path = constraint_path
-        
-        trie_data = self.data.get("trie3_god", {})
-        values_list = trie_data.get("values", [])
-        self.values_dict: Dict[int, Dict] = {int(k): v for k, v in values_list}
-        
-        roots_list = self.data.get("precomputed3", [])
-        self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_list}
+        self.model = self._parse_model(constraint_data)
 
         self._adj = None
         self._reverse_adj = None
-        
+
         print(f"Inspector created for '{constraint_path.name}'.")
-        print(f"Loaded {len(self.values_dict)} nodes.")
+        print(f"Loaded {len(self.model.arena)} nodes.")
         print("Type 'inspector.help()' for a list of commands.")
+
+    def _parse_model(self, data: dict) -> ConstraintModel:
+        """Parses the raw JSON dictionary into structured dataclasses."""
+        # Arena parsing
+        arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
+        arena = {}
+        for uid, node_data in arena_dict.items():
+            children_data = node_data.get("children") or []
+            loaded_children = []
+            for (pop, llm_json), dest_map_json in children_data:
+                dests = []
+                for dest_idx, state_json in dest_map_json:
+                    dests.append(ArenaEdgeDest(dest_idx=int(dest_idx), state_bv=state_json))
+                loaded_children.append(ArenaEdge(pop=int(pop), llm_bv=llm_json, dests=dests))
+
+            clean_end = node_data.get("value", {}).get("clean_end", False)
+            max_depth = int(node_data.get("max_depth", 0) or 0)
+            arena[uid] = ArenaNode(children=loaded_children, clean_end=clean_end, max_depth=max_depth)
+
+        # Tokenizer parsing
+        dfa_data = data['tokenizer']['dfa']
+        dfa_states = [
+            DFAState(
+                transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()},
+                finalizers=set(s['finalizers']),
+                possible_future_group_ids=set(s['possible_future_group_ids'])
+            ) for s in dfa_data['states']
+        ]
+        tokenizer = Tokenizer(
+            states=dfa_states,
+            start_state=dfa_data['start_state'],
+            non_greedy_finalizers=set(dfa_data['non_greedy_finalizers'])
+        )
+
+        # Parser Table parsing
+        parser_data = data['parser']
+        py_table: Dict[int, ParserRow] = {}
+        for state_id_str, row_data in parser_data['stage_7_table']:
+            state_id = int(state_id_str)
+            actions = {}
+            for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                term_id, variant = int(term_id_str), action_data['variant']
+                if variant == 'Shift':
+                    actions[term_id] = action_data['state_id']
+                elif variant == 'Reduce':
+                    actions[term_id] = ReduceAction(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                elif variant == 'Split':
+                    reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
+                    actions[term_id] = SplitAction(action_data['shift'], reduces)
+            gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+            py_table[state_id] = ParserRow(actions=actions, gotos=gotos)
+        parser_table = ParserTable(start_state_id=parser_data['start_state_id'], table=py_table, ignore_terminal_id=parser_data.get('ignore_terminal_id'))
+
+        # Other data
+        roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
+        pmc_json = data['possible_matches']
+        possible_matches = {int(tsid): {int(term_id): bv for term_id, bv in term_map} for tsid, term_map in pmc_json}
+        vocab = data['precompute3_vocab']
+
+        return ConstraintModel(
+            roots_map=roots_map, arena=arena, tokenizer=tokenizer, parser_table=parser_table,
+            possible_matches=possible_matches,
+            llm_token_map=dict(data['llm_token_map']),
+            internal_to_original_map={int(k): v for k, v in dict(vocab['internal_to_original']).items()},
+            internal_max_llm_token=vocab['internal_max_llm_token']
+        )
 
     def help(self):
         """Prints a list of available inspection commands."""
@@ -86,23 +229,22 @@ class Inspector:
 
     def stats(self):
         """Prints detailed statistics about the loaded model's arena."""
-        num_nodes = len(self.values_dict)
-        num_roots = len(set(self.roots_map.values()))
+        num_nodes = len(self.model.arena)
+        num_roots = len(set(self.model.roots_map.values()))
         num_ends = 0
         num_edges = 0
         num_dests = 0
         pop_counts = collections.Counter()
 
-        for node in self.values_dict.values():
-            children = node.get("children", [])
+        for node in self.model.arena.values():
+            children = node.children
             if not children:
                 num_ends += 1
             
             for edge in children:
                 num_edges += 1
-                (pop, _llm_bv), dests = edge
-                pop_counts[int(pop)] += 1
-                num_dests += len(dests)
+                pop_counts[edge.pop] += 1
+                num_dests += len(edge.dests)
 
         print("\n--- Arena Statistics ---")
         print(f"  Nodes: {num_nodes:,}")
@@ -125,11 +267,10 @@ class Inspector:
         if self._adj is None:
             print("Building forward adjacency map (one-time operation)...")
             self._adj = collections.defaultdict(set)
-            for u, node in self.values_dict.items():
-                for edge in node.get("children", []):
-                    _key, dests = edge
-                    for dest_id, _state_bv in dests:
-                        self._adj[int(u)].add(int(dest_id))
+            for u, node in self.model.arena.items():
+                for edge in node.children:
+                    for dest in edge.dests:
+                        self._adj[int(u)].add(int(dest.dest_idx))
             print("Done.")
         return self._adj
 
@@ -139,29 +280,28 @@ class Inspector:
         if self._reverse_adj is None:
             print("Building reverse adjacency map (one-time operation)...")
             self._reverse_adj = collections.defaultdict(set)
-            for u, node in self.values_dict.items():
-                for edge in node.get("children", []):
-                    _key, dests = edge
-                    for dest_id, _state_bv in dests:
-                        self._reverse_adj[int(dest_id)].add(int(u))
+            for u, node in self.model.arena.items():
+                for edge in node.children:
+                    for dest in edge.dests:
+                        self._reverse_adj[int(dest.dest_idx)].add(int(u))
             print("Done.")
         return self._reverse_adj
 
     def node(self, node_id: int):
         """Prints detailed information about a specific node."""
-        node = self.values_dict.get(node_id)
+        node = self.model.arena.get(node_id)
         if not node:
             print(f"Node {node_id} not found in arena.")
             return
 
         print(f"\n--- Node {node_id} ---")
-        is_root = any(r == node_id for r in self.roots_map.values())
-        children = node.get("children", [])
+        is_root = any(r == node_id for r in self.model.roots_map.values())
+        children = node.children
         is_end = not children
 
         print(f"  Is Root: {'Yes' if is_root else 'No'}")
         print(f"  Is End (no children): {'Yes' if is_end else 'No'}")
-        print(f"  Max Depth (heuristic): {node.get('max_depth', 'N/A')}")
+        print(f"  Max Depth (heuristic): {node.max_depth}")
 
         parents = self.reverse_adj.get(node_id)
         if parents:
@@ -174,30 +314,29 @@ class Inspector:
             print("    None")
         else:
             for i, edge in enumerate(children):
-                (pop, llm_bv_json), dests = edge
-                dest_ids = sorted([int(d[0]) for d in dests])
-                print(f"    - Edge {i}: pop={pop}")
-                print(f"      - LLM Tokens: {format_ranges(llm_bv_json)}")
+                dest_ids = sorted([d.dest_idx for d in edge.dests])
+                print(f"    - Edge {i}: pop={edge.pop}")
+                print(f"      - LLM Tokens: {format_ranges(edge.llm_bv)}")
                 print(f"      - Destinations ({len(dest_ids)}): {dest_ids}")
         print("-" * 15)
 
     def roots(self):
         """Lists all root nodes."""
-        root_ids = sorted(list(set(self.roots_map.values())))
+        root_ids = sorted(list(set(self.model.roots_map.values())))
         print(f"Found {len(root_ids)} unique root nodes:")
         print(root_ids)
         return root_ids
 
     def ends(self):
         """Lists all end nodes (nodes with no children)."""
-        end_ids = sorted([nid for nid, node in self.values_dict.items() if not node.get("children")])
+        end_ids = sorted([nid for nid, node in self.model.arena.items() if not node.children])
         print(f"Found {len(end_ids)} end nodes:")
         print(end_ids)
         return end_ids
 
     def path(self, start_id: int, end_id: int, max_depth: int = 10):
         """Finds and prints a path from a start node to an end node using BFS."""
-        if start_id not in self.values_dict or end_id not in self.values_dict:
+        if start_id not in self.model.arena or end_id not in self.model.arena:
             print("Error: One or both nodes not in arena.")
             return
 
@@ -228,10 +367,9 @@ class Inspector:
     def find_pop(self, pop_value: int):
         """Finds all nodes with at least one edge having the specified pop value."""
         found_nodes = []
-        for nid, node in self.values_dict.items():
-            for edge in node.get("children", []):
-                (pop, _llm_bv), _dests = edge
-                if int(pop) == pop_value:
+        for nid, node in self.model.arena.items():
+            for edge in node.children:
+                if edge.pop == pop_value:
                     found_nodes.append(nid)
                     break
         print(f"Found {len(found_nodes)} nodes with edges where pop={pop_value}:")
@@ -241,10 +379,9 @@ class Inspector:
     def find_token(self, token_id: int):
         """Finds all nodes with at least one edge that accepts the given LLM token ID."""
         found_nodes = []
-        for nid, node in self.values_dict.items():
-            for edge in node.get("children", []):
-                (_pop, llm_bv_json), _dests = edge
-                if token_in_ranges(token_id, llm_bv_json):
+        for nid, node in self.model.arena.items():
+            for edge in node.children:
+                if token_in_ranges(token_id, edge.llm_bv):
                     found_nodes.append(nid)
                     break
         print(f"Found {len(found_nodes)} nodes with edges accepting token {token_id}:")
@@ -287,7 +424,7 @@ def load(constraint_path: str) -> Inspector:
     path = Path(constraint_path)
     if not path.exists():
         print(f"Error: File not found at '{path}'")
-        return
+        return None
 
     print(f"Loading constraint data from '{path}'...")
     try:
@@ -299,7 +436,7 @@ def load(constraint_path: str) -> Inspector:
                 json_data = json.load(f)
     except Exception as e:
         print(f"Error loading or parsing JSON file: {e}")
-        return
+        return None
 
     inspector = Inspector(json_data, path)
     return inspector
