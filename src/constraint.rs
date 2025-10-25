@@ -2412,6 +2412,10 @@ impl GrammarConstraint {
         crate::constraint_special_precompute::precompute_special(self)
     }
 
+    pub fn dump_precomputed_special(&self) {
+        crate::constraint_special_precompute::dump_precomputed_special(self);
+    }
+
     pub fn all_internal_llm_tokens_bitset_precompute0(&self) -> LLMTokenBV {
         LLMTokenBV::ones(self.precompute0_vocab.internal_max_llm_token + 1)
     }

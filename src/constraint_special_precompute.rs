@@ -8,7 +8,7 @@ use crate::glr::table::{Goto, NonTerminalID, Stage7ShiftsAndReducesLookaheadValu
 use crate::types::TerminalID;
 
 // Types for special precomputation
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
     pub enum SpecialPrecomputeDest {
         Reduce { pop: usize, dest_nt: NonTerminalID },
         Escape { push_states: Vec<StateID> },
@@ -180,3 +180,68 @@ use crate::types::TerminalID;
     pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
         todo!()
     }
+
+pub fn dump_precomputed_special(gc: &GrammarConstraint) {
+    let sp = &gc.special_precomputation;
+    let parser = &gc.parser;
+
+    println!("--- Special Precomputation Dump ---");
+
+    // For resolving NT IDs to names
+    let nt_map_rev = parser.non_terminal_map.right_to_left_map();
+    let get_nt_name = |nt_id: &NonTerminalID| -> String {
+        nt_map_rev
+            .get(nt_id)
+            .map(|nt| nt.to_string())
+            .unwrap_or_else(|| format!("NT({})", nt_id.0))
+    };
+    let get_opt_nt_name = |opt_nt_id: &Option<NonTerminalID>| -> String {
+        opt_nt_id
+            .as_ref()
+            .map(get_nt_name)
+            .unwrap_or_else(|| "None".to_string())
+    };
+
+    // For resolving Terminal IDs to names
+    let term_map_rev = parser.terminal_map.right_to_left_map();
+    let get_term_name = |term_id: &TerminalID| -> String {
+        term_map_rev
+            .get(term_id)
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| format!("T({})", term_id.0))
+    };
+
+    println!("\nNormal Edges ({}):", sp.normal_edges.len());
+    println!("{:-<120}", "");
+    println!(
+        "{:<20} | {:<10} | {:<20} | {:<60}",
+        "Source NT", "Initial State", "Terminal", "Destination"
+    );
+    println!("{:-<120}", "");
+
+    let mut sorted_normal_edges: Vec<_> = sp.normal_edges.iter().collect();
+    sorted_normal_edges.sort_unstable();
+
+    for (src_nt, initial_state, terminal, dest) in sorted_normal_edges {
+        let dest_str = match dest {
+            SpecialPrecomputeDest::Reduce { pop, dest_nt } => {
+                format!("Reduce(pop={}, dest_nt={})", pop, get_nt_name(dest_nt))
+            }
+            SpecialPrecomputeDest::Escape { push_states } => {
+                let states_str: Vec<_> = push_states.iter().map(|s| s.0.to_string()).collect();
+                format!("Escape(push=[{}])", states_str.join(", "))
+            }
+        };
+
+        println!(
+            "{:<20} | S{:<8} | {:<20} | {}",
+            get_opt_nt_name(src_nt),
+            initial_state.0,
+            get_term_name(terminal),
+            dest_str
+        );
+    }
+
+    println!("\nSuper Edges ({}):", sp.super_edges.len());
+    println!("\n--- End Special Precomputation Dump ---");
+}
