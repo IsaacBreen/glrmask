@@ -1,8 +1,7 @@
 use std::collections::{BTreeSet, HashSet, VecDeque};
 
 use crate::constraint::{
-    GrammarConstraint, GrammarConstraintState, LLMTokenBV, PrecomputeNode1Index, SpecialPrecomputeDest,
-    SpecialPrecomputeNormalEdge,
+    GrammarConstraint, GrammarConstraintState, LLMTokenBV, PrecomputeNode1Index
 };
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{Goto, NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID};
