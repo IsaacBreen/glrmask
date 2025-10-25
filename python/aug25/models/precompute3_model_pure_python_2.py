@@ -352,6 +352,12 @@ class Model(GraphProvider):
     # State
     state: Dict[int, GSS]
 
+    # SCC traversal data
+    sccs: List[List[NodeID]] = field(default_factory=list, init=False)
+    topo_sorted_sccs: List[int] = field(default_factory=list, init=False)
+    node_to_scc_id: Dict[NodeID, int] = field(default_factory=dict, init=False)
+
+
     @staticmethod
     def from_json_string(s: str) -> 'Model':
         Stats.get().reset()
@@ -555,6 +561,7 @@ class Model(GraphProvider):
 
         # Reorder edges/dests to prioritize reaching end nodes quickly
         model.optimize_traversal()
+        model._compute_traversal_data()
 
         return model
 
@@ -837,6 +844,106 @@ class Model(GraphProvider):
             node.children = new_children
         stats.stop('optimize_traversal')
 
+    def _compute_traversal_data(self):
+        """
+        Computes Strongly Connected Components and a topological sort of the condensation graph.
+        This data is used to optimize the traversal in get_mask.
+        """
+        stats = Stats.get()
+        stats.start('scc_computation')
+
+        nodes = sorted(list(self.arena.keys()))
+        n = len(nodes)
+        if n == 0:
+            self.sccs = []
+            self.topo_sorted_sccs = []
+            self.node_to_scc_id = {}
+            stats.stop('scc_computation')
+            return
+
+        node_to_idx = {node: i for i, node in enumerate(nodes)}
+        adj = [[] for _ in range(n)]
+        radj = [[] for _ in range(n)]
+
+        for u_node, a_node in self.arena.items():
+            if u_node not in node_to_idx: continue
+            u = node_to_idx[u_node]
+            # children is Dict[pop, Dict[state, List[Tuple[dest, ...]]]]
+            for state_map in a_node.children.values():
+                for dest_list in state_map.values():
+                    for dest_id, _ in dest_list:
+                        if dest_id in node_to_idx:
+                            v = node_to_idx[dest_id]
+                            adj[u].append(v)
+                            radj[v].append(u)
+
+        # Kosaraju's algorithm
+        # 1. First DFS pass on original graph to get post-order
+        visited = [False] * n
+        order = []
+        for i in range(n):
+            if not visited[i]:
+                stack = [(i, iter(adj[i]))]
+                visited[i] = True
+                while stack:
+                    u, children_iter = stack[-1]
+                    try:
+                        v = next(children_iter)
+                        if not visited[v]:
+                            visited[v] = True
+                            stack.append((v, iter(adj[v])))
+                    except StopIteration:
+                        order.append(u)
+                        stack.pop()
+
+        # 2. Second DFS pass on reversed graph to find SCCs
+        scc = [-1] * n
+        scc_id_counter = 0
+        for i in range(n):
+            u = order[n - 1 - i]
+            if scc[u] == -1:
+                stack = [u]
+                scc[u] = scc_id_counter
+                while stack:
+                    v = stack.pop()
+                    for w in radj[v]:
+                        if scc[w] == -1:
+                            scc[w] = scc_id_counter
+                            stack.append(w)
+                scc_id_counter += 1
+
+        sccs = [[] for _ in range(scc_id_counter)]
+        for i, s_id in enumerate(scc):
+            sccs[s_id].append(nodes[i])
+        self.node_to_scc_id = {nodes[i]: s_id for i, s_id in enumerate(scc)}
+
+        # 3. Build condensation graph and topologically sort it
+        scc_adj = {i: set() for i in range(scc_id_counter)}
+        scc_indegree = collections.defaultdict(int)
+        for u_scc, scc_nodes in enumerate(sccs):
+            for node_id in scc_nodes:
+                u = node_to_idx[node_id]
+                for v in adj[u]:
+                    v_scc = self.node_to_scc_id[nodes[v]]
+                    if u_scc != v_scc and v_scc not in scc_adj[u_scc]:
+                        scc_adj[u_scc].add(v_scc)
+                        scc_indegree[v_scc] += 1
+
+        queue = collections.deque([i for i in range(scc_id_counter) if scc_indegree[i] == 0])
+        topo_sorted_sccs = []
+        while queue:
+            s_id = queue.popleft()
+            topo_sorted_sccs.append(s_id)
+            # Sort for determinism
+            for neighbor_s_id in sorted(list(scc_adj[s_id])):
+                scc_indegree[neighbor_s_id] -= 1
+                if scc_indegree[neighbor_s_id] == 0:
+                    queue.append(neighbor_s_id)
+
+        self.sccs = sccs
+        self.topo_sorted_sccs = topo_sorted_sccs
+        stats.stop('scc_computation')
+
     @profile
     def get_mask(self) -> LLMTokenSet:
         """
@@ -864,10 +971,7 @@ class Model(GraphProvider):
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
         values: Dict[NodeID, GSS] = {}
-        depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
-        enqueued_nodes: Set[NodeID] = set()
 
-        hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
         max_depth: Dict[NodeID, int] = self.max_depth
         arena: Dict[NodeID, ArenaNode] = self.arena
@@ -944,25 +1048,10 @@ class Model(GraphProvider):
             else:
                 values[r] = gss_initialized
 
-            d: int = max_depth[r]
-            if r not in enqueued_nodes:
-                enqueued_nodes.add(r)
-                hp(depth_heap, (-d, r))
-
-        def enqueue(d: int, n: NodeID) -> None:
-            stats.inc('get_mask.traversal.enqueues')
-            if n not in enqueued_nodes:
-                enqueued_nodes.add(n)
-                hp(depth_heap, (-d, n))
-
-        def dequeue() -> Tuple[int, int]:
-            neg_d, n = hpop(depth_heap)
-            return -neg_d, n
         stats.stop('get_mask.seeding')
 
         # Main loop
         stats.start('get_mask.main_loop')
-        max_depth_reached = 0
         visited_nodes = set()
 
         # Helper to update remaining_mask when final_mask grows
@@ -971,15 +1060,19 @@ class Model(GraphProvider):
             # Recompute remaining_mask conservatively to avoid tracking diffs
             remaining_mask = all_ones.difference(final_mask)
 
-        while depth_heap:
-            depth, node = dequeue()
-            max_depth_reached = max(max_depth_reached, depth)
-            stats.inc('get_mask.traversal.depth_heap.pops')
-            stats.inc('get_mask.traversal.nodes_processed')
-            visited_nodes.add(node)
-            gss_node: GSS = values.pop(node)
-            enqueued_nodes.remove(node)
-            stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
+        for scc_id in self.topo_sorted_sccs:
+            scc_nodes = self.sccs[scc_id]
+            local_queue = collections.deque([node for node in scc_nodes if node in values])
+            in_queue = set(local_queue)
+
+            while local_queue:
+                node = local_queue.popleft()
+                in_queue.remove(node)
+
+                stats.inc('get_mask.traversal.nodes_processed')
+                visited_nodes.add(node)
+                gss_node: GSS = values.pop(node)
+                stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
             # Precompute reduced mask once for this node
             stats.start('get_mask.main_loop.node.reduce_acc')
@@ -1016,19 +1109,17 @@ class Model(GraphProvider):
                 Stats.get().inc('get_mask.zombie_check.node.skipped_no_overlap_disjoint')
                 continue
 
-            # Traverse edges and propagate masks
-            children = a_node.children if a_node else {}
-            pop_cache: Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]] = {}
+                # Traverse edges and propagate masks
+                children = a_node.children if a_node else {}
+                pop_cache: Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]] = {}
 
-            # Local aliases for hot methods to reduce attribute lookups
-            rs_isdisjoint = LLMTokenSet.isdisjoint
-            rs_intersection = LLMTokenSet.intersection
-            rs_difference = LLMTokenSet.difference
-            states_from_indices = RangeSetStates.from_indices
-            
-            for pop, state_map in children.items():
-                stats.inc('get_mask.traversal.edges_traversed')
-                stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
+                # Local aliases for hot methods to reduce attribute lookups
+                rs_isdisjoint = LLMTokenSet.isdisjoint
+                states_from_indices = RangeSetStates.from_indices
+                
+                for pop, state_map in children.items():
+                    stats.inc('get_mask.traversal.edges_traversed')
+                    stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
 
                 # Get or compute popn results
                 if pop in pop_cache:
@@ -1065,75 +1156,83 @@ class Model(GraphProvider):
                 if not popped_acc or popped_acc.llm_mask.is_empty():
                     continue
 
-                # Group heads by (dest, llm_bv)
-                transitions: Dict[Tuple[NodeID, Tuple], List[int]] = collections.defaultdict(list)
-                for state_id in peeked:
-                    dest_list = state_map.get(state_id)
-                    if not dest_list:
-                        continue
-                    for dest_id, llm_bv_tuple in dest_list:
-                        transitions[(dest_id, llm_bv_tuple)].append(state_id)
+                    # Group heads by (dest, llm_bv)
+                    transitions: Dict[Tuple[NodeID, Tuple], List[int]] = collections.defaultdict(list)
+                    for state_id in peeked:
+                        dest_list = state_map.get(state_id)
+                        if not dest_list:
+                            continue
+                        for dest_id, llm_bv_tuple in dest_list:
+                            transitions[(dest_id, llm_bv_tuple)].append(state_id)
 
-                for (dest_id, llm_bv_tuple), heads in transitions.items():
-                    llm_bv, llm_bv_not = llm_bv_tuple
+                    for (dest_id, llm_bv_tuple), heads in transitions.items():
+                        llm_bv, llm_bv_not = llm_bv_tuple
 
-                    # Optimization A: Skip edges that can't contribute new tokens at all
-                    stats.start('get_mask.main_loop.edge.early_skip_check')
-                    if rs_isdisjoint(llm_bv, remaining_mask):
+                        # Optimization A: Skip edges that can't contribute new tokens at all
+                        stats.start('get_mask.main_loop.edge.early_skip_check')
+                        if rs_isdisjoint(llm_bv, remaining_mask):
+                            stats.stop('get_mask.main_loop.edge.early_skip_check')
+                            stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+                            continue
                         stats.stop('get_mask.main_loop.edge.early_skip_check')
-                        stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
-                        continue
-                    stats.stop('get_mask.main_loop.edge.early_skip_check')
 
-                    # Isolate GSS for this group of heads
-                    gss_for_heads = popped.isolate_many(heads)
-                    if gss_for_heads.is_empty():
-                        continue
+                        # Isolate GSS for this group of heads
+                        gss_for_heads = popped.isolate_many(heads)
+                        if gss_for_heads.is_empty():
+                            continue
 
-                    gss_for_heads_acc = gss_for_heads.reduce_acc()
-                    if not gss_for_heads_acc:
-                        continue
+                        gss_for_heads_acc = gss_for_heads.reduce_acc()
+                        if not gss_for_heads_acc:
+                            continue
 
-                    # Optimization B: Pre-skip if disjoint with GSS's allowed tokens
-                    if llm_bv.isdisjoint(gss_for_heads_acc.llm_mask):
-                        continue
+                        # Optimization B: Pre-skip if disjoint with GSS's allowed tokens
+                        if llm_bv.isdisjoint(gss_for_heads_acc.llm_mask):
+                            continue
 
-                    # Apply intersection
-                    child_gss = gss_for_heads
-                    need_apply = True
-                    if llm_bv_not is not None and gss_for_heads_acc.llm_mask.isdisjoint(llm_bv_not):
-                        need_apply = False
+                        # Apply intersection
+                        child_gss = gss_for_heads
+                        need_apply = True
+                        if llm_bv_not is not None and gss_for_heads_acc.llm_mask.isdisjoint(llm_bv_not):
+                            need_apply = False
 
-                    if need_apply:
-                        @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
-                        def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                            pfx = 'get_mask.main_loop.edge.intersect_and_prune'
-                            stats.inc(f'{pfx}.calls')
-                            stats.start(f'{pfx}.intersection')
-                            new_mask = acc.llm_mask.intersection(llm_bv)
-                            stats.stop(f'{pfx}.intersection')
-                            if new_mask.is_empty():
-                                stats.inc(f'{pfx}.pruned_accs')
-                                return None
-                            return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
+                        if need_apply:
+                            @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
+                            def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                pfx = 'get_mask.main_loop.edge.intersect_and_prune'
+                                stats.inc(f'{pfx}.calls')
+                                stats.start(f'{pfx}.intersection')
+                                new_mask = acc.llm_mask.intersection(llm_bv)
+                                stats.stop(f'{pfx}.intersection')
+                                if new_mask.is_empty():
+                                    stats.inc(f'{pfx}.pruned_accs')
+                                    return None
+                                return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
 
-                        stats.start('get_mask.main_loop.edge.apply_and_prune')
-                        child_gss = gss_for_heads.apply_and_prune(intersect_and_prune)
-                        stats.stop('get_mask.main_loop.edge.apply_and_prune')
+                            stats.start('get_mask.main_loop.edge.apply_and_prune')
+                            child_gss = gss_for_heads.apply_and_prune(intersect_and_prune)
+                            stats.stop('get_mask.main_loop.edge.apply_and_prune')
 
-                    if child_gss.is_empty():
-                        continue
+                        if child_gss.is_empty():
+                            continue
 
-                    # Enqueue
-                    d: NodeID = int(dest_id)
-                    if d in values:
-                        values[d] = values[d].merge(child_gss)
-                    else:
-                        values[d] = child_gss
-                    enqueue(max_depth[d], d)
+                        # Enqueue / Propagate
+                        d: NodeID = int(dest_id)
+                        if d in values:
+                            values[d] = values[d].merge(child_gss)
+                        else:
+                            values[d] = child_gss
+                        
+                        if self.node_to_scc_id.get(d) == scc_id:
+                            if d not in in_queue:
+                                in_queue.add(d)
+                                local_queue.append(d)
+
+                # Re-queue if necessary
+                if node in values and node not in in_queue:
+                    in_queue.add(node)
+                    local_queue.append(node)
 
         stats.stop('get_mask.main_loop')
-        stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
 
         stats.start('get_mask.final_conversion')
