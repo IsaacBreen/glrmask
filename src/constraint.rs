@@ -3375,45 +3375,6 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask3(&self) -> LLMTokenBV {
-        let t0 = std::time::Instant::now();
-        crate::debug!(10, "\n--- get_mask3 START ---");
-        crate::debug!(10, "GSS at start of get_mask3:");
-        crate::debug!(3, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
-        let stats = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-        );
-        crate::debug!(10, "Initial GSS stats: {:#?}", stats);
-        crate::debug!(3, "GSS stats: {:#?}", stats);
-        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
-        if GSS_LOGGING_ENABLED {
-            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
-            println!("{}", s);
-            println!("\n\n--- GSS State Explanations ---\n");
-            for state_id in state_ids {
-                let mut explanation = String::new();
-                println!("\n--- State {} ---", state_id.0);
-                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
-                println!("{}", explanation);
-            }
-
-            println!("\n\n--- Begin GSS Graphviz ---");
-            let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
-            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
-                .map(|s| s.as_str())
-                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
-                .collect();
-            println!("{}", self.parent.parser.gss_forest_to_dot( // TODO: fix this
-                &roots_with_labels,
-                Some(&self.parent.precompute_vocab1.original_to_internal),
-                Some(&self.parent.llm_vocab.llm_token_map),
-            ));
-            println!("\n\n--- End GSS Graphviz ---");
-        }
-
-        for (state_id, state) in self.state.iter() {
-            crate::debug!(3, "State {}:", state_id.0);
-        }
-
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
             return self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
@@ -3427,7 +3388,6 @@ impl<'a> GrammarConstraintState<'a> {
         };
 
         let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
-        crate::debug!(10, "\n--- Seeding work queue ---");
         for (&tokenizer_state_id, glr_state) in &self.state {
             if glr_state.active_state.stack.is_empty() {
                 continue;
@@ -3440,8 +3400,6 @@ impl<'a> GrammarConstraintState<'a> {
             );
 
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
-                crate::debug!(10, "  SEED: sid={}, root_idx={}, gss_ptr={:p}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack);
-                
                 initial_values_by_trie_node.entry(precomputed_trie_root_arc.clone())
                     .and_modify(|existing_glr| {
                         existing_glr.merge_with(glr_state.clone());
@@ -3455,16 +3413,8 @@ impl<'a> GrammarConstraintState<'a> {
         let initial_values_for_map: Vec<_> = initial_values_by_trie_node.into_iter().collect();
 
         if initial_values_for_map.is_empty() {
-             crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
              return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
         }
-
-        let t1 = std::time::Instant::now();
-        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
-            println!("after initial_values_for_map: {:>15?}", t1.duration_since(t0));
-        }
-
-        crate::profiler::reset();
 
         Trie::special_map_grouped(
             &self.parent.trie3_god,
@@ -3472,12 +3422,7 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
             |glr_s, (pop, llm_token_bv_from_edge), dest_map| {
-                crate::debug!(10, "  - STEP: gss_ptr={:p}, edge=(pop={}, llm_bv={})", glr_s.active_state.stack, pop, format_bv(llm_token_bv_from_edge));
                 let popped = glr_s.active_state.stack.popn(*pop as usize);
-                let num_peeks: usize = popped.iter().map(|p| p.peek_iter().count()).sum();
-                if num_peeks > 0 {
-                    crate::debug!(10, "      - Popped GSS has {} peeks", num_peeks);
-                }
                 let mut results = Vec::new();
 
                 for (dest_idx, state_id_bv) in dest_map.iter() {
@@ -3501,57 +3446,28 @@ impl<'a> GrammarConstraintState<'a> {
                     allow_only_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, llm_token_bv_from_edge, &mut HashMap::new());
 
                     if new_glr_s.is_ok() {
-                        crate::debug!(10, "      - Dest: idx={}, state_bv={}, matched={}, new_gss_ptr={:p}", dest_idx, format_bv(state_id_bv), valid_gss_nodes.len(), new_glr_s.active_state.stack);
                         results.push((dest_idx.clone(), new_glr_s));
                     }
                 }
                 results
             },
             // merge_fn
-            |glr_s1, glr_s2| {
-                crate::debug!(10, "    - MERGE: gss1(ptr={:p}) WITH gss2(ptr={:p})", glr_s1.active_state.stack, glr_s2.active_state.stack);
-                glr_s1.merge_with(glr_s2);
-            },
+            |glr_s1, glr_s2| glr_s1.merge_with(glr_s2),
             // process_fn: (precomputed_node_data, final_state_for_this_path)
             |precomputed_node_data, glr_s| {
-                crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}", precomputed_node_data as *const _, glr_s.active_state.stack);
                 let mut glr_s_copy = glr_s.clone();
                 let glr_active_tokens = glr_s_copy.active_state.stack.allowed_llm_tokens();
                 let keep_going = glr_s_copy.is_ok();
                 if precomputed_node_data.value.end {
                     if !glr_active_tokens.is_empty() {
-                        let before = final_mask_internal.borrow().len();
                         *final_mask_internal.borrow_mut() |= &glr_active_tokens;
-                        let after = final_mask_internal.borrow().len();
-                        if after > before {
-                            crate::debug!(10, "    - END NODE. final_mask len: {} -> {} (+{}) with tokens {}", before, after, after - before, format_bv(&glr_active_tokens));
-                        }
                     }
                 }
                 keep_going
             },
         );
 
-        let t_after_special_map = std::time::Instant::now();
-        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
-            println!("after special_map: {:>15?}", t_after_special_map.duration_since(t0));
-        }
-
-        crate::profiler::print_summary_flat();
-        crate::profiler::print_summary();
-        crate::profiler::reset();
-
-        crate::debug!(10, "\n--- get_mask3 END ---");
-        crate::debug!(10, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
-        crate::debug!(4, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
         let final_mask_mapped = self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
-        crate::debug!(10, "Final mask mapped: {}", format_bv(&final_mask_mapped));
-        crate::debug!(4, "Final mask mapped: {}", format_bv(&final_mask_mapped));
-
-        let t_end = std::time::Instant::now();
-        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
-            println!("get_mask took: {:>15?}", t_end.duration_since(t0));
-        }
 
         final_mask_mapped
     }
