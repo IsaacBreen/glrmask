@@ -31,6 +31,21 @@ pub struct TrieStats {
     pub avg_out_degree: f64,
 }
 
+/// Precomputed data for efficient traversal using `special_map_grouped`.
+#[derive(Debug, Clone)]
+pub struct TrieTraversalData {
+    /// The nodes reachable from the roots, in a fixed order.
+    nodes: Vec<Trie2Index>,
+    /// A map from a node's `usize` index to its position in the `nodes` vector.
+    pos_of_u: HashMap<usize, usize>,
+    /// A map from a node's position in `nodes` to its SCC ID.
+    comp_id: Vec<usize>,
+    /// The list of SCCs. Each inner vector contains node positions.
+    sccs: Vec<Vec<usize>>,
+    /// The topologically sorted list of SCC IDs.
+    topo: Vec<usize>,
+}
+
 /// Represents a node in a Trie–like structure (allowing shared subtrees and DAGs).
 /// Multiple children can exist for the same edge key. Each edge instance has a value.
 ///
@@ -1798,56 +1813,19 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         }
     }
 
-    /// Performs a specialized breadth-first traversal, grouping children by edge key.
-    /// This is more efficient than `special_map` when many edges share the same key,
-    /// as the `step` function is called once per key, not once per edge.
-    ///
-    /// Scheduling uses node.max_depth; if not recomputed yet it may be usize::MAX,
-    /// which is suboptimal but not incorrect.
+    /// Precomputes traversal data (SCCs, topological sort) for `special_map_grouped`.
+    /// This is useful to avoid recomputing this data if `special_map_grouped` is called
+    /// multiple times on the same graph structure.
     #[time_it]
-    pub fn special_map_grouped<V, S, I>(
+    pub fn compute_traversal_data(
         arena: &Arena<Trie<EK, EV, T>>,
-        initial_nodes_and_values: Vec<(Trie2Index, V)>,
-        mut step: S,
-        mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
-    )
-    where
-        V: Clone,
-        S: FnMut(
-            &V, &EK, &OrderedHashMap<Trie2Index, EV>
-        ) -> I,
-        I: IntoIterator<Item = (Trie2Index, V)>,
-    {
-        // ------------------------------------------------------------------
-        //  SCC-aware scheduler:
-        //  - Build SCCs of the reachable subgraph from the initial nodes.
-        //  - Process SCCs in topological order.
-        //  - Inside each SCC, run a local worklist until stabilization.
-        // ------------------------------------------------------------------
+        initial_nodes: &[Trie2Index],
+    ) -> Option<TrieTraversalData> {
         use std::collections::VecDeque;
-
-        // Pending values to be processed per node (by usize index).
-        let mut values: HashMap<usize, V> = HashMap::new();
-        // Nodes that should never be scheduled again (process returned false).
-        let mut stopped_nodes: HashSet<usize> = HashSet::new();
-
-        // Seed pending values with the user-supplied starting set.
-        let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| *n).collect();
-        let total_edges = Self::count_all_edges(arena, &initial_nodes);
-        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
-        for (node_idx, v0) in initial_nodes_and_values {
-            let ptr = node_idx.as_usize();
-            values
-                .entry(ptr)
-                .and_modify(|old| merge(old, v0.clone()))
-                .or_insert(v0);
-        }
-
         // Build reachable set and adjacency for SCC computation.
-        let nodes: Vec<Trie2Index> = Self::all_nodes(arena, &initial_nodes);
+        let nodes: Vec<Trie2Index> = Self::all_nodes(arena, initial_nodes);
         if nodes.is_empty() {
-            return;
+            return None;
         }
         let n = nodes.len();
         let mut pos_of_u: HashMap<usize, usize> = HashMap::with_capacity(n);
@@ -1857,7 +1835,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut radj: Vec<Vec<usize>> = vec![Vec::new(); n];
-        let mut has_self_loop = false;
         for (i, idx) in nodes.iter().enumerate() {
             if let Some(g) = idx.read(arena) {
                 for dest_map in g.children.values() {
@@ -1865,9 +1842,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                         if let Some(&j) = pos_of_u.get(&child_idx.as_usize()) {
                             adj[i].push(j);
                             radj[j].push(i);
-                            if i == j {
-                                has_self_loop = true;
-                            }
                         }
                     }
                 }
@@ -1920,7 +1894,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         for i in 0..n {
             sccs[comp_id[i]].push(i);
         }
-        let _has_cycles = has_self_loop || sccs.iter().any(|c| c.len() > 1);
 
         // Build condensation DAG of SCCs and topologically sort it.
         let mut scc_adj: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); scc_count];
@@ -1953,9 +1926,67 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             }
         }
 
+        Some(TrieTraversalData {
+            nodes,
+            pos_of_u,
+            comp_id,
+            sccs,
+            topo,
+        })
+    }
+
+    /// Performs a specialized breadth-first traversal, grouping children by edge key.
+    /// This is more efficient than `special_map` when many edges share the same key,
+    /// as the `step` function is called once per key, not once per edge.
+    ///
+    /// This version uses pre-computed traversal data for efficiency.
+    #[time_it]
+    pub fn special_map_grouped<V, S, I>(
+        arena: &Arena<Trie<EK, EV, T>>,
+        traversal_data: &TrieTraversalData,
+        initial_nodes_and_values: Vec<(Trie2Index, V)>,
+        mut step: S,
+        mut merge: impl FnMut(&mut V, V),
+        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
+    )
+    where
+        V: Clone,
+        S: FnMut(
+            &V, &EK, &OrderedHashMap<Trie2Index, EV>
+        ) -> I,
+        I: IntoIterator<Item = (Trie2Index, V)>,
+    {
+        // ------------------------------------------------------------------
+        //  SCC-aware scheduler:
+        //  - Process SCCs in topological order.
+        //  - Inside each SCC, run a local worklist until stabilization.
+        // ------------------------------------------------------------------
+        use std::collections::VecDeque;
+
+        let mut values: HashMap<usize, V> = HashMap::new();
+        let mut stopped_nodes: HashSet<usize> = HashSet::new();
+
+        let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| *n).collect();
+        let total_edges = Self::count_all_edges(arena, &initial_nodes);
+        let mut pb = tqdm!(total = total_edges, desc = "Traversing edges", disable = !PROGRESS_BAR_ENABLED, leave=false);
+        for (node_idx, v0) in initial_nodes_and_values {
+            let ptr = node_idx.as_usize();
+            values
+                .entry(ptr)
+                .and_modify(|old| merge(old, v0.clone()))
+                .or_insert(v0);
+        }
+
+        // Use pre-computed traversal data.
+        let nodes = &traversal_data.nodes;
+        let pos_of_u = &traversal_data.pos_of_u;
+        let comp_id = &traversal_data.comp_id;
+        let sccs = &traversal_data.sccs;
+        let topo = &traversal_data.topo;
+
         // Worklist inside each SCC until stabilization; process SCCs in topological order.
         let mut in_queue: HashSet<usize> = HashSet::new(); // node.usize currently in the local SCC queue
-        for s in topo {
+        for &s in topo {
             // Seed local queue with nodes in this SCC that currently have pending values.
             let mut local_queue: VecDeque<usize> = VecDeque::new(); // holds positions (indices into `nodes`)
             for &pos in &sccs[s] {
