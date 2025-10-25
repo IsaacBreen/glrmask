@@ -349,6 +349,7 @@ fn test_constraint_expression() {
     // constraint.dump_precomputed1(); // Commented out dump for cleaner test output
     // constraint.dump_precomputed2(); // Commented out dump for cleaner test output
     constraint.dump_precomputed3();
+    constraint.dump_precomputed_special();
 
     // Initial state and step
     let mut state = constraint.init();
