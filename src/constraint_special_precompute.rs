@@ -215,7 +215,7 @@ pub fn precompute_special(gc: &GrammarConstraint) -> SpecialPrecomputation {
             _ => continue,
         };
 
-        let guard = trie1_god.read(pci1_idx).unwrap();
+        let guard = pci1_idx.read(trie1_god).unwrap();
         for (edge_terminal_opt, destinations_map) in guard.children() {
             let terminal = match edge_terminal_opt {
                 Some(t) => *t,
@@ -295,7 +295,11 @@ pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
 
     let mut q: VecDeque<(GLRParserState, PrecomputeNode1Index, Option<NonTerminalID>)> =
         VecDeque::new();
-    let mut visited = HashSet::new();
+    let mut visited: HashSet<(
+        Arc<GSSNode>,
+        PrecomputeNode1Index,
+        Option<NonTerminalID>,
+    )> = HashSet::new();
 
     // Initial states
     for (tokenizer_id, glr_state) in &gcs.state {
@@ -312,7 +316,7 @@ pub fn get_mask4(gcs: &GrammarConstraintState) -> LLMTokenBV {
             continue;
         }
 
-        let guard = gcs.parent.trie1_god.read(pci1_idx).unwrap();
+        let guard = pci1_idx.read(&gcs.parent.trie1_god).unwrap();
         if guard.value.end {
             *final_mask.borrow_mut() |= &glr_state.active_state.stack.allowed_llm_tokens();
         }
