@@ -130,7 +130,11 @@ use crate::types::TerminalID;
                         let actions = get_actions(parser, top_state, terminal);
 
                         for action in actions {
-                            let mut handle_reduce = |len: usize, reduce_nt: NonTerminalID| {
+                            let mut handle_reduce = |
+                                normal_edges: &mut HashSet<SpecialPrecomputeNormalEdge>,
+                                len: usize,
+                                reduce_nt: NonTerminalID,
+                            | {
                                 if stack.len() <= len {
                                     let pop_below = len - stack.len();
                                     let dest = SpecialPrecomputeDest::Reduce {
@@ -171,7 +175,7 @@ use crate::types::TerminalID;
                                     len,
                                     ..
                                 } => {
-                                    handle_reduce(*len, *nonterminal_id);
+                                    handle_reduce(&mut normal_edges, *len, *nonterminal_id);
                                 }
                                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                     if let Some(next_state) = shift {
@@ -184,7 +188,7 @@ use crate::types::TerminalID;
                                     }
                                     for (len, nts) in reduces {
                                         for (nt, _) in nts {
-                                            handle_reduce(*len, *nt);
+                                            handle_reduce(&mut normal_edges, *len, *nt);
                                         }
                                     }
                                 }
