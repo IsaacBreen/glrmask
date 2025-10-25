@@ -78,7 +78,7 @@ pub struct NormalEdge {
 }
 
 /// A compact, precomputed "super edge" described above.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuperEdge {
     pub src_nt: Option<NonTerminalID>,
     pub terminal: TerminalID,
@@ -93,7 +93,7 @@ pub struct SuperEdge {
 }
 
 /// A "None-terminal" trie1 edge: move in trie1 and intersect tokens, no grammar action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmOnlyEdge {
     pub pci1_start: PrecomputeNode1Index,
     pub pci1_end: PrecomputeNode1Index,
@@ -101,7 +101,7 @@ pub struct LlmOnlyEdge {
 }
 
 /// Container with indices to speed up runtime lookups.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpecialPrecomputation {
     // Stage1 results (useful for debug/inspection)
     pub normal_edges: Vec<NormalEdge>,
@@ -392,7 +392,7 @@ fn extract_llm_only_edges(gc: &GrammarConstraint) -> Vec<LlmOnlyEdge> {
 fn index_normal_edges(
     normal_edges: &[NormalEdge],
 ) -> HashMap<(Option<NonTerminalID>, StateID, TerminalID), Vec<NormalEdgeKind>> {
-    let mut m = HashMap::new();
+    let mut m: HashMap<(Option<NonTerminalID>, StateID, TerminalID), Vec<NormalEdgeKind>> = HashMap::new();
     for e in normal_edges {
         m.entry((e.src_nt, e.revealed_state, e.terminal))
             .or_default()
@@ -515,16 +515,16 @@ fn build_super_edges(gc: &GrammarConstraint, normal_edges: &[NormalEdge]) -> Vec
                                                 pop: *pop,
                                                 dest_nt: *dest_nt,
                                                 pci1_start: *dest_map.keys().next_back().unwrap_or(dst), // fallback; not used
-                                                pci1_start: {
-                                                    // pci1_start is the current "node" before we follow this edge. We cannot
-                                                    // see it directly in step() callback; however, in special_map_grouped,
-                                                    // each callback corresponds to a specific source node processed earlier.
-                                                    // We cannot pass it directly, so we approximate by using the predecessor
-                                                    // of dst among dest_map mapping. To keep the edges consistent, we'll
-                                                    // overwrite below when we push out pairs per destination. Here we fill a placeholder.
-                                                    // This placeholder will never be read; see overridden insertion below.
-                                                    *dst
-                                                },
+                                                // pci1_start: {
+                                                //     // pci1_start is the current "node" before we follow this edge. We cannot
+                                                //     // see it directly in step() callback; however, in special_map_grouped,
+                                                //     // each callback corresponds to a specific source node processed earlier.
+                                                //     // We cannot pass it directly, so we approximate by using the predecessor
+                                                //     // of dst among dest_map mapping. To keep the edges consistent, we'll
+                                                //     // overwrite below when we push out pairs per destination. Here we fill a placeholder.
+                                                //     // This placeholder will never be read; see overridden insertion below.
+                                                //     *dst
+                                                // },
                                                 pci1_end: *dst,
                                             };
                                             // We'll override key.pci1_start in insertion below; to keep borrow rules clean,
