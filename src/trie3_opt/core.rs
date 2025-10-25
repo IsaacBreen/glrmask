@@ -5,7 +5,7 @@ pub type NodeId = u32;
 
 /// A compact sorted set of usize indices with deterministic ordering.
 /// Backed by Vec<usize> kept sorted and deduplicated.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Default)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Default, Hash)]
 pub struct SortedSet {
     pub elems: Vec<usize>,
 }

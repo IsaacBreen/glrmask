@@ -12,6 +12,7 @@ use crate::trie3_opt::passes::{
 use crate::constraint::{
     PrecomputeNode3Index, PrecomputedNodeContents, Trie3GodWrapper, LLMTokenBV, StateIDBV,
 };
+use crate::datastructures::EntryApi;
 use crate::datastructures::trie::Trie;
 use crate::tokenizer::TokenizerStateID;
 
@@ -266,7 +267,7 @@ mod tests {
     #[test]
     fn roundtrip_basic() {
         // Build a tiny God/arena with 2 nodes and one edge
-        let arena = Trie3GodWrapper::default();
+        let arena = Trie3GodWrapper::new();
 
         let a_idx = PrecomputeNode3Index::new(arena.insert(Trie::new(PrecomputedNodeContents::internal())));
         let b_idx = PrecomputeNode3Index::new(arena.insert(Trie::new(PrecomputedNodeContents::internal())));

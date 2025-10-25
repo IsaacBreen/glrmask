@@ -55,7 +55,8 @@ impl OptimizationPass for MergeStructuralPass {
         for _ in 0..self.max_iters.max(1) {
             // Build signature per node
             #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
-            struct EdgeSig {
+            #[derive(Hash)]
+struct EdgeSig {
                 pop: isize,
                 tokens: SortedSet,
                 dest: Vec<(usize, SortedSet)>, // dest_class, states

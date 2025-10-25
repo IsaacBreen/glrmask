@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{MiniTrie, NodeId};
 use crate::trie3_opt::passes::OptimizationPass;
+use crate::trie3_opt::SortedSet;
 
 /// Canonicalize all end nodes to a single representative and rewire edges to it.
 /// The canonical end node keeps no outgoing edges. This preserves semantics and
@@ -40,7 +41,7 @@ impl OptimizationPass for CanonicalizeEndNodesPass {
                 for (dst, sids) in dm {
                     let new_dst = if end_set.contains(&dst) { canonical } else { dst };
                     dm2.entry(new_dst)
-                        .and_modify(|e| e.union_inplace(&sids))
+                        .and_modify(|e: &mut SortedSet| e.union_inplace(&sids))
                         .or_insert(sids);
                 }
                 if !dm2.is_empty() {
