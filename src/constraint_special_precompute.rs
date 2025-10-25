@@ -210,12 +210,12 @@ pub fn dump_precomputed_special(gc: &GrammarConstraint) {
     };
 
     println!("\nNormal Edges ({}):", sp.normal_edges.len());
-    println!("{:-<120}", "");
+    println!("{:-<125}", "");
     println!(
-        "{:<20} | {:<10} | {:<20} | {:<60}",
+        "{:<20} | {:<15} | {:<20} | {:<60}",
         "Source NT", "Initial State", "Terminal", "Destination"
     );
-    println!("{:-<120}", "");
+    println!("{:-<125}", "");
 
     let mut sorted_normal_edges: Vec<_> = sp.normal_edges.iter().collect();
     sorted_normal_edges.sort_unstable();
@@ -232,7 +232,7 @@ pub fn dump_precomputed_special(gc: &GrammarConstraint) {
         };
 
         println!(
-            "{:<20} | S{:<8} | {:<20} | {}",
+            "{:<20} | S{:<13} | {:<20} | {}",
             get_opt_nt_name(src_nt),
             initial_state.0,
             get_term_name(terminal),
