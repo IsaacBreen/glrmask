@@ -2424,72 +2424,7 @@ impl GrammarConstraint {
     pub fn precompute_special(
         &self,
     ) -> SpecialPrecomputation {
-        let mut sp = SpecialPrecomputation::default();
-        let parser = &self.parser;
-
-        let mut src_nts: Vec<Option<NonTerminalID>> = parser.productions.iter().map(|p| Some(p.lhs)).collect::<BTreeSet<_>>().into_iter().collect();
-        src_nts.push(None);
-        src_nts.sort(); // for determinism
-
-        let mut all_terminals: Vec<TerminalID> = parser.terminal_map.values().copied().collect();
-        all_terminals.sort(); // for determinism
-
-        let mut all_states: Vec<StateID> = parser.table.keys().copied().collect();
-        all_states.sort(); // for determinism
-
-        for src_nt in &src_nts {
-            for start_state_id in &all_states {
-                // Determine initial GSS heads for this (src_nt, start_state_id) pair
-                let mut heads = vec![];
-                let bottom_node = GSSNode::new_root();
-                if let Some(nt_id) = src_nt {
-                    if let Some(goto_dests) = parser.table.get(start_state_id).and_then(|s| s.gotos.get(nt_id)) {
-                        let start_node = GSSNode::with_single_pred(bottom_node, ParseStateEdgeContent { state_id: *start_state_id, ..Default::default() });
-                        for dest_state_id in goto_dests {
-                            heads.push(GSSNode::with_single_pred(start_node.clone(), ParseStateEdgeContent { state_id: *dest_state_id, ..Default::default() }));
-                        }
-                    }
-                } else {
-                    heads.push(GSSNode::with_single_pred(bottom_node, ParseStateEdgeContent { state_id: *start_state_id, ..Default::default() }));
-                }
-
-                if heads.is_empty() { continue; }
-                
-                let initial_stack = GSSNode::merge_many(heads);
-                let initial_depth = if src_nt.is_some() { 2 } else { 1 };
-
-                for terminal_id in &all_terminals {
-                    let mut s = parser.init_glr_parser(Some(self.llm_vocab.clone()));
-                    s.active_state.stack = initial_stack.clone();
-
-                    let cfg = ProcessTokenAdvancedConfig {
-                        below_bottom_mode: BelowBottomReductionMode::Capture,
-                        current_token: Some(*terminal_id),
-                        reset_cache: true,
-                    };
-                    s.process_token_advanced(*terminal_id, &cfg);
-
-                    for (pop, nt_id) in s.active_state.below_bottom_reductions.iter() {
-                        let dest = SpecialPrecomputeDest::Reduce { pop: *pop, dest_nt: *nt_id };
-                        sp.normal_edges.insert((*src_nt, *start_state_id, *terminal_id, dest));
-                    }
-
-                    if s.is_ok() {
-                        let stacks = s.active_state.stack.inner.to_stacks();
-                        for (stack, _acc) in stacks {
-                            if stack.len() > initial_depth {
-                                let pushed_states: Vec<StateID> = stack.iter().take(stack.len() - initial_depth).map(|edge| edge.state_id).rev().collect();
-                                if !pushed_states.is_empty() {
-                                     let dest = SpecialPrecomputeDest::Escape { push_states: pushed_states };
-                                     sp.normal_edges.insert((*src_nt, *start_state_id, *terminal_id, dest));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        sp
+        todo!()
     }
 
     pub fn all_internal_llm_tokens_bitset_precompute0(&self) -> LLMTokenBV {
