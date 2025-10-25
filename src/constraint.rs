@@ -2424,7 +2424,7 @@ impl GrammarConstraint {
     pub fn precompute_special(
         &self,
     ) -> SpecialPrecomputation {
-        SpecialPrecomputation::default()
+        todo!()
     }
 
     pub fn all_internal_llm_tokens_bitset_precompute0(&self) -> LLMTokenBV {
@@ -3507,7 +3507,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn get_mask4(&self) -> LLMTokenBV {
-        LLMTokenBV::zeros()
+        todo!()
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // original ID
