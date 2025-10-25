@@ -12,7 +12,7 @@ pub mod compress_edges;
 pub mod merge_structural;
 pub mod eliminate_pop0;
 pub mod canonicalize_end_nodes;
-pub mod constraint_precompute3_utils;
+pub mod full;
 
 pub use prune_dead_paths::PruneDeadPathsPass;
 pub use compress_edges::CompressEdgesPass;
