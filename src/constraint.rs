@@ -763,6 +763,7 @@ impl GrammarConstraint {
     }
 }
 
+
 impl JSONConvertible for GrammarConstraint {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
@@ -1278,6 +1279,7 @@ impl GrammarConstraint {
             special_precomputation: SpecialPrecomputation::default(),
         };
 
+        gc.special_precomputation = gc.precompute_special();
         gc
     }
     pub fn new_with_config_and_precompute0_cache(
@@ -1534,6 +1536,7 @@ impl GrammarConstraint {
             special_precomputation: SpecialPrecomputation::default(),
         };
 
+        gc.special_precomputation = gc.precompute_special();
         gc
     }
 
