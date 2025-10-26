@@ -697,23 +697,23 @@ class Model(GraphProvider):
             if pop == 0 and peek0_rs is None:
                 peek0_rs = RangeSetStates.from_indices(gss_node.peek())
 
-            if edge.pop in pop_cache:
-                popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+            if pop in pop_cache:
+                popped, popped_acc, peeked, peek_rs = pop_cache[pop]
                 stats.inc('get_mask.main_loop.edge.pop_cache_hits')
             else:
                 # Try global cache first
                 popped = None
                 if global_pop_cache is not None:
-                    key = (id(gss_node), edge.pop)
+                    key = (id(gss_node), pop)
                     cached = global_pop_cache.get(key)
                     if cached is not None:
                         popped, popped_acc, peeked, peek_rs = cached
-                        pop_cache[edge.pop] = cached
+                        pop_cache[pop] = cached
                         stats.inc('get_mask.global_pop_cache_hits')
                 if popped is None:
                     stats.start('get_mask.main_loop.edge.popn')
                     _t0 = _perf_now()
-                    popped = gss_node.popn(edge.pop)
+                    popped = gss_node.popn(pop)
                     _t1 = _perf_now()
                     stats.stop('get_mask.main_loop.edge.popn')
                     if oracle_counters is not None and local_ctr is not None:
@@ -721,36 +721,36 @@ class Model(GraphProvider):
                         local_ctr["popn_time_ms"] = local_ctr.get("popn_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                 if popped.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_empty')
-                    pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+                    pop_cache[pop] = (popped, None, [], RangeSetStates.empty())
                     continue
                 stats.start('get_mask.main_loop.edge.popped.reduce_acc')
                 popped_acc = popped.reduce_acc()
                 stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
                 if not popped_acc or popped_acc.llm_mask.is_empty():
-                    pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                    pop_cache[pop] = (GSS.empty(), None, [], RangeSetStates.empty())
                     continue
                 # Avoid double-peek: call once and reuse both list and RangeSetStates
                 peeked = popped.peek()
                 peek_rs = RangeSetStates.from_indices(peeked)
-                pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                pop_cache[pop] = (popped, popped_acc, peeked, peek_rs)
                 if global_pop_cache is not None:
-                    global_pop_cache[(id(gss_node), edge.pop)] = (popped, popped_acc, peeked, peek_rs)
+                    global_pop_cache[(id(gss_node), pop)] = (popped, popped_acc, peeked, peek_rs)
 
             # One-time per-pop bucket pruning: states and llm masks
-            if edge.pop not in checked_pops:
+            if pop not in checked_pops:
                 checked_pops.add(pop)
-                pop_states_union = a_node.pop_to_state_union.get(edge.pop)
+                pop_states_union = a_node.pop_to_state_union.get(pop)
                 if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
                     stats.inc('get_mask.main_loop.bucket_pruned_state')
-                    skip_pops.add(edge.pop)
+                    skip_pops.add(pop)
                     continue
-                pop_llm_union = a_node.pop_to_llm_union.get(edge.pop)
+                pop_llm_union = a_node.pop_to_llm_union.get(pop)
                 # Extra prune when node_allowed_mask present: if the bucket's llm union has no overlap with
                 # active_remaining_mask, skip the whole pop bucket.
                 if pop_llm_union is not None and (
                     (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)):
                     stats.inc('get_mask.main_loop.bucket_pruned_llm')
-                    skip_pops.add(edge.pop)
+                    skip_pops.add(pop)
                     continue
 
             active_states_keys = RangeSetStates.from_indices(list(state_map.keys()))
