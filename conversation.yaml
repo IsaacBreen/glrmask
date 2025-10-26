@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python_opt4_5.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python_opt4_5.py: |+
@@ -952,6 +952,7 @@ local_system:
 
               # Fast-path: if per-state adjacency exists, avoid scanning irrelevant edges.
               if a_node.fast_children:
+                  stats.inc('get_mask.main_loop.fast_path')
                   pops_in_node = sorted(a_node.fast_children.keys())
                   group_index = 0  # for Suspend priority tie-breaking
 
@@ -1145,6 +1146,7 @@ local_system:
                           edges_proc = 0
                       edges_proc += 1
               else:
+                  stats.inc('get_mask.main_loop.slow_path')
                   # Fallback: original edge-scanning block (leave as-is)
                   edge_iterator = None
                   ordered_indices = edge_order_override_map.get(node_id) if edge_order_override_map else None
@@ -1354,6 +1356,193 @@ local_system:
                           parents[int(dest.dest_idx)].add(int(u))
               self.reverse_adj = dict(parents)
               return self.reverse_adj
+
+          def _compute_exact_frontier(
+              self,
+              node_id: int,
+              gss_node: GSS,
+              cache: Dict[Tuple[int, int], LLMTokenSet],
+              apply_cache: Optional[Dict[Tuple[int, int], GSS]] = None,
+              isolate_cache: Optional[Dict[Tuple[int, Tuple[int, ...]], GSS]] = None,
+          ) -> LLMTokenSet:
+              """
+              Computes the exact set of LLM tokens reachable from a specific (node_id, gss_node)
+              state, i.e., tokens t for which there exists a path to a clean_end that can be traversed
+              while keeping t feasible at every step (respecting all GSS pop/isolate/apply constraints).
+              Uses a per-call cache keyed by (node_id, id(gss_node)). Builds the local subgraph of
+              (node, gss) pairs reachable from the start pair and solves the resulting monotone system
+              via a fixed-point iteration to handle cycles exactly.
+              """
+              stats = Stats.get()
+              key0 = (int(node_id), id(gss_node))
+              if key0 in cache:
+                  stats.inc('oracle.frontier.cache_hits')
+                  return cache[key0]
+
+              stats.inc('oracle.frontier.calls')
+              # Build local pair-graph reachable from (node_id, gss_node)
+              from collections import deque
+
+              # Graph: key -> list of child keys
+              children: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+              # Seeds: immediate token contribution at a key (clean_end contributes its GSS llm_mask)
+              seeds: Dict[Tuple[int, int], LLMTokenSet] = {}
+              # Store the actual GSS object for each key to compute transitions
+              key_to_gss: Dict[Tuple[int, int], GSS] = {}
+
+              q = deque()
+              q.append((int(node_id), gss_node))
+              discovered: Set[Tuple[int, int]] = set()
+
+              # Helper: cached apply_and_prune with llm_bv
+              def _apply_llm(popped: GSS, llm_bv: LLMTokenSet) -> GSS:
+                  key = (id(popped), id(llm_bv))
+                  if apply_cache is not None and key in apply_cache:
+                      return apply_cache[key]
+                  @_acc_memoize(use_value_cache=False)
+                  def intersect(acc: PyAcc):
+                      new_mask = acc.llm_mask.intersection(llm_bv)
+                      return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                  tmp = popped.apply_and_prune(intersect)
+                  if apply_cache is not None:
+                      apply_cache[key] = tmp
+                  return tmp
+
+              while q:
+                  cur_node_id, cur_gss = q.popleft()
+                  cur_key = (int(cur_node_id), id(cur_gss))
+                  if cur_key in discovered:
+                      continue
+                  discovered.add(cur_key)
+                  key_to_gss[cur_key] = cur_gss
+                  children[cur_key] = []
+
+                  # Seed: end-node contributes its current allowed tokens directly
+                  cur_acc = cur_gss.reduce_acc()
+                  if self.is_end(int(cur_node_id)) and cur_acc and not cur_acc.llm_mask.is_empty():
+                      seeds[cur_key] = cur_acc.llm_mask
+                  else:
+                      seeds[cur_key] = RangeSet.empty()
+
+                  a_node = self.arena.get(int(cur_node_id))
+                  if not a_node or not a_node.children:
+                      continue
+
+                  # Enumerate pops present at this node
+                  pops_to_consider: List[int]
+                  if a_node.fast_children:
+                      pops_to_consider = sorted(a_node.fast_children.keys())
+                  else:
+                      pops_to_consider = sorted({edge.pop for edge in a_node.children})
+
+                  for pop_val in pops_to_consider:
+                      # Pop
+                      if pop_val == 0:
+                          popped = cur_gss
+                      else:
+                          popped = cur_gss.popn(int(pop_val))
+                      if popped.is_empty():
+                          continue
+
+                      popped_acc = popped.reduce_acc()
+                      if not popped_acc or popped_acc.llm_mask.is_empty():
+                          continue
+
+                      peeked = popped.peek()
+                      if not peeked:
+                          continue
+                      peek_rs = RangeSetStates.from_indices(peeked)
+
+                      # Build dest -> (states_to_keep, llm_bv_union) for this pop bucket
+                      dest_to_states: Dict[int, List[int]] = collections.defaultdict(list)
+                      dest_to_llm: Dict[int, LLMTokenSet] = {}
+
+                      if a_node.fast_children:
+                          mapping_for_pop = a_node.fast_children.get(int(pop_val), {})
+                          for sid in peeked:
+                              per_state_map = mapping_for_pop.get(int(sid), {})
+                              if not per_state_map:
+                                  continue
+                              for dest_id, triple in per_state_map.items():
+                                  llm_bv, _llm_bv_not, _llm_bv_thru = triple
+                                  if popped_acc.llm_mask.isdisjoint(llm_bv):
+                                      continue
+                                  dest_to_states[int(dest_id)].append(int(sid))
+                                  prev = dest_to_llm.get(int(dest_id))
+                                  dest_to_llm[int(dest_id)] = llm_bv if prev is None else prev.union(llm_bv)
+                      else:
+                          # Fallback path: group using original edges
+                          for edge in a_node.children:
+                              if int(edge.pop) != int(pop_val):
+                                  continue
+                              if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+                                  continue
+                              if edge.dest_states_union.isdisjoint(peek_rs):
+                                  continue
+                              edge.ensure_index()
+                              for sid in peeked:
+                                  dest_js = edge.state_to_dest.get(int(sid))
+                                  if not dest_js:
+                                      continue
+                                  for dest_j in dest_js:
+                                      dest = edge.dests[dest_j]
+                                      did = int(dest.dest_idx)
+                                      dest_to_states[did].append(int(sid))
+                                      prev = dest_to_llm.get(did)
+                                      dest_to_llm[did] = edge.llm_bv if prev is None else prev.union(edge.llm_bv)
+
+                      if not dest_to_states:
+                          continue
+
+                      # For each destination, create the child (dest_id, child_gss) pair and add to graph
+                      for dest_id, states_to_keep in dest_to_states.items():
+                          llm_bv_union = dest_to_llm.get(int(dest_id), RangeSet.empty())
+                          if popped_acc.llm_mask.isdisjoint(llm_bv_union):
+                              continue
+                          # Apply mask for this pop/dest (union across relevant edges)
+                          source_after_apply = _apply_llm(popped, llm_bv_union)
+                          if source_after_apply.is_empty():
+                              continue
+
+                          # Isolate only contributing heads if needed
+                          if len(states_to_keep) == len(peeked):
+                              child_gss = source_after_apply
+                          else:
+                              key_iso = (id(source_after_apply), tuple(states_to_keep))
+                              if isolate_cache is not None and key_iso in isolate_cache:
+                                  child_gss = isolate_cache[key_iso]
+                              else:
+                                  child_gss = source_after_apply.isolate_many(states_to_keep)
+                                  if isolate_cache is not None:
+                                      isolate_cache[key_iso] = child_gss
+
+                          if child_gss.is_empty():
+                              continue
+
+                          child_key = (int(dest_id), id(child_gss))
+                          children[cur_key].append(child_key)
+                          if child_key not in discovered:
+                              key_to_gss[child_key] = child_gss
+                              q.append((int(dest_id), child_gss))
+
+              # Fixed-point solve over the discovered subgraph
+              values: Dict[Tuple[int, int], LLMTokenSet] = {k: seeds.get(k, RangeSet.empty()) for k in discovered}
+              changed = True
+              while changed:
+                  changed = False
+                  for k in discovered:
+                      accum = values[k]
+                      # Union in contributions from all children
+                      for ch in children.get(k, ()):
+                          accum = accum.union(values.get(ch, RangeSet.empty()))
+                      if accum != values[k]:
+                          values[k] = accum
+                          changed = True
+
+              # Commit results to the per-call cache
+              for k, v in values.items():
+                  cache[k] = v
+              return cache[key0]
 
           def _precompute_static_costs(self) -> None:
               """
@@ -2087,6 +2276,8 @@ local_system:
               global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
               apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
               isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
+              # Exact frontier cache for this get_mask_run: (node_id, id(gss)) -> LLMTokenSet
+              frontier_cache: Dict[Tuple[int, int], LLMTokenSet] = {}
               @dataclass
               class HeapItem:
                   priority: Any
@@ -2191,12 +2382,28 @@ local_system:
                               break
 
                       a_node = self.arena.get(node_id)
-                      # Stronger upper bound than llm_bv_union: descendant closure
-                      if oracle_reward_mask is not None and a_node:
-                          node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
+                      # For planning runs, compute the exact GSS-aware frontier.
+                      # For guided/normal runs, use the faster static descendant closure.
+                      if record_end_unions:
+                          # Exact, GSS-aware frontier for this (node, gss)
+                          frontier_mask = self._compute_exact_frontier(
+                              int(node_id),
+                              gss_node,
+                              frontier_cache,
+                              apply_cache=apply_cache_by_bv,
+                              isolate_cache=isolate_many_cache,
+                          ) if a_node else RangeSet.empty()
+                          work_llm_mask = frontier_mask
+                          node_allowed_mask_for_gen = frontier_mask
                       else:
-                          node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
-                      work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
+                          # Stronger upper bound than llm_bv_union: descendant closure
+                          if oracle_reward_mask is not None and a_node:
+                              node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
+                          else:
+                              node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
+                          work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
+                          # Replicate original logic for guided runs
+                          node_allowed_mask_for_gen = node_desc_mask if oracle_reward_mask is not None else None
 
                       if not a_node or not a_node.children:
                           # Still record frontier mask for planning if requested
@@ -2223,7 +2430,7 @@ local_system:
                           edge_order_override_map=edge_order_map,
                           dest_scores=guided_scores,
                           oracle_counters=analysis_node_costs if record_end_unions else None,
-                          node_allowed_mask=node_desc_mask if oracle_reward_mask is not None else None,
+                          node_allowed_mask=node_allowed_mask_for_gen,
                       )
                       # Record frontier for planning if requested
                       if record_end_unions and a_node:
@@ -3484,6 +3691,7 @@ local_system:
 
               # Fast-path: if per-state adjacency exists, avoid scanning irrelevant edges.
               if a_node.fast_children:
+                  stats.inc('get_mask.main_loop.fast_path')
                   pops_in_node = sorted(a_node.fast_children.keys())
                   group_index = 0  # for Suspend priority tie-breaking
 
@@ -3556,9 +3764,9 @@ local_system:
                               continue
                           for dest_id, triple in per_state_map.items():
                               llm_bv, llm_bv_not, llm_bv_thru = triple
-                              # Strong gating: if no token can reach an end via this (dest) with current masks, skip
-                              if llm_bv_thru.isdisjoint(active_remaining_mask) or popped_acc.llm_mask.isdisjoint(llm_bv_thru):
-                                  stats.inc('get_mask.main_loop.edge.descendant_pruned')
+                              # Strong gating: if no token can reach an end via this (dest) with the current GSS mask, skip
+                              if popped_acc.llm_mask.isdisjoint(llm_bv_thru):
+                                  stats.inc('get_mask.main_loop.edge.descendant_pruned_gss')
                                   continue
                               key = (int(dest_id), id(llm_bv_thru))
                               entry = groups.get(key)
@@ -3583,11 +3791,14 @@ local_system:
                           llm_bv_not = entry["llm_bv_not"]
                           states_to_keep: List[int] = entry["states"]
 
+                          # JIT Pruning: Re-check against the latest remaining_mask before doing work.
+                          if llm_bv.isdisjoint(active_remaining_mask):
+                              stats.inc('get_mask.main_loop.edge.jit_pruned')
+                              continue
+
                           # Apply-and-prune cache per (popped, llm_bv)
                           source_after_apply = popped
-                          # Always use the descendant-aware llm_bv
-                          if popped_acc.llm_mask.isdisjoint(llm_bv):
-                              continue
+                          # The check against popped_acc.llm_mask is now done during group building.
                           key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
                           cached_apply = local_apply_cache.get(key_apply)
                           if cached_apply is not None:
@@ -3677,6 +3888,7 @@ local_system:
                           edges_proc = 0
                       edges_proc += 1
               else:
+                  stats.inc('get_mask.main_loop.slow_path')
                   # Fallback: original edge-scanning block (leave as-is)
                   edge_iterator = None
                   ordered_indices = edge_order_override_map.get(node_id) if edge_order_override_map else None
@@ -6263,6 +6475,7 @@ messages:
 
               # Fast-path: if per-state adjacency exists, avoid scanning irrelevant edges.
               if a_node.fast_children:
+                  stats.inc('get_mask.main_loop.fast_path')
                   pops_in_node = sorted(a_node.fast_children.keys())
                   group_index = 0  # for Suspend priority tie-breaking
 
@@ -6456,6 +6669,7 @@ messages:
                           edges_proc = 0
                       edges_proc += 1
               else:
+                  stats.inc('get_mask.main_loop.slow_path')
                   # Fallback: original edge-scanning block (leave as-is)
                   edge_iterator = None
                   ordered_indices = edge_order_override_map.get(node_id) if edge_order_override_map else None
@@ -6665,6 +6879,193 @@ messages:
                           parents[int(dest.dest_idx)].add(int(u))
               self.reverse_adj = dict(parents)
               return self.reverse_adj
+
+          def _compute_exact_frontier(
+              self,
+              node_id: int,
+              gss_node: GSS,
+              cache: Dict[Tuple[int, int], LLMTokenSet],
+              apply_cache: Optional[Dict[Tuple[int, int], GSS]] = None,
+              isolate_cache: Optional[Dict[Tuple[int, Tuple[int, ...]], GSS]] = None,
+          ) -> LLMTokenSet:
+              """
+              Computes the exact set of LLM tokens reachable from a specific (node_id, gss_node)
+              state, i.e., tokens t for which there exists a path to a clean_end that can be traversed
+              while keeping t feasible at every step (respecting all GSS pop/isolate/apply constraints).
+              Uses a per-call cache keyed by (node_id, id(gss_node)). Builds the local subgraph of
+              (node, gss) pairs reachable from the start pair and solves the resulting monotone system
+              via a fixed-point iteration to handle cycles exactly.
+              """
+              stats = Stats.get()
+              key0 = (int(node_id), id(gss_node))
+              if key0 in cache:
+                  stats.inc('oracle.frontier.cache_hits')
+                  return cache[key0]
+
+              stats.inc('oracle.frontier.calls')
+              # Build local pair-graph reachable from (node_id, gss_node)
+              from collections import deque
+
+              # Graph: key -> list of child keys
+              children: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+              # Seeds: immediate token contribution at a key (clean_end contributes its GSS llm_mask)
+              seeds: Dict[Tuple[int, int], LLMTokenSet] = {}
+              # Store the actual GSS object for each key to compute transitions
+              key_to_gss: Dict[Tuple[int, int], GSS] = {}
+
+              q = deque()
+              q.append((int(node_id), gss_node))
+              discovered: Set[Tuple[int, int]] = set()
+
+              # Helper: cached apply_and_prune with llm_bv
+              def _apply_llm(popped: GSS, llm_bv: LLMTokenSet) -> GSS:
+                  key = (id(popped), id(llm_bv))
+                  if apply_cache is not None and key in apply_cache:
+                      return apply_cache[key]
+                  @_acc_memoize(use_value_cache=False)
+                  def intersect(acc: PyAcc):
+                      new_mask = acc.llm_mask.intersection(llm_bv)
+                      return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                  tmp = popped.apply_and_prune(intersect)
+                  if apply_cache is not None:
+                      apply_cache[key] = tmp
+                  return tmp
+
+              while q:
+                  cur_node_id, cur_gss = q.popleft()
+                  cur_key = (int(cur_node_id), id(cur_gss))
+                  if cur_key in discovered:
+                      continue
+                  discovered.add(cur_key)
+                  key_to_gss[cur_key] = cur_gss
+                  children[cur_key] = []
+
+                  # Seed: end-node contributes its current allowed tokens directly
+                  cur_acc = cur_gss.reduce_acc()
+                  if self.is_end(int(cur_node_id)) and cur_acc and not cur_acc.llm_mask.is_empty():
+                      seeds[cur_key] = cur_acc.llm_mask
+                  else:
+                      seeds[cur_key] = RangeSet.empty()
+
+                  a_node = self.arena.get(int(cur_node_id))
+                  if not a_node or not a_node.children:
+                      continue
+
+                  # Enumerate pops present at this node
+                  pops_to_consider: List[int]
+                  if a_node.fast_children:
+                      pops_to_consider = sorted(a_node.fast_children.keys())
+                  else:
+                      pops_to_consider = sorted({edge.pop for edge in a_node.children})
+
+                  for pop_val in pops_to_consider:
+                      # Pop
+                      if pop_val == 0:
+                          popped = cur_gss
+                      else:
+                          popped = cur_gss.popn(int(pop_val))
+                      if popped.is_empty():
+                          continue
+
+                      popped_acc = popped.reduce_acc()
+                      if not popped_acc or popped_acc.llm_mask.is_empty():
+                          continue
+
+                      peeked = popped.peek()
+                      if not peeked:
+                          continue
+                      peek_rs = RangeSetStates.from_indices(peeked)
+
+                      # Build dest -> (states_to_keep, llm_bv_union) for this pop bucket
+                      dest_to_states: Dict[int, List[int]] = collections.defaultdict(list)
+                      dest_to_llm: Dict[int, LLMTokenSet] = {}
+
+                      if a_node.fast_children:
+                          mapping_for_pop = a_node.fast_children.get(int(pop_val), {})
+                          for sid in peeked:
+                              per_state_map = mapping_for_pop.get(int(sid), {})
+                              if not per_state_map:
+                                  continue
+                              for dest_id, triple in per_state_map.items():
+                                  llm_bv, _llm_bv_not, _llm_bv_thru = triple
+                                  if popped_acc.llm_mask.isdisjoint(llm_bv):
+                                      continue
+                                  dest_to_states[int(dest_id)].append(int(sid))
+                                  prev = dest_to_llm.get(int(dest_id))
+                                  dest_to_llm[int(dest_id)] = llm_bv if prev is None else prev.union(llm_bv)
+                      else:
+                          # Fallback path: group using original edges
+                          for edge in a_node.children:
+                              if int(edge.pop) != int(pop_val):
+                                  continue
+                              if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+                                  continue
+                              if edge.dest_states_union.isdisjoint(peek_rs):
+                                  continue
+                              edge.ensure_index()
+                              for sid in peeked:
+                                  dest_js = edge.state_to_dest.get(int(sid))
+                                  if not dest_js:
+                                      continue
+                                  for dest_j in dest_js:
+                                      dest = edge.dests[dest_j]
+                                      did = int(dest.dest_idx)
+                                      dest_to_states[did].append(int(sid))
+                                      prev = dest_to_llm.get(did)
+                                      dest_to_llm[did] = edge.llm_bv if prev is None else prev.union(edge.llm_bv)
+
+                      if not dest_to_states:
+                          continue
+
+                      # For each destination, create the child (dest_id, child_gss) pair and add to graph
+                      for dest_id, states_to_keep in dest_to_states.items():
+                          llm_bv_union = dest_to_llm.get(int(dest_id), RangeSet.empty())
+                          if popped_acc.llm_mask.isdisjoint(llm_bv_union):
+                              continue
+                          # Apply mask for this pop/dest (union across relevant edges)
+                          source_after_apply = _apply_llm(popped, llm_bv_union)
+                          if source_after_apply.is_empty():
+                              continue
+
+                          # Isolate only contributing heads if needed
+                          if len(states_to_keep) == len(peeked):
+                              child_gss = source_after_apply
+                          else:
+                              key_iso = (id(source_after_apply), tuple(states_to_keep))
+                              if isolate_cache is not None and key_iso in isolate_cache:
+                                  child_gss = isolate_cache[key_iso]
+                              else:
+                                  child_gss = source_after_apply.isolate_many(states_to_keep)
+                                  if isolate_cache is not None:
+                                      isolate_cache[key_iso] = child_gss
+
+                          if child_gss.is_empty():
+                              continue
+
+                          child_key = (int(dest_id), id(child_gss))
+                          children[cur_key].append(child_key)
+                          if child_key not in discovered:
+                              key_to_gss[child_key] = child_gss
+                              q.append((int(dest_id), child_gss))
+
+              # Fixed-point solve over the discovered subgraph
+              values: Dict[Tuple[int, int], LLMTokenSet] = {k: seeds.get(k, RangeSet.empty()) for k in discovered}
+              changed = True
+              while changed:
+                  changed = False
+                  for k in discovered:
+                      accum = values[k]
+                      # Union in contributions from all children
+                      for ch in children.get(k, ()):
+                          accum = accum.union(values.get(ch, RangeSet.empty()))
+                      if accum != values[k]:
+                          values[k] = accum
+                          changed = True
+
+              # Commit results to the per-call cache
+              for k, v in values.items():
+                  cache[k] = v
+              return cache[key0]
 
           def _precompute_static_costs(self) -> None:
               """
@@ -7398,6 +7799,8 @@ messages:
               global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
               apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
               isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
+              # Exact frontier cache for this get_mask_run: (node_id, id(gss)) -> LLMTokenSet
+              frontier_cache: Dict[Tuple[int, int], LLMTokenSet] = {}
               @dataclass
               class HeapItem:
                   priority: Any
@@ -7502,12 +7905,28 @@ messages:
                               break
 
                       a_node = self.arena.get(node_id)
-                      # Stronger upper bound than llm_bv_union: descendant closure
-                      if oracle_reward_mask is not None and a_node:
-                          node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
+                      # For planning runs, compute the exact GSS-aware frontier.
+                      # For guided/normal runs, use the faster static descendant closure.
+                      if record_end_unions:
+                          # Exact, GSS-aware frontier for this (node, gss)
+                          frontier_mask = self._compute_exact_frontier(
+                              int(node_id),
+                              gss_node,
+                              frontier_cache,
+                              apply_cache=apply_cache_by_bv,
+                              isolate_cache=isolate_many_cache,
+                          ) if a_node else RangeSet.empty()
+                          work_llm_mask = frontier_mask
+                          node_allowed_mask_for_gen = frontier_mask
                       else:
-                          node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
-                      work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
+                          # Stronger upper bound than llm_bv_union: descendant closure
+                          if oracle_reward_mask is not None and a_node:
+                              node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
+                          else:
+                              node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
+                          work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
+                          # Replicate original logic for guided runs
+                          node_allowed_mask_for_gen = node_desc_mask if oracle_reward_mask is not None else None
 
                       if not a_node or not a_node.children:
                           # Still record frontier mask for planning if requested
@@ -7534,7 +7953,7 @@ messages:
                           edge_order_override_map=edge_order_map,
                           dest_scores=guided_scores,
                           oracle_counters=analysis_node_costs if record_end_unions else None,
-                          node_allowed_mask=node_desc_mask if oracle_reward_mask is not None else None,
+                          node_allowed_mask=node_allowed_mask_for_gen,
                       )
                       # Record frontier for planning if requested
                       if record_end_unions and a_node:
@@ -7853,657 +8272,37 @@ messages:
   - user: |-
       **High-Level Goal:**
 
-      Dramatically improve the accuracy of the oracle's planning phase by upgrading its pruning information from a static, GSS-agnostic model to a dynamic, **GSS-aware** model. The objective is to compute the *exact* set of reachable tokens (the "frontier") for each specific `(node, GSS)` state encountered during the planning run.
+      Fix a critical logical flaw in the `_process_internal_node_gen` coroutine. The recent changes enabled real-time updates to `active_remaining_mask`, but the current implementation fails to *use* these updates effectively for pruning because it determines all its work up-front based on stale data.
 
-      **The Core Problem:**
+      **The Core Problem: The "Snapshot" Error**
 
-      Currently, the oracle's planning and pruning decisions rely on a pre-computed, static `llm_bv_descendant` for each node. This represents the union of all tokens reachable from that node, regardless of the specific parser state (GSS) that arrives there. This is a coarse over-approximation. As a result, the oracle's plans are based on imperfect information, and its pruning checks are far less effective than they could be, leading to a sub-optimal performance bound.
+      The current implementation of the `fast_children` path operates in two distinct phases that are out of sync:
+
+      1.  **Phase 1: Work Discovery (The Stale Snapshot)**
+          It iterates through all potential edges and builds a `groups` dictionary. Crucially, it performs the pruning check—`llm_bv_thru.isdisjoint(active_remaining_mask)`—during this phase.
+          *   *The Flaw:* This phase happens entirely at the *beginning* of the generator's execution. The `groups` dictionary therefore represents a "snapshot" of work that was considered necessary at that specific moment in time.
+
+      2.  **Phase 2: Work Execution (The Missed Opportunity)**
+          It then iterates through the `dest_keys` derived from that static `groups` snapshot. Inside this loop, it successfully receives updated `active_remaining_mask` values via `yield`.
+          *   *The Flaw:* While it *has* the new mask, it never uses it to re-evaluate the work items in the `groups` snapshot. It blindly processes every group that was added during Phase 1, even if the new mask would now make that group redundant.
+
+      **Scenario Demonstrating the Failure:**
+
+      Imagine a mega-node with 1000 children.
+      *   **Phase 1:** The generator starts. `active_remaining_mask` needs everything. All 1000 children pass the `isdisjoint` check and are added to the `groups` dictionary.
+      *   **Phase 2, Iteration 1:** Child #1 is processed and yielded. The main loop finds tokens and sends back a much smaller `active_remaining_mask`.
+      *   **Phase 2, Iteration 2:** The generator receives the new mask. It proceeds to process Child #2 from the `groups` dictionary.
+      *   *The Failure:* It does **not** re-check if Child #2 is still needed given the new mask. It just assumes it is because it passed the check back in Phase 1.
 
       **The Task:**
 
-      Your task is to implement a system that computes and utilizes these precise, GSS-aware frontiers during the oracle's planning phase. Since this is for an offline analysis tool where planning cost is not a concern, you should prioritize accuracy over the performance of the planning run itself.
+      Refactor the loop in `_process_internal_node_gen` to ensure that pruning checks are applied **just-in-time**.
 
-      **Key Requirements:**
-
-      1.  **Compute Exact Frontiers:** During the initial planning run, for any given state `(node_id, gss)`, you must determine the precise `LLMTokenSet` of all tokens reachable from that specific state.
-      2.  **Memoization:** The computation of these frontiers is expensive. You must implement a robust caching/memoization mechanism to ensure that the frontier for any given `(node_id, gss)` pair is computed only once per `get_mask` call.
-      3.  **Integration:** The oracle's planning logic (e.g., candidate generation, cost estimation) should be updated to use this new, highly accurate frontier information instead of the old static `llm_bv_descendant`. The final guided run should also leverage this information for its pruning checks.
-
-      **Implementation Freedom:**
-
-      You have the freedom to decide on the best implementation strategy. This includes:
-      *   How to make the `GSS` object a key in your memoization cache (e.g., by implementing a `__hash__` method, creating a hashable representation, etc.).
-      *   The specific algorithm for the "isolated sub-traversal" needed to compute a frontier for a given state.
-      *   How to best integrate the new frontier data into the existing oracle planning and execution logic.
+      You must ensure that even if a work item (edge group) was added to the `groups` dictionary initially, it is *re-checked* against the very latest `active_remaining_mask` right before any expensive work (like `apply_and_prune` or `isolate_many`) is performed for it.
 
       **Expected Outcome:**
 
-      The oracle's plans will be based on near-perfect information about the reachability of tokens from any given state. This will result in a much tighter, more accurate theoretical performance bound (`best_edges_traversed`), giving us a true measure of the optimal traversal path for a given grammar state.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
-                  - Give concrete, step-by-step edits the user can apply.
-                  - Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: llm
-      phase: instructions-only
-  - assistant: |-
-      Below are precise, step-by-step edits to implement GSS-aware, exact frontiers and integrate them into the oracle planning and guided runs. Follow the steps in order. Do not copy full files; insert/replace only the indicated snippets.
-
-      File to edit: python/aug25/models/precompute3_model_pure_python_opt4_5.py
-
-      1) Add a new method to compute exact frontiers per (node_id, GSS)
-      - Location: Inside class Model, place this method near other internal helpers (e.g., just above _get_mask_run or right after _ensure_reverse_adjacency).
-      - Insert the following method exactly as-is:
-
-      ```python
-      def _compute_exact_frontier(
-          self,
-          node_id: int,
-          gss_node: GSS,
-          cache: Dict[Tuple[int, int], LLMTokenSet],
-          apply_cache: Optional[Dict[Tuple[int, int], GSS]] = None,
-          isolate_cache: Optional[Dict[Tuple[int, Tuple[int, ...]], GSS]] = None,
-      ) -> LLMTokenSet:
-          """
-          Computes the exact set of LLM tokens reachable from a specific (node_id, gss_node)
-          state, i.e., tokens t for which there exists a path to a clean_end that can be traversed
-          while keeping t feasible at every step (respecting all GSS pop/isolate/apply constraints).
-          Uses a per-call cache keyed by (node_id, id(gss_node)). Builds the local subgraph of
-          (node, gss) pairs reachable from the start pair and solves the resulting monotone system
-          via a fixed-point iteration to handle cycles exactly.
-          """
-          stats = Stats.get()
-          key0 = (int(node_id), id(gss_node))
-          if key0 in cache:
-              stats.inc('oracle.frontier.cache_hits')
-              return cache[key0]
-
-          stats.inc('oracle.frontier.calls')
-          # Build local pair-graph reachable from (node_id, gss_node)
-          from collections import deque
-
-          # Graph: key -> list of child keys
-          children: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
-          # Seeds: immediate token contribution at a key (clean_end contributes its GSS llm_mask)
-          seeds: Dict[Tuple[int, int], LLMTokenSet] = {}
-          # Store the actual GSS object for each key to compute transitions
-          key_to_gss: Dict[Tuple[int, int], GSS] = {}
-
-          q = deque()
-          q.append((int(node_id), gss_node))
-          discovered: Set[Tuple[int, int]] = set()
-
-          # Helper: cached apply_and_prune with llm_bv
-          def _apply_llm(popped: GSS, llm_bv: LLMTokenSet) -> GSS:
-              key = (id(popped), id(llm_bv))
-              if apply_cache is not None and key in apply_cache:
-                  return apply_cache[key]
-              @_acc_memoize(use_value_cache=False)
-              def intersect(acc: PyAcc):
-                  new_mask = acc.llm_mask.intersection(llm_bv)
-                  return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-              tmp = popped.apply_and_prune(intersect)
-              if apply_cache is not None:
-                  apply_cache[key] = tmp
-              return tmp
-
-          while q:
-              cur_node_id, cur_gss = q.popleft()
-              cur_key = (int(cur_node_id), id(cur_gss))
-              if cur_key in discovered:
-                  continue
-              discovered.add(cur_key)
-              key_to_gss[cur_key] = cur_gss
-              children[cur_key] = []
-
-              # Seed: end-node contributes its current allowed tokens directly
-              cur_acc = cur_gss.reduce_acc()
-              if self.is_end(int(cur_node_id)) and cur_acc and not cur_acc.llm_mask.is_empty():
-                  seeds[cur_key] = cur_acc.llm_mask
-              else:
-                  seeds[cur_key] = RangeSet.empty()
-
-              a_node = self.arena.get(int(cur_node_id))
-              if not a_node or not a_node.children:
-                  continue
-
-              # Enumerate pops present at this node
-              pops_to_consider: List[int]
-              if a_node.fast_children:
-                  pops_to_consider = sorted(a_node.fast_children.keys())
-              else:
-                  pops_to_consider = sorted({edge.pop for edge in a_node.children})
-
-              for pop_val in pops_to_consider:
-                  # Pop
-                  if pop_val == 0:
-                      popped = cur_gss
-                  else:
-                      popped = cur_gss.popn(int(pop_val))
-                  if popped.is_empty():
-                      continue
-
-                  popped_acc = popped.reduce_acc()
-                  if not popped_acc or popped_acc.llm_mask.is_empty():
-                      continue
-
-                  peeked = popped.peek()
-                  if not peeked:
-                      continue
-                  peek_rs = RangeSetStates.from_indices(peeked)
-
-                  # Build dest -> (states_to_keep, llm_bv_union) for this pop bucket
-                  dest_to_states: Dict[int, List[int]] = collections.defaultdict(list)
-                  dest_to_llm: Dict[int, LLMTokenSet] = {}
-
-                  if a_node.fast_children:
-                      mapping_for_pop = a_node.fast_children.get(int(pop_val), {})
-                      for sid in peeked:
-                          per_state_map = mapping_for_pop.get(int(sid), {})
-                          if not per_state_map:
-                              continue
-                          for dest_id, triple in per_state_map.items():
-                              llm_bv, _llm_bv_not, _llm_bv_thru = triple
-                              if popped_acc.llm_mask.isdisjoint(llm_bv):
-                                  continue
-                              dest_to_states[int(dest_id)].append(int(sid))
-                              prev = dest_to_llm.get(int(dest_id))
-                              dest_to_llm[int(dest_id)] = llm_bv if prev is None else prev.union(llm_bv)
-                  else:
-                      # Fallback path: group using original edges
-                      for edge in a_node.children:
-                          if int(edge.pop) != int(pop_val):
-                              continue
-                          if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
-                              continue
-                          if edge.dest_states_union.isdisjoint(peek_rs):
-                              continue
-                          edge.ensure_index()
-                          for sid in peeked:
-                              dest_js = edge.state_to_dest.get(int(sid))
-                              if not dest_js:
-                                  continue
-                              for dest_j in dest_js:
-                                  dest = edge.dests[dest_j]
-                                  did = int(dest.dest_idx)
-                                  dest_to_states[did].append(int(sid))
-                                  prev = dest_to_llm.get(did)
-                                  dest_to_llm[did] = edge.llm_bv if prev is None else prev.union(edge.llm_bv)
-
-                  if not dest_to_states:
-                      continue
-
-                  # For each destination, create the child (dest_id, child_gss) pair and add to graph
-                  for dest_id, states_to_keep in dest_to_states.items():
-                      llm_bv_union = dest_to_llm.get(int(dest_id), RangeSet.empty())
-                      if popped_acc.llm_mask.isdisjoint(llm_bv_union):
-                          continue
-                      # Apply mask for this pop/dest (union across relevant edges)
-                      source_after_apply = _apply_llm(popped, llm_bv_union)
-                      if source_after_apply.is_empty():
-                          continue
-
-                      # Isolate only contributing heads if needed
-                      if len(states_to_keep) == len(peeked):
-                          child_gss = source_after_apply
-                      else:
-                          key_iso = (id(source_after_apply), tuple(states_to_keep))
-                          if isolate_cache is not None and key_iso in isolate_cache:
-                              child_gss = isolate_cache[key_iso]
-                          else:
-                              child_gss = source_after_apply.isolate_many(states_to_keep)
-                              if isolate_cache is not None:
-                                  isolate_cache[key_iso] = child_gss
-
-                      if child_gss.is_empty():
-                          continue
-
-                      child_key = (int(dest_id), id(child_gss))
-                      children[cur_key].append(child_key)
-                      if child_key not in discovered:
-                          key_to_gss[child_key] = child_gss
-                          q.append((int(dest_id), child_gss))
-
-          # Fixed-point solve over the discovered subgraph
-          values: Dict[Tuple[int, int], LLMTokenSet] = {k: seeds.get(k, RangeSet.empty()) for k in discovered}
-          changed = True
-          while changed:
-              changed = False
-              for k in discovered:
-                  accum = values[k]
-                  # Union in contributions from all children
-                  for ch in children.get(k, ()):
-                      accum = accum.union(values.get(ch, RangeSet.empty()))
-                  if accum != values[k]:
-                      values[k] = accum
-                      changed = True
-
-          # Commit results to the per-call cache
-          for k, v in values.items():
-              cache[k] = v
-          return cache[key0]
-      ```
-
-      2) Create a per-call frontier cache in _get_mask_run
-      - Location: Inside _get_mask_run, immediately after the existing global caches are created:
-        - After these lines:
-          - global_pop_cache = {}
-          - apply_cache_by_bv = {}
-          - isolate_many_cache = {}
-      - Insert the following:
-
-      ```python
-      # Exact frontier cache for this get_mask_run: (node_id, id(gss)) -> LLMTokenSet
-      frontier_cache: Dict[Tuple[int, int], LLMTokenSet] = {}
-      ```
-
-      3) Replace static descendant-based gating with exact frontier at each WorkItemNew
-      - Location: In _get_mask_run, inside the main loop after we pop heap and create a WorkItemNew generator (i.e., in the branch where is_new_gen is True). Find the block:
-
-      ```python
-      a_node = self.arena.get(node_id)
-      # Stronger upper bound than llm_bv_union: descendant closure
-      if oracle_reward_mask is not None and a_node:
-          node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
-      else:
-          node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
-      work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
-      ```
-
-      - Replace the entire block above with:
-
-      ```python
-      a_node = self.arena.get(node_id)
-      # Exact, GSS-aware frontier for this (node, gss)
-      frontier_mask = self._compute_exact_frontier(
-          int(node_id),
-          gss_node,
-          frontier_cache,
-          apply_cache=apply_cache_by_bv,
-          isolate_cache=isolate_many_cache,
-      ) if a_node else RangeSet.empty()
-      work_llm_mask = frontier_mask
-      ```
-
-      4) Always pass the exact frontier as node_allowed_mask to the traversal generator
-      - Location: In the same WorkItemNew branch, when constructing the generator gen via self._process_internal_node_gen(...).
-      - Find the existing call:
-
-      ```python
-      gen = self._process_internal_node_gen(
-          node_id,
-          gss_node,
-          remaining_mask,
-          gss_acc.llm_mask,
-          depth,
-          global_pop_cache=global_pop_cache,
-          apply_cache=apply_cache_by_bv,
-          isolate_cache=isolate_many_cache,
-          edge_order_override_map=edge_order_map,
-          dest_scores=guided_scores,
-          oracle_counters=analysis_node_costs if record_end_unions else None,
-          node_allowed_mask=node_desc_mask if oracle_reward_mask is not None else None,
-      )
-      ```
-
-      - Replace it with:
-
-      ```python
-      gen = self._process_internal_node_gen(
-          node_id,
-          gss_node,
-          remaining_mask,
-          gss_acc.llm_mask,
-          depth,
-          global_pop_cache=global_pop_cache,
-          apply_cache=apply_cache_by_bv,
-          isolate_cache=isolate_many_cache,
-          edge_order_override_map=edge_order_map,
-          dest_scores=guided_scores,
-          oracle_counters=analysis_node_costs if record_end_unions else None,
-          # Use exact frontier for pruning regardless of oracle_reward_mask
-          node_allowed_mask=frontier_mask,
-      )
-      ```
-
-      5) Record exact frontiers into the planning output
-      - Location A: Still inside the WorkItemNew branch, just before the “continue” for leaf nodes (no children). Find:
-
-      ```python
-      if not a_node or not a_node.children:
-          # Still record frontier mask for planning if requested
-          if record_end_unions and a_node:
-              if analysis_frontiers is not None:
-                  if not work_llm_mask.is_empty():
-                      prev = analysis_frontiers.get(int(node_id))
-                      analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
-          continue
-      ```
-
-      - Keep this block as-is; it now uses the exact frontier (work_llm_mask == frontier_mask), so no change needed here.
-
-      - Location B: Immediately after constructing gen (i.e., right after the block from step 4), we also record the frontier (this path already exists in your code). Ensure it unions the exact frontier (work_llm_mask). It currently does:
-
-      ```python
-      # Record frontier for planning if requested
-      if record_end_unions and a_node:
-          if analysis_frontiers is not None and not work_llm_mask.is_empty():
-              prev = analysis_frontiers.get(int(node_id))
-              analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
-      ```
-
-      - No changes required, but verify that this code exists after the gen construction and uses work_llm_mask (which is now the exact frontier).
-
-      6) Optional: add light Stats to see frontier usage
-      - Not required for correctness, but recommended for visibility:
-        - At the start of _compute_exact_frontier, the code already increments:
-          - oracle.frontier.calls
-          - oracle.frontier.cache_hits
-        - If you want timing, you can add:
-          - stats.start('oracle.frontier.time') at method entry and stats.stop('oracle.frontier.time') just before return.
-        - Do not add any new imports.
-
-      7) Why this works and how it integrates
-      - Exact frontier definition: For each (node, GSS), we build the subgraph of reachable (node, GSS) pairs under the same pop/apply/isolate transitions that the engine will take for a single-token selection. We then solve a monotone fixed-point with seeds from clean_end visits to obtain the exact set of tokens that can lead to an end from this state.
-      - Memoization: cache is keyed by (node_id, id(gss)); we also reuse the existing apply_cache_by_bv and isolate_many_cache so structurally identical intermediate GSSes get canonicalized across recursive expansion, making the cache effective and preventing infinite growth on cycles.
-      - Planning integration: analysis_frontiers in the plan now reflect exact, GSS-aware frontiers. All pruning during the planning pass uses frontier_mask instead of node.llm_bv_descendant, greatly improving accuracy.
-      - Guided run integration: The final guided run uses the same _compute_exact_frontier on-the-fly, passing node_allowed_mask=frontier_mask to _process_internal_node_gen. This tightens its pruning without needing to serialize the per-(node,gss) results from planning.
-
-      8) Sanity checklist after changes
-      - get_mask should still return the same final RangeSetOut semantics; only the planning/guided pruning should change.
-      - The new method relies exclusively on public GSS APIs already used elsewhere (popn, reduce_acc, peek, isolate_many, apply_and_prune).
-      - No external configuration or environment tweaks required.
-
-      That’s it. After applying the above edits, the oracle will compute and use precise, GSS-aware frontiers during planning and the final guided run.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, output git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
-                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git
-      phase: diff-after-plan
-  - assistant: |-
-      ```diff
-      --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      @@ -1429,6 +1429,141 @@
-               self.reverse_adj = dict(parents)
-               return self.reverse_adj
-       
-      +    def _compute_exact_frontier(
-      +        self,
-      +        node_id: int,
-      +        gss_node: GSS,
-      +        cache: Dict[Tuple[int, int], LLMTokenSet],
-      +        apply_cache: Optional[Dict[Tuple[int, int], GSS]] = None,
-      +        isolate_cache: Optional[Dict[Tuple[int, Tuple[int, ...]], GSS]] = None,
-      +    ) -> LLMTokenSet:
-      +        """
-      +        Computes the exact set of LLM tokens reachable from a specific (node_id, gss_node)
-      +        state, i.e., tokens t for which there exists a path to a clean_end that can be traversed
-      +        while keeping t feasible at every step (respecting all GSS pop/isolate/apply constraints).
-      +        Uses a per-call cache keyed by (node_id, id(gss_node)). Builds the local subgraph of
-      +        (node, gss) pairs reachable from the start pair and solves the resulting monotone system
-      +        via a fixed-point iteration to handle cycles exactly.
-      +        """
-      +        stats = Stats.get()
-      +        key0 = (int(node_id), id(gss_node))
-      +        if key0 in cache:
-      +            stats.inc('oracle.frontier.cache_hits')
-      +            return cache[key0]
-      +
-      +        stats.inc('oracle.frontier.calls')
-      +        # Build local pair-graph reachable from (node_id, gss_node)
-      +        from collections import deque
-      +
-      +        # Graph: key -> list of child keys
-      +        children: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
-      +        # Seeds: immediate token contribution at a key (clean_end contributes its GSS llm_mask)
-      +        seeds: Dict[Tuple[int, int], LLMTokenSet] = {}
-      +        # Store the actual GSS object for each key to compute transitions
-      +        key_to_gss: Dict[Tuple[int, int], GSS] = {}
-      +
-      +        q = deque()
-      +        q.append((int(node_id), gss_node))
-      +        discovered: Set[Tuple[int, int]] = set()
-      +
-      +        # Helper: cached apply_and_prune with llm_bv
-      +        def _apply_llm(popped: GSS, llm_bv: LLMTokenSet) -> GSS:
-      +            key = (id(popped), id(llm_bv))
-      +            if apply_cache is not None and key in apply_cache:
-      +                return apply_cache[key]
-      +            @_acc_memoize(use_value_cache=False)
-      +            def intersect(acc: PyAcc):
-      +                new_mask = acc.llm_mask.intersection(llm_bv)
-      +                return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-      +            tmp = popped.apply_and_prune(intersect)
-      +            if apply_cache is not None:
-      +                apply_cache[key] = tmp
-      +            return tmp
-      +
-      +        while q:
-      +            cur_node_id, cur_gss = q.popleft()
-      +            cur_key = (int(cur_node_id), id(cur_gss))
-      +            if cur_key in discovered:
-      +                continue
-      +            discovered.add(cur_key)
-      +            key_to_gss[cur_key] = cur_gss
-      +            children[cur_key] = []
-      +
-      +            # Seed: end-node contributes its current allowed tokens directly
-      +            cur_acc = cur_gss.reduce_acc()
-      +            if self.is_end(int(cur_node_id)) and cur_acc and not cur_acc.llm_mask.is_empty():
-      +                seeds[cur_key] = cur_acc.llm_mask
-      +            else:
-      +                seeds[cur_key] = RangeSet.empty()
-      +
-      +            a_node = self.arena.get(int(cur_node_id))
-      +            if not a_node or not a_node.children:
-      +                continue
-      +
-      +            # Enumerate pops present at this node
-      +            pops_to_consider: List[int]
-      +            if a_node.fast_children:
-      +                pops_to_consider = sorted(a_node.fast_children.keys())
-      +            else:
-      +                pops_to_consider = sorted({edge.pop for edge in a_node.children})
-      +
-      +            for pop_val in pops_to_consider:
-      +                # Pop
-      +                if pop_val == 0:
-      +                    popped = cur_gss
-      +                else:
-      +                    popped = cur_gss.popn(int(pop_val))
-      +                if popped.is_empty():
-      +                    continue
-      +
-      +                popped_acc = popped.reduce_acc()
-      +                if not popped_acc or popped_acc.llm_mask.is_empty():
-      +                    continue
-      +
-      +                peeked = popped.peek()
-      +                if not peeked:
-      +                    continue
-      +                peek_rs = RangeSetStates.from_indices(peeked)
-      +
-      +                # Build dest -> (states_to_keep, llm_bv_union) for this pop bucket
-      +                dest_to_states: Dict[int, List[int]] = collections.defaultdict(list)
-      +                dest_to_llm: Dict[int, LLMTokenSet] = {}
-      +
-      +                if a_node.fast_children:
-      +                    mapping_for_pop = a_node.fast_children.get(int(pop_val), {})
-      +                    for sid in peeked:
-      +                        per_state_map = mapping_for_pop.get(int(sid), {})
-      +                        if not per_state_map:
-      +                            continue
-      +                        for dest_id, triple in per_state_map.items():
-      +                            llm_bv, _llm_bv_not, _llm_bv_thru = triple
-      +                            if popped_acc.llm_mask.isdisjoint(llm_bv):
-      +                                continue
-      +                            dest_to_states[int(dest_id)].append(int(sid))
-      +                            prev = dest_to_llm.get(int(dest_id))
-      +                            dest_to_llm[int(dest_id)] = llm_bv if prev is None else prev.union(llm_bv)
-      +                else:
-      +                    # Fallback path: group using original edges
-      +                    for edge in a_node.children:
-      +                        if int(edge.pop) != int(pop_val):
-      +                            continue
-      +                        if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
-      +                            continue
-      +                        if edge.dest_states_union.isdisjoint(peek_rs):
-      +                            continue
-      +                        edge.ensure_index()
-      +                        for sid in peeked:
-      +                            dest_js = edge.state_to_dest.get(int(sid))
-      +                            if not dest_js:
-      +                                continue
-      +                            for dest_j in dest_js:
-      +                                dest = edge.dests[dest_j]
-      +                                did = int(dest.dest_idx)
-      +                                dest_to_states[did].append(int(sid))
-      +                                prev = dest_to_llm.get(did)
-      +                                dest_to_llm[did] = edge.llm_bv if prev is None else prev.union(edge.llm_bv)
-      +
-      +                if not dest_to_states:
-      +                    continue
-      +
-      +                # For each destination, create the child (dest_id, child_gss) pair and add to graph
-      +                for dest_id, states_to_keep in dest_to_states.items():
-      +                    llm_bv_union = dest_to_llm.get(int(dest_id), RangeSet.empty())
-      +                    if popped_acc.llm_mask.isdisjoint(llm_bv_union):
-      +                        continue
-      +                    # Apply mask for this pop/dest (union across relevant edges)
-      +                    source_after_apply = _apply_llm(popped, llm_bv_union)
-      +                    if source_after_apply.is_empty():
-      +                        continue
-      +
-      +                    # Isolate only contributing heads if needed
-      +                    if len(states_to_keep) == len(peeked):
-      +                        child_gss = source_after_apply
-      +                    else:
-      +                        key_iso = (id(source_after_apply), tuple(states_to_keep))
-      +                        if isolate_cache is not None and key_iso in isolate_cache:
-      +                            child_gss = isolate_cache[key_iso]
-      +                        else:
-      +                            child_gss = source_after_apply.isolate_many(states_to_keep)
-      +                            if isolate_cache is not None:
-      +                                isolate_cache[key_iso] = child_gss
-      +
-      +                    if child_gss.is_empty():
-      +                        continue
-      +
-      +                    child_key = (int(dest_id), id(child_gss))
-      +                    children[cur_key].append(child_key)
-      +                    if child_key not in discovered:
-      +                        key_to_gss[child_key] = child_gss
-      +                        q.append((int(dest_id), child_gss))
-      +
-      +        # Fixed-point solve over the discovered subgraph
-      +        values: Dict[Tuple[int, int], LLMTokenSet] = {k: seeds.get(k, RangeSet.empty()) for k in discovered}
-      +        changed = True
-      +        while changed:
-      +            changed = False
-      +            for k in discovered:
-      +                accum = values[k]
-      +                # Union in contributions from all children
-      +                for ch in children.get(k, ()):
-      +                    accum = accum.union(values.get(ch, RangeSet.empty()))
-      +                if accum != values[k]:
-      +                    values[k] = accum
-      +                    changed = True
-      +
-      +        # Commit results to the per-call cache
-      +        for k, v in values.items():
-      +            cache[k] = v
-      +        return cache[key0]
-      +
-           def _precompute_static_costs(self) -> None:
-               """
-               Pre-computes the minimum static path cost from every node back to any root.
-      @@ -1659,6 +1794,8 @@
-               global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
-               apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
-               isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
-      +        # Exact frontier cache for this get_mask_run: (node_id, id(gss)) -> LLMTokenSet
-      +        frontier_cache: Dict[Tuple[int, int], LLMTokenSet] = {}
-               @dataclass
-               class HeapItem:
-                   priority: Any
-      @@ -1746,14 +1883,17 @@
-                               stats.inc('get_mask.early_exit_full_mask')
-                               break
-       
-      -                a_node = self.arena.get(node_id)
-      -                # Stronger upper bound than llm_bv_union: descendant closure
-      -                if oracle_reward_mask is not None and a_node:
-      -                    node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
-      -                else:
-      -                    node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
-      -                work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
-      -
-      +                a_node = self.arena.get(node_id)
-      +                # Exact, GSS-aware frontier for this (node, gss)
-      +                frontier_mask = self._compute_exact_frontier(
-      +                    int(node_id),
-      +                    gss_node,
-      +                    frontier_cache,
-      +                    apply_cache=apply_cache_by_bv,
-      +                    isolate_cache=isolate_many_cache,
-      +                ) if a_node else RangeSet.empty()
-      +                work_llm_mask = frontier_mask
-      +                
-                       if not a_node or not a_node.children:
-                           # Still record frontier mask for planning if requested
-                           if record_end_unions and a_node:
-      @@ -1776,7 +1916,8 @@
-                           edge_order_override_map=edge_order_map,
-                           dest_scores=guided_scores,
-                           oracle_counters=analysis_node_costs if record_end_unions else None,
-      -                    node_allowed_mask=node_desc_mask if oracle_reward_mask is not None else None,
-      +                    # Use exact frontier for pruning regardless of oracle_reward_mask
-      +                    node_allowed_mask=frontier_mask,
-                       )
-                       # Record frontier for planning if requested
-                       if record_end_unions and a_node:
-
-      ```
-    metadata:
-  - user: |
-      Apply result (plan-git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
-    metadata:
-  - user: 'Changes committed with message: "Oracle: Implement GSS-aware exact frontier
-      computation for planning and pruning"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: This actually hurts performance. I suspect it's because _compute_exact_frontier
-      is used not just for the oracle but also a runtime. Is that right?
+      When processing a mega-node, the first few yielded children should cause `active_remaining_mask` to shrink. Subsequent iterations of the work loop must then successfully prune the remaining pending items in the `groups` dictionary using this new, tighter mask, leading to a dramatic reduction in `edges_traversed`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8523,134 +8322,94 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      You are correct. The performance degradation is because the expensive `_compute_exact_frontier` method was being used for all runs, including the final timed/guided run, not just the oracle's offline planning phase.
+      Here are the step-by-step instructions to apply the fix, followed by the git diff.
 
-      The fix is to ensure this exact computation only happens during the planning run (when `record_end_unions` is true) and to revert to the faster, static-analysis-based pruning for the final guided run.
+      ### Step-by-Step Instructions
 
-      Here are the step-by-step instructions to correct this.
+      1.  **Open the file:** `python/aug25/models/precompute3_model_pure_python_opt4_5.py`.
 
-      ### Instructions
+      2.  **Navigate to the `_process_internal_node_gen` method.**
 
-      **File to Edit:** `python/aug25/models/precompute3_model_pure_python_opt4_5.py`
-
-      1.  **Locate the `_get_mask_run` method.** Inside this method, find the `WorkItemNew` processing block, which starts around line 1720.
-
-      2.  **Replace the frontier computation logic.** Find and select the following block of code that unconditionally computes and uses the exact frontier:
-
+      3.  **Modify the initial pruning check:** Inside the `if a_node.fast_children:` block, find the following code snippet within the `for sid in peeked:` loop:
           ```python
-                      a_node = self.arena.get(node_id)
-                      # Exact, GSS-aware frontier for this (node, gss)
-                      frontier_mask = self._compute_exact_frontier(
-                          int(node_id),
-                          gss_node,
-                          frontier_cache,
-                          apply_cache=apply_cache_by_bv,
-                          isolate_cache=isolate_many_cache,
-                      ) if a_node else RangeSet.empty()
-                      work_llm_mask = frontier_mask
+                              # Strong gating: if no token can reach an end via this (dest) with current masks, skip
+                              if llm_bv_thru.isdisjoint(active_remaining_mask) or popped_acc.llm_mask.isdisjoint(llm_bv_thru):
+                                  stats.inc('get_mask.main_loop.edge.descendant_pruned')
+                                  continue
+          ```
+          Replace it with this code, which removes the check against the stale `active_remaining_mask`:
+          ```python
+                              # Strong gating: if no token can reach an end via this (dest) with the current GSS mask, skip
+                              if popped_acc.llm_mask.isdisjoint(llm_bv_thru):
+                                  stats.inc('get_mask.main_loop.edge.descendant_pruned_gss')
+                                  continue
           ```
 
-      3.  **Replace the selected block** with the following conditional logic. This new code computes the exact frontier only for planning runs and uses the faster static logic otherwise:
-
+      4.  **Add the just-in-time pruning check:** A little further down in the same method, find the loop that begins with `for (dest_id, llm_bv_id) in dest_keys:`. Locate the following block of code inside it:
           ```python
-                      a_node = self.arena.get(node_id)
-                      # For planning runs, compute the exact GSS-aware frontier.
-                      # For guided/normal runs, use the faster static descendant closure.
-                      if record_end_unions:
-                          # Exact, GSS-aware frontier for this (node, gss)
-                          frontier_mask = self._compute_exact_frontier(
-                              int(node_id),
-                              gss_node,
-                              frontier_cache,
-                              apply_cache=apply_cache_by_bv,
-                              isolate_cache=isolate_many_cache,
-                          ) if a_node else RangeSet.empty()
-                          work_llm_mask = frontier_mask
-                          node_allowed_mask_for_gen = frontier_mask
-                      else:
-                          # Stronger upper bound than llm_bv_union: descendant closure
-                          if oracle_reward_mask is not None and a_node:
-                              node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
-                          else:
-                              node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
-                          work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
-                          # Replicate original logic for guided runs
-                          node_allowed_mask_for_gen = node_desc_mask if oracle_reward_mask is not None else None
+                          # Apply-and-prune cache per (popped, llm_bv)
+                          source_after_apply = popped
+                          # Always use the descendant-aware llm_bv
+                          if popped_acc.llm_mask.isdisjoint(llm_bv):
+                              continue
+                          key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
+          ```
+          Replace that block with the code below. This adds the new just-in-time check and removes the now-redundant check.
+          ```python
+                          # JIT Pruning: Re-check against the latest remaining_mask before doing work.
+                          if llm_bv.isdisjoint(active_remaining_mask):
+                              stats.inc('get_mask.main_loop.edge.jit_pruned')
+                              continue
+
+                          # Apply-and-prune cache per (popped, llm_bv)
+                          source_after_apply = popped
+                          # The check against popped_acc.llm_mask is now done during group building.
+                          key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
           ```
 
-      4.  **Update the generator call.** A few lines down, find the call to `self._process_internal_node_gen`. Modify the `node_allowed_mask` argument.
-
-          *   **Change this line:**
-              ```python
-                              # Use exact frontier for pruning regardless of oracle_reward_mask
-                              node_allowed_mask=frontier_mask,
-              ```
-          *   **To this:**
-              ```python
-                              node_allowed_mask=node_allowed_mask_for_gen,
-              ```
-
-      This change restores performance for the guided run while retaining the improved accuracy for the oracle's planning phase.
+      These changes ensure that the pruning logic uses the most up-to-date `active_remaining_mask` before performing expensive operations.
 
       ### Git Diff
 
-      Here is the git diff to apply these changes.
+      Here is the git diff for the changes:
 
       ```diff
       --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      @@ -1746,20 +1746,29 @@
-                               stats.inc('get_mask.early_exit_full_mask')
-                               break
+      @@ -1141,9 +1141,9 @@
+                               continue
+                           for dest_id, triple in per_state_map.items():
+                               llm_bv, llm_bv_not, llm_bv_thru = triple
+      -                        # Strong gating: if no token can reach an end via this (dest) with current masks, skip
+      -                        if llm_bv_thru.isdisjoint(active_remaining_mask) or popped_acc.llm_mask.isdisjoint(llm_bv_thru):
+      -                            stats.inc('get_mask.main_loop.edge.descendant_pruned')
+      +                        # Strong gating: if no token can reach an end via this (dest) with the current GSS mask, skip
+      +                        if popped_acc.llm_mask.isdisjoint(llm_bv_thru):
+      +                            stats.inc('get_mask.main_loop.edge.descendant_pruned_gss')
+                                   continue
+                               key = (int(dest_id), id(llm_bv_thru))
+                               entry = groups.get(key)
+      @@ -1167,14 +1167,15 @@
+                           llm_bv = entry["llm_bv"]
+                           llm_bv_not = entry["llm_bv_not"]
+                           states_to_keep: List[int] = entry["states"]
        
-      -                a_node = self.arena.get(node_id)
-      -                # Exact, GSS-aware frontier for this (node, gss)
-      -                frontier_mask = self._compute_exact_frontier(
-      -                    int(node_id),
-      -                    gss_node,
-      -                    frontier_cache,
-      -                    apply_cache=apply_cache_by_bv,
-      -                    isolate_cache=isolate_many_cache,
-      -                ) if a_node else RangeSet.empty()
-      -                work_llm_mask = frontier_mask
-      -                
-      +                a_node = self.arena.get(node_id)
-      +                # For planning runs, compute the exact GSS-aware frontier.
-      +                # For guided/normal runs, use the faster static descendant closure.
-      +                if record_end_unions:
-      +                    # Exact, GSS-aware frontier for this (node, gss)
-      +                    frontier_mask = self._compute_exact_frontier(
-      +                        int(node_id),
-      +                        gss_node,
-      +                        frontier_cache,
-      +                        apply_cache=apply_cache_by_bv,
-      +                        isolate_cache=isolate_many_cache,
-      +                    ) if a_node else RangeSet.empty()
-      +                    work_llm_mask = frontier_mask
-      +                    node_allowed_mask_for_gen = frontier_mask
-      +                else:
-      +                    # Stronger upper bound than llm_bv_union: descendant closure
-      +                    if oracle_reward_mask is not None and a_node:
-      +                        node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
-      +                    else:
-      +                        node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
-      +                    work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
-      +                    # Replicate original logic for guided runs
-      +                    node_allowed_mask_for_gen = node_desc_mask if oracle_reward_mask is not None else None
+      +                    # JIT Pruning: Re-check against the latest remaining_mask before doing work.
+      +                    if llm_bv.isdisjoint(active_remaining_mask):
+      +                        stats.inc('get_mask.main_loop.edge.jit_pruned')
+      +                        continue
       +
-                       if not a_node or not a_node.children:
-                           # Still record frontier mask for planning if requested
-                           if record_end_unions and a_node:
-      @@ -1785,8 +1794,7 @@
-                           edge_order_override_map=edge_order_map,
-                           dest_scores=guided_scores,
-                           oracle_counters=analysis_node_costs if record_end_unions else None,
-      -                    # Use exact frontier for pruning regardless of oracle_reward_mask
-      -                    node_allowed_mask=frontier_mask,
-      +                    node_allowed_mask=node_allowed_mask_for_gen,
-                       )
-                       # Record frontier for planning if requested
-                       if record_end_unions and a_node:
+                           # Apply-and-prune cache per (popped, llm_bv)
+                           source_after_apply = popped
+      -                    # Always use the descendant-aware llm_bv
+      -                    if popped_acc.llm_mask.isdisjoint(llm_bv):
+      -                        continue
+      -                    key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
+      +                    # The check against popped_acc.llm_mask is now done during group building.
+      +                    key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
+                           cached_apply = local_apply_cache.get(key_apply)
+                           if cached_apply is not None:
+                               source_after_apply = cached_apply
 
       ```
     metadata:
@@ -8663,7 +8422,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Restrict GSS-aware exact frontier
-      computation to oracle planning phase only"'
+  - user: 'Changes committed with message: "Refactor: Apply active_remaining_mask
+      pruning check just-in-time in _process_internal_node_gen"'
     metadata:
 ...

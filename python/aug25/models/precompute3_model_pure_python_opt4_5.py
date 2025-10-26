@@ -1018,9 +1018,9 @@ class Model(GraphProvider):
                         continue
                     for dest_id, triple in per_state_map.items():
                         llm_bv, llm_bv_not, llm_bv_thru = triple
-                        # Strong gating: if no token can reach an end via this (dest) with current masks, skip
-                        if llm_bv_thru.isdisjoint(active_remaining_mask) or popped_acc.llm_mask.isdisjoint(llm_bv_thru):
-                            stats.inc('get_mask.main_loop.edge.descendant_pruned')
+                        # Strong gating: if no token can reach an end via this (dest) with the current GSS mask, skip
+                        if popped_acc.llm_mask.isdisjoint(llm_bv_thru):
+                            stats.inc('get_mask.main_loop.edge.descendant_pruned_gss')
                             continue
                         key = (int(dest_id), id(llm_bv_thru))
                         entry = groups.get(key)
@@ -1045,11 +1045,14 @@ class Model(GraphProvider):
                     llm_bv_not = entry["llm_bv_not"]
                     states_to_keep: List[int] = entry["states"]
 
+                    # JIT Pruning: Re-check against the latest remaining_mask before doing work.
+                    if llm_bv.isdisjoint(active_remaining_mask):
+                        stats.inc('get_mask.main_loop.edge.jit_pruned')
+                        continue
+
                     # Apply-and-prune cache per (popped, llm_bv)
                     source_after_apply = popped
-                    # Always use the descendant-aware llm_bv
-                    if popped_acc.llm_mask.isdisjoint(llm_bv):
-                        continue
+                    # The check against popped_acc.llm_mask is now done during group building.
                     key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
                     cached_apply = local_apply_cache.get(key_apply)
                     if cached_apply is not None:
