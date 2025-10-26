@@ -359,7 +359,6 @@ class WorkItemNew:
 @dataclass
 class WorkItemSuspended:
     generator: Generator
-    llm_mask: LLMTokenSet
     depth: int
 
 
@@ -915,7 +914,7 @@ class Model(GraphProvider):
         dest_scores: Optional[Dict[int, int]] = None,
         oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
         node_allowed_mask: Optional[LLMTokenSet] = None,
-    ) -> Generator[Union[Enqueue, Suspend], None, None]:
+    ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
         stats = Stats.get()
         a_node = self.arena.get(node_id)
         if not a_node:
@@ -926,6 +925,8 @@ class Model(GraphProvider):
 
         # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
         # Strengthen remaining-mask with node-specific allowance (oracle reward) when provided.
+        if remaining_mask.is_empty():
+            return
         active_remaining_mask = remaining_mask if node_allowed_mask is None else remaining_mask.intersection(node_allowed_mask)
 
         max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
@@ -1103,21 +1104,37 @@ class Model(GraphProvider):
                         continue
 
                     d: NodeID = int(dest_id)
-                    yield Enqueue(d, child_gss, depth + 1)
+                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+                    if new_mask is not None:
+                        active_remaining_mask = new_mask
+                    if active_remaining_mask.is_empty():
+                        return
+
                     dests_proc += 1
                     if oracle_counters is not None and local_ctr is not None:
                         local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
                     if dests_proc >= max_dests:
                         priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                        yield Suspend(priority, depth)
+                        new_mask = yield Suspend(node_id, priority, depth)
+                        if new_mask is not None:
+                            active_remaining_mask = new_mask
+                        if active_remaining_mask.is_empty():
+                            return
                         dests_proc = 0
 
                     group_index += 1
 
+                if active_remaining_mask.is_empty():
+                    return
+
                 if edges_proc >= max_edges:
                     priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                    yield Suspend(int(node_id), priority, depth)
+                    new_mask = yield Suspend(int(node_id), priority, depth)
+                    if new_mask is not None:
+                        active_remaining_mask = new_mask
+                    if active_remaining_mask.is_empty():
+                        return
                     edges_proc = 0
                 edges_proc += 1
         else:
@@ -1260,8 +1277,14 @@ class Model(GraphProvider):
                 for dest_j in dest_keys:
                     if dests_proc >= max_dests:
                         priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                        yield Suspend(priority, depth)
+                        new_mask = yield Suspend(node_id, priority, depth)
+                        if new_mask is not None:
+                            active_remaining_mask = new_mask
+                        if active_remaining_mask.is_empty():
+                            return
                         dests_proc = 0
+                    if active_remaining_mask.is_empty():
+                        break
                     dest = edge.dests[dest_j]
                     values_to_keep = grouped[dest_j]
                     # If all heads survive, reuse popped directly
@@ -1287,15 +1310,27 @@ class Model(GraphProvider):
                                 isolate_cache[key_isolate] = child_gss
                     if child_gss.is_empty(): continue
                     d: NodeID = int(dest.dest_idx)
-                    yield Enqueue(d, child_gss, depth + 1)
+                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+                    if new_mask is not None:
+                        active_remaining_mask = new_mask
+                    if active_remaining_mask.is_empty():
+                        return
+
                     dests_proc += 1
                     if oracle_counters is not None and local_ctr is not None:
                         local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
+                if active_remaining_mask.is_empty():
+                    return
+
                 if edges_proc >= max_edges:
                     # Suspend work after a batch to allow priority reordering at the heap level
                     priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                    yield Suspend(int(node_id), priority, depth)
+                    new_mask = yield Suspend(int(node_id), priority, depth)
+                    if new_mask is not None:
+                        active_remaining_mask = new_mask
+                    if active_remaining_mask.is_empty():
+                        return
                     edges_proc = 0
                 edges_proc += 1
         # When max_dests suspend triggers
@@ -2112,16 +2147,16 @@ class Model(GraphProvider):
             heap_item = heapq.heappop(work_heap)
             priority, work = heap_item.priority, heap_item.item
 
-            if isinstance(work, WorkItemSuspended):
-                gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
+            gen = None
+            is_new_gen = False
 
-                if work_llm_mask.isdisjoint(remaining_mask):
-                    continue
+            if isinstance(work, WorkItemSuspended):
+                gen, depth = work.generator, work.depth
             elif isinstance(work, WorkItemNew):
+                is_new_gen = True
                 stats.inc('get_mask.traversal.nodes_processed')
                 node_id, gss_node, depth = work.node_id, work.gss, work.depth
                 stats.counts['get_mask.traversal.max_depth'] = max(stats.counts.get('get_mask.traversal.max_depth', 0), depth)
-                stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
                 assert isinstance(node_id, int)
                 assert isinstance(gss_node, GSS)
@@ -2191,47 +2226,49 @@ class Model(GraphProvider):
             else:
                 raise ValueError(f'Unexpected work item: {work}')
 
-            if gen:
-                while True:
-                    try:
-                        yielded = next(gen)
+            if not gen:
+                continue
 
-                        if isinstance(yielded, Enqueue):
-                            new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
-                            base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                            # Dynamic, target-aware child priority if enabled and reward masks present
-                            if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-                                child_priority = self._priority_for_node(
-                                    new_node_id,
-                                    new_depth,
-                                    remaining_mask,
-                                    guided_scores=guided_scores,
-                                    oracle_reward_mask=oracle_reward_mask,
-                                    analysis_node_costs=oracle_node_costs,
-                                )
-                            elif guided_scores is not None:
-                                child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
-                            else:
-                                child_priority = base_child_pri
-                            heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
-                        elif isinstance(yielded, Suspend):
-                            # Recompute scheduling priority for the suspended work dynamically based on remaining_mask
-                            if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-                                susp_pri = self._priority_for_node(
-                                    yielded.node_id,
-                                    yielded.depth,
-                                    remaining_mask,
-                                    guided_scores=guided_scores,
-                                    oracle_reward_mask=oracle_reward_mask,
-                                    analysis_node_costs=oracle_node_costs,
-                                )
-                            else:
-                                susp_pri = yielded.priority
-                            heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
-                            break
+            # Coroutine driving loop
+            try:
+                if is_new_gen:
+                    yielded = next(gen)
+                else:
+                    yielded = gen.send(remaining_mask)
 
-                    except StopIteration:
-                        break # Generator is done.
+                while True: # Drive this generator until it suspends or finishes
+                    if isinstance(yielded, Enqueue):
+                        new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                        base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                        if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                            child_priority = self._priority_for_node(
+                                new_node_id, new_depth, remaining_mask,
+                                guided_scores=guided_scores,
+                                oracle_reward_mask=oracle_reward_mask,
+                                analysis_node_costs=oracle_node_costs,
+                            )
+                        elif guided_scores is not None:
+                            child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
+                        else:
+                            child_priority = base_child_pri
+                        heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
+                    elif isinstance(yielded, Suspend):
+                        if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                            susp_pri = self._priority_for_node(
+                                yielded.node_id, yielded.depth, remaining_mask,
+                                guided_scores=guided_scores,
+                                oracle_reward_mask=oracle_reward_mask,
+                                analysis_node_costs=oracle_node_costs,
+                            )
+                        else:
+                            susp_pri = yielded.priority
+                        heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
+                        break # Stop driving this generator
+
+                    yielded = gen.send(remaining_mask)
+            except StopIteration:
+                pass # Generator is done.
+
         stats.stop('get_mask.main_loop')
 
         stats.start('get_mask.final_conversion')
