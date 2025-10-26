@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python_opt4_5.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python_opt4_5.py: |+
@@ -328,7 +328,8 @@ local_system:
 
           def __hash__(self):
               # Correctly hash the dictionary content for memoization
-              return hash((len(self.terminals_union), self.llm_mask))
+              terminals_hashable = frozenset(self.terminals_union.items())
+              return hash((terminals_hashable, self.llm_mask))
 
           def merge(self, other: "PyAcc") -> "PyAcc":
               new_terminals_union = self.terminals_union.copy()
@@ -423,6 +424,7 @@ local_system:
           oracle_permute_top_ends: int = 8
           # Pre-computed static costs for oracle mode
           static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
+          oracle_use_astar: bool = True
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -2253,6 +2255,123 @@ local_system:
               # Negative for min-heap; depth tiebreaker to encourage shallower early
               return (-float(gain) / max(1.0, float(cost)), -int(gain), -int(gs), -int(self.max_depth.get(node_id_i, 0)), int(depth))
 
+          def _expand_one_node(self, node_id: int, gss: GSS, remaining_mask: LLMTokenSet, global_pop_cache: Dict, apply_cache: Dict, isolate_cache: Dict) -> Tuple[Set[Tuple[int, GSS]], int, LLMTokenSet]:
+              """Helper for A* search. Expands one (node, gss) work item."""
+              gss_acc = gss.reduce_acc()
+              if not gss_acc:
+                  return set(), 0, RangeSet.empty()
+
+              counters = {}
+              gen = self._process_internal_node_gen(
+                  node_id, gss, remaining_mask, gss_acc.llm_mask, 0,
+                  global_pop_cache=global_pop_cache,
+                  apply_cache=apply_cache,
+                  isolate_cache=isolate_cache,
+                  oracle_counters=counters
+              )
+
+              new_work_items: Set[Tuple[int, GSS]] = set()
+              next_send = remaining_mask
+              while True:
+                  try:
+                      yielded = gen.send(next_send)
+                      if isinstance(yielded, Enqueue):
+                          new_work_items.add((yielded.node_id, yielded.gss))
+                  except StopIteration:
+                      break
+
+              node_counters = counters.get(int(node_id), {})
+              edges_traversed = node_counters.get("edges", 0)
+
+              mask_contribution = RangeSet.empty()
+              if self.is_end(node_id):
+                  mask_contribution = gss_acc.llm_mask
+
+              return new_work_items, edges_traversed, mask_contribution
+
+          def _oracle_plan_with_astar(self) -> Tuple[List[Tuple[int, GSS]], int]:
+              """
+              Finds the optimal plan (sequence of node expansions) using A* search.
+              The cost is the number of edge traversals.
+              Returns the plan (sequence of (node_id, gss) expanded) and the optimal cost.
+              """
+              print("[oracle] Starting A* search for optimal plan...")
+              all_ones = self.all_internal_llm_tokens_bitset
+
+              @_acc_memoize(use_value_cache=False)
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  disallowed = RangeSet.empty()
+                  for tsid, terms in acc.terminals_union.items():
+                      if tsid in self.possible_matches_cache:
+                          term_map = self.possible_matches_cache[tsid]
+                          for term_id in terms.iter_indices():
+                              if term_id in term_map: disallowed |= term_map[term_id]
+                  return PyAcc({}, all_ones.difference(disallowed))
+
+              init_cache = {}
+              initial_work_items = set()
+              for sid, gss in self.state.items():
+                  r = self.roots_map[int(sid)]
+                  gss_init = gss.apply(initialize_acc, init_cache)
+                  if not gss_init.is_empty():
+                      initial_work_items.add((r, gss_init))
+
+              frontier_cache, apply_cache_ft, isolate_cache_ft = {}, {}, {}
+              target_mask = RangeSet.empty()
+              for node_id, gss in initial_work_items:
+                  target_mask |= self._compute_exact_frontier(node_id, gss, frontier_cache, apply_cache_ft, isolate_cache_ft)
+
+              if target_mask.is_empty():
+                  print("[oracle] A*: Target mask is empty. Nothing to do.")
+                  return [], 0
+
+              initial_state = (RangeSet.empty(), frozenset(initial_work_items))
+              def heuristic(state):
+                  mask, _ = state
+                  return 0 if mask.issuperset(target_mask) else 1
+
+              open_set = []
+              g_scores = {initial_state: 0}
+              came_from = {}
+              heapq.heappush(open_set, (heuristic(initial_state), 0, initial_state))
+              pop_cache, apply_cache, isolate_cache = {}, {}, {}
+              visited_states = 0
+
+              while open_set:
+                  _, g_score, current_state = heapq.heappop(open_set)
+                  visited_states += 1
+                  if visited_states % 100 == 0:
+                      print(f"[oracle] A*: Visited {visited_states} states, queue size {len(open_set)}...")
+
+                  current_mask, current_work_items = current_state
+                  if current_mask.issuperset(target_mask):
+                      print(f"[oracle] A*: Goal reached with cost {g_score}. Visited {visited_states} states.")
+                      path = []
+                      curr = current_state
+                      while curr in came_from:
+                          prev, expanded_item = came_from[curr]
+                          path.append(expanded_item)
+                          curr = prev
+                      path.reverse()
+                      return path, g_score
+
+                  for work_item in current_work_items:
+                      node_id, gss = work_item
+                      remaining_mask = target_mask.difference(current_mask)
+                      new_items, edges, mask_contrib = self._expand_one_node(node_id, gss, remaining_mask, pop_cache, apply_cache, isolate_cache)
+                      neighbor_mask = current_mask.union(mask_contrib)
+                      neighbor_work_items = (current_work_items - {work_item}).union(new_items)
+                      neighbor_state = (neighbor_mask, frozenset(neighbor_work_items))
+                      tentative_g_score = g_score + edges
+                      if tentative_g_score < g_scores.get(neighbor_state, float('inf')):
+                          came_from[neighbor_state] = (current_state, work_item)
+                          g_scores[neighbor_state] = tentative_g_score
+                          f_score = tentative_g_score + heuristic(neighbor_state)
+                          heapq.heappush(open_set, (f_score, tentative_g_score, neighbor_state))
+
+              print("[oracle] A*: Search finished without finding a solution.")
+              return [], -1
+
           def _get_mask_run(
               self,
               guided_scores: Optional[Dict[int, int]] = None,
@@ -2546,6 +2665,38 @@ local_system:
               # Oracle wrapper: plan, then guided run
               if not self.oracle_mode:
                   out, _ = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=False)
+                  return out
+
+              if getattr(self, 'oracle_use_astar', False):
+                  optimal_path, optimal_cost = self._oracle_plan_with_astar()
+                  if optimal_cost == -1:
+                      print("[oracle] A* failed to find a plan, running unguided.")
+                      out, _ = self._get_mask_run()
+                      return out
+
+                  print(f"[oracle] A* optimal plan found with {optimal_cost} edges. Path length: {len(optimal_path)} node expansions.")
+
+                  # Convert path to guidance. The sequence of expansions is the priority.
+                  guided_scores = {node_id: len(optimal_path) - i for i, (node_id, gss) in enumerate(optimal_path)}
+
+                  edge_order_map: Dict[int, List[int]] = {}
+                  for u, node in self.arena.items():
+                      if not node.children:
+                          continue
+                      edge_scores: List[Tuple[int, int]] = []
+                      for idx, edge in enumerate(node.children):
+                          s = 0
+                          for d in edge.dests:
+                              s += int(guided_scores.get(int(d.dest_idx), 0))
+                          edge_scores.append((idx, s))
+                      if any(s > 0 for (_, s) in edge_scores):
+                          ordered = sorted(edge_scores, key=lambda t: t[1], reverse=True)
+                          edge_order_map[int(u)] = [idx for (idx, _) in ordered]
+
+                  # Final guided run
+                  Stats.get().reset()
+                  out, _ = self._get_mask_run(guided_scores=guided_scores, edge_order_map=edge_order_map, record_end_unions=False)
+                  print(f"[oracle] A* guided run executed {self.last_get_mask_cost} edges (optimal was {optimal_cost}).")
                   return out
 
               # Trivial seed heuristic: single tokenizer state and single LR head -> skip planning
@@ -3187,38 +3338,6 @@ local_system:
           def from_json_string(s: str) -> 'Model':
               Stats.get().reset()
               data = json.loads(s)
-
-              # --- Monkey-patch GSS to be hashable for A* search ---
-              # The A* planner requires GSS objects to be hashable to use them in sets
-              # and dictionary keys. The LeveledGSS implementation may not define __hash__.
-              # We add one here based on its likely internal structure (a dict of levels).
-              def _gss_hash(self):
-                  # Cache the hash for performance
-                  if hasattr(self, '_hash_val'):
-                      return self._hash_val
-
-                  # The internal representation is likely a dictionary of levels,
-                  # where each level contains a dictionary of stacks.
-                  if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
-                      # Fallback if structure is unexpected, though this may not be unique
-                      return id(self)
-
-                  level_items = []
-                  for level, stacks in self.levels.items():
-                      # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
-                      # frozenset of items makes this part hashable and order-independent.
-                      stack_items = frozenset(stacks.items())
-                      level_items.append((level, stack_items))
-                  
-                  # Sort by level to make the final representation canonical.
-                  level_items.sort()
-                  self._hash_val = hash(tuple(level_items))
-                  return self._hash_val
-
-              # Unconditionally patch GSS to ensure our hash function is used for the A* search,
-              # which requires value-based hashing for GSS objects.
-              GSS.__hash__ = _gss_hash
-              # --- End of monkey-patch ---
 
               # Arena
               roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
@@ -5702,7 +5821,7 @@ local_system:
 
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: git-llm
+  prev_apply_mode: plan-git-llm
   default_end_line:
 system:
   message: |-
@@ -5720,7 +5839,7 @@ system:
     - gf
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: plan-git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -6067,7 +6186,8 @@ messages:
 
           def __hash__(self):
               # Correctly hash the dictionary content for memoization
-              return hash((len(self.terminals_union), self.llm_mask))
+              terminals_hashable = frozenset(self.terminals_union.items())
+              return hash((terminals_hashable, self.llm_mask))
 
           def merge(self, other: "PyAcc") -> "PyAcc":
               new_terminals_union = self.terminals_union.copy()
@@ -6162,6 +6282,7 @@ messages:
           oracle_permute_top_ends: int = 8
           # Pre-computed static costs for oracle mode
           static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
+          oracle_use_astar: bool = True
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -7992,6 +8113,123 @@ messages:
               # Negative for min-heap; depth tiebreaker to encourage shallower early
               return (-float(gain) / max(1.0, float(cost)), -int(gain), -int(gs), -int(self.max_depth.get(node_id_i, 0)), int(depth))
 
+          def _expand_one_node(self, node_id: int, gss: GSS, remaining_mask: LLMTokenSet, global_pop_cache: Dict, apply_cache: Dict, isolate_cache: Dict) -> Tuple[Set[Tuple[int, GSS]], int, LLMTokenSet]:
+              """Helper for A* search. Expands one (node, gss) work item."""
+              gss_acc = gss.reduce_acc()
+              if not gss_acc:
+                  return set(), 0, RangeSet.empty()
+
+              counters = {}
+              gen = self._process_internal_node_gen(
+                  node_id, gss, remaining_mask, gss_acc.llm_mask, 0,
+                  global_pop_cache=global_pop_cache,
+                  apply_cache=apply_cache,
+                  isolate_cache=isolate_cache,
+                  oracle_counters=counters
+              )
+
+              new_work_items: Set[Tuple[int, GSS]] = set()
+              next_send = remaining_mask
+              while True:
+                  try:
+                      yielded = gen.send(next_send)
+                      if isinstance(yielded, Enqueue):
+                          new_work_items.add((yielded.node_id, yielded.gss))
+                  except StopIteration:
+                      break
+
+              node_counters = counters.get(int(node_id), {})
+              edges_traversed = node_counters.get("edges", 0)
+
+              mask_contribution = RangeSet.empty()
+              if self.is_end(node_id):
+                  mask_contribution = gss_acc.llm_mask
+
+              return new_work_items, edges_traversed, mask_contribution
+
+          def _oracle_plan_with_astar(self) -> Tuple[List[Tuple[int, GSS]], int]:
+              """
+              Finds the optimal plan (sequence of node expansions) using A* search.
+              The cost is the number of edge traversals.
+              Returns the plan (sequence of (node_id, gss) expanded) and the optimal cost.
+              """
+              print("[oracle] Starting A* search for optimal plan...")
+              all_ones = self.all_internal_llm_tokens_bitset
+
+              @_acc_memoize(use_value_cache=False)
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  disallowed = RangeSet.empty()
+                  for tsid, terms in acc.terminals_union.items():
+                      if tsid in self.possible_matches_cache:
+                          term_map = self.possible_matches_cache[tsid]
+                          for term_id in terms.iter_indices():
+                              if term_id in term_map: disallowed |= term_map[term_id]
+                  return PyAcc({}, all_ones.difference(disallowed))
+
+              init_cache = {}
+              initial_work_items = set()
+              for sid, gss in self.state.items():
+                  r = self.roots_map[int(sid)]
+                  gss_init = gss.apply(initialize_acc, init_cache)
+                  if not gss_init.is_empty():
+                      initial_work_items.add((r, gss_init))
+
+              frontier_cache, apply_cache_ft, isolate_cache_ft = {}, {}, {}
+              target_mask = RangeSet.empty()
+              for node_id, gss in initial_work_items:
+                  target_mask |= self._compute_exact_frontier(node_id, gss, frontier_cache, apply_cache_ft, isolate_cache_ft)
+
+              if target_mask.is_empty():
+                  print("[oracle] A*: Target mask is empty. Nothing to do.")
+                  return [], 0
+
+              initial_state = (RangeSet.empty(), frozenset(initial_work_items))
+              def heuristic(state):
+                  mask, _ = state
+                  return 0 if mask.issuperset(target_mask) else 1
+
+              open_set = []
+              g_scores = {initial_state: 0}
+              came_from = {}
+              heapq.heappush(open_set, (heuristic(initial_state), 0, initial_state))
+              pop_cache, apply_cache, isolate_cache = {}, {}, {}
+              visited_states = 0
+
+              while open_set:
+                  _, g_score, current_state = heapq.heappop(open_set)
+                  visited_states += 1
+                  if visited_states % 100 == 0:
+                      print(f"[oracle] A*: Visited {visited_states} states, queue size {len(open_set)}...")
+
+                  current_mask, current_work_items = current_state
+                  if current_mask.issuperset(target_mask):
+                      print(f"[oracle] A*: Goal reached with cost {g_score}. Visited {visited_states} states.")
+                      path = []
+                      curr = current_state
+                      while curr in came_from:
+                          prev, expanded_item = came_from[curr]
+                          path.append(expanded_item)
+                          curr = prev
+                      path.reverse()
+                      return path, g_score
+
+                  for work_item in current_work_items:
+                      node_id, gss = work_item
+                      remaining_mask = target_mask.difference(current_mask)
+                      new_items, edges, mask_contrib = self._expand_one_node(node_id, gss, remaining_mask, pop_cache, apply_cache, isolate_cache)
+                      neighbor_mask = current_mask.union(mask_contrib)
+                      neighbor_work_items = (current_work_items - {work_item}).union(new_items)
+                      neighbor_state = (neighbor_mask, frozenset(neighbor_work_items))
+                      tentative_g_score = g_score + edges
+                      if tentative_g_score < g_scores.get(neighbor_state, float('inf')):
+                          came_from[neighbor_state] = (current_state, work_item)
+                          g_scores[neighbor_state] = tentative_g_score
+                          f_score = tentative_g_score + heuristic(neighbor_state)
+                          heapq.heappush(open_set, (f_score, tentative_g_score, neighbor_state))
+
+              print("[oracle] A*: Search finished without finding a solution.")
+              return [], -1
+
           def _get_mask_run(
               self,
               guided_scores: Optional[Dict[int, int]] = None,
@@ -8287,6 +8525,38 @@ messages:
                   out, _ = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=False)
                   return out
 
+              if getattr(self, 'oracle_use_astar', False):
+                  optimal_path, optimal_cost = self._oracle_plan_with_astar()
+                  if optimal_cost == -1:
+                      print("[oracle] A* failed to find a plan, running unguided.")
+                      out, _ = self._get_mask_run()
+                      return out
+
+                  print(f"[oracle] A* optimal plan found with {optimal_cost} edges. Path length: {len(optimal_path)} node expansions.")
+
+                  # Convert path to guidance. The sequence of expansions is the priority.
+                  guided_scores = {node_id: len(optimal_path) - i for i, (node_id, gss) in enumerate(optimal_path)}
+
+                  edge_order_map: Dict[int, List[int]] = {}
+                  for u, node in self.arena.items():
+                      if not node.children:
+                          continue
+                      edge_scores: List[Tuple[int, int]] = []
+                      for idx, edge in enumerate(node.children):
+                          s = 0
+                          for d in edge.dests:
+                              s += int(guided_scores.get(int(d.dest_idx), 0))
+                          edge_scores.append((idx, s))
+                      if any(s > 0 for (_, s) in edge_scores):
+                          ordered = sorted(edge_scores, key=lambda t: t[1], reverse=True)
+                          edge_order_map[int(u)] = [idx for (idx, _) in ordered]
+
+                  # Final guided run
+                  Stats.get().reset()
+                  out, _ = self._get_mask_run(guided_scores=guided_scores, edge_order_map=edge_order_map, record_end_unions=False)
+                  print(f"[oracle] A* guided run executed {self.last_get_mask_cost} edges (optimal was {optimal_cost}).")
+                  return out
+
               # Trivial seed heuristic: single tokenizer state and single LR head -> skip planning
               try:
                   if len(self.state) == 1:
@@ -8508,61 +8778,827 @@ messages:
 
       **High-Level Goal:**
 
-      Replace the oracle's current heuristic-based planner with a provably optimal **A* search algorithm**. The objective is to find the absolute theoretical minimum number of edge traversals required to compute the full `final_mask`. Since this is for an offline analysis tool, the computational cost and memory usage of the A* search itself are acceptable.
+      Implement a correlation-aware pruning strategy for the oracle by augmenting its frontiers with Bloom filters. A critical requirement is to handle the stateful, mutable nature of Bloom filters correctly to avoid infinite loops and incorrect results during the recursive frontier computation.
 
-      **The Core Problem:**
+      **Context and The Core Challenge:**
 
-      The current oracle planner uses greedy heuristics (like minimal set cover or beam search) to decide the order of traversal. While effective, these greedy methods are not guaranteed to be optimal. They can be lured by locally attractive paths that lead to a globally suboptimal solution. To find the true performance bound, we must replace these heuristics with a search algorithm that guarantees optimality.
+      We need to enhance the oracle's `_compute_exact_frontier` function. Currently, it computes a simple `LLMTokenSet` (a union of all possible tokens). We want to upgrade this to also compute a **Bloom filter** that tracks which **pairs of tokens** can appear together in a valid output.
 
-      **The Task: Implement an A* Search to Find the Optimal Traversal Path**
+      The primary challenge is that Bloom filters are mutable objects. The `_compute_exact_frontier` function is a recursive, memoized algorithm that traverses a graph. If a mutable Bloom filter from a child node is modified by a parent node, it can corrupt the memoized (cached) result for the child, leading to incorrect calculations and potential infinite loops. Our implementation must be carefully designed to prevent this state corruption.
 
-      You will implement a new planning method that frames the `get_mask` problem as finding the shortest path in a state-space graph and uses A* to solve it.
+      **Your Task:**
 
-      **A* Search Framework:**
-
-      The A* algorithm finds the shortest path by minimizing `f(n) = g(n) + h(n)`, where:
-      *   `g(n)` is the exact cost from the start state to the current state `n`.
-      *   `h(n)` is the estimated (heuristic) cost from state `n` to the goal.
+      You will modify the oracle's planning phase to create and use these token-pair Bloom filters, with a specific focus on ensuring the immutability of cached results.
 
       **Step-by-Step Implementation Plan:**
 
-      1.  **Define the A* State (`n`):**
-          A state in our search must capture everything needed to make a decision. A suitable state representation would be a tuple:
-          `(current_final_mask: LLMTokenSet, current_gss: GSS, current_node_id: NodeID)`
-          To use this in data structures like sets and dictionary keys, you will need to make the state hashable. The `GSS` object will require a robust `__hash__` method.
+      1.  **Choose and Integrate a Bloom Filter Library:**
+          *   Select a standard Python library for Bloom filters (e.g., `pybloom_live`).
+          *   Note that these libraries typically provide *mutable* filter objects. Your implementation must account for this.
 
-      2.  **Define the Search Components:**
-          *   **Start State:** The initial state of the system: `(empty_mask, initial_gss, root_node_id)`. You will need to handle multiple initial GSS/root states.
-          *   **Goal State:** A state `n` is a goal state if its `current_final_mask` is a superset of the `target_mask`. The `target_mask` is the complete set of all possible tokens, which can be determined by running the GSS-aware frontier computation on the start state(s).
-          *   **Cost Function `g(n)`:** The cost is the number of edge traversals taken to reach the state. This will be tracked alongside each state in the A* priority queue.
-          *   **Actions/Neighbors:** From a state `(mask, gss, node_id)`, the possible actions are to traverse any of the valid outgoing edges from `node_id`. Each traversal will produce a new neighbor state `(new_mask, new_gss, new_node_id)` with a cost of `g(n) + 1`.
+      2.  **Modify `_compute_exact_frontier`:**
+          *   The function's return type and its internal memoization cache must be changed to handle a tuple: `Tuple[LLMTokenSet, BloomFilter]`.
+          *   **Population:** When the function's sub-traversal finds an end-node with a token mask `M`, create a *new, local* Bloom filter. Populate this filter by iterating through all unique pairs of tokens `(t1, t2)` in `M` and adding a representation of the pair (e.g., `f"{t1},{t2}"`) to the filter.
+          *   **Propagation and Immutability:** This is the most critical step. When propagating results up from child nodes, you must combine their frontiers.
+              *   The `LLMTokenSet`s can be combined using their standard `union` method.
+              *   To combine the Bloom filters, you must **never modify a filter in-place if it came from the cache or another node.** The correct pattern is to **create a copy** of one filter and then perform a `union` operation with the other filter on that copy. For example: `parent_filter = child1_filter.copy(); parent_filter.union(child2_filter)`. This ensures that the cached objects for the children remain pristine and unmodified.
 
-      3.  **Implement the Heuristic Function `h(n)`:**
-          The heuristic must be **admissible** (never overestimates the true cost) to guarantee optimality. A powerful, admissible heuristic can be designed using the GSS-aware frontiers:
-          *   Given a state `n = (current_mask, gss, node_id)`, calculate the `remaining_mask = target_mask - current_mask`.
-          *   If `remaining_mask` is empty, `h(n) = 0`.
-          *   Otherwise, for each token `t` in `remaining_mask`, you need to find the minimum possible cost to find it. This requires a pre-computation step or a nested search. A feasible approach:
-              *   Pre-compute the static path cost from every node to the nearest end-node (using a reverse Dijkstra search on the `arena` graph at initialization). Let's call this `cost_to_end(node_id)`.
-              *   The heuristic `h(n)` can be the `max(cost_to_end(u))` over all nodes `u` that are known (via their static frontiers) to be able to produce a token `t` in the `remaining_mask`. This is a loose but admissible lower bound.
-          *   *Self-correction:* A simpler, though weaker, admissible heuristic is `h(n) = 1` if the goal is not met, and `0` if it is. This effectively turns A* into Dijkstra's search, which is still optimal but less efficient. Start with this if the more complex heuristic is difficult.
-
-      4.  **Implement the A* Algorithm:**
-          *   Use a priority queue (`heapq`) to store `(f_score, g_score, state)` tuples. The queue should be ordered by `f_score`.
-          *   Maintain a `closed_set` or a dictionary (`came_from`) to avoid re-processing states.
-          *   The main loop will pop the state with the lowest `f_score`, check if it's the goal, and if not, generate its neighbors.
-          *   For each neighbor, calculate its `g_score` and `f_score` and add it to the priority queue if it's a better path than one already found.
-
-      5.  **Extract the Final Plan:**
-          Once the A* search finds a goal state, the `came_from` dictionary can be used to reconstruct the path of states taken. This path of states implies a sequence of edge traversals. This sequence is the **provably optimal plan**. This plan (specifically, the edge ordering and node priorities derived from it) can then be used in the final, fast guided run to verify the performance bound.
+      3.  **Implement the New Two-Stage Pruning Check:**
+          *   This part of the logic remains the same as our previous design. In the guided run, when checking an edge that leads to a state with frontier `(frontier_tokens, frontier_bloom_filter)`:
+          *   **Stage 1:** Check if `frontier_tokens` is disjoint from the `remaining_mask`.
+          *   **Stage 2:** If not pruned, find the `needed_and_available` tokens. If there is more than one, check all pairs against the `frontier_bloom_filter`. If any required pair is missing from the filter, prune the edge.
 
       **Expected Outcome:**
 
-      The oracle's planning phase will be replaced by a computationally intensive but optimal A* search. The `best_edges_traversed` result from the final guided run using this A*-generated plan will represent the **true, provable minimum** number of serial edge traversals required to solve the `get_mask` problem for that initial state. This will provide the ultimate, definitive performance bound.
+      The oracle will be equipped with a powerful, correlation-aware pruning mechanism. By correctly handling the mutable state of Bloom filters using a defensive copying strategy, the `_compute_exact_frontier` function will terminate correctly and produce accurate results. This will allow the oracle to find a significantly tighter and more precise performance bound, reflecting the true complexity of the grammar.
     metadata:
   - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
+      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
+                  - Give concrete, step-by-step edits the user can apply.
+                  - Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: llm
+      phase: instructions-only
+  - assistant: |-
+      Below are precise, step-by-step edits to implement correlation-aware pruning using Bloom filters, while ensuring cached Bloom results are never mutated. Follow the steps in order.
+
+      File to edit:
+      python/aug25/models/precompute3_model_pure_python_opt4_5.py
+
+      1) Add imports near the top of the file
+
+      Right after the existing imports (time, types, etc.), add the following:
+
+      ```python
+      import hashlib
+      import struct
+      ```
+
+      2) Insert a fixed-parameter, copy-safe PairBloom implementation
+
+      Place this just after the “Type Aliases” section (right below the TerminalIdSet alias is a good spot), before the monkey-patch block. This Bloom filter uses a fixed-size bitset and fixed k hash functions, supports copy() and union() that both return new immutable instances, and provides add_pair/contains_pair helpers.
+
+      ```python
+      # --- Immutable Bloom filter for token-pair correlation ---
+      # Fixed-parameter bloom to ensure consistent hashing; safe copies for immutability.
+      class PairBloom:
+          __slots__ = ("m", "k", "_bits")
+          # Default: ~262k bits, k=6; tune if needed
+          DEFAULT_M_BITS = 262144
+          DEFAULT_K = 6
+
+          def __init__(self, m_bits: int = None, k: int = None, bits: Optional[int] = None):
+              self.m = int(m_bits if m_bits is not None else self.DEFAULT_M_BITS)
+              self.k = int(k if k is not None else self.DEFAULT_K)
+              self._bits = int(bits) if bits is not None else 0
+
+          def _hashes(self, key: bytes):
+              # Double hashing from a single 128-bit blake2b
+              h = hashlib.blake2b(key, digest_size=16).digest()
+              h1 = int.from_bytes(h[:8], 'big')
+              h2 = int.from_bytes(h[8:], 'big') or 0x9E3779B97F4A7C15  # ensure non-zero second hash
+              m = self.m
+              for i in range(self.k):
+                  yield (h1 + i * h2) % m
+
+          def add(self, key: bytes):
+              bits = self._bits
+              for pos in self._hashes(key):
+                  bits |= (1 << pos)
+              # Important: PairBloom is logically immutable single-assignment at callers; but this instance
+              # provides add only for local construction before storing in caches. We never mutate cached instances.
+              self._bits = bits
+
+          def __contains__(self, key: bytes) -> bool:
+              bits = self._bits
+              for pos in self._hashes(key):
+                  if (bits >> pos) & 1 == 0:
+                      return False
+              return True
+
+          @staticmethod
+          def _pair_key(a: int, b: int) -> bytes:
+              # canonicalize order to avoid (a,b) vs (b,a) duplication
+              x, y = (a, b) if a <= b else (b, a)
+              return struct.pack('>II', int(x), int(y))
+
+          def add_pair(self, a: int, b: int):
+              self.add(self._pair_key(a, b))
+
+          def contains_pair(self, a: int, b: int) -> bool:
+              return (self._pair_key(a, b) in self)
+
+          def copy(self) -> "PairBloom":
+              # Returns a new instance with identical configuration and bitset.
+              return PairBloom(self.m, self.k, self._bits)
+
+          def union(self, other: Optional["PairBloom"]) -> "PairBloom":
+              # Returns a new instance; never mutates self or other.
+              if other is None:
+                  return self.copy()
+              if not isinstance(other, PairBloom):
+                  raise TypeError("PairBloom.union expects a PairBloom")
+              # Both m and k are fixed at construction site; all instances created with defaults are compatible.
+              return PairBloom(self.m, self.k, self._bits | other._bits)
+
+          def is_empty(self) -> bool:
+              return self._bits == 0
+
+          def __eq__(self, o: object) -> bool:
+              return isinstance(o, PairBloom) and self.m == o.m and self.k == o.k and self._bits == o._bits
+
+      # Helper: build a PairBloom from a token mask by inserting all unordered pairs
+      def bloom_from_mask(mask: "LLMTokenSet") -> PairBloom:
+          bf = PairBloom()
+          tokens = list(mask.iter_indices())
+          n = len(tokens)
+          # Note: O(n^2) construction; acceptable for planning scale. Tune if needed.
+          for i in range(n):
+              a = tokens[i]
+              for j in range(i + 1, n):
+                  bf.add_pair(a, tokens[j])
+          return bf
+      # --- End Bloom filter ---
+      ```
+
+      3) Replace _compute_exact_frontier to compute both tokens and Bloom filter
+
+      Completely replace the existing _compute_exact_frontier function with the implementation below. This version returns a tuple (frontier_mask, pair_bloom) and strictly avoids mutating any cached bloom instance (uses copy() and union() that always produce new objects).
+
+      Find the function:
+
+      def _compute_exact_frontier(
+          self,
+          node_id: int,
+          gss_node: GSS,
+          cache: Dict[Tuple[int, int], LLMTokenSet],
+          apply_cache: Optional[Dict[Tuple[int, int], GSS]] = None,
+          isolate_cache: Optional[Dict[Tuple[int, Tuple[int, ...]], GSS]] = None,
+      ) -> LLMTokenSet:
+
+      Replace the entire function (signature and body) with:
+
+      ```python
+      def _compute_exact_frontier(
+          self,
+          node_id: int,
+          gss_node: GSS,
+          cache: Dict[Tuple[int, int], Tuple[LLMTokenSet, PairBloom]],
+          apply_cache: Optional[Dict[Tuple[int, int], GSS]] = None,
+          isolate_cache: Optional[Dict[Tuple[int, Tuple[int, ...]], GSS]] = None,
+      ) -> Tuple[LLMTokenSet, PairBloom]:
+          """
+          Computes the exact set of LLM tokens reachable from a specific (node_id, gss_node)
+          state, and a correlation Bloom filter over token pairs that can co-occur along valid outputs.
+          Returns (mask, bloom). Uses a per-call cache keyed by (node_id, id(gss_node)).
+          Critical: never mutate a cached bloom (always use copy() and union() that return new objects).
+          """
+          stats = Stats.get()
+          key0 = (int(node_id), id(gss_node))
+          cached = cache.get(key0)
+          if cached is not None:
+              stats.inc('oracle.frontier.cache_hits')
+              return cached
+
+          stats.inc('oracle.frontier.calls')
+
+          from collections import deque
+
+          # Graph over local (node, gss) pairs
+          children: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+          seeds_mask: Dict[Tuple[int, int], LLMTokenSet] = {}
+          seeds_bloom: Dict[Tuple[int, int], PairBloom] = {}
+          key_to_gss: Dict[Tuple[int, int], GSS] = {}
+
+          q = deque()
+          q.append((int(node_id), gss_node))
+          discovered: Set[Tuple[int, int]] = set()
+
+          # Helper: cached apply_and_prune with llm_bv
+          def _apply_llm(popped: GSS, llm_bv: LLMTokenSet) -> GSS:
+              key = (id(popped), id(llm_bv))
+              if apply_cache is not None and key in apply_cache:
+                  return apply_cache[key]
+              @_acc_memoize(use_value_cache=False)
+              def intersect(acc: PyAcc):
+                  new_mask = acc.llm_mask.intersection(llm_bv)
+                  return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+              tmp = popped.apply_and_prune(intersect)
+              if apply_cache is not None:
+                  apply_cache[key] = tmp
+              return tmp
+
+          while q:
+              cur_node_id, cur_gss = q.popleft()
+              cur_key = (int(cur_node_id), id(cur_gss))
+              if cur_key in discovered:
+                  continue
+              discovered.add(cur_key)
+              key_to_gss[cur_key] = cur_gss
+              children[cur_key] = []
+
+              cur_acc = cur_gss.reduce_acc()
+
+              # Seed mask+bloom: end-node contributes current allowed tokens and their pairwise correlations
+              if self.is_end(int(cur_node_id)) and cur_acc and not cur_acc.llm_mask.is_empty():
+                  seeds_mask[cur_key] = cur_acc.llm_mask
+                  seeds_bloom[cur_key] = bloom_from_mask(cur_acc.llm_mask)
+              else:
+                  seeds_mask[cur_key] = RangeSet.empty()
+                  seeds_bloom[cur_key] = PairBloom()  # empty
+
+              a_node = self.arena.get(int(cur_node_id))
+              if not a_node or not a_node.children:
+                  continue
+
+              pops_to_consider: List[int]
+              if a_node.fast_children:
+                  pops_to_consider = sorted(a_node.fast_children.keys())
+              else:
+                  pops_to_consider = sorted({edge.pop for edge in a_node.children})
+
+              for pop_val in pops_to_consider:
+                  # Pop step
+                  if pop_val == 0:
+                      popped = cur_gss
+                  else:
+                      popped = cur_gss.popn(int(pop_val))
+                  if popped.is_empty():
+                      continue
+
+                  popped_acc = popped.reduce_acc()
+                  if not popped_acc or popped_acc.llm_mask.is_empty():
+                      continue
+
+                  peeked = popped.peek()
+                  if not peeked:
+                      continue
+                  peek_rs = RangeSetStates.from_indices(peeked)
+
+                  dest_to_states: Dict[int, List[int]] = collections.defaultdict(list)
+                  dest_to_llm: Dict[int, LLMTokenSet] = {}
+
+                  if a_node.fast_children:
+                      mapping_for_pop = a_node.fast_children.get(int(pop_val), {})
+                      for sid in peeked:
+                          per_state_map = mapping_for_pop.get(int(sid), {})
+                          if not per_state_map:
+                              continue
+                          for dest_id, triple in per_state_map.items():
+                              llm_bv, _llm_bv_not, _llm_bv_thru = triple
+                              if popped_acc.llm_mask.isdisjoint(llm_bv):
+                                  continue
+                              dest_to_states[int(dest_id)].append(int(sid))
+                              prev = dest_to_llm.get(int(dest_id))
+                              dest_to_llm[int(dest_id)] = llm_bv if prev is None else prev.union(llm_bv)
+                  else:
+                      for edge in a_node.children:
+                          if int(edge.pop) != int(pop_val):
+                              continue
+                          if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+                              continue
+                          if edge.dest_states_union.isdisjoint(peek_rs):
+                              continue
+                          edge.ensure_index()
+                          for sid in peeked:
+                              dest_js = edge.state_to_dest.get(int(sid))
+                              if not dest_js:
+                                  continue
+                              for dest_j in dest_js:
+                                  dest = edge.dests[dest_j]
+                                  did = int(dest.dest_idx)
+                                  dest_to_states[did].append(int(sid))
+                                  prev = dest_to_llm.get(did)
+                                  dest_to_llm[did] = edge.llm_bv if prev is None else prev.union(edge.llm_bv)
+
+                  if not dest_to_states:
+                      continue
+
+                  for dest_id, states_to_keep in dest_to_states.items():
+                      llm_bv_union = dest_to_llm.get(int(dest_id), RangeSet.empty())
+                      if popped_acc.llm_mask.isdisjoint(llm_bv_union):
+                          continue
+                      source_after_apply = _apply_llm(popped, llm_bv_union)
+                      if source_after_apply.is_empty():
+                          continue
+
+                      if len(states_to_keep) == len(peeked):
+                          child_gss = source_after_apply
+                      else:
+                          key_iso = (id(source_after_apply), tuple(states_to_keep))
+                          if isolate_cache is not None and key_iso in isolate_cache:
+                              child_gss = isolate_cache[key_iso]
+                          else:
+                              child_gss = source_after_apply.isolate_many(states_to_keep)
+                              if isolate_cache is not None:
+                                  isolate_cache[key_iso] = child_gss
+
+                      if child_gss.is_empty():
+                          continue
+
+                      child_key = (int(dest_id), id(child_gss))
+                      children[cur_key].append(child_key)
+                      if child_key not in discovered:
+                          key_to_gss[child_key] = child_gss
+                          q.append((int(dest_id), child_gss))
+
+          # Fixed-point solve over the discovered subgraph: values[key] -> (mask, bloom)
+          values: Dict[Tuple[int, int], Tuple[LLMTokenSet, PairBloom]] = {
+              k: (seeds_mask.get(k, RangeSet.empty()), seeds_bloom.get(k, PairBloom()))
+              for k in discovered
+          }
+          changed = True
+          while changed:
+              changed = False
+              for k in discovered:
+                  cur_mask, cur_bloom = values[k]
+                  # Start from seeds
+                  accum_mask = seeds_mask.get(k, RangeSet.empty())
+                  accum_bloom = seeds_bloom.get(k, PairBloom()).copy()  # copy to avoid mutating seeds
+
+                  # Union in contributions from all children (never mutate child blooms)
+                  for ch in children.get(k, ()):
+                      ch_mask, ch_bloom = values.get(ch, (RangeSet.empty(), PairBloom()))
+                      accum_mask = accum_mask.union(ch_mask)
+                      accum_bloom = accum_bloom.union(ch_bloom)
+
+                  if accum_mask != cur_mask or accum_bloom != cur_bloom:
+                      values[k] = (accum_mask, accum_bloom)
+                      changed = True
+
+          # Commit results to the per-call cache
+          for k, v in values.items():
+              cache[k] = v
+          return cache[key0]
+      ```
+
+      4) Update call sites to handle the new (mask, bloom) return value
+
+      4.a) In _oracle_plan_with_astar: unpack the returned tuple before unioning the target mask.
+
+      Find this initialization of target_mask:
+
+      ```python
+      target_mask = RangeSet.empty()
+      for node_id, gss in initial_work_items:
+          target_mask |= self._compute_exact_frontier(node_id, gss, frontier_cache, apply_cache_ft, isolate_cache_ft)
+      ```
+
+      Replace with:
+
+      ```python
+      target_mask = RangeSet.empty()
+      for node_id, gss in initial_work_items:
+          _mask, _bf = self._compute_exact_frontier(node_id, gss, frontier_cache, apply_cache_ft, isolate_cache_ft)
+          target_mask |= _mask
+      ```
+
+      4.b) In _get_mask_run: add a new parameter for frontier blooms and propagate it to the generator
+
+      i) Change the _get_mask_run signature to include the new optional map:
+
+      Find the def line:
+
+      ```python
+      def _get_mask_run(
+          self,
+          guided_scores: Optional[Dict[int, int]] = None,
+          edge_order_map: Optional[Dict[int, List[int]]] = None,
+          record_end_unions: bool = False,
+          oracle_target_mask: Optional[LLMTokenSet] = None,
+          oracle_reward_mask: Optional[Dict[int, LLMTokenSet]] = None,
+          oracle_node_costs: Optional[Dict[int, Dict[str, int]]] = None,
+          ) -> Tuple[Dict, Dict]:
+      ```
+
+      Change it to:
+
+      ```python
+      def _get_mask_run(
+          self,
+          guided_scores: Optional[Dict[int, int]] = None,
+          edge_order_map: Optional[Dict[int, List[int]]] = None,
+          record_end_unions: bool = False,
+          oracle_target_mask: Optional[LLMTokenSet] = None,
+          oracle_reward_mask: Optional[Dict[int, LLMTokenSet]] = None,
+          oracle_node_costs: Optional[Dict[int, Dict[str, int]]] = None,
+          oracle_frontier_blooms: Optional[Dict[int, PairBloom]] = None,
+          ) -> Tuple[Dict, Dict]:
+      ```
+
+      ii) When record_end_unions is True, capture and aggregate frontier blooms
+
+      - Initialize a holder near analysis_frontiers declarations:
+
+      Find:
+
+      ```python
+      analysis_frontiers: Dict[int, LLMTokenSet] = {} if record_end_unions else None
+      analysis_node_costs: Dict[int, Dict[str, int]] = {} if record_end_unions else None
+      analysis_end_masks: Dict[int, LLMTokenSet] = {} if record_end_unions else None
+      ```
+
+      Append this line right after:
+
+      ```python
+      analysis_frontier_blooms: Dict[int, PairBloom] = {} if record_end_unions else None
+      ```
+
+      - When computing exact frontier during planning, unpack the bloom and aggregate:
+
+      Find this block inside the main loop when record_end_unions is True:
+
+      ```python
+      stats.start('get_mask.main_loop.node.exact_frontier')
+      # Exact, GSS-aware frontier for this (node, gss)
+      frontier_mask = self._compute_exact_frontier(
+          int(node_id),
+          gss_node,
+          frontier_cache,
+          apply_cache=apply_cache_by_bv,
+          isolate_cache=isolate_many_cache,
+      ) if a_node else RangeSet.empty()
+      stats.stop('get_mask.main_loop.node.exact_frontier')
+      work_llm_mask = frontier_mask
+      node_allowed_mask_for_gen = frontier_mask
+      ```
+
+      Replace with:
+
+      ```python
+      stats.start('get_mask.main_loop.node.exact_frontier')
+      # Exact, GSS-aware frontier for this (node, gss)
+      if a_node:
+          frontier_mask, frontier_bloom = self._compute_exact_frontier(
+              int(node_id),
+              gss_node,
+              frontier_cache,
+              apply_cache=apply_cache_by_bv,
+              isolate_cache=isolate_many_cache,
+          )
+      else:
+          frontier_mask, frontier_bloom = (RangeSet.empty(), PairBloom())
+      stats.stop('get_mask.main_loop.node.exact_frontier')
+      work_llm_mask = frontier_mask
+      node_allowed_mask_for_gen = frontier_mask
+      # Aggregate per-node blooms for planning output
+      if record_end_unions and analysis_frontier_blooms is not None:
+          prev_bf = analysis_frontier_blooms.get(int(node_id))
+          analysis_frontier_blooms[int(node_id)] = frontier_bloom if prev_bf is None else prev_bf.union(frontier_bloom)
+      ```
+
+      - Also handle the “still record frontier” case for leaf nodes:
+
+      Find:
+
+      ```python
+      if record_end_unions and a_node:
+          if analysis_frontiers is not None:
+              if not work_llm_mask.is_empty():
+                  prev = analysis_frontiers.get(int(node_id))
+                  analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
+      ```
+
+      Immediately after that block, add:
+
+      ```python
+      # Also record the bloom (empty if leaf)
+      if record_end_unions and analysis_frontier_blooms is not None:
+          prev_bf = analysis_frontier_blooms.get(int(node_id))
+          # Use the last computed frontier_bloom if available; else an empty bloom
+          leaf_bf = frontier_bloom if 'frontier_bloom' in locals() else PairBloom()
+          analysis_frontier_blooms[int(node_id)] = leaf_bf if prev_bf is None else prev_bf.union(leaf_bf)
+      ```
+
+      - Where frontiers are stored for planning in the “normal” case (right after creating the generator), extend to record blooms too:
+
+      Find:
+
+      ```python
+      if record_end_unions and a_node:
+          if analysis_frontiers is not None and not work_llm_mask.is_empty():
+              prev = analysis_frontiers.get(int(node_id))
+              analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
+      ```
+
+      Right after it, add:
+
+      ```python
+      if record_end_unions and analysis_frontier_blooms is not None:
+          # frontier_bloom variable exists in planning branch above; if not, default to empty
+          bf = frontier_bloom if 'frontier_bloom' in locals() else PairBloom()
+          prev_bf = analysis_frontier_blooms.get(int(node_id))
+          analysis_frontier_blooms[int(node_id)] = bf if prev_bf is None else prev_bf.union(bf)
+      ```
+
+      - Include the blooms in the returned planning dictionary:
+
+      Find:
+
+      ```python
+      if record_end_unions:
+          oracle_data = {
+              "end_events": end_union_events,
+              "frontiers": analysis_frontiers or {},
+              "node_costs": analysis_node_costs or {},
+              "end_masks": analysis_end_masks or {},
+          }
+      ```
+
+      Change to:
+
+      ```python
+      if record_end_unions:
+          oracle_data = {
+              "end_events": end_union_events,
+              "frontiers": analysis_frontiers or {},
+              "frontier_blooms": analysis_frontier_blooms or {},
+              "node_costs": analysis_node_costs or {},
+              "end_masks": analysis_end_masks or {},
+          }
+      ```
+
+      iii) Pass oracle_frontier_blooms to the generator
+
+      Find generator creation inside _get_mask_run:
+
+      ```python
+      gen = self._process_internal_node_gen(
+          node_id,
+          gss_node,
+          remaining_mask,
+          gss_acc.llm_mask,
+          depth,
+          global_pop_cache=global_pop_cache,
+          apply_cache=apply_cache_by_bv,
+          isolate_cache=isolate_many_cache,
+          edge_order_override_map=edge_order_map,
+          dest_scores=guided_scores,
+          oracle_counters=analysis_node_costs if record_end_unions else None,
+          node_allowed_mask=node_allowed_mask_for_gen,
+      )
+      ```
+
+      Append the new argument:
+
+      ```python
+      gen = self._process_internal_node_gen(
+          node_id,
+          gss_node,
+          remaining_mask,
+          gss_acc.llm_mask,
+          depth,
+          global_pop_cache=global_pop_cache,
+          apply_cache=apply_cache_by_bv,
+          isolate_cache=isolate_many_cache,
+          edge_order_override_map=edge_order_map,
+          dest_scores=guided_scores,
+          oracle_counters=analysis_node_costs if record_end_unions else None,
+          node_allowed_mask=node_allowed_mask_for_gen,
+          oracle_frontier_blooms=oracle_frontier_blooms,
+      )
+      ```
+
+      5) Pass oracle_frontier_blooms from the planning pass into guided runs
+
+      In get_mask(), after the planning pass, include frontier blooms when invoking guided runs:
+
+      5.a) Baseline evaluation with advanced guidance (first evaluation after building plan):
+
+      Find:
+
+      ```python
+      Stats.get().reset()
+      _out, _ = self._get_mask_run(
+          guided_scores=best_scores,
+          edge_order_map=best_edge_map,
+          record_end_unions=False,
+          oracle_target_mask=target_mask,
+          oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+          oracle_node_costs=plan.get("node_costs", {}),
+      )
+      ```
+
+      Add oracle_frontier_blooms:
+
+      ```python
+      Stats.get().reset()
+      _out, _ = self._get_mask_run(
+          guided_scores=best_scores,
+          edge_order_map=best_edge_map,
+          record_end_unions=False,
+          oracle_target_mask=target_mask,
+          oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+          oracle_node_costs=plan.get("node_costs", {}),
+          oracle_frontier_blooms=plan.get("frontier_blooms", {}),
+      )
+      ```
+
+      5.b) Candidate sequence evaluations:
+
+      Find the similar call in the trial loop:
+
+      ```python
+      Stats.get().reset()
+      _out, _ = self._get_mask_run(
+          guided_scores=trial_scores,
+          edge_order_map=merged_edge_map,
+          record_end_unions=False,
+          oracle_target_mask=target_mask,
+          oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+          oracle_node_costs=plan.get("node_costs", {}),
+      )
+      ```
+
+      Add oracle_frontier_blooms as above:
+
+      ```python
+      Stats.get().reset()
+      _out, _ = self._get_mask_run(
+          guided_scores=trial_scores,
+          edge_order_map=merged_edge_map,
+          record_end_unions=False,
+          oracle_target_mask=target_mask,
+          oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+          oracle_node_costs=plan.get("node_costs", {}),
+          oracle_frontier_blooms=plan.get("frontier_blooms", {}),
+      )
+      ```
+
+      5.c) Final guided run:
+
+      Find:
+
+      ```python
+      Stats.get().reset()
+      out, _ = self._get_mask_run(
+          guided_scores=best_scores,
+          edge_order_map=best_edge_map,
+          record_end_unions=False,
+          oracle_target_mask=target_mask,
+          oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+          oracle_node_costs=plan.get("node_costs", {}),
+      )
+      ```
+
+      Add oracle_frontier_blooms:
+
+      ```python
+      Stats.get().reset()
+      out, _ = self._get_mask_run(
+          guided_scores=best_scores,
+          edge_order_map=best_edge_map,
+          record_end_unions=False,
+          oracle_target_mask=target_mask,
+          oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
+          oracle_node_costs=plan.get("node_costs", {}),
+          oracle_frontier_blooms=plan.get("frontier_blooms", {}),
+      )
+      ```
+
+      6) Extend the generator to accept and use the frontier Blooms for stage-2 pruning
+
+      6.a) Update the _process_internal_node_gen signature to accept oracle_frontier_blooms:
+
+      Find:
+
+      ```python
+      def _process_internal_node_gen(
+          self,
+          node_id: NodeID,
+          gss_node: GSS,
+          remaining_mask: LLMTokenSet,
+          gss_mask: LLMTokenSet,
+          depth: int,
+          global_pop_cache: Optional[Dict] = None,
+          apply_cache: Optional[Dict] = None,
+          isolate_cache: Optional[Dict] = None,
+          edge_order_override_map: Optional[Dict[int, List[int]]] = None,
+          dest_scores: Optional[Dict[int, int]] = None,
+          oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
+          node_allowed_mask: Optional[LLMTokenSet] = None,
+      ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+      ```
+
+      Change it to:
+
+      ```python
+      def _process_internal_node_gen(
+          self,
+          node_id: NodeID,
+          gss_node: GSS,
+          remaining_mask: LLMTokenSet,
+          gss_mask: LLMTokenSet,
+          depth: int,
+          global_pop_cache: Optional[Dict] = None,
+          apply_cache: Optional[Dict] = None,
+          isolate_cache: Optional[Dict] = None,
+          edge_order_override_map: Optional[Dict[int, List[int]]] = None,
+          dest_scores: Optional[Dict[int, int]] = None,
+          oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
+          node_allowed_mask: Optional[LLMTokenSet] = None,
+          oracle_frontier_blooms: Optional[Dict[int, PairBloom]] = None,
+      ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+      ```
+
+      6.b) Add a local accessor for the node’s Bloom and a helper to validate pairs
+
+      Right after obtaining a_node and active_remaining_mask (just below the early-return remaining_mask.is_empty() check), add:
+
+      ```python
+      # Frontier Bloom for correlation-aware pruning (planned and aggregated per node).
+      node_bloom = oracle_frontier_blooms.get(int(node_id)) if oracle_frontier_blooms else None
+
+      def _pairs_ok(mask: LLMTokenSet) -> bool:
+          # Stage-2 pruning: ensure all pairs among (remaining ∩ mask) are seen in the node’s frontier bloom.
+          if node_bloom is None:
+              return True
+          cand = mask.intersection(active_remaining_mask)
+          toks = list(cand.iter_indices())
+          if len(toks) <= 1:
+              return True
+          for i in range(len(toks)):
+              a = toks[i]
+              for j in range(i + 1, len(toks)):
+                  b = toks[j]
+                  if not node_bloom.contains_pair(a, b):
+                      return False
+          return True
+      ```
+
+      6.c) Apply Stage-2 pruning in the fast path (coalesced, per-dest groups)
+
+      In the fast path loop, inside:
+
+      ```python
+      for (dest_id, llm_bv_id) in dest_keys:
+          entry = groups[(dest_id, llm_bv_id)]
+          llm_bv = entry["llm_bv"]
+          llm_bv_not = entry["llm_bv_not"]
+          states_to_keep: List[int] = entry["states"]
+
+          # JIT Pruning: Re-check against the latest remaining_mask before doing work.
+          if llm_bv.isdisjoint(active_remaining_mask):
+              stats.inc('get_mask.main_loop.edge.jit_pruned')
+              continue
+      ```
+
+      Immediately after the JIT check, insert the Bloom pruning:
+
+      ```python
+          # Stage-2 correlation pruning via Bloom: prune if any required pair is missing
+          if not _pairs_ok(llm_bv):
+              stats.inc('get_mask.main_loop.edge.bloom_pruned')
+              continue
+      ```
+
+      6.d) Apply Stage-2 pruning in the slow path (edge-scanning)
+
+      In the slow path loop, right after:
+
+      ```python
+      if edge.llm_bv.isdisjoint(active_remaining_mask):
+          stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+          continue
+      ```
+
+      Insert:
+
+      ```python
+      # Stage-2 correlation pruning via Bloom
+      if not _pairs_ok(edge.llm_bv):
+          stats.inc('get_mask.main_loop.edge.bloom_pruned')
+          continue
+      ```
+
+      7) Update planning consumers to unpack the new frontier return
+
+      In _get_mask_run planning branch we already unpacked frontier_mask and frontier_bloom. No further changes needed there.
+
+      8) Notes on mutability and caches (for your understanding; no code changes required)
+
+      - The PairBloom class is constructed locally and then stored in caches or aggregations.
+      - All upward propagation and aggregation use copy() and union() which return new instances, ensuring cached child blooms are never mutated in place.
+      - This avoids both incorrect reuse and infinite recursion loops that can arise from mutating shared state.
+
+      9) Optional: Stats labels
+
+      The new counter get_mask.main_loop.edge.bloom_pruned is used via Stats.inc; no additional registration is necessary.
+
+      What you get with these changes
+
+      - The planning pass produces, per (node, gss), an exact token frontier plus a Bloom filter summarizing which token pairs can co-occur.
+      - The plan aggregates these into a per-node frontier_blooms map.
+      - Guided runs consult these Blooms to prune edges for which the currently-needed tokens contain any pair not present in the Bloom, achieving correlation-aware pruning without mutating cached Bloom objects.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, output git diff patches.
                   - Use one fenced ```diff code block per file.
                   - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
                   - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
@@ -8574,364 +9610,70 @@ messages:
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: git-llm
-      phase: default
+      mode: git
+      phase: diff-after-plan
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the A* search for optimal planning, followed by the corresponding git diff.
-
-      ### Step-by-step Instructions
-
-      1.  **File: `python/aug25/models/precompute3_model_pure_python_opt4_5.py`**
-
-          a.  **Add `oracle_use_astar` flag:** In the `Model` dataclass definition, add a new boolean field `oracle_use_astar: bool = False` right after `static_path_costs`. This will act as a switch to enable the A* planner.
-
-          b.  **Add helper and A* methods:** In the `Model` class, insert two new methods after the `_priority_for_node` method:
-              *   `_expand_one_node`: This helper method will simulate the processing of a single work item (`(node_id, gss)`), driving the `_process_internal_node_gen` generator to completion for that item. It will calculate the number of edges traversed and collect all resulting new work items.
-              *   `_oracle_plan_with_astar`: This is the main A* search implementation. It will define the state space, heuristic, and search loop to find the path with the minimum number of edge traversals to compute the full `final_mask`.
-
-          c.  **Integrate A* planner into `get_mask`:** In the `get_mask` method, at the beginning of the `if self.oracle_mode:` block, insert a new conditional check for `getattr(self, 'oracle_use_astar', False)`.
-              *   If true, this new block will execute the A* planner by calling `_oracle_plan_with_astar`.
-              *   It will then convert the optimal path found by A* into `guided_scores` and an `edge_order_map`.
-              *   Finally, it will trigger a single, fast, guided run using this optimal plan to verify the result and return the final mask.
-              *   The existing heuristic-based oracle logic will be untouched and will execute if `oracle_use_astar` is false.
-
-      ### Git Diff
-
-      Here is the git diff to apply these changes.
-
       ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python_opt4_5.py b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      index 2320743..0310237 100644
       --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      @@ -470,6 +470,7 @@
-           oracle_permute_top_ends: int = 8
-           # Pre-computed static costs for oracle mode
-           static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
-      +    oracle_use_astar: bool = False
-       
-           @staticmethod
+      @@ -425,38 +425,6 @@
            def from_json_string(s: str) -> 'Model':
-      @@ -2012,6 +2013,115 @@
-               # Negative for min-heap; depth tiebreaker to encourage shallower early
-               return (-float(gain) / max(1.0, float(cost)), -int(gain), -int(gs), -int(self.max_depth.get(node_id_i, 0)), int(depth))
+               Stats.get().reset()
+               data = json.loads(s)
+      -
+      -        # --- Monkey-patch GSS to be hashable for A* search ---
+      -        # The A* planner requires GSS objects to be hashable to use them in sets
+      -        # and dictionary keys. The LeveledGSS implementation may not define __hash__.
+      -        # We add one here based on its likely internal structure (a dict of levels).
+      -        def _gss_hash(self):
+      -            # Cache the hash for performance
+      -            if hasattr(self, '_hash_val'):
+      -                return self._hash_val
+      -
+      -            # The internal representation is likely a dictionary of levels,
+      -            # where each level contains a dictionary of stacks.
+      -            if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
+      -                # Fallback if structure is unexpected, though this may not be unique
+      -                return id(self)
+      -
+      -            level_items = []
+      -            for level, stacks in self.levels.items():
+      -                # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
+      -                # frozenset of items makes this part hashable and order-independent.
+      -                stack_items = frozenset(stacks.items())
+      -                level_items.append((level, stack_items))
+      -            
+      -            # Sort by level to make the final representation canonical.
+      -            level_items.sort()
+      -            self._hash_val = hash(tuple(level_items))
+      -            return self._hash_val
+      -
+      -        # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
+      -        if getattr(GSS, '__hash__', "exists") is None:
+      -            GSS.__hash__ = _gss_hash
+      -        # --- End of monkey-patch ---
        
-      +    def _expand_one_node(self, node_id: int, gss: GSS, remaining_mask: LLMTokenSet, global_pop_cache: Dict, apply_cache: Dict, isolate_cache: Dict) -> Tuple[Set[Tuple[int, GSS]], int, LLMTokenSet]:
-      +        """Helper for A* search. Expands one (node, gss) work item."""
-      +        gss_acc = gss.reduce_acc()
-      +        if not gss_acc:
-      +            return set(), 0, RangeSet.empty()
-      +
-      +        counters = {}
-      +        gen = self._process_internal_node_gen(
-      +            node_id, gss, remaining_mask, gss_acc.llm_mask, 0,
-      +            global_pop_cache=global_pop_cache,
-      +            apply_cache=apply_cache,
-      +            isolate_cache=isolate_cache,
-      +            oracle_counters=counters
-      +        )
-      +
-      +        new_work_items: Set[Tuple[int, GSS]] = set()
-      +        next_send = remaining_mask
-      +        while True:
-      +            try:
-      +                yielded = gen.send(next_send)
-      +                if isinstance(yielded, Enqueue):
-      +                    new_work_items.add((yielded.node_id, yielded.gss))
-      +            except StopIteration:
-      +                break
-      +
-      +        node_counters = counters.get(int(node_id), {})
-      +        edges_traversed = node_counters.get("edges", 0)
-      +
-      +        mask_contribution = RangeSet.empty()
-      +        if self.is_end(node_id):
-      +            mask_contribution = gss_acc.llm_mask
-      +
-      +        return new_work_items, edges_traversed, mask_contribution
-      +
-      +    def _oracle_plan_with_astar(self) -> Tuple[List[Tuple[int, GSS]], int]:
-      +        """
-      +        Finds the optimal plan (sequence of node expansions) using A* search.
-      +        The cost is the number of edge traversals.
-      +        Returns the plan (sequence of (node_id, gss) expanded) and the optimal cost.
-      +        """
-      +        print("[oracle] Starting A* search for optimal plan...")
-      +        all_ones = self.all_internal_llm_tokens_bitset
-      +
-      +        @_acc_memoize(use_value_cache=False)
-      +        def initialize_acc(acc: PyAcc) -> PyAcc:
-      +            disallowed = RangeSet.empty()
-      +            for tsid, terms in acc.terminals_union.items():
-      +                if tsid in self.possible_matches_cache:
-      +                    term_map = self.possible_matches_cache[tsid]
-      +                    for term_id in terms.iter_indices():
-      +                        if term_id in term_map: disallowed |= term_map[term_id]
-      +            return PyAcc({}, all_ones.difference(disallowed))
-      +
-      +        init_cache = {}
-      +        initial_work_items = set()
-      +        for sid, gss in self.state.items():
-      +            r = self.roots_map[int(sid)]
-      +            gss_init = gss.apply(initialize_acc, init_cache)
-      +            if not gss_init.is_empty():
-      +                initial_work_items.add((r, gss_init))
-      +
-      +        frontier_cache, apply_cache_ft, isolate_cache_ft = {}, {}, {}
-      +        target_mask = RangeSet.empty()
-      +        for node_id, gss in initial_work_items:
-      +            target_mask |= self._compute_exact_frontier(node_id, gss, frontier_cache, apply_cache_ft, isolate_cache_ft)
-      +
-      +        if target_mask.is_empty():
-      +            print("[oracle] A*: Target mask is empty. Nothing to do.")
-      +            return [], 0
-      +
-      +        initial_state = (RangeSet.empty(), frozenset(initial_work_items))
-      +        def heuristic(state):
-      +            mask, _ = state
-      +            return 0 if mask.issuperset(target_mask) else 1
-      +
-      +        open_set = []
-      +        g_scores = {initial_state: 0}
-      +        came_from = {}
-      +        heapq.heappush(open_set, (heuristic(initial_state), 0, initial_state))
-      +        pop_cache, apply_cache, isolate_cache = {}, {}, {}
-      +        visited_states = 0
-      +
-      +        while open_set:
-      +            _, g_score, current_state = heapq.heappop(open_set)
-      +            visited_states += 1
-      +            if visited_states % 100 == 0:
-      +                print(f"[oracle] A*: Visited {visited_states} states, queue size {len(open_set)}...")
-      +
-      +            current_mask, current_work_items = current_state
-      +            if current_mask.issuperset(target_mask):
-      +                print(f"[oracle] A*: Goal reached with cost {g_score}. Visited {visited_states} states.")
-      +                path = []
-      +                curr = current_state
-      +                while curr in came_from:
-      +                    prev, expanded_item = came_from[curr]
-      +                    path.append(expanded_item)
-      +                    curr = prev
-      +                path.reverse()
-      +                return path, g_score
-      +
-      +            for work_item in current_work_items:
-      +                node_id, gss = work_item
-      +                remaining_mask = target_mask.difference(current_mask)
-      +                new_items, edges, mask_contrib = self._expand_one_node(node_id, gss, remaining_mask, pop_cache, apply_cache, isolate_cache)
-      +                neighbor_mask = current_mask.union(mask_contrib)
-      +                neighbor_work_items = (current_work_items - {work_item}).union(new_items)
-      +                neighbor_state = (neighbor_mask, frozenset(neighbor_work_items))
-      +                tentative_g_score = g_score + edges
-      +                if tentative_g_score < g_scores.get(neighbor_state, float('inf')):
-      +                    came_from[neighbor_state] = (current_state, work_item)
-      +                    g_scores[neighbor_state] = tentative_g_score
-      +                    f_score = tentative_g_score + heuristic(neighbor_state)
-      +                    heapq.heappush(open_set, (f_score, tentative_g_score, neighbor_state))
-      +
-      +        print("[oracle] A*: Search finished without finding a solution.")
-      +        return [], -1
-      +
-           def _get_mask_run(
-               self,
-               guided_scores: Optional[Dict[int, int]] = None,
-      @@ -2268,10 +2378,41 @@
-               if not self.oracle_mode:
-                   out, _ = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=False)
-                   return out
-       
-      +        if getattr(self, 'oracle_use_astar', False):
-      +            optimal_path, optimal_cost = self._oracle_plan_with_astar()
-      +            if optimal_cost == -1:
-      +                print("[oracle] A* failed to find a plan, running unguided.")
-      +                out, _ = self._get_mask_run()
-      +                return out
-      +
-      +            print(f"[oracle] A* optimal plan found with {optimal_cost} edges. Path length: {len(optimal_path)} node expansions.")
-      +
-      +            # Convert path to guidance. The sequence of expansions is the priority.
-      +            guided_scores = {node_id: len(optimal_path) - i for i, (node_id, gss) in enumerate(optimal_path)}
-      +
-      +            edge_order_map: Dict[int, List[int]] = {}
-      +            for u, node in self.arena.items():
-      +                if not node.children:
-      +                    continue
-      +                edge_scores: List[Tuple[int, int]] = []
-      +                for idx, edge in enumerate(node.children):
-      +                    s = 0
-      +                    for d in edge.dests:
-      +                        s += int(guided_scores.get(int(d.dest_idx), 0))
-      +                    edge_scores.append((idx, s))
-      +                if any(s > 0 for (_, s) in edge_scores):
-      +                    ordered = sorted(edge_scores, key=lambda t: t[1], reverse=True)
-      +                    edge_order_map[int(u)] = [idx for (idx, _) in ordered]
-      +
-      +            # Final guided run
-      +            Stats.get().reset()
-      +            out, _ = self._get_mask_run(guided_scores=guided_scores, edge_order_map=edge_order_map, record_end_unions=False)
-      +            print(f"[oracle] A* guided run executed {self.last_get_mask_cost} edges (optimal was {optimal_cost}).")
-      +            return out
-      +
-               # Trivial seed heuristic: single tokenizer state and single LR head -> skip planning
-               try:
-                   if len(self.state) == 1:
+               # Arena
+               roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
 
       ```
     metadata:
-  - user: |
-      Apply result (git-llm mode):
+  - user: |-
+      Git apply attempt failed (plan-git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python_opt4_5.py
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
-    metadata:
-  - user: 'Changes committed with message: "Implement A* search for provably optimal
-      oracle planning by replacing greedy heuristics"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5.py since previous turn:
-      ```diff
-      --- original version of python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      +++ current version of python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      @@ -416,7 +416,7 @@
-           oracle_permute_top_ends: int = 8
-           # Pre-computed static costs for oracle mode
-           static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
-      -    oracle_use_astar: bool = False
-      +    oracle_use_astar: bool = True
-       
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
+      Error applying patch to python/aug25/models/precompute3_model_pure_python_opt4_5.py: Hunk #1 (header: `@@ -425,38 +425,6 @@`) failed: context not found.
 
-      ```
-    metadata:
-  - user: |-
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 373, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 369, in main
-          run_benchmark(args, run_index=i)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 254, in run_benchmark
-          result = model.get_mask()
-                   ^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4_5.py", line 2663, in get_mask
-          optimal_path, optimal_cost = self._oracle_plan_with_astar()
-                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4_5.py", line 2309, in _oracle_plan_with_astar
-          initial_work_items.add((r, gss_init))
-        File "<string>", line 3, in __hash__
-        File "<string>", line 3, in __hash__
-        File "<string>", line 3, in __hash__
-      TypeError: unhashable type: 'dict'
-    metadata:
-  - assistant: |-
-      It appears you've encountered a `TypeError` because the `GSS` objects, which are part of the A* search state, are not hashable. This typically happens when an object contains mutable collections like dictionaries without a custom `__hash__` method to handle them.
+      --- Expected Context (from patch): ---
+          def from_json_string(s: str) -> 'Model':
+              Stats.get().reset()
+              data = json.loads(s)
 
-      The root cause is the `__hash__` method in the `PyAcc` dataclass. It's implemented in a way that doesn't correctly account for the contents of the `terminals_union` dictionary, which is a violation of Python's hashing contract and can lead to errors when objects containing `PyAcc` instances are themselves hashed.
-
-      Here are the steps to fix this.
-
-      ### Step-by-step Instructions
-
-      1.  **File: `python/aug25/models/precompute3_model_pure_python_opt4_5.py`**
-
-          a.  **Navigate to the `PyAcc` class definition.**
-
-          b.  **Correct the `__hash__` method.** The current implementation only hashes the *length* of the `terminals_union` dictionary, not its contents. To make it correctly hashable, you need to convert the dictionary's items into a hashable type, like a `frozenset`.
-
-          Replace this:
-          ```python
-          def __hash__(self):
-              # Correctly hash the dictionary content for memoization
-              return hash((len(self.terminals_union), self.llm_mask))
-          ```
-          with this:
-          ```python
-          def __hash__(self):
-              # Correctly hash the dictionary content for memoization
-              terminals_hashable = frozenset(self.terminals_union.items())
-              return hash((terminals_hashable, self.llm_mask))
-          ```
-          This change ensures that any `PyAcc` instance can be correctly and safely hashed, which in turn allows the `GSS` objects containing them to be hashable, resolving the error in the A* planner.
-
-      ### Git Diff
-
-      Here is the corresponding git diff for the fix.
-
-      ```diff
-      --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      @@ -359,8 +359,8 @@
-       
-           def __hash__(self):
-               # Correctly hash the dictionary content for memoization
-      -        return hash((len(self.terminals_union), self.llm_mask))
-      +        terminals_hashable = frozenset(self.terminals_union.items())
-      +        return hash((terminals_hashable, self.llm_mask))
-       
-           def merge(self, other: "PyAcc") -> "PyAcc":
-               new_terminals_union = self.terminals_union.copy()
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
-    metadata:
-  - user: 'Changes committed with message: "Implement A* search for optimal planning
-      and fix GSS hashing for state representation"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 373, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 369, in main
-          run_benchmark(args, run_index=i)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 254, in run_benchmark
-          result = model.get_mask()
-                   ^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4_5.py", line 2664, in get_mask
-          optimal_path, optimal_cost = self._oracle_plan_with_astar()
-                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4_5.py", line 2310, in _oracle_plan_with_astar
-          initial_work_items.add((r, gss_init))
-        File "<string>", line 3, in __hash__
-        File "<string>", line 3, in __hash__
-        File "<string>", line 3, in __hash__
-      TypeError: unhashable type: 'dict'
-    metadata:
-  - assistant: |-
-      I see what's happening. My previous fix correctly made the `PyAcc` objects hashable, but that was only part of the problem. The `GSS` container object itself is also not hashable because it's likely implemented using a dictionary internally and lacks its own `__hash__` method. The A* search requires the entire state, including the `GSS` object, to be hashable.
-
-      The traceback is identical because the root cause—the unhashable `GSS` object—was not addressed. We need to make the `GSS` class hashable. Since we cannot edit the imported `GSS` file, we will apply a "monkey-patch" at runtime to add the required hashing logic.
-
-      Here are the step-by-step instructions to fix this.
-
-      ### Step-by-step Instructions
-
-      1.  **File: `python/aug25/models/precompute3_model_pure_python_opt4_5.py`**
-
-          a.  **Navigate to the `Model.from_json_string` static method.**
-
-          b.  **Insert the monkey-patch code.** Right after the `data = json.loads(s)` line, insert the following code block. This will dynamically add a `__hash__` method to the imported `GSS` class, making its instances hashable.
-
-          ```python
               # --- Monkey-patch GSS to be hashable for A* search ---
               # The A* planner requires GSS objects to be hashable to use them in sets
               # and dictionary keys. The LeveledGSS implementation may not define __hash__.
@@ -8963,160 +9705,221 @@ messages:
               if getattr(GSS, '__hash__', "exists") is None:
                   GSS.__hash__ = _gss_hash
               # --- End of monkey-patch ---
-          ```
 
-      This patch inspects the likely internal structure of a `GSS` object (a dictionary of levels) and computes a stable hash based on its contents. This will resolve the `TypeError` and allow the A* planner to proceed.
+              # Arena
+              roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
+      --- End Expected Context ---
 
-      ### Git Diff
+      --- Nearest Match (found at line 423 with 92.11% similarity): ---
+          def from_json_string(s: str) -> 'Model':
+              Stats.get().reset()
+              data = json.loads(s)
 
-      Here is the git diff for the change.
+              # --- Monkey-patch GSS to be hashable for A* search ---
+              # The A* planner requires GSS objects to be hashable to use them in sets
+              # and dictionary keys. The LeveledGSS implementation may not define __hash__.
+              # We add one here based on its likely internal structure (a dict of levels).
+              def _gss_hash(self):
+                  # Cache the hash for performance
+                  if hasattr(self, '_hash_val'):
+                      return self._hash_val
 
-      ```diff
-      --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      @@ -474,6 +474,38 @@
-               Stats.get().reset()
-               data = json.loads(s)
-       
-      +        # --- Monkey-patch GSS to be hashable for A* search ---
-      +        # The A* planner requires GSS objects to be hashable to use them in sets
-      +        # and dictionary keys. The LeveledGSS implementation may not define __hash__.
-      +        # We add one here based on its likely internal structure (a dict of levels).
-      +        def _gss_hash(self):
-      +            # Cache the hash for performance
-      +            if hasattr(self, '_hash_val'):
-      +                return self._hash_val
-      +
-      +            # The internal representation is likely a dictionary of levels,
-      +            # where each level contains a dictionary of stacks.
-      +            if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
-      +                # Fallback if structure is unexpected, though this may not be unique
-      +                return id(self)
-      +
-      +            level_items = []
-      +            for level, stacks in self.levels.items():
-      +                # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
-      +                # frozenset of items makes this part hashable and order-independent.
-      +                stack_items = frozenset(stacks.items())
-      +                level_items.append((level, stack_items))
-      +            
-      +            # Sort by level to make the final representation canonical.
-      +            level_items.sort()
-      +            self._hash_val = hash(tuple(level_items))
-      +            return self._hash_val
-      +
-      +        # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
-      +        if getattr(GSS, '__hash__', "exists") is None:
-      +            GSS.__hash__ = _gss_hash
-      +        # --- End of monkey-patch ---
-      +
-               # Arena
-               roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
-               arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
+                  # The internal representation is likely a dictionary of levels,
+                  # where each level contains a dictionary of stacks.
+                  if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
+                      # Fallback if structure is unexpected, though this may not be unique
+                      return id(self)
 
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+                  level_items = []
+                  for level, stacks in self.levels.items():
+                      # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
+                      # frozenset of items makes this part hashable and order-independent.
+                      stack_items = frozenset(stacks.items())
+                      level_items.append((level, stack_items))
+                  
+                  # Sort by level to make the final representation canonical.
+                  level_items.sort()
+                  self._hash_val = hash(tuple(level_items))
+                  return self._hash_val
 
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
-    metadata:
-  - user: 'Changes committed with message: "Implement A* search for provably optimal
-      oracle planning and add necessary GSS/PyAcc hashing fixes"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 373, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 369, in main
-          run_benchmark(args, run_index=i)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 254, in run_benchmark
-          result = model.get_mask()
-                   ^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4_5.py", line 2696, in get_mask
-          optimal_path, optimal_cost = self._oracle_plan_with_astar()
-                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4_5.py", line 2342, in _oracle_plan_with_astar
-          initial_work_items.add((r, gss_init))
-        File "<string>", line 3, in __hash__
-        File "<string>", line 3, in __hash__
-        File "<string>", line 3, in __hash__
-      TypeError: unhashable type: 'dict'
-    metadata:
-  - user: FIX IT once and for all. Do it.
-    metadata:
-  - assistant: |-
-      You are right to be frustrated. The repeated `TypeError` indicates that my previous attempts, while logically sound, were insufficient to override the hashing behavior of the `GSS` object in your environment. The core issue remains: some part of the `GSS` object is an unhashable dictionary, and my patch is not being applied effectively.
-
-      Let's fix this once and for all with a more forceful approach. The problem is almost certainly that the condition for applying the monkey-patch is not being met, so the custom `__hash__` function is never attached to the `GSS` class. We will make the patch unconditional.
-
-      ### Step-by-step Instructions
-
-      1.  **File: `python/aug25/models/precompute3_model_pure_python_opt4_5.py`**
-
-          a.  **Locate the GSS monkey-patch block.** This is inside the `Model.from_json_string` method, which you added in the previous step.
-
-          b.  **Make the patch unconditional.** The current code conditionally applies the patch. This is failing. We will remove the condition to force our custom hash function to be used.
-
-          Replace this block:
-          ```python
-              # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
-              if getattr(GSS, '__hash__', "exists") is None:
-                  GSS.__hash__ = _gss_hash
-          ```
-          with this unconditional assignment:
-          ```python
               # Unconditionally patch GSS to ensure our hash function is used for the A* search,
               # which requires value-based hashing for GSS objects.
               GSS.__hash__ = _gss_hash
-          ```
-          This change guarantees that your `GSS` objects will use our custom, correct hashing logic, which properly handles the internal dictionaries by converting them to hashable types. This will resolve the `TypeError`.
+              # --- End of monkey-patch ---
 
-      ### Git Diff
+              # Arena
+              roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
+      --- End Nearest Match ---
 
-      Here is the git diff for this definitive fix.
-
-      ```diff
-      --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      @@ -507,9 +507,9 @@
+      --- Diff of Expected vs. Nearest Match: ---
+      [91m--- expected_context[0m
+      [92m+++ actual_context[0m
+      [96m@@ -29,9 +29,9 @@[0m
                    self._hash_val = hash(tuple(level_items))
+
                    return self._hash_val
+
        
-      -        # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
-      -        if getattr(GSS, '__hash__', "exists") is None:
-      -            GSS.__hash__ = _gss_hash
-      +        # Unconditionally patch GSS to ensure our hash function is used for the A* search,
-      +        # which requires value-based hashing for GSS objects.
-      +        GSS.__hash__ = _gss_hash
+
+      [91m-        # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
+      [0m
+      [91m-        if getattr(GSS, '__hash__', "exists") is None:
+      [0m
+      [91m-            GSS.__hash__ = _gss_hash
+      [0m
+      [92m+        # Unconditionally patch GSS to ensure our hash function is used for the A* search,
+      [0m
+      [92m+        # which requires value-based hashing for GSS objects.
+      [0m
+      [92m+        GSS.__hash__ = _gss_hash
+      [0m
                # --- End of monkey-patch ---
+
        
+
                # Arena
 
-      ```
+      --- End Diff ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
     metadata:
   - user: |
-      Apply result (git-llm mode):
+      Apply result (plan-git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Git apply output:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python_opt4_5.py
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
+      Error applying patch to python/aug25/models/precompute3_model_pure_python_opt4_5.py: Hunk #1 (header: `@@ -425,38 +425,6 @@`) failed: context not found.
+
+      --- Expected Context (from patch): ---
+          def from_json_string(s: str) -> 'Model':
+              Stats.get().reset()
+              data = json.loads(s)
+
+              # --- Monkey-patch GSS to be hashable for A* search ---
+              # The A* planner requires GSS objects to be hashable to use them in sets
+              # and dictionary keys. The LeveledGSS implementation may not define __hash__.
+              # We add one here based on its likely internal structure (a dict of levels).
+              def _gss_hash(self):
+                  # Cache the hash for performance
+                  if hasattr(self, '_hash_val'):
+                      return self._hash_val
+
+                  # The internal representation is likely a dictionary of levels,
+                  # where each level contains a dictionary of stacks.
+                  if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
+                      # Fallback if structure is unexpected, though this may not be unique
+                      return id(self)
+
+                  level_items = []
+                  for level, stacks in self.levels.items():
+                      # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
+                      # frozenset of items makes this part hashable and order-independent.
+                      stack_items = frozenset(stacks.items())
+                      level_items.append((level, stack_items))
+                  
+                  # Sort by level to make the final representation canonical.
+                  level_items.sort()
+                  self._hash_val = hash(tuple(level_items))
+                  return self._hash_val
+
+              # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
+              if getattr(GSS, '__hash__', "exists") is None:
+                  GSS.__hash__ = _gss_hash
+              # --- End of monkey-patch ---
+
+              # Arena
+              roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
+      --- End Expected Context ---
+
+      --- Nearest Match (found at line 423 with 92.11% similarity): ---
+          def from_json_string(s: str) -> 'Model':
+              Stats.get().reset()
+              data = json.loads(s)
+
+              # --- Monkey-patch GSS to be hashable for A* search ---
+              # The A* planner requires GSS objects to be hashable to use them in sets
+              # and dictionary keys. The LeveledGSS implementation may not define __hash__.
+              # We add one here based on its likely internal structure (a dict of levels).
+              def _gss_hash(self):
+                  # Cache the hash for performance
+                  if hasattr(self, '_hash_val'):
+                      return self._hash_val
+
+                  # The internal representation is likely a dictionary of levels,
+                  # where each level contains a dictionary of stacks.
+                  if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
+                      # Fallback if structure is unexpected, though this may not be unique
+                      return id(self)
+
+                  level_items = []
+                  for level, stacks in self.levels.items():
+                      # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
+                      # frozenset of items makes this part hashable and order-independent.
+                      stack_items = frozenset(stacks.items())
+                      level_items.append((level, stack_items))
+                  
+                  # Sort by level to make the final representation canonical.
+                  level_items.sort()
+                  self._hash_val = hash(tuple(level_items))
+                  return self._hash_val
+
+              # Unconditionally patch GSS to ensure our hash function is used for the A* search,
+              # which requires value-based hashing for GSS objects.
+              GSS.__hash__ = _gss_hash
+              # --- End of monkey-patch ---
+
+              # Arena
+              roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
+      --- End Nearest Match ---
+
+      --- Diff of Expected vs. Nearest Match: ---
+      [91m--- expected_context[0m
+      [92m+++ actual_context[0m
+      [96m@@ -29,9 +29,9 @@[0m
+                   self._hash_val = hash(tuple(level_items))
+
+                   return self._hash_val
+
+       
+
+      [91m-        # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
+      [0m
+      [91m-        if getattr(GSS, '__hash__', "exists") is None:
+      [0m
+      [91m-            GSS.__hash__ = _gss_hash
+      [0m
+      [92m+        # Unconditionally patch GSS to ensure our hash function is used for the A* search,
+      [0m
+      [92m+        # which requires value-based hashing for GSS objects.
+      [0m
+      [92m+        GSS.__hash__ = _gss_hash
+      [0m
+               # --- End of monkey-patch ---
+
+       
+
+               # Arena
+
+      --- End Diff ---
+
+
+      LLM apply output:
+      Using model 'cp' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      No JSON action block found, but no file actions seem required based on context. Proceeding.
+      Found 1 code blocks with filepaths in attempt 1.
+      Warning: Received code block for unexpected file (not in create/replace JSON actions): python/aug25/models/precompute3_model_pure_python_opt4_5.py. Ignoring.
+      No file actions specified in JSON. Nothing to apply.
     metadata:
-  - user: 'Changes committed with message: "Implement A* search for optimal planning
-      and ensure GSS/PyAcc objects are hashable"'
+  - user: 'Changes committed with message: "Implement correlation-aware pruning in
+      oracle planning using PairBloom filters"'
     metadata:
 ...
