@@ -229,7 +229,6 @@ class ArenaNode:
     llm_bv_descendant: LLMTokenSet = field(default_factory=RangeSet.empty)
     pop_to_state_union: Dict[int, StateIDSet] = field(default_factory=dict)
     pop_to_llm_union: Dict[int, LLMTokenSet] = field(default_factory=dict)
-    pop_state_to_edge_indices: Dict[int, Dict[int, List[int]]] = field(default_factory=dict)
 
 def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
@@ -490,7 +489,7 @@ class Model(GraphProvider):
         # New: per-pop unions and descendant closures for stronger pruning
         model._compute_bucket_unions()
         model._compute_descendant_llm_closure()
-        model._build_indices()
+        model.optimize_traversal()
         model._compute_and_print_stats()
         return model
 
@@ -549,23 +548,10 @@ class Model(GraphProvider):
                     node.llm_bv_descendant = updated
                     changed = True
 
-    def _build_indices(self) -> None:
-        """Build traversal indices: per-edge state_to_dest and per-node pop_state_to_edge_indices."""
-        for node in tqdm(self.arena.values(), desc="Building traversal indices"):
-            pop_state_map = collections.defaultdict(lambda: collections.defaultdict(list))
-            for i, edge in enumerate(node.children):
+    def optimize_traversal(self) -> None:
+        for node in self.arena.values():
+            for edge in node.children:
                 edge.ensure_index()
-                for dest in edge.dests:
-                    for sid in dest.state_bv.iter_indices():
-                        pop_state_map[edge.pop][sid].append(i)
-
-            # Finalize the map, making lists unique and sorted for determinism
-            final_map = {}
-            for pop, state_map in pop_state_map.items():
-                final_map[pop] = {
-                    sid: sorted(list(set(indices))) for sid, indices in state_map.items()
-                }
-            node.pop_state_to_edge_indices = final_map
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
@@ -848,192 +834,207 @@ class Model(GraphProvider):
         oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
         node_allowed_mask: Optional[LLMTokenSet] = None,
     ) -> Generator[Union[Enqueue, Suspend], None, None]:
-        """The core traversal logic for a single node in the arena graph."""
         stats = Stats.get()
         a_node = self.arena.get(node_id)
-        if not a_node or not a_node.pop_state_to_edge_indices:
+        if not a_node:
             return
 
+        # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
+        # Strengthen remaining-mask with node-specific allowance (oracle reward) when provided.
         active_remaining_mask = remaining_mask if node_allowed_mask is None else remaining_mask.intersection(node_allowed_mask)
+
         max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
         edges_proc, dests_proc = 0, 0
-
-        pop_cache: Dict[int, Tuple[GSS, Any, List[int], StateIDSet]] = {}
+        peek0_rs = None
+        pop_cache: Dict[int, Tuple[Any, Any, List[int], StateIDSet]] = {}
+        skip_pops: Set[int] = set()
+        checked_pops: Set[int] = set()
+        # Local per-(popped, llm_bv) apply cache to amortize within this node
         local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
+
         local_ctr = None
+        # High-resolution timers per-node for hotspot analysis
         _perf_now = time.perf_counter
         if oracle_counters is not None:
             local_ctr = oracle_counters.setdefault(int(node_id), {"edges": 0, "apply": 0, "isolate": 0})
 
-        all_pops = sorted(list(a_node.pop_state_to_edge_indices.keys()))
+        edge_iterator = None
+        ordered_indices = edge_order_override_map.get(node_id) if edge_order_override_map else None
+        if ordered_indices:
+            # Oracle-guided order. We still need to iterate non-guided edges if any.
+            all_indices = set(range(len(a_node.children)))
+            other_indices = sorted(list(all_indices - set(ordered_indices)))
+            edge_iterator = ((i, a_node.children[i]) for i in ordered_indices + other_indices)
+        else:
+            edge_iterator = enumerate(a_node.children)
+        for edge_i, edge in edge_iterator:
+            if edge.pop in skip_pops:
+                continue
+            if edge.llm_bv.isdisjoint(active_remaining_mask):
+                stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+                continue
+            if edge.llm_bv.isdisjoint(gss_mask):
+                stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
+                continue
+            if edge.pop == 0:
+                if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
+                if edge.dest_states_union.isdisjoint(peek0_rs):
+                    stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
+                    continue
 
-        for pop in all_pops:
-            # 1. Pop GSS once per pop value and cache it.
-            if pop in pop_cache:
-                popped, popped_acc, peeked, peek_rs = pop_cache[pop]
+            stats.inc('get_mask.traversal.edges_traversed')
+            stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
+            if oracle_counters is not None and local_ctr is not None: local_ctr["edges"] += 1
+
+            if edge.pop in pop_cache:
+                popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
                 stats.inc('get_mask.main_loop.edge.pop_cache_hits')
             else:
+                # Try global cache first
                 popped = None
                 if global_pop_cache is not None:
-                    if (cached := global_pop_cache.get((id(gss_node), pop))) is not None:
+                    key = (id(gss_node), edge.pop)
+                    cached = global_pop_cache.get(key)
+                    if cached is not None:
                         popped, popped_acc, peeked, peek_rs = cached
-                        pop_cache[pop] = cached
+                        pop_cache[edge.pop] = cached
                         stats.inc('get_mask.global_pop_cache_hits')
-
                 if popped is None:
                     stats.start('get_mask.main_loop.edge.popn')
                     _t0 = _perf_now()
-                    popped = gss_node.popn(pop)
+                    popped = gss_node.popn(edge.pop)
                     _t1 = _perf_now()
                     stats.stop('get_mask.main_loop.edge.popn')
                     if oracle_counters is not None and local_ctr is not None:
                         local_ctr["popn_calls"] = local_ctr.get("popn_calls", 0) + 1
                         local_ctr["popn_time_ms"] = local_ctr.get("popn_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
-
                 if popped.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_empty')
-                    continue # Skip to next pop value
-
+                    pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+                    continue
                 stats.start('get_mask.main_loop.edge.popped.reduce_acc')
                 popped_acc = popped.reduce_acc()
                 stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
                 if not popped_acc or popped_acc.llm_mask.is_empty():
-                    continue # Skip to next pop value
-
+                    pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                    continue
+                # Avoid double-peek: call once and reuse both list and RangeSetStates
                 peeked = popped.peek()
                 peek_rs = RangeSetStates.from_indices(peeked)
-                entry = (popped, popped_acc, peeked, peek_rs)
-                pop_cache[pop] = entry
+                pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
                 if global_pop_cache is not None:
-                    global_pop_cache[(id(gss_node), pop)] = entry
+                    global_pop_cache[(id(gss_node), edge.pop)] = (popped, popped_acc, peeked, peek_rs)
 
-            # 2. Per-pop bucket pruning.
-            if (pop_states_union := a_node.pop_to_state_union.get(pop)) and pop_states_union.isdisjoint(peek_rs):
-                stats.inc('get_mask.main_loop.bucket_pruned_state')
-                continue
-            if (pop_llm_union := a_node.pop_to_llm_union.get(pop)) and (
-                (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)):
-                stats.inc('get_mask.main_loop.bucket_pruned_llm')
-                continue
-
-            # 3. Find active edges for this pop and the peeked states.
-            edges_to_process: Dict[int, List[int]] = collections.defaultdict(list)
-            pop_state_map = a_node.pop_state_to_edge_indices.get(pop, {})
-            for sid in peeked:
-                if (edge_indices := pop_state_map.get(sid)):
-                    for edge_idx in edge_indices:
-                        edges_to_process[edge_idx].append(sid)
-            if not edges_to_process:
-                continue
-
-            # 4. Create edge iterator that respects oracle order.
-            active_edge_indices = set(edges_to_process.keys())
-            ordered_indices_all = edge_order_override_map.get(node_id) if edge_order_override_map else None
-            if ordered_indices_all:
-                ordered_active = [i for i in ordered_indices_all if i in active_edge_indices]
-                other_active = sorted(list(active_edge_indices - set(ordered_active)))
-                edge_indices_iterator = iter(ordered_active + other_active)
-            else:
-                edge_indices_iterator = iter(sorted(list(active_edge_indices)))
-
-            # 5. Loop over active edges for this pop bucket.
-            for edge_i in edge_indices_iterator:
-                edge = a_node.children[edge_i]
-
-                if edge.llm_bv.isdisjoint(active_remaining_mask):
-                    stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+            # One-time per-pop bucket pruning: states and llm masks
+            if edge.pop not in checked_pops:
+                checked_pops.add(edge.pop)
+                pop_states_union = a_node.pop_to_state_union.get(edge.pop)
+                if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
+                    stats.inc('get_mask.main_loop.bucket_pruned_state')
+                    skip_pops.add(edge.pop)
                     continue
+                pop_llm_union = a_node.pop_to_llm_union.get(edge.pop)
+                # Extra prune when node_allowed_mask present: if the bucket's llm union has no overlap with
+                # active_remaining_mask, skip the whole pop bucket.
+                if pop_llm_union is not None and (
+                    (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)):
+                    stats.inc('get_mask.main_loop.bucket_pruned_llm')
+                    skip_pops.add(edge.pop)
+                    continue
+
+            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
+                if popped_acc: stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
+                continue
+
+            # Apply-and-prune caching across edges sharing the same llm_bv
+            source_after_apply = popped
+            if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
                 if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
-                    stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
                     continue
-
-                stats.inc('get_mask.traversal.edges_traversed')
-                stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
-                if oracle_counters is not None and local_ctr is not None: local_ctr["edges"] += 1
-
-                # Apply-and-prune, with caching.
-                source_after_apply = popped
-                if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                    key_apply = (id(popped), id(edge.llm_bv))
-                    if (cached_apply := local_apply_cache.get(key_apply)) is not None:
-                        source_after_apply = cached_apply
-                        stats.inc('get_mask.apply.cache_hits')
-                    else:
-                        @_acc_memoize(use_value_cache=False)
-                        def intersect(acc: PyAcc):
-                            new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                            return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                        if oracle_counters is not None and local_ctr is not None: local_ctr["apply"] += 1
-                        stats.start('get_mask.main_loop.edge.apply_and_prune')
-                        _t0 = _perf_now()
-                        tmp = popped.apply_and_prune(intersect)
-                        _t1 = _perf_now()
-                        stats.stop('get_mask.main_loop.edge.apply_and_prune')
-                        if oracle_counters is not None and local_ctr is not None:
-                            local_ctr["apply_time_ms"] = local_ctr.get("apply_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
-                        if tmp.is_empty():
-                            continue
-                        source_after_apply = tmp
-                        local_apply_cache[key_apply] = tmp
-
-                # Group states by destination for this edge.
-                sids_for_edge = edges_to_process[edge_i]
-                grouped: Dict[int, List[int]] = collections.defaultdict(list)
-                m = edge.state_to_dest
-                for sid in sids_for_edge:
-                    if (dest_list := m.get(sid)):
-                        for dest_j in dest_list:
-                            grouped[dest_j].append(sid)
-
-                dest_keys = list(grouped.keys())
-                if dest_scores:
-                    dest_keys.sort(key=lambda j: (-dest_scores.get(int(edge.dests[j].dest_idx), 0), j))
+                key_apply = (id(popped), id(edge.llm_bv))
+                cached_apply = local_apply_cache.get(key_apply)
+                if cached_apply is not None:
+                    source_after_apply = cached_apply
+                    stats.inc('get_mask.apply.cache_hits')
                 else:
-                    dest_keys.sort()
-
-                for dest_j in dest_keys:
-                    if dests_proc >= max_dests:
-                        priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                        yield Suspend(int(node_id), priority, depth)
-                        dests_proc = 0
-
-                    dest = edge.dests[dest_j]
-                    values_to_keep = grouped[dest_j]
-
-                    if len(values_to_keep) == len(peeked):
-                        child_gss = source_after_apply
-                    else:
-                        key_isolate = (id(source_after_apply), tuple(sorted(values_to_keep)))
-                        if isolate_cache is not None and key_isolate in isolate_cache:
-                            stats.inc('get_mask.isolate_many.cache_hits')
-                            child_gss = isolate_cache[key_isolate]
-                        else:
-                            stats.start('get_mask.main_loop.edge.isolate_many')
-                            _t0 = _perf_now()
-                            child_gss = source_after_apply.isolate_many(values_to_keep)
-                            _t1 = _perf_now()
-                            stats.stop('get_mask.main_loop.edge.isolate_many')
-                            if oracle_counters is not None and local_ctr is not None:
-                                local_ctr["isolate"] = local_ctr.get("isolate", 0) + 1
-                                local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
-                                local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
-                            if isolate_cache is not None:
-                                isolate_cache[key_isolate] = child_gss
-
-                    if child_gss.is_empty():
-                        continue
-
-                    d: NodeID = int(dest.dest_idx)
-                    yield Enqueue(d, child_gss, depth + 1)
-                    dests_proc += 1
+                    @_acc_memoize(use_value_cache=False)
+                    def intersect(acc: PyAcc):
+                        new_mask = acc.llm_mask.intersection(edge.llm_bv)
+                        return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                    if oracle_counters is not None and local_ctr is not None: local_ctr["apply"] += 1
+                    stats.start('get_mask.main_loop.edge.apply_and_prune')
+                    _t0 = _perf_now()
+                    tmp = popped.apply_and_prune(intersect)
+                    _t1 = _perf_now()
+                    stats.stop('get_mask.main_loop.edge.apply_and_prune')
                     if oracle_counters is not None and local_ctr is not None:
-                        local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+                        local_ctr["apply_time_ms"] = local_ctr.get("apply_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+                    if tmp.is_empty():
+                        continue
+                    source_after_apply = tmp
+                    local_apply_cache[key_apply] = tmp
+            if not peeked: continue
 
-                if edges_proc >= max_edges:
-                    priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                    yield Suspend(int(node_id), priority, depth)
-                    edges_proc = 0
-                edges_proc += 1
+            grouped: Dict[int, List[int]] = {}
+            m = edge.state_to_dest
+            for sid in peeked:
+                dest_list = m.get(sid)
+                if not dest_list: continue
+                for dest_j in dest_list:
+                    lst = grouped.get(dest_j)
+                    if lst is None: grouped[dest_j] = [sid]
+                    else: lst.append(sid)
+
+            dest_keys = list(grouped.keys())
+            if dest_scores:
+                # Sort by destination node score (desc), then by original index (asc) for stability
+                dest_keys.sort(key=lambda j: (-dest_scores.get(int(edge.dests[j].dest_idx), 0), j))
+            else:
+                # Iterate grouped dests in ascending order for locality
+                dest_keys.sort()
+            for dest_j in dest_keys:
+                if dests_proc >= max_dests:
+                    priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+                    yield Suspend(priority, depth)
+                    dests_proc = 0
+                dest = edge.dests[dest_j]
+                values_to_keep = grouped[dest_j]
+                # If all heads survive, reuse popped directly
+                if len(values_to_keep) == len(peeked):
+                    child_gss = source_after_apply
+                else:
+                    # Global/local cache for isolate_many
+                    key_isolate = (id(source_after_apply), tuple(values_to_keep))
+                    if isolate_cache is not None and key_isolate in isolate_cache:
+                        stats.inc('get_mask.isolate_many.cache_hits')
+                        child_gss = isolate_cache[key_isolate]
+                    else:
+                        stats.start('get_mask.main_loop.edge.isolate_many')
+                        _t0 = _perf_now()
+                        child_gss = source_after_apply.isolate_many(values_to_keep)
+                        _t1 = _perf_now()
+                        stats.stop('get_mask.main_loop.edge.isolate_many')
+                        if oracle_counters is not None and local_ctr is not None: local_ctr["isolate"] += 1
+                        if oracle_counters is not None and local_ctr is not None:
+                            local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+                            local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+                        if isolate_cache is not None:
+                            isolate_cache[key_isolate] = child_gss
+                if child_gss.is_empty(): continue
+                d: NodeID = int(dest.dest_idx)
+                yield Enqueue(d, child_gss, depth + 1)
+                dests_proc += 1
+                if oracle_counters is not None and local_ctr is not None:
+                    local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+
+            if edges_proc >= max_edges:
+                # Suspend work after a batch to allow priority reordering at the heap level
+                priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
+                yield Suspend(int(node_id), priority, depth)
+                edges_proc = 0
+            edges_proc += 1
+        # When max_dests suspend triggers
+        # (Handled inside the loop above with proper node_id propagation)
 
     def _ensure_reverse_adjacency(self) -> Dict[int, Set[int]]:
         """Build and cache reverse adjacency: dest_node -> set(parent_nodes)."""
@@ -2194,3 +2195,4 @@ class Model(GraphProvider):
         """Called at the end of a benchmark run to perform any final actions, like printing stats."""
         print("\n--- Final Stats Report from Model ---")
         Stats.get().report()
+
