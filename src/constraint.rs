@@ -3408,8 +3408,7 @@ impl<'a> GrammarConstraintState<'a> {
         let traversal_data = match &self.parent.trie3_traversal_data {
             Some(data) => data,
             None => {
-                crate::debug!(2, "No traversal data for get_mask3, returning empty mask.");
-                return self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+                panic!("No traversal data for get_mask3, returning empty mask.");
             }
         };
 
