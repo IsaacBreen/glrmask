@@ -610,7 +610,18 @@ class Model(GraphProvider):
             local_ctr = oracle_counters.setdefault(int(node_id), {"edges": 0, "apply": 0, "isolate": 0})
 
         # Iterate pop buckets directly from the children map
-        for pop, state_map in a_node.children.items():
+        pops_to_iterate = list(a_node.children.keys())
+        if edge_order_override_map and int(node_id) in edge_order_override_map:
+            ordered_pops = edge_order_override_map[int(node_id)]
+            present_pops = set(pops_to_iterate)
+            ordered_pops_present = [p for p in ordered_pops if p in present_pops]
+            remaining_pops = sorted(list(present_pops - set(ordered_pops_present)))
+            pops_to_iterate = ordered_pops_present + remaining_pops
+        else:
+            pops_to_iterate.sort()
+
+        for pop in pops_to_iterate:
+            state_map = a_node.children[pop]
             if pop in skip_pops:
                 continue
 
@@ -1074,13 +1085,14 @@ class Model(GraphProvider):
                 continue
             # Compute deterministic edge weights from child rewards
             base_weights: List[Tuple[int, int]] = []
-            for idx, edge in enumerate(node.children):
+            for pop, state_map in node.children.items():
                 s = 0
-                for d in edge.dests:
-                    cm = reward_masks.get(int(d.dest_idx))
-                    if cm is not None and not cm.is_empty():
-                        s += int(len(cm.intersection(target_mask)))
-                base_weights.append((idx, s))
+                for _sid, dest_map in state_map.items():
+                    for dest_idx in dest_map.keys():
+                        cm = reward_masks.get(int(dest_idx))
+                        if cm is not None and not cm.is_empty():
+                            s += int(len(cm.intersection(target_mask)))
+                base_weights.append((pop, s))
             if not any(w > 0 for (_, w) in base_weights):
                 # Nothing to bias on; skip
                 continue
@@ -1109,15 +1121,15 @@ class Model(GraphProvider):
                         if r <= acc:
                             pick = i
                             break
-                    idx, w = items.pop(pick)
-                    perm.append(idx)
+                    pop_val, w = items.pop(pick)
+                    perm.append(pop_val)
                 # Score permutation by cumulative reward if taken in this order
                 # Approximate: sum of weights; better if high weights front-loaded
                 cum = 0
-                for rank, idx in enumerate(perm):
+                for rank, pop_val in enumerate(perm):
                     w = 0
-                    for (j, ww) in base_weights:
-                        if j == idx:
+                    for (p, ww) in base_weights:
+                        if p == pop_val:
                             w = ww
                             break
                     # Discount later edges (prefer early gain)
