@@ -3328,8 +3328,8 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
         // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
         // self.get_mask1()
-        // self.get_mask3()
-        self.get_mask4()
+        self.get_mask3()
+        // self.get_mask4()
     }
 
     pub fn print_gss_stats(&self) {
