@@ -90,7 +90,7 @@ pub struct SuperEdge {
     pub pci1_end: PrecomputeNode1Index,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpecialPrecomputation {
     // Stage-1, grammar-only edges:
     pub reduce_edges: Vec<ReduceEdge>,
@@ -336,7 +336,7 @@ fn build_stage1_edges(parser: &GLRParser) -> (Vec<ReduceEdge>, Vec<ShiftEdge>) {
 
 #[derive(Clone)]
 struct ValueItem {
-    stack: Vec<StateID>,                // above-baseline frames
+    stack: Vec<StateID>,               // above-baseline frames
     llm_bv: LLMTokenBV,                // current token mask
     pci1_start: PrecomputeNode1Index,  // where this value started (for Super-edge pci1_start)
 }
@@ -729,7 +729,7 @@ pub fn graphviz_special(gc: &GrammarConstraint) -> String {
 
         // Nodes in this cluster: all src_nt that appear as sources
         let mut nts = BTreeSet::<Option<NonTerminalID>>::new();
-        for e in *edges {
+        for e in edges {
             nts.insert(e.src_nt);
         }
         for nt in nts {
