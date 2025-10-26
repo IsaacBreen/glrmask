@@ -402,6 +402,14 @@ class Model(GraphProvider):
     oracle_reward_prune: bool = True
     # New oracle controls
     oracle_dynamic_prioritization: bool = True
+    # Stronger oracle search and planning controls
+    oracle_beam_width: int = 8
+    oracle_search_trials: int = 16
+    oracle_edge_trials_per_node: int = 64
+    oracle_meganode_top_k: int = 10
+    oracle_plan_use_exact_end_masks: bool = True
+    oracle_use_beam_search: bool = True
+    oracle_debug_verbose: bool = False
     oracle_hotspot_report_top_k: int = 10
     # Try random permutations of the top-K largest end masks
     oracle_permute_top_ends: int = 8
@@ -1094,9 +1102,9 @@ class Model(GraphProvider):
         target_mask: LLMTokenSet,
         jitter: int = 0,
     ) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
-        """Target-aware guidance.
-        - Node scores ~ (reward tokens at node)/(estimated node cost).
-        - Edge order per node is by the sum of reward tokens at child destinations.
+        """Target-aware guidance (advanced).
+        - Node scores ~ (reward tokens at node intersect target)/(estimated node cost).
+        - Edge order per node is by the sum of child reward tokens (intersected with target).
         - Optional jitter adds small random noise to break ties differently across trials.
         """
         node_costs_raw: Dict[int, Dict[str, int]] = {int(k): v for k, v in plan.get('node_costs', {}).items()}
@@ -1137,6 +1145,252 @@ class Model(GraphProvider):
                 weighted.sort(key=lambda t: t[1], reverse=True)
                 edge_order_map[int(u)] = [idx for (idx, _) in weighted]
         return scores, edge_order_map
+
+    def _oracle_compute_reward_masks_from_end_masks(self, end_masks: Dict[int, LLMTokenSet]) -> Dict[int, LLMTokenSet]:
+        """Exact reward propagation: seed end nodes with their exact end masks (union across all visits),
+        then propagate upstream via edge.llm_bv intersections until a fixed point.
+        This avoids order-dependent artifacts of delta-based end events."""
+        reward: Dict[int, LLMTokenSet] = {}
+        # Seed end nodes
+        for nid, m in (end_masks or {}).items():
+            if m is None or m.is_empty():
+                continue
+            reward[int(nid)] = m
+
+        if not reward:
+            return {}
+
+        changed = True
+        while changed:
+            changed = False
+            for u, node in self.arena.items():
+                if not node.children:
+                    continue
+                accum = RangeSet.empty()
+                for edge in node.children:
+                    child_union = RangeSet.empty()
+                    for d in edge.dests:
+                        cm = reward.get(int(d.dest_idx))
+                        if cm is not None and not cm.is_empty():
+                            child_union |= cm
+                    if not child_union.is_empty():
+                        thru = child_union.intersection(edge.llm_bv)
+                        if not thru.is_empty():
+                            accum |= thru
+                if accum.is_empty():
+                    continue
+                prev = reward.get(int(u))
+                updated = accum if prev is None else prev.union(accum)
+                if prev is None or prev != updated:
+                    reward[int(u)] = updated
+                    changed = True
+        return reward
+
+    def _oracle_estimate_end_cost(self, end_node_id: int, analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None) -> float:
+        """Estimate minimal cost from any root to the given end node by reverse Dijkstra over parents.
+        Edge costs are modeled by node costs (sum along a path). This is a heuristic but helps the oracle order ends."""
+        rev = self._ensure_reverse_adjacency()
+        roots: Set[int] = set(int(r) for r in self.roots_map.values())
+        # If end is itself a root
+        if int(end_node_id) in roots:
+            return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
+        # Dijkstra from end toward roots via parents (reverse edges)
+        import heapq as _hq
+        INF = float('inf')
+        dist: Dict[int, float] = {}
+        pq: List[Tuple[float, int]] = []
+        start = int(end_node_id)
+        dist[start] = self._oracle_node_cost(start, analysis_node_costs)
+        _hq.heappush(pq, (dist[start], start))
+        best_to_any_root = INF
+        while pq:
+            cd, u = _hq.heappop(pq)
+            if cd > dist.get(u, INF):
+                continue
+            if u in roots:
+                best_to_any_root = min(best_to_any_root, cd)
+                break
+            for parent in rev.get(u, ()):
+                v = int(parent)
+                nd = cd + self._oracle_node_cost(v, analysis_node_costs)
+                if nd < dist.get(v, INF):
+                    dist[v] = nd
+                    _hq.heappush(pq, (nd, v))
+        if best_to_any_root == INF:
+            # Fallback: just return cost of this node
+            return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
+        return best_to_any_root
+
+    def _oracle_beam_search_end_sequence(
+        self,
+        end_masks: Dict[int, LLMTokenSet],
+        target_mask: LLMTokenSet,
+        analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None,
+        trials: int = 8,
+        beam_width: int = 8,
+        jitter: int = 0,
+    ) -> List[int]:
+        """Cost-aware beam search over end-node sequences to maximize token gain per cost.
+        Returns one promising end-node ordering."""
+        if not end_masks:
+            return []
+        # Precompute costs and sizes
+        ends = list(int(k) for k in end_masks.keys())
+        end_cost: Dict[int, float] = {e: self._oracle_estimate_end_cost(e, analysis_node_costs) for e in ends}
+        # Precompute mask sizes intersected with target
+        end_target_sizes: Dict[int, int] = {}
+        for e in ends:
+            m = end_masks.get(int(e))
+            end_target_sizes[int(e)] = int(len((m or RangeSet.empty()).intersection(target_mask)))
+        rng = random.Random(31337)
+        best_seq: List[int] = []
+        best_score = -1.0
+        # Beam state: (covered_mask, sequence, score)
+        for _ in range(max(1, int(trials))):
+            beam: List[Tuple[LLMTokenSet, List[int], float]] = [(RangeSet.empty(), [], 0.0)]
+            visited_seq: Set[Tuple[int, ...]] = set()
+            while beam:
+                # Goal check
+                beam.sort(key=lambda t: (-len(t[0]), -t[2]))
+                if not beam:
+                    break
+                new_beam: List[Tuple[LLMTokenSet, List[int], float]] = []
+                for covered, seq, sc in beam[:max(1, int(beam_width))]:
+                    remaining = target_mask.difference(covered)
+                    if remaining.is_empty():
+                        if sc > best_score:
+                            best_score = sc
+                            best_seq = seq
+                        continue
+                    # Rank candidates by gain/cost with jitter
+                    candidates: List[Tuple[float, int, int]] = []
+                    for e in ends:
+                        if e in seq:
+                            continue
+                        m = end_masks.get(int(e), RangeSet.empty())
+                        gain = len(remaining.intersection(m))
+                        if gain <= 0:
+                            continue
+                        cost = end_cost.get(int(e), 1.0)
+                        score = float(gain) / max(1.0, cost)
+                        if jitter > 0:
+                            score *= (1.0 + rng.uniform(-float(jitter)/100.0, float(jitter)/100.0))
+                        candidates.append((score, int(e), int(gain)))
+                    candidates.sort(key=lambda t: (-t[0], -t[2]))
+                    if not candidates:
+                        # dead end
+                        continue
+                    # Expand top-k candidates from this beam state
+                    k = min(len(candidates), max(1, int(beam_width)))
+                    for i in range(k):
+                        _, e, _ = candidates[i]
+                        m = end_masks[int(e)]
+                        new_cov = covered.union(m)
+                        new_seq = seq + [int(e)]
+                        key = tuple(new_seq)
+                        if key in visited_seq:
+                            continue
+                        visited_seq.add(key)
+                        # New state score = covered tokens cardinality / sum end costs
+                        tot_cost = sum(end_cost.get(int(x), 1.0) for x in new_seq)
+                        new_score = float(len(new_cov.intersection(target_mask))) / max(1.0, tot_cost)
+                        new_beam.append((new_cov, new_seq, new_score))
+                beam = new_beam
+            # If we didn't complete coverage in this trial, still accept best partial state
+            if not best_seq and beam:
+                beam.sort(key=lambda t: (-len(t[0]), -t[2]))
+                best_seq = beam[0][1]
+        return best_seq
+
+    def _oracle_local_edge_order_search(
+        self,
+        reward_masks: Dict[int, LLMTokenSet],
+        target_mask: LLMTokenSet,
+        analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None,
+        top_k: int = 10,
+        trials_per_node: int = 32,
+        jitter: int = 0,
+    ) -> Dict[int, List[int]]:
+        """Randomized local search for edge ordering at top 'mega nodes'.
+        For each selected node u, sample several edge orders biased by child reward tokens and pick the best.
+        Returns a partial edge_order_map (node_id -> list of edge indices)."""
+        node_costs = analysis_node_costs or {}
+        # Rank nodes by "hotness"
+        ranked: List[Tuple[float, int]] = []
+        for nid_str, cnt in node_costs.items():
+            try:
+                nid = int(nid_str)
+            except Exception:
+                nid = int(nid_str)
+            edges = float(cnt.get("edges", 0))
+            apply_calls = float(cnt.get("apply", 0))
+            isolate_calls = float(cnt.get("isolate", 0))
+            score = edges + self.oracle_apply_weight * apply_calls + self.oracle_isolate_weight * isolate_calls
+            ranked.append((score, nid))
+        ranked.sort(key=lambda t: t[0], reverse=True)
+        selected = [nid for (_, nid) in ranked[:max(1, int(top_k))]]
+        rng = random.Random(20240518)
+        result: Dict[int, List[int]] = {}
+        for u in selected:
+            node = self.arena.get(int(u))
+            if not node or not node.children:
+                continue
+            # Compute deterministic edge weights from child rewards
+            base_weights: List[Tuple[int, int]] = []
+            for idx, edge in enumerate(node.children):
+                s = 0
+                for d in edge.dests:
+                    cm = reward_masks.get(int(d.dest_idx))
+                    if cm is not None and not cm.is_empty():
+                        s += int(len(cm.intersection(target_mask)))
+                base_weights.append((idx, s))
+            if not any(w > 0 for (_, w) in base_weights):
+                # Nothing to bias on; skip
+                continue
+            # Sample permutations with softmax-like bias
+            best_order: List[int] = []
+            best_score: int = -1
+            for _ in range(max(1, int(trials_per_node))):
+                # Shuffle with bias: larger weight edges tend to go first
+                items = base_weights[:]
+                perm: List[int] = []
+                while items:
+                    # compute probabilities proportional to w + epsilon + jitter
+                    weights = []
+                    for (_, w) in items:
+                        val = max(1, w)
+                        if jitter > 0:
+                            val = int(val * (1.0 + rng.uniform(-float(jitter)/100.0, float(jitter)/100.0)))
+                            val = max(1, val)
+                        weights.append(val)
+                    total = float(sum(weights))
+                    r = rng.uniform(0.0, total)
+                    acc = 0.0
+                    pick = 0
+                    for i, val in enumerate(weights):
+                        acc += float(val)
+                        if r <= acc:
+                            pick = i
+                            break
+                    idx, w = items.pop(pick)
+                    perm.append(idx)
+                # Score permutation by cumulative reward if taken in this order
+                # Approximate: sum of weights; better if high weights front-loaded
+                cum = 0
+                for rank, idx in enumerate(perm):
+                    w = 0
+                    for (j, ww) in base_weights:
+                        if j == idx:
+                            w = ww
+                            break
+                    # Discount later edges (prefer early gain)
+                    cum += int(w / (1 + rank))
+                if cum > best_score:
+                    best_score = cum
+                    best_order = perm
+            if best_order:
+                result[int(u)] = best_order
+        return result
 
     def _oracle_build_guidance_from_plan(self, plan: Dict, jitter: int = 0) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
         """Build a stronger oracle guidance from planning analysis:
@@ -1565,6 +1819,7 @@ class Model(GraphProvider):
         # Oracle planning accumulators
         analysis_frontiers: Dict[int, LLMTokenSet] = {} if record_end_unions else None
         analysis_node_costs: Dict[int, Dict[str, int]] = {} if record_end_unions else None
+        analysis_end_masks: Dict[int, LLMTokenSet] = {} if record_end_unions else None
         while work_heap:
             if not record_end_unions and remaining_mask.is_empty():
                 stats.inc('get_mask.early_exit_full_mask')
@@ -1598,13 +1853,17 @@ class Model(GraphProvider):
                         delta = gss_acc.llm_mask.difference(final_mask)
                         if record_end_unions and not delta.is_empty():
                             end_union_events.append((int(node_id), delta))
-                        stats.start('get_mask.main_loop.end_node.final_mask_union')
-                        final_mask |= gss_acc.llm_mask
-                        stats.stop('get_mask.main_loop.end_node.final_mask_union')
-                        remaining_mask = all_ones.difference(final_mask)
-                        if remaining_mask.is_empty():
-                            stats.inc('get_mask.early_exit_full_mask')
-                            break
+                    # Record exact end mask (union across visits), independent of delta
+                    if record_end_unions and analysis_end_masks is not None:
+                        prev_mask = analysis_end_masks.get(int(node_id))
+                        analysis_end_masks[int(node_id)] = gss_acc.llm_mask if prev_mask is None else prev_mask.union(gss_acc.llm_mask)
+                    stats.start('get_mask.main_loop.end_node.final_mask_union')
+                    final_mask |= gss_acc.llm_mask
+                    stats.stop('get_mask.main_loop.end_node.final_mask_union')
+                    remaining_mask = all_ones.difference(final_mask)
+                    if remaining_mask.is_empty():
+                        stats.inc('get_mask.early_exit_full_mask')
+                        break
 
                 a_node = self.arena.get(node_id)
                 # Stronger upper bound than llm_bv_union: descendant closure
@@ -1722,6 +1981,7 @@ class Model(GraphProvider):
                 "end_events": end_union_events,
                 "frontiers": analysis_frontiers or {},
                 "node_costs": analysis_node_costs or {},
+                "end_masks": analysis_end_masks or {},
             }
         else:
             oracle_data = {}
@@ -1749,11 +2009,19 @@ class Model(GraphProvider):
             plan = {}
 
         end_events: List[Tuple[int, LLMTokenSet]] = plan.get("end_events", [])
-        # Build exact per-call target mask as union of end-event deltas
-        target_mask = RangeSet.empty()
-        for nid, delta in end_events:
-            if delta is not None and not delta.is_empty():
-                target_mask |= delta
+        end_masks_map: Dict[int, LLMTokenSet] = plan.get("end_masks", {}) or {}
+        # Prefer exact end masks to compute the per-call target, if available
+        if self.oracle_plan_use_exact_end_masks and end_masks_map:
+            target_mask = RangeSet.empty()
+            for m in end_masks_map.values():
+                if m is not None and not m.is_empty():
+                    target_mask |= m
+        else:
+            # Fallback to union of deltas (order-dependent but fine as a fallback)
+            target_mask = RangeSet.empty()
+            for nid, delta in end_events:
+                if delta is not None and not delta.is_empty():
+                    target_mask |= delta
 
         # If nothing to cover, run a trivial guided pass
         if target_mask.is_empty():
@@ -1761,8 +2029,14 @@ class Model(GraphProvider):
             out, _ = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=False)
             return out
 
-        # Compute target-aware reward masks (oracle pruning)
-        reward_masks = self._oracle_compute_reward_masks(end_events) if self.oracle_reward_prune else {}
+        # Compute target-aware reward masks (oracle pruning), prefer exact end masks
+        if self.oracle_reward_prune:
+            if self.oracle_plan_use_exact_end_masks and end_masks_map:
+                reward_masks = self._oracle_compute_reward_masks_from_end_masks(end_masks_map)
+            else:
+                reward_masks = self._oracle_compute_reward_masks(end_events)
+        else:
+            reward_masks = {}
 
         # Optional: report hotspots to investigate potential "mega nodes"
         if self.oracle_debug:
@@ -1781,10 +2055,25 @@ class Model(GraphProvider):
             prev = end_items_unique.get(int(nid))
             end_items_unique[int(nid)] = m if prev is None else prev.union(m)
         end_items = [(nid, m) for nid, m in end_items_unique.items()]
+        # If exact end masks available, override end_items with exacts (better for planning)
+        if self.oracle_plan_use_exact_end_masks and end_masks_map:
+            end_items = [(int(nid), m) for nid, m in end_masks_map.items() if m is not None and not m.is_empty()]
         # Minimal cover sequence (greedy/exact from recorded end masks)
         min_cover_seq = self._compute_oracle_min_cover(end_items)
         # Token-mass sorted sequence
         mass_sorted_seq = [nid for nid, _ in sorted(end_items, key=lambda t: len(t[1]), reverse=True)]
+        # Beam-search cost-aware sequence over ends
+        if self.oracle_use_beam_search and (end_masks_map or end_items):
+            beam_seq = self._oracle_beam_search_end_sequence(
+                end_masks=end_masks_map if (self.oracle_plan_use_exact_end_masks and end_masks_map) else dict(end_items),
+                target_mask=target_mask,
+                analysis_node_costs=plan.get("node_costs", {}),
+                trials=max(1, int(self.oracle_search_trials)),
+                beam_width=max(1, int(self.oracle_beam_width)),
+                jitter=int(self.oracle_jitter),
+            )
+        else:
+            beam_seq = []
         # Random permutations of top-K ends
         topK = min(max(1, int(self.oracle_permute_top_ends)), len(mass_sorted_seq))
         top_list = mass_sorted_seq[:topK]
@@ -1797,6 +2086,11 @@ class Model(GraphProvider):
             trial_sequences.append(mass_sorted_seq)
         # Also include a guidance derived from plan (as a baseline candidate)
         plan_guided_scores, plan_edge_order_map = self._oracle_build_guidance_from_plan(plan, jitter=0)
+        # Also include the advanced reward/target-aware guidance
+        adv_scores, adv_edge_order_map = self._oracle_build_guidance_advanced(plan, reward_masks, target_mask, jitter=int(self.oracle_jitter))
+        # Include beam-search-based end sequence if any
+        if beam_seq:
+            trial_sequences.append(beam_seq)
         # Add random permutations
         for _ in range(max(0, int(self.oracle_trials))):
             perm = top_list[:]
@@ -1814,19 +2108,19 @@ class Model(GraphProvider):
                 dedup.append(seq)
         trial_sequences = dedup
 
-        # Evaluate candidates (including the plan-based one)
-        best_scores = plan_guided_scores
-        best_edge_map = plan_edge_order_map
+        # Evaluate candidates (including the plan-based and advanced-guided ones)
+        best_scores = adv_scores if adv_scores else plan_guided_scores
+        best_edge_map = adv_edge_order_map if adv_edge_order_map else plan_edge_order_map
         best_edges = None
         best_time_ms = None
-        # First evaluate the plan-derived candidate
+        # First evaluate the best available base guidance (adv or plan)
         prev_suppress = self.suppress_stats_report
         try:
             self.suppress_stats_report = True
             Stats.get().reset()
             _out, _ = self._get_mask_run(
-                guided_scores=plan_guided_scores,
-                edge_order_map=plan_edge_order_map,
+                guided_scores=best_scores,
+                edge_order_map=best_edge_map,
                 record_end_unions=False,
                 oracle_target_mask=target_mask,
                 oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
@@ -1838,15 +2132,34 @@ class Model(GraphProvider):
         finally:
             self.suppress_stats_report = prev_suppress
 
+        # Local randomized edge-order search for mega nodes; merge into baseline edge map
+        local_edge_map = self._oracle_local_edge_order_search(
+            reward_masks=reward_masks if self.oracle_reward_prune else {},
+            target_mask=target_mask,
+            analysis_node_costs=plan.get("node_costs", {}),
+            top_k=int(self.oracle_meganode_top_k),
+            trials_per_node=int(self.oracle_edge_trials_per_node),
+            jitter=int(self.oracle_jitter),
+        )
+        if local_edge_map:
+            merged = dict(best_edge_map) if best_edge_map else {}
+            merged.update(local_edge_map)
+            best_edge_map = merged
+
         for seq in trial_sequences:
             trial_scores, trial_edge_map = self._oracle_prepare_guidance(seq)
+            # Merge advanced edge map and local improvements
+            merged_edge_map = dict(adv_edge_order_map) if adv_edge_order_map else {}
+            merged_edge_map.update(trial_edge_map or {})
+            if local_edge_map:
+                merged_edge_map.update(local_edge_map)
             prev_suppress = self.suppress_stats_report
             try:
                 self.suppress_stats_report = True
                 Stats.get().reset()
                 _out, _ = self._get_mask_run(
                     guided_scores=trial_scores,
-                    edge_order_map=trial_edge_map,
+                    edge_order_map=merged_edge_map,
                     record_end_unions=False,
                     oracle_target_mask=target_mask,
                     oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
