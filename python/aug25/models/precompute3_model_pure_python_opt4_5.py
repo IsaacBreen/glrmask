@@ -164,148 +164,17 @@ class ParserTable:
     start_state_id: int
     table: Dict[int, Row]
 
-@dataclass
-class ArenaEdgeDest:
-    dest_idx: NodeID
-    state_bv: StateIDSet
-
-@dataclass
-class LoadedArenaEdgeDest:
-    dest_idx: NodeID
-    state_bv: StateIDSet
-
-@dataclass
-class LoadedArenaEdge:
-    pop: int
-    llm_bv: LLMTokenSet
-    dests: List[LoadedArenaEdgeDest]
-
-@dataclass
-class LoadedArenaNode:
-    children: List[LoadedArenaEdge]
-    clean_end: bool
-
-@dataclass
-class IntermediateArenaEdgeDest:
-    dest_idx: NodeID
-    state_bv: StateIDSet
-
-@dataclass
-class IntermediateArenaEdge:
-    pop: int
-    llm_bv: LLMTokenSet
-    dests: IntermediateArenaEdgeDest
-
-@dataclass
-class IntermediateArenaNode:
-    children: List[IntermediateArenaEdge]
-    clean_end: bool
-
-@dataclass
-class ArenaEdge:
-    pop: int
-    llm_bv: LLMTokenSet
-    dests: List[ArenaEdgeDest] = field(default_factory=list)
-    dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
-    llm_bv_not: Optional[LLMTokenSet] = None
-    state_to_dest: Optional[Dict[int, List[int]]] = None
-
-    def ensure_index(self) -> None:
-        if self.state_to_dest is not None:
-            return
-
-        mapping: Dict[int, List[int]] = collections.defaultdict(list)
-        for j, dest in enumerate(self.dests):
-            for sid in dest.state_bv.iter_indices():
-                mapping[sid].append(j)
-        self.state_to_dest = dict(mapping)
 
 @dataclass
 class ArenaNode:
-    children: List[ArenaEdge] = field(default_factory=list)
+    # pop -> state -> list of (dest, (llm_bv, llm_bv_not))
+    children: Dict[int, Dict[int, List[Tuple[int, Tuple[LLMTokenSet, LLMTokenSet]]]]] = field(default_factory=dict)
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
     # New accelerators
     llm_bv_descendant: LLMTokenSet = field(default_factory=RangeSet.empty)
     pop_to_state_union: Dict[int, StateIDSet] = field(default_factory=dict)
     pop_to_llm_union: Dict[int, LLMTokenSet] = field(default_factory=dict)
-
-def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
-    for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
-        if not node.children:
-            continue
-        # Sort edges by destination depth (desc) and then pop count (asc)
-        node.children.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
-
-def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, IntermediateArenaNode]:
-    """Stage 1: Convert from the loaded format to a flattened intermediate format."""
-    intermediate_arena: Dict[NodeID, IntermediateArenaNode] = {}
-    for uid, loaded_node in tqdm(loaded_arena.items(), desc="Stage 1: Loading and flattening arena"):
-        intermediate_children: List[IntermediateArenaEdge] = []
-        for loaded_edge in loaded_node.children:
-            for d in loaded_edge.dests:
-                intermediate_children.append(IntermediateArenaEdge(
-                    pop=loaded_edge.pop,
-                    llm_bv=loaded_edge.llm_bv,
-                    dests=IntermediateArenaEdgeDest(d.dest_idx, d.state_bv),
-                ))
-        intermediate_arena[uid] = IntermediateArenaNode(
-            children=intermediate_children,
-            clean_end=loaded_node.clean_end,
-        )
-    return intermediate_arena
-
-def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
-    """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
-    arena: Dict[NodeID, ArenaNode] = {}
-    for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
-        new_children: List[ArenaEdge] = []
-        llm_bv_union = RangeSet.empty()
-
-        if not intermediate_node.children:
-            arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
-            continue
-
-        children_it = iter(intermediate_node.children)
-        first = next(children_it)
-        edge_dests = []
-        prev_pop = first.pop
-        prev_llm_bv = first.llm_bv
-        edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
-        def flush() -> None:
-            nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
-            dest_states_union = RangeSetStates.empty()
-            for d in edge_dests:
-                dest_states_union |= d.state_bv
-            llm_bv_union |= prev_llm_bv
-            new_children.append(ArenaEdge(
-                pop=prev_pop,
-                llm_bv=prev_llm_bv,
-                dests=edge_dests,
-                dest_states_union=dest_states_union,
-            ))
-        for edge in children_it:
-            if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
-                flush()
-                prev_pop = edge.pop
-                prev_llm_bv = edge.llm_bv
-                edge_dests = []
-            edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-        flush()
-
-        arena[uid] = ArenaNode(
-            children=new_children,
-            llm_bv_union=llm_bv_union,
-            clean_end=intermediate_node.clean_end,
-        )
-    return arena
-
-def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Dict[NodeID, ArenaNode]:
-    """Orchestrates the full conversion from loaded data to the final arena format."""
-    intermediate_arena = _load_and_flatten_arena(loaded_arena)
-    _optimize_intermediate_arena(intermediate_arena, max_depth)
-    final_arena = _merge_and_finalize_arena(intermediate_arena)
-    return final_arena
 
 @dataclass(frozen=True, eq=False)
 class PyAcc:
@@ -420,29 +289,59 @@ class Model(GraphProvider):
         data = json.loads(s)
 
         # Arena
+        vocab = data['precompute3_vocab']
+        all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
         roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
         arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
         max_depth: Dict[NodeID, int] = {}
         dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
 
-        loaded_arena: Dict[NodeID, LoadedArenaNode] = {}
-        for uid, node_data in arena_dict.items():
+        arena: Dict[NodeID, ArenaNode] = {}
+        for uid, node_data in tqdm(arena_dict.items(), desc="Loading and processing arena"):
             max_depth[uid] = int(node_data.get("max_depth", 0) or 0)
-            children_data = node_data.get("children") or []
-
-            loaded_children: List[LoadedArenaEdge] = []
-            for (pop, llm_json), dest_map_json in children_data:
-                llm_bv = RangeSet.from_ranges(bs_from_json(dumps(llm_json)).to_ranges())
-                dests: List[ArenaEdgeDest] = []
-                for dest_idx, state_json in dest_map_json:
-                    state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
-                    dests.append(LoadedArenaEdgeDest(int(dest_idx), state_bv))
-                loaded_children.append(LoadedArenaEdge(int(pop), llm_bv, dests))
-
             clean_end = node_data.get("value", {}).get("clean_end", False)
-            loaded_arena[uid] = LoadedArenaNode(children=loaded_children, clean_end=clean_end)
+            children_json = node_data.get("children") or []
 
-        arena = _convert_arena(loaded_arena, max_depth)
+            if not children_json:
+                arena[uid] = ArenaNode(clean_end=clean_end)
+                continue
+
+            unpacked_children: Dict = collections.defaultdict(lambda: collections.defaultdict(dict))
+            llm_bv_union: LLMTokenSet = RangeSet.empty()
+            for edge_key, dest_map_json in children_json:
+                pop, llm_bv_json = edge_key
+                pop = int(pop)
+                llm_bv = RangeSet.from_ranges(bs_from_json(dumps(llm_bv_json)).to_ranges())
+                llm_bv_union |= llm_bv
+
+                for dest_idx, state_bv_json in dest_map_json:
+                    dest_idx = int(dest_idx)
+                    state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_bv_json)).to_ranges())
+                    for state_id in state_bv.iter_indices():
+                        current_bv = unpacked_children[pop][state_id].get(dest_idx)
+                        unpacked_children[pop][state_id][dest_idx] = llm_bv if current_bv is None else current_bv.union(llm_bv)
+
+            final_children: Dict = collections.defaultdict(dict)
+            for pop, state_map in unpacked_children.items():
+                new_state_map = {}
+                for state_id, dest_map in state_map.items():
+                    sorted_dests = sorted(
+                        dest_map.items(),
+                        key=lambda item: max_depth.get(int(item[0]), 0),
+                        reverse=True
+                    )
+                    new_dest_list = []
+                    for dest_node, llm_bv in sorted_dests:
+                        llm_bv_not = all_internal_llm_tokens_bitset.difference(llm_bv)
+                        new_dest_list.append((dest_node, (llm_bv, llm_bv_not)))
+                    new_state_map[state_id] = new_dest_list
+                final_children[pop] = new_state_map
+
+            arena[uid] = ArenaNode(
+                children=dict(final_children),
+                llm_bv_union=llm_bv_union,
+                clean_end=clean_end
+            )
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
         dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
@@ -468,8 +367,6 @@ class Model(GraphProvider):
         constraint = ffi.GrammarConstraint.from_json_string(s)
         pmc_ffi = constraint.possible_matches()
         possible_matches_cache = {int(t): {int(i): RangeSet.from_ranges(b.to_ranges()) for i, b in inner.items()} for t, inner in pmc_ffi.items()}
-        vocab = data['precompute3_vocab']
-        all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
         # Initial state
         initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
@@ -485,34 +382,20 @@ class Model(GraphProvider):
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
             state={tokenizer.initial_state_id(): initial_gss},
         )
-        model._compute_edge_accelerators()
         # New: per-pop unions and descendant closures for stronger pruning
         model._compute_bucket_unions()
         model._compute_descendant_llm_closure()
-        model.optimize_traversal()
         model._compute_and_print_stats()
         return model
-
-    def _compute_edge_accelerators(self) -> None:
-        all_ones = self.all_internal_llm_tokens_bitset
-        for node in self.arena.values():
-            for edge in node.children:
-                edge.llm_bv_not = all_ones.difference(edge.llm_bv)
 
     def _compute_bucket_unions(self) -> None:
         """Per node, per-pop unions for early bucket pruning."""
         for node in self.arena.values():
             if not node.children:
-                node.pop_to_state_union = {}
-                node.pop_to_llm_union = {}
+                node.pop_to_state_union, node.pop_to_llm_union = {}, {}
                 continue
-            state_union_by_pop: Dict[int, StateIDSet] = collections.defaultdict(RangeSetStates.empty)
-            llm_union_by_pop: Dict[int, LLMTokenSet] = collections.defaultdict(RangeSet.empty)
-            for edge in node.children:
-                state_union_by_pop[edge.pop] |= edge.dest_states_union
-                llm_union_by_pop[edge.pop] |= edge.llm_bv
-            node.pop_to_state_union = dict(state_union_by_pop)
-            node.pop_to_llm_union = dict(llm_union_by_pop)
+            node.pop_to_state_union = {p: RangeSetStates.from_indices(list(s.keys())) for p, s in node.children.items()}
+            node.pop_to_llm_union = {p: RangeSet.union_many(llm for s in sm.values() for _, (llm, _) in s) for p, sm in node.children.items()}
 
     def _compute_descendant_llm_closure(self) -> None:
         """Compute an upper-bound mask of tokens reachable from each node to a clean_end.
@@ -536,22 +419,17 @@ class Model(GraphProvider):
                     # Leaf without clean_end stays empty unless it was already grown previously
                     continue
                 new_accum = RangeSet.empty()
-                for edge in node.children:
-                    dest_union_closure = RangeSet.empty()
-                    for d in edge.dests:
-                        dest_union_closure |= self.arena[int(d.dest_idx)].llm_bv_descendant
-                    if not dest_union_closure.is_empty():
-                        new_accum |= edge.llm_bv.intersection(dest_union_closure)
+                for state_map in node.children.values():
+                    for dest_list in state_map.values():
+                        for dest_id, (llm_bv, _) in dest_list:
+                            dest_closure = self.arena[int(dest_id)].llm_bv_descendant
+                            if not dest_closure.is_empty():
+                                new_accum |= llm_bv.intersection(dest_closure)
                 # Monotone update: only grow the closure.
                 updated = node.llm_bv_descendant.union(new_accum)
                 if updated != node.llm_bv_descendant:
                     node.llm_bv_descendant = updated
                     changed = True
-
-    def optimize_traversal(self) -> None:
-        for node in self.arena.values():
-            for edge in node.children:
-                edge.ensure_index()
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
@@ -570,12 +448,11 @@ class Model(GraphProvider):
     def iter_edges(self, node: NodeID, token: int):
         a_node = self.arena.get(node)
         if not a_node: return
-        for edge in a_node.children:
-            if edge.llm_bv.contains(token):
-                for dest in edge.dests:
-                    for start, end in dest.state_bv.to_ranges():
-                        for sid in range(start, end + 1):
-                            yield (edge.pop, sid, dest.dest_idx)
+        for pop, state_map in a_node.children.items():
+            for state_id, dest_list in state_map.items():
+                for dest_id, (llm_bv, _) in dest_list:
+                    if llm_bv.contains(token):
+                        yield (pop, state_id, dest_id)
 
     def commit(self, token_id: int):
         token_bytes = self.id_to_token[token_id]
@@ -666,11 +543,6 @@ class Model(GraphProvider):
             np = None
 
         stats = collections.defaultdict(list)
-        stats['edges_per_pop_bucket'] = []
-        stats['state_coverage_per_pop_bucket'] = []
-        stats['avg_edges_per_state_per_pop_bucket'] = []
-        stats['unique_llm_bvs_per_pop_bucket'] = []
-        stats['unique_dest_states_unions_per_pop_bucket'] = []
         pop_counts = collections.Counter()
         num_nodes = len(self.arena)
         num_clean_end_nodes = 0
@@ -680,70 +552,38 @@ class Model(GraphProvider):
         for node in self.arena.values():
             if node.clean_end:
                 num_clean_end_nodes += 1
-            stats['edges_per_node'].append(len(node.children))
+            
+            node_transitions = 0
+            unique_dests = set()
+            sum_llm_cardinality = 0
 
-            if node.children:
-                unique_dests_in_node = set(d.dest_idx for edge in node.children for d in edge.dests)
-                stats['unique_dests_per_node'].append(len(unique_dests_in_node))
+            for pop, state_map in node.children.items():
+                pop_counts[pop] += len(state_map)
+                stats['states_per_pop_bucket'].append(len(state_map))
+                
+                unique_llm_bvs_in_pop = set()
+                
+                for state_id, dest_list in state_map.items():
+                    stats['dests_per_state'].append(len(dest_list))
+                    node_transitions += len(dest_list)
+                    for dest_id, (llm_bv, _) in dest_list:
+                        unique_dests.add(dest_id)
+                        llm_len = len(llm_bv)
+                        stats['llm_bv_cardinality'].append(llm_len)
+                        sum_llm_cardinality += llm_len
+                        total_llm_bv_cardinality += llm_len
+                        unique_llm_bvs_in_pop.add(llm_bv)
+                
+                stats['unique_llm_bvs_per_pop_bucket'].append(len(unique_llm_bvs_in_pop))
 
-                sum_llm_bv_len_for_node = sum(len(edge.llm_bv) for edge in node.children)
-                if node.llm_bv_union and len(node.llm_bv_union) > 0:
-                    overlap_factor = sum_llm_bv_len_for_node / len(node.llm_bv_union)
-                    stats['llm_bv_overlap_factor'].append(overlap_factor)
-
-            for edge in node.children:
-                stats['dests_per_edge'].append(len(edge.dests))
-                if edge.dests:
-                    stats['unique_dests_per_edge'].append(len({d.dest_idx for d in edge.dests}))
-                pop_counts[edge.pop] += 1
-
-                llm_bv_len = len(edge.llm_bv)
-                stats['llm_bv_cardinality'].append(llm_bv_len)
-                total_llm_bv_cardinality += llm_bv_len
-
-                stats['dest_states_union_cardinality'].append(len(edge.dest_states_union))
-
-                for dest in edge.dests:
-                    state_bv_len = len(dest.state_bv)
-                    stats['dest_state_bv_cardinality'].append(state_bv_len)
-                    total_state_bv_cardinality += state_bv_len
-
-            # --- New pop-bucket stats for the current node ---
-            pop_buckets = collections.defaultdict(list)
-            for edge in node.children:
-                pop_buckets[edge.pop].append(edge)
-
-            for pop, edges_in_bucket in pop_buckets.items():
-                # Edges per pop-bucket
-                stats['edges_per_pop_bucket'].append(len(edges_in_bucket))
-
-                # State coverage and avg edges per state
-                pop_state_union = RangeSetStates.empty()
-                sum_dest_states_union_cardinality = 0
-                for edge in edges_in_bucket:
-                    pop_state_union |= edge.dest_states_union
-                    sum_dest_states_union_cardinality += len(edge.dest_states_union)
-
-                state_coverage = len(pop_state_union)
-                stats['state_coverage_per_pop_bucket'].append(state_coverage)
-
-                if state_coverage > 0:
-                    avg_edges = sum_dest_states_union_cardinality / state_coverage
-                    stats['avg_edges_per_state_per_pop_bucket'].append(avg_edges)
-
-                # B_p(u): Unique LLM BVs per Pop-Bucket. This predicts the number of
-                # apply_and_prune calls needed if we group by llm_bv.
-                unique_llm_bvs = {edge.llm_bv for edge in edges_in_bucket}
-                stats['unique_llm_bvs_per_pop_bucket'].append(len(unique_llm_bvs))
-
-                # Proxy for s-list duplication: Unique dest_states_union per Pop-Bucket.
-                # If this is low, it suggests high potential for caching isolate_many results.
-                unique_dest_states = {edge.dest_states_union for edge in edges_in_bucket}
-                stats['unique_dest_states_unions_per_pop_bucket'].append(len(unique_dest_states))
+            stats['transitions_per_node'].append(node_transitions)
+            stats['unique_dests_per_node'].append(len(unique_dests))
+            if node.llm_bv_union and len(node.llm_bv_union) > 0:
+                overlap = sum_llm_cardinality / len(node.llm_bv_union)
+                stats['llm_bv_overlap_factor'].append(overlap)
 
 
-        num_edges = sum(stats['edges_per_node']) if stats['edges_per_node'] else 0
-        num_dests = sum(stats['dests_per_edge']) if stats['dests_per_edge'] else 0
+        num_transitions = sum(stats['transitions_per_node']) if stats['transitions_per_node'] else 0
 
         print("\nCalculating inverted index stats for (Pop, StateID) ambiguity (this may take a moment)...")
         llm_bvs_per_pop_state = []
@@ -751,13 +591,12 @@ class Model(GraphProvider):
 
         for node in tqdm(self.arena.values(), desc="Analyzing state ambiguity"):
             per_node_inverted_map = collections.defaultdict(lambda: collections.defaultdict(lambda: {'llm_bvs': set(), 'dests': set()}))
-            for edge in node.children:
-                edge.ensure_index()
-                for sid, dest_j_list in edge.state_to_dest.items():
-                    state_entry = per_node_inverted_map[edge.pop][sid]
-                    state_entry['llm_bvs'].add(edge.llm_bv)
-                    for dest_j in dest_j_list:
-                        state_entry['dests'].add(edge.dests[dest_j].dest_idx)
+            for pop, state_map in node.children.items():
+                for sid, dest_list in state_map.items():
+                    state_entry = per_node_inverted_map[pop][sid]
+                    for dest_id, (llm_bv, _) in dest_list:
+                        state_entry['dests'].add(dest_id)
+                        state_entry['llm_bvs'].add(llm_bv)
 
             for pop_map in per_node_inverted_map.values():
                 for state_map_val in pop_map.values():
@@ -768,10 +607,8 @@ class Model(GraphProvider):
         print("\n--- Arena Stats ---")
         print(f"Total nodes: {num_nodes:,}")
         print(f"Clean end nodes: {num_clean_end_nodes:,}")
-        print(f"Total edges: {num_edges:,}")
-        print(f"Total destinations: {num_dests:,}")
+        print(f"Total transitions (dest, llm_bv pairs): {num_transitions:,}")
         print(f"Total LLM token cardinality (sum over edges): {total_llm_bv_cardinality:,}")
-        print(f"Total state ID cardinality (sum over dests): {total_state_bv_cardinality:,}")
 
         def print_dist_stats(name, data):
             if not data or not np:
@@ -792,28 +629,23 @@ class Model(GraphProvider):
             percentiles = np.percentile(arr, [25, 50, 75, 90, 99])
             print(f"  Percentiles (25, 50, 75, 90, 99): [{', '.join(f'{p:,.2f}' for p in percentiles)}]")
 
-        print_dist_stats("Edges per Node", stats['edges_per_node'])
+        print_dist_stats("Transitions per Node", stats['transitions_per_node'])
         print_dist_stats("Unique Destinations per Node", stats['unique_dests_per_node'])
-        print_dist_stats("Destinations per Edge", stats['dests_per_edge'])
-        print_dist_stats("Unique Destinations per Edge", stats['unique_dests_per_edge'])
-        print_dist_stats("LLM TokenSet Cardinality per Edge", stats['llm_bv_cardinality'])
+        print_dist_stats("Destinations per (Pop, State)", stats['dests_per_state'])
+        print_dist_stats("LLM TokenSet Cardinality per Transition", stats['llm_bv_cardinality'])
         print_dist_stats("LLM BV Overlap Factor per Node", stats['llm_bv_overlap_factor'])
-        print_dist_stats("StateIDSet Union Cardinality per Edge", stats['dest_states_union_cardinality'])
-        print_dist_stats("StateIDSet Cardinality per Destination", stats['dest_state_bv_cardinality'])
         print_dist_stats("Unique LLM BVs per (Node, Pop, StateID)", llm_bvs_per_pop_state)
         print_dist_stats("Unique Destinations per (Node, Pop, StateID)", dests_per_pop_state)
-        print_dist_stats("Edges per Pop-Bucket", stats['edges_per_pop_bucket'])
+        print_dist_stats("States per Pop-Bucket", stats['states_per_pop_bucket'])
         print_dist_stats("Unique LLM BVs per Pop-Bucket", stats['unique_llm_bvs_per_pop_bucket'])
-        print_dist_stats("Unique Dest State Unions per Pop-Bucket", stats['unique_dest_states_unions_per_pop_bucket'])
-        print_dist_stats("State Coverage per Pop-Bucket", stats['state_coverage_per_pop_bucket'])
-        print_dist_stats("Avg Edges per State per Pop-Bucket", stats['avg_edges_per_state_per_pop_bucket'])
         if self.max_depth:
             print_dist_stats("Max Depth per Node", list(self.max_depth.values()))
 
         print("\n--- Pop Counts ---")
-        if num_edges > 0:
+        total_state_entries = sum(pop_counts.values())
+        if total_state_entries > 0:
             for pop_val, count in sorted(pop_counts.items()):
-                print(f"  Pop {pop_val}: {count:,} edges ({count/num_edges*100:.2f}%)")
+                print(f"  Pop {pop_val}: {count:,} state entries ({count/total_state_entries*100:.2f}%)")
         else:
             print("  (No edges)")
 
@@ -858,33 +690,12 @@ class Model(GraphProvider):
         if oracle_counters is not None:
             local_ctr = oracle_counters.setdefault(int(node_id), {"edges": 0, "apply": 0, "isolate": 0})
 
-        edge_iterator = None
-        ordered_indices = edge_order_override_map.get(node_id) if edge_order_override_map else None
-        if ordered_indices:
-            # Oracle-guided order. We still need to iterate non-guided edges if any.
-            all_indices = set(range(len(a_node.children)))
-            other_indices = sorted(list(all_indices - set(ordered_indices)))
-            edge_iterator = ((i, a_node.children[i]) for i in ordered_indices + other_indices)
-        else:
-            edge_iterator = enumerate(a_node.children)
-        for edge_i, edge in edge_iterator:
-            if edge.pop in skip_pops:
-                continue
-            if edge.llm_bv.isdisjoint(active_remaining_mask):
-                stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
-                continue
-            if edge.llm_bv.isdisjoint(gss_mask):
-                stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
-                continue
-            if edge.pop == 0:
-                if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                if edge.dest_states_union.isdisjoint(peek0_rs):
-                    stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
-                    continue
+        # TODO: Oracle guidance for pop order
+        for pop, state_map in a_node.children.items():
+            if pop in skip_pops: continue
 
-            stats.inc('get_mask.traversal.edges_traversed')
-            stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
-            if oracle_counters is not None and local_ctr is not None: local_ctr["edges"] += 1
+            if pop == 0 and peek0_rs is None:
+                peek0_rs = RangeSetStates.from_indices(gss_node.peek())
 
             if edge.pop in pop_cache:
                 popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
@@ -927,7 +738,7 @@ class Model(GraphProvider):
 
             # One-time per-pop bucket pruning: states and llm masks
             if edge.pop not in checked_pops:
-                checked_pops.add(edge.pop)
+                checked_pops.add(pop)
                 pop_states_union = a_node.pop_to_state_union.get(edge.pop)
                 if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
                     stats.inc('get_mask.main_loop.bucket_pruned_state')
@@ -942,10 +753,26 @@ class Model(GraphProvider):
                     skip_pops.add(edge.pop)
                     continue
 
-            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
-                if popped_acc: stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
-                continue
+            active_states_keys = RangeSetStates.from_indices(list(state_map.keys()))
+            active_states = peek_rs.intersection(active_states_keys)
+            if active_states.is_empty(): continue
 
+            # Group by (dest_id, llm_bv_tuple) -> list of states
+            transitions: Dict[Tuple, List[int]] = collections.defaultdict(list)
+            for state_id in active_states.iter_indices():
+                for dest_id, llm_bv_tuple in state_map[state_id]:
+                    transitions[(dest_id, llm_bv_tuple)].append(state_id)
+            
+            if not transitions: continue
+
+            # TODO: Oracle guidance to reorder transitions.items()
+
+            for (dest_id, llm_bv_tuple), states in transitions.items():
+                llm_bv, llm_bv_not = llm_bv_tuple
+                
+                if llm_bv.isdisjoint(active_remaining_mask): continue
+                if popped_acc and llm_bv.isdisjoint(popped_acc.llm_mask): continue
+            
             # Apply-and-prune caching across edges sharing the same llm_bv
             source_after_apply = popped
             if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
@@ -974,58 +801,30 @@ class Model(GraphProvider):
                     source_after_apply = tmp
                     local_apply_cache[key_apply] = tmp
             if not peeked: continue
-
-            grouped: Dict[int, List[int]] = {}
-            m = edge.state_to_dest
-            for sid in peeked:
-                dest_list = m.get(sid)
-                if not dest_list: continue
-                for dest_j in dest_list:
-                    lst = grouped.get(dest_j)
-                    if lst is None: grouped[dest_j] = [sid]
-                    else: lst.append(sid)
-
-            dest_keys = list(grouped.keys())
-            if dest_scores:
-                # Sort by destination node score (desc), then by original index (asc) for stability
-                dest_keys.sort(key=lambda j: (-dest_scores.get(int(edge.dests[j].dest_idx), 0), j))
+            
+            # Global/local cache for isolate_many
+            key_isolate = (id(source_after_apply), tuple(states))
+            if isolate_cache is not None and key_isolate in isolate_cache:
+                stats.inc('get_mask.isolate_many.cache_hits')
+                child_gss = isolate_cache[key_isolate]
             else:
-                # Iterate grouped dests in ascending order for locality
-                dest_keys.sort()
-            for dest_j in dest_keys:
-                if dests_proc >= max_dests:
-                    priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                    yield Suspend(priority, depth)
-                    dests_proc = 0
-                dest = edge.dests[dest_j]
-                values_to_keep = grouped[dest_j]
-                # If all heads survive, reuse popped directly
-                if len(values_to_keep) == len(peeked):
-                    child_gss = source_after_apply
-                else:
-                    # Global/local cache for isolate_many
-                    key_isolate = (id(source_after_apply), tuple(values_to_keep))
-                    if isolate_cache is not None and key_isolate in isolate_cache:
-                        stats.inc('get_mask.isolate_many.cache_hits')
-                        child_gss = isolate_cache[key_isolate]
-                    else:
-                        stats.start('get_mask.main_loop.edge.isolate_many')
-                        _t0 = _perf_now()
-                        child_gss = source_after_apply.isolate_many(values_to_keep)
-                        _t1 = _perf_now()
-                        stats.stop('get_mask.main_loop.edge.isolate_many')
-                        if oracle_counters is not None and local_ctr is not None: local_ctr["isolate"] += 1
-                        if oracle_counters is not None and local_ctr is not None:
-                            local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
-                            local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
-                        if isolate_cache is not None:
-                            isolate_cache[key_isolate] = child_gss
-                if child_gss.is_empty(): continue
-                d: NodeID = int(dest.dest_idx)
-                yield Enqueue(d, child_gss, depth + 1)
-                dests_proc += 1
+                stats.start('get_mask.main_loop.edge.isolate_many')
+                _t0 = _perf_now()
+                child_gss = source_after_apply.isolate_many(states)
+                _t1 = _perf_now()
+                stats.stop('get_mask.main_loop.edge.isolate_many')
+                if oracle_counters is not None and local_ctr is not None: local_ctr["isolate"] += 1
                 if oracle_counters is not None and local_ctr is not None:
-                    local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+                    local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+                    local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+                if isolate_cache is not None:
+                    isolate_cache[key_isolate] = child_gss
+            if child_gss.is_empty(): continue
+            d: NodeID = int(dest_id)
+            yield Enqueue(d, child_gss, depth + 1)
+            dests_proc += 1
+            if oracle_counters is not None and local_ctr is not None:
+                local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
             if edges_proc >= max_edges:
                 # Suspend work after a batch to allow priority reordering at the heap level
@@ -1042,9 +841,10 @@ class Model(GraphProvider):
             return self.reverse_adj
         parents: Dict[int, Set[int]] = collections.defaultdict(set)
         for u, node in self.arena.items():
-            for edge in node.children:
-                for dest in edge.dests:
-                    parents[int(dest.dest_idx)].add(int(u))
+            for state_map in node.children.values():
+                for dest_list in state_map.values():
+                    for dest_id, _ in dest_list:
+                        parents[int(dest_id)].add(int(u))
         self.reverse_adj = dict(parents)
         return self.reverse_adj
 
@@ -1075,15 +875,12 @@ class Model(GraphProvider):
                 if not node.children:
                     continue
                 accum = RangeSet.empty()
-                for edge in node.children:
-                    # Union of reward at all children along this edge
-                    child_union = RangeSet.empty()
-                    for d in edge.dests:
-                        cm = reward.get(int(d.dest_idx))
-                        if cm is not None and not cm.is_empty():
-                            child_union |= cm
-                    if not child_union.is_empty():
-                        thru = child_union.intersection(edge.llm_bv)
+                for state_map in node.children.values():
+                    for dest_list in state_map.values():
+                        for dest_id, (llm_bv, _) in dest_list:
+                            child_reward = reward.get(int(dest_id))
+                            if child_reward and not child_reward.is_empty():
+                                thru = child_reward.intersection(llm_bv)
                         if not thru.is_empty():
                             accum |= thru
                 if accum.is_empty():
@@ -1132,15 +929,12 @@ class Model(GraphProvider):
             if not node.children:
                 continue
             weighted: List[Tuple[int, int]] = []
-            for idx, edge in enumerate(node.children):
-                s = 0
-                for d in edge.dests:
-                    cm = reward_masks.get(int(d.dest_idx))
-                    if cm is not None and not cm.is_empty():
-                        s += int(len(cm.intersection(target_mask)))
-                if jitter > 0 and s > 0:
-                    s += random.randint(0, int(jitter))
-                weighted.append((idx, s))
+            # This logic needs a complete rethink as "edge index" is gone.
+            # For now, we cannot do edge ordering this way.
+            # The node scores (dest_scores) will still guide the heap.
+            # A proper implementation would score each (pop, state, dest, llm_bv) transition.
+            # This is a placeholder for a much more complex implementation.
+            pass
             if any(w > 0 for _, w in weighted):
                 weighted.sort(key=lambda t: t[1], reverse=True)
                 edge_order_map[int(u)] = [idx for (idx, _) in weighted]
@@ -1167,16 +961,14 @@ class Model(GraphProvider):
                 if not node.children:
                     continue
                 accum = RangeSet.empty()
-                for edge in node.children:
-                    child_union = RangeSet.empty()
-                    for d in edge.dests:
-                        cm = reward.get(int(d.dest_idx))
-                        if cm is not None and not cm.is_empty():
-                            child_union |= cm
-                    if not child_union.is_empty():
-                        thru = child_union.intersection(edge.llm_bv)
-                        if not thru.is_empty():
-                            accum |= thru
+                for state_map in node.children.values():
+                    for dest_list in state_map.values():
+                        for dest_id, (llm_bv, _) in dest_list:
+                            child_reward = reward.get(int(dest_id))
+                            if child_reward and not child_reward.is_empty():
+                                thru = child_reward.intersection(llm_bv)
+                                if not thru.is_empty():
+                                    accum |= thru
                 if accum.is_empty():
                     continue
                 prev = reward.get(int(u))
@@ -1336,14 +1128,12 @@ class Model(GraphProvider):
             if not node or not node.children:
                 continue
             # Compute deterministic edge weights from child rewards
-            base_weights: List[Tuple[int, int]] = []
-            for idx, edge in enumerate(node.children):
-                s = 0
-                for d in edge.dests:
-                    cm = reward_masks.get(int(d.dest_idx))
-                    if cm is not None and not cm.is_empty():
-                        s += int(len(cm.intersection(target_mask)))
-                base_weights.append((idx, s))
+            # This needs to be adapted. The concept of an edge index is gone.
+            # We would need to score individual transitions, which is a much larger change.
+            # For now, this feature will be disabled with the new structure.
+            base_weights: List[Tuple[Any, int]] = []
+
+
             if not any(w > 0 for (_, w) in base_weights):
                 # Nothing to bias on; skip
                 continue
@@ -1500,11 +1290,8 @@ class Model(GraphProvider):
             if not node.children:
                 continue
             edge_scores: List[Tuple[int, int]] = []
-            for idx, edge in enumerate(node.children):
-                s = 0
-                for d in edge.dests:
-                    s += int(scores.get(int(d.dest_idx), 0))
-                edge_scores.append((idx, s))
+            # This logic is disabled as "edge index" is no longer applicable.
+            # Node scores will still guide heap priority.
             if any(s > 0 for (_, s) in edge_scores):
                 ordered = sorted(edge_scores, key=lambda t: t[1], reverse=True)
                 edge_order_map[int(u)] = [idx for (idx, _) in ordered]
@@ -1541,7 +1328,7 @@ class Model(GraphProvider):
         for i, item in enumerate(ranked[:max(1, int(top_k))], start=1):
             score, nid, edges, apply_calls, isolate_calls, popn_calls, dests, total_ms = item
             md = self.max_depth.get(int(nid), 0)
-            ch = len(self.arena.get(int(nid), ArenaNode()).children) if int(nid) in self.arena else 0
+            ch = sum(len(sm) for sm in self.arena[int(nid)].children.values()) if int(nid) in self.arena else 0
             print(f"  {i:2d}) node={nid} depth={md} children={ch} score={score:.2f} total_ms={total_ms:.3f} "
                   f"| edges={edges} apply={apply_calls} isolate={isolate_calls} popn_calls={popn_calls} dests={dests}")
         print()
@@ -1554,10 +1341,7 @@ class Model(GraphProvider):
         if not node:
             return 1.0
         # Cheap fallback: edges + 0.25 * total dest count + 1
-        total_dests = 0
-        for e in node.children:
-            total_dests += len(e.dests)
-        return 1.0 + float(len(node.children)) + 0.25 * float(total_dests)
+        return 1.0 + float(sum(len(dl) for sm in node.children.values() for dl in sm.values()))
 
     def _compute_oracle_min_cover(self, end_union_events: List[Tuple[int, LLMTokenSet]]) -> List[int]:
         """Given a list of (end_node_id, delta_mask) events collected from a full planning run,
@@ -1697,11 +1481,7 @@ class Model(GraphProvider):
             if not node.children:
                 continue
             edge_scores: List[Tuple[int, int]] = []
-            for idx, edge in enumerate(node.children):
-                s = 0
-                for d in edge.dests:
-                    s += int(scores.get(int(d.dest_idx), 0))
-                edge_scores.append((idx, s))
+            # Edge ordering is disabled with the new structure.
             # If all scores zero, skip ordering for that node
             if any(s > 0 for (_, s) in edge_scores):
                 ordered = sorted(edge_scores, key=lambda t: t[1], reverse=True)
