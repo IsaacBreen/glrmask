@@ -230,7 +230,7 @@ class ArenaNode:
     pop_to_state_union: Dict[int, StateIDSet] = field(default_factory=dict)
     pop_to_llm_union: Dict[int, LLMTokenSet] = field(default_factory=dict)
     # New: per-state adjacency (pop -> state_id -> dest_node_id -> (llm_bv, llm_bv_not))
-    fast_children: Dict[int, Dict[int, Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet]]]]] = field(default_factory=dict)
+    fast_children: Dict[int, Dict[int, Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet], LLMTokenSet]]]] = field(default_factory=dict)
 
 def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
@@ -487,16 +487,16 @@ class Model(GraphProvider):
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
             state={tokenizer.initial_state_id(): initial_gss},
         )
+        model._compute_descendant_llm_closure()
+        model._shrink_edges_by_descendant()
         model._compute_edge_accelerators()
         # New: per-pop unions and descendant closures for stronger pruning
         model._compute_bucket_unions()
-        model._compute_descendant_llm_closure()
         # Build the per-state adjacency (pop -> state -> dest -> (llm_bv, llm_bv_not))
         model._build_fast_children()
         model.optimize_traversal()
         model._compute_and_print_stats()
         return model
-
     def _compute_edge_accelerators(self) -> None:
         all_ones = self.all_internal_llm_tokens_bitset
         for node in self.arena.values():
@@ -552,9 +552,38 @@ class Model(GraphProvider):
                     node.llm_bv_descendant = updated
                     changed = True
 
+    def _shrink_edges_by_descendant(self) -> None:
+        """
+        For each edge (u -> V) with mask L, restrict L to L ∩ (⋃_{v in V} D[v]),
+        where D[v] is the descendant closure of node v. Drop edges whose mask becomes empty.
+        Recompute each node's llm_bv_union accordingly.
+        Correctness: no token outside the union of child descendant closures can ever reach an end via this edge.
+        """
+        for u, node in self.arena.items():
+            if not node.children:
+                node.llm_bv_union = RangeSet.empty()
+                continue
+            new_children = []
+            llm_union = RangeSet.empty()
+            for edge in node.children:
+                child_union = RangeSet.empty()
+                for d in edge.dests:
+                    child_union |= self.arena[int(d.dest_idx)].llm_bv_descendant
+                shrunk = edge.llm_bv.intersection(child_union)
+                if shrunk.is_empty():
+                    # drop edge
+                    continue
+                # keep edge with shrunk mask
+                edge.llm_bv = shrunk
+                new_children.append(edge)
+                llm_union |= shrunk
+            node.children = new_children
+            node.llm_bv_union = llm_union
+
     def _build_fast_children(self) -> None:
-        """Build pop -> state_id -> dest -> (llm_bv, llm_bv_not) for each node by coalescing edges.
-        For a fixed (pop, state_id, dest), llm_bv is the union over all edges whose dest.state_bv contains state_id."""
+        """Build pop -> state_id -> dest -> (llm_bv, llm_bv_not, llm_bv_thru_desc) for each node by coalescing edges.
+        For a fixed (pop, state_id, dest), llm_bv is the union over all edges whose dest.state_bv contains state_id.
+        llm_bv_thru_desc is that union intersected with the destination's descendant closure."""
         all_ones = self.all_internal_llm_tokens_bitset
         for node in self.arena.values():
             if not node.children:
@@ -576,14 +605,20 @@ class Model(GraphProvider):
                         else:
                             state_map[int(dest.dest_idx)] = prev.union(edge.llm_bv)
 
-            # Finalize into (llm_bv, llm_bv_not)
-            final_children: Dict[int, Dict[int, Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet]]]]] = {}
+            # Finalize into (llm_bv, llm_bv_not, llm_bv_thru_desc)
+            final_children: Dict[int, Dict[int, Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet], LLMTokenSet]]]] = {}
             for pop, smap in mapping_by_pop.items():
-                per_state: Dict[int, Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet]]]] = {}
+                per_state: Dict[int, Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet], LLMTokenSet]]] = {}
                 for sid, dmap in smap.items():
-                    per_dest: Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet]]] = {}
+                    per_dest: Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet], LLMTokenSet]] = {}
                     for dest_id, llm_bv in dmap.items():
-                        per_dest[int(dest_id)] = (llm_bv, all_ones.difference(llm_bv))
+                        child_desc = self.arena[int(dest_id)].llm_bv_descendant
+                        llm_thru = llm_bv.intersection(child_desc)
+                        if not llm_thru.is_empty():
+                            per_dest[int(dest_id)] = (llm_bv, all_ones.difference(llm_bv), llm_thru)
+                        else:
+                            # If no token can reach an end via this (state,dest) through the current llm_bv, skip
+                            continue
                     per_state[int(sid)] = per_dest
                 final_children[int(pop)] = per_state
 
@@ -883,13 +918,15 @@ class Model(GraphProvider):
         if not a_node:
             return
 
+        peek0 = gss_node.peek()
+        peek0_rs = RangeSetStates.from_indices(peek0) if peek0 else RangeSetStates.empty()
+
         # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
         # Strengthen remaining-mask with node-specific allowance (oracle reward) when provided.
         active_remaining_mask = remaining_mask if node_allowed_mask is None else remaining_mask.intersection(node_allowed_mask)
 
         max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
         edges_proc, dests_proc = 0, 0
-        peek0_rs = None
         pop_cache: Dict[int, Tuple[Any, Any, List[int], StateIDSet]] = {}
         skip_pops: Set[int] = set()
         checked_pops: Set[int] = set()
@@ -916,35 +953,40 @@ class Model(GraphProvider):
                     popped, popped_acc, peeked, peek_rs = pop_cache[pop_val]
                     stats.inc('get_mask.main_loop.edge.pop_cache_hits')
                 else:
-                    popped = None
-                    if global_pop_cache is not None:
-                        key = (id(gss_node), pop_val)
-                        cached = global_pop_cache.get(key)
-                        if cached is not None:
-                            popped, popped_acc, peeked, peek_rs = cached
-                            pop_cache[pop_val] = cached
-                            stats.inc('get_mask.global_pop_cache_hits')
-                    if popped is None:
-                        if pop_val == 0:
-                            stats.inc('get_mask.main_loop.edge.popn n==0')
-                        stats.start('get_mask.main_loop.edge.popn')
-                        popped = gss_node.popn(pop_val)
-                        stats.stop('get_mask.main_loop.edge.popn')
-                    if popped.is_empty():
-                        stats.inc('get_mask.traversal.edge.popped_empty')
-                        pop_cache[pop_val] = (popped, None, [], RangeSetStates.empty())
-                        continue
-                    stats.start('get_mask.main_loop.edge.popped.reduce_acc')
-                    popped_acc = popped.reduce_acc()
-                    stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
-                    if not popped_acc or popped_acc.llm_mask.is_empty():
-                        pop_cache[pop_val] = (GSS.empty(), None, [], RangeSetStates.empty())
-                        continue
-                    peeked = popped.peek()
-                    peek_rs = RangeSetStates.from_indices(peeked)
-                    pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
-                    if global_pop_cache is not None:
-                        global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
+                    if pop_val == 0:
+                        popped = gss_node
+                        popped_acc = types.SimpleNamespace(llm_mask=gss_mask)  # reuse caller’s gss_mask
+                        peeked = peek0
+                        peek_rs = peek0_rs
+                        pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
+                    else:
+                        popped = None
+                        if global_pop_cache is not None:
+                            key = (id(gss_node), pop_val)
+                            cached = global_pop_cache.get(key)
+                            if cached is not None:
+                                popped, popped_acc, peeked, peek_rs = cached
+                                pop_cache[pop_val] = cached
+                                stats.inc('get_mask.global_pop_cache_hits')
+                        if popped is None:
+                            stats.start('get_mask.main_loop.edge.popn')
+                            popped = gss_node.popn(pop_val)
+                            stats.stop('get_mask.main_loop.edge.popn')
+                        if popped.is_empty():
+                            stats.inc('get_mask.traversal.edge.popped_empty')
+                            pop_cache[pop_val] = (popped, None, [], RangeSetStates.empty())
+                            continue
+                        stats.start('get_mask.main_loop.edge.popped.reduce_acc')
+                        popped_acc = popped.reduce_acc()
+                        stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
+                        if not popped_acc or popped_acc.llm_mask.is_empty():
+                            pop_cache[pop_val] = (GSS.empty(), None, [], RangeSetStates.empty())
+                            continue
+                        peeked = popped.peek()
+                        peek_rs = RangeSetStates.from_indices(peeked)
+                        pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
+                        if global_pop_cache is not None:
+                            global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
 
                 # Per-pop bucket pruning
                 if pop_val not in checked_pops:
@@ -969,17 +1011,16 @@ class Model(GraphProvider):
                     per_state_map = mapping_for_pop.get(int(sid), {})
                     if not per_state_map:
                         continue
-                    for dest_id, (llm_bv, llm_bv_not) in per_state_map.items():
-                        # Token-scope prune before growing the group
-                        if llm_bv.isdisjoint(active_remaining_mask):
+                    for dest_id, triple in per_state_map.items():
+                        llm_bv, llm_bv_not, llm_bv_thru = triple
+                        # Strong gating: if no token can reach an end via this (dest) with current masks, skip
+                        if llm_bv_thru.isdisjoint(active_remaining_mask) or popped_acc.llm_mask.isdisjoint(llm_bv_thru):
+                            stats.inc('get_mask.main_loop.edge.descendant_pruned')
                             continue
-                        # Also prune against current popped GSS mask
-                        if popped_acc.llm_mask.isdisjoint(llm_bv):
-                            continue
-                        key = (int(dest_id), id(llm_bv))
+                        key = (int(dest_id), id(llm_bv_thru))
                         entry = groups.get(key)
                         if entry is None:
-                            groups[key] = {"llm_bv": llm_bv, "llm_bv_not": llm_bv_not, "states": [int(sid)]}
+                            groups[key] = {"llm_bv": llm_bv_thru, "llm_bv_not": None, "states": [int(sid)]}
                         else:
                             entry["states"].append(int(sid))
 
@@ -1001,32 +1042,32 @@ class Model(GraphProvider):
 
                     # Apply-and-prune cache per (popped, llm_bv)
                     source_after_apply = popped
-                    if not (llm_bv_not and popped_acc.llm_mask.isdisjoint(llm_bv_not)):
-                        if popped_acc.llm_mask.isdisjoint(llm_bv):
+                    # Always use the descendant-aware llm_bv
+                    if popped_acc.llm_mask.isdisjoint(llm_bv):
+                        continue
+                    key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
+                    cached_apply = local_apply_cache.get(key_apply)
+                    if cached_apply is not None:
+                        source_after_apply = cached_apply
+                        stats.inc('get_mask.apply.cache_hits')
+                    else:
+                        @_acc_memoize(use_value_cache=False)
+                        def intersect(acc: PyAcc):
+                            new_mask = acc.llm_mask.intersection(llm_bv)
+                            return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                        if oracle_counters is not None and local_ctr is not None:
+                            local_ctr["apply"] = local_ctr.get("apply", 0) + 1
+                        stats.start('get_mask.main_loop.edge.apply_and_prune')
+                        _t0 = _perf_now()
+                        tmp = popped.apply_and_prune(intersect)
+                        _t1 = _perf_now()
+                        stats.stop('get_mask.main_loop.edge.apply_and_prune')
+                        if oracle_counters is not None and local_ctr is not None:
+                            local_ctr["apply_time_ms"] = local_ctr.get("apply_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+                        if tmp.is_empty():
                             continue
-                        key_apply = (id(popped), llm_bv_id)
-                        cached_apply = local_apply_cache.get(key_apply)
-                        if cached_apply is not None:
-                            source_after_apply = cached_apply
-                            stats.inc('get_mask.apply.cache_hits')
-                        else:
-                            @_acc_memoize(use_value_cache=False)
-                            def intersect(acc: PyAcc):
-                                new_mask = acc.llm_mask.intersection(llm_bv)
-                                return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                            if oracle_counters is not None and local_ctr is not None:
-                                local_ctr["apply"] = local_ctr.get("apply", 0) + 1
-                            stats.start('get_mask.main_loop.edge.apply_and_prune')
-                            _t0 = _perf_now()
-                            tmp = popped.apply_and_prune(intersect)
-                            _t1 = _perf_now()
-                            stats.stop('get_mask.main_loop.edge.apply_and_prune')
-                            if oracle_counters is not None and local_ctr is not None:
-                                local_ctr["apply_time_ms"] = local_ctr.get("apply_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
-                            if tmp.is_empty():
-                                continue
-                            source_after_apply = tmp
-                            local_apply_cache[key_apply] = tmp
+                        source_after_apply = tmp
+                        local_apply_cache[key_apply] = tmp
 
                     # Count this "edge-equivalent" group for stats
                     stats.inc('get_mask.traversal.edges_traversed')
@@ -1096,11 +1137,6 @@ class Model(GraphProvider):
                 if edge.llm_bv.isdisjoint(gss_mask):
                     stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
                     continue
-                if edge.pop == 0:
-                    if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                    if edge.dest_states_union.isdisjoint(peek0_rs):
-                        stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
-                        continue
 
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
@@ -1110,40 +1146,46 @@ class Model(GraphProvider):
                     popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
                     stats.inc('get_mask.main_loop.edge.pop_cache_hits')
                 else:
-                    # Try global cache first
-                    popped = None
-                    if global_pop_cache is not None:
-                        key = (id(gss_node), edge.pop)
-                        cached = global_pop_cache.get(key)
-                        if cached is not None:
-                            popped, popped_acc, peeked, peek_rs = cached
-                            pop_cache[edge.pop] = cached
-                            stats.inc('get_mask.global_pop_cache_hits')
-                    if popped is None:
-                        stats.start('get_mask.main_loop.edge.popn')
-                        _t0 = _perf_now()
-                        popped = gss_node.popn(edge.pop)
-                        _t1 = _perf_now()
-                        stats.stop('get_mask.main_loop.edge.popn')
-                        if oracle_counters is not None and local_ctr is not None:
-                            local_ctr["popn_calls"] = local_ctr.get("popn_calls", 0) + 1
-                            local_ctr["popn_time_ms"] = local_ctr.get("popn_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
-                    if popped.is_empty():
-                        stats.inc('get_mask.traversal.edge.popped_empty')
-                        pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
-                        continue
-                    stats.start('get_mask.main_loop.edge.popped.reduce_acc')
-                    popped_acc = popped.reduce_acc()
-                    stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
-                    if not popped_acc or popped_acc.llm_mask.is_empty():
-                        pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
-                        continue
-                    # Avoid double-peek: call once and reuse both list and RangeSetStates
-                    peeked = popped.peek()
-                    peek_rs = RangeSetStates.from_indices(peeked)
-                    pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
-                    if global_pop_cache is not None:
-                        global_pop_cache[(id(gss_node), edge.pop)] = (popped, popped_acc, peeked, peek_rs)
+                    if edge.pop == 0:
+                        popped = gss_node
+                        popped_acc = types.SimpleNamespace(llm_mask=gss_mask)
+                        peeked = peek0
+                        peek_rs = peek0_rs
+                        pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                    else:
+                        # Try global cache first
+                        popped = None
+                        if global_pop_cache is not None:
+                            key = (id(gss_node), edge.pop)
+                            cached = global_pop_cache.get(key)
+                            if cached is not None:
+                                popped, popped_acc, peeked, peek_rs = cached
+                                pop_cache[edge.pop] = cached
+                                stats.inc('get_mask.global_pop_cache_hits')
+                        if popped is None:
+                            stats.start('get_mask.main_loop.edge.popn')
+                            _t0 = _perf_now()
+                            popped = gss_node.popn(edge.pop)
+                            _t1 = _perf_now()
+                            stats.stop('get_mask.main_loop.edge.popn')
+                            if oracle_counters is not None and local_ctr is not None:
+                                local_ctr["popn_calls"] = local_ctr.get("popn_calls", 0) + 1
+                                local_ctr["popn_time_ms"] = local_ctr.get("popn_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+                        if popped.is_empty():
+                            stats.inc('get_mask.traversal.edge.popped_empty')
+                            pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+                            continue
+                        stats.start('get_mask.main_loop.edge.popped.reduce_acc')
+                        popped_acc = popped.reduce_acc()
+                        stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
+                        if not popped_acc or popped_acc.llm_mask.is_empty():
+                            pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                            continue
+                        peeked = popped.peek()
+                        peek_rs = RangeSetStates.from_indices(peeked)
+                        pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                        if global_pop_cache is not None:
+                            global_pop_cache[(id(gss_node), edge.pop)] = (popped, popped_acc, peeked, peek_rs)
 
                 # One-time per-pop bucket pruning: states and llm masks
                 if edge.pop not in checked_pops:
