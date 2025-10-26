@@ -416,6 +416,7 @@ class Model(GraphProvider):
     oracle_permute_top_ends: int = 8
     # Pre-computed static costs for oracle mode
     static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
+    oracle_use_astar: bool = False
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -2246,6 +2247,123 @@ class Model(GraphProvider):
         # Negative for min-heap; depth tiebreaker to encourage shallower early
         return (-float(gain) / max(1.0, float(cost)), -int(gain), -int(gs), -int(self.max_depth.get(node_id_i, 0)), int(depth))
 
+    def _expand_one_node(self, node_id: int, gss: GSS, remaining_mask: LLMTokenSet, global_pop_cache: Dict, apply_cache: Dict, isolate_cache: Dict) -> Tuple[Set[Tuple[int, GSS]], int, LLMTokenSet]:
+        """Helper for A* search. Expands one (node, gss) work item."""
+        gss_acc = gss.reduce_acc()
+        if not gss_acc:
+            return set(), 0, RangeSet.empty()
+
+        counters = {}
+        gen = self._process_internal_node_gen(
+            node_id, gss, remaining_mask, gss_acc.llm_mask, 0,
+            global_pop_cache=global_pop_cache,
+            apply_cache=apply_cache,
+            isolate_cache=isolate_cache,
+            oracle_counters=counters
+        )
+
+        new_work_items: Set[Tuple[int, GSS]] = set()
+        next_send = remaining_mask
+        while True:
+            try:
+                yielded = gen.send(next_send)
+                if isinstance(yielded, Enqueue):
+                    new_work_items.add((yielded.node_id, yielded.gss))
+            except StopIteration:
+                break
+
+        node_counters = counters.get(int(node_id), {})
+        edges_traversed = node_counters.get("edges", 0)
+
+        mask_contribution = RangeSet.empty()
+        if self.is_end(node_id):
+            mask_contribution = gss_acc.llm_mask
+
+        return new_work_items, edges_traversed, mask_contribution
+
+    def _oracle_plan_with_astar(self) -> Tuple[List[Tuple[int, GSS]], int]:
+        """
+        Finds the optimal plan (sequence of node expansions) using A* search.
+        The cost is the number of edge traversals.
+        Returns the plan (sequence of (node_id, gss) expanded) and the optimal cost.
+        """
+        print("[oracle] Starting A* search for optimal plan...")
+        all_ones = self.all_internal_llm_tokens_bitset
+
+        @_acc_memoize(use_value_cache=False)
+        def initialize_acc(acc: PyAcc) -> PyAcc:
+            disallowed = RangeSet.empty()
+            for tsid, terms in acc.terminals_union.items():
+                if tsid in self.possible_matches_cache:
+                    term_map = self.possible_matches_cache[tsid]
+                    for term_id in terms.iter_indices():
+                        if term_id in term_map: disallowed |= term_map[term_id]
+            return PyAcc({}, all_ones.difference(disallowed))
+
+        init_cache = {}
+        initial_work_items = set()
+        for sid, gss in self.state.items():
+            r = self.roots_map[int(sid)]
+            gss_init = gss.apply(initialize_acc, init_cache)
+            if not gss_init.is_empty():
+                initial_work_items.add((r, gss_init))
+
+        frontier_cache, apply_cache_ft, isolate_cache_ft = {}, {}, {}
+        target_mask = RangeSet.empty()
+        for node_id, gss in initial_work_items:
+            target_mask |= self._compute_exact_frontier(node_id, gss, frontier_cache, apply_cache_ft, isolate_cache_ft)
+
+        if target_mask.is_empty():
+            print("[oracle] A*: Target mask is empty. Nothing to do.")
+            return [], 0
+
+        initial_state = (RangeSet.empty(), frozenset(initial_work_items))
+        def heuristic(state):
+            mask, _ = state
+            return 0 if mask.issuperset(target_mask) else 1
+
+        open_set = []
+        g_scores = {initial_state: 0}
+        came_from = {}
+        heapq.heappush(open_set, (heuristic(initial_state), 0, initial_state))
+        pop_cache, apply_cache, isolate_cache = {}, {}, {}
+        visited_states = 0
+
+        while open_set:
+            _, g_score, current_state = heapq.heappop(open_set)
+            visited_states += 1
+            if visited_states % 100 == 0:
+                print(f"[oracle] A*: Visited {visited_states} states, queue size {len(open_set)}...")
+
+            current_mask, current_work_items = current_state
+            if current_mask.issuperset(target_mask):
+                print(f"[oracle] A*: Goal reached with cost {g_score}. Visited {visited_states} states.")
+                path = []
+                curr = current_state
+                while curr in came_from:
+                    prev, expanded_item = came_from[curr]
+                    path.append(expanded_item)
+                    curr = prev
+                path.reverse()
+                return path, g_score
+
+            for work_item in current_work_items:
+                node_id, gss = work_item
+                remaining_mask = target_mask.difference(current_mask)
+                new_items, edges, mask_contrib = self._expand_one_node(node_id, gss, remaining_mask, pop_cache, apply_cache, isolate_cache)
+                neighbor_mask = current_mask.union(mask_contrib)
+                neighbor_work_items = (current_work_items - {work_item}).union(new_items)
+                neighbor_state = (neighbor_mask, frozenset(neighbor_work_items))
+                tentative_g_score = g_score + edges
+                if tentative_g_score < g_scores.get(neighbor_state, float('inf')):
+                    came_from[neighbor_state] = (current_state, work_item)
+                    g_scores[neighbor_state] = tentative_g_score
+                    f_score = tentative_g_score + heuristic(neighbor_state)
+                    heapq.heappush(open_set, (f_score, tentative_g_score, neighbor_state))
+
+        print("[oracle] A*: Search finished without finding a solution.")
+        return [], -1
+
     def _get_mask_run(
         self,
         guided_scores: Optional[Dict[int, int]] = None,
@@ -2539,6 +2657,38 @@ class Model(GraphProvider):
         # Oracle wrapper: plan, then guided run
         if not self.oracle_mode:
             out, _ = self._get_mask_run(guided_scores=None, edge_order_map=None, record_end_unions=False)
+            return out
+
+        if getattr(self, 'oracle_use_astar', False):
+            optimal_path, optimal_cost = self._oracle_plan_with_astar()
+            if optimal_cost == -1:
+                print("[oracle] A* failed to find a plan, running unguided.")
+                out, _ = self._get_mask_run()
+                return out
+
+            print(f"[oracle] A* optimal plan found with {optimal_cost} edges. Path length: {len(optimal_path)} node expansions.")
+
+            # Convert path to guidance. The sequence of expansions is the priority.
+            guided_scores = {node_id: len(optimal_path) - i for i, (node_id, gss) in enumerate(optimal_path)}
+
+            edge_order_map: Dict[int, List[int]] = {}
+            for u, node in self.arena.items():
+                if not node.children:
+                    continue
+                edge_scores: List[Tuple[int, int]] = []
+                for idx, edge in enumerate(node.children):
+                    s = 0
+                    for d in edge.dests:
+                        s += int(guided_scores.get(int(d.dest_idx), 0))
+                    edge_scores.append((idx, s))
+                if any(s > 0 for (_, s) in edge_scores):
+                    ordered = sorted(edge_scores, key=lambda t: t[1], reverse=True)
+                    edge_order_map[int(u)] = [idx for (idx, _) in ordered]
+
+            # Final guided run
+            Stats.get().reset()
+            out, _ = self._get_mask_run(guided_scores=guided_scores, edge_order_map=edge_order_map, record_end_unions=False)
+            print(f"[oracle] A* guided run executed {self.last_get_mask_cost} edges (optimal was {optimal_cost}).")
             return out
 
         # Trivial seed heuristic: single tokenizer state and single LR head -> skip planning
