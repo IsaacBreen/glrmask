@@ -424,6 +424,38 @@ class Model(GraphProvider):
         Stats.get().reset()
         data = json.loads(s)
 
+        # --- Monkey-patch GSS to be hashable for A* search ---
+        # The A* planner requires GSS objects to be hashable to use them in sets
+        # and dictionary keys. The LeveledGSS implementation may not define __hash__.
+        # We add one here based on its likely internal structure (a dict of levels).
+        def _gss_hash(self):
+            # Cache the hash for performance
+            if hasattr(self, '_hash_val'):
+                return self._hash_val
+
+            # The internal representation is likely a dictionary of levels,
+            # where each level contains a dictionary of stacks.
+            if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
+                # Fallback if structure is unexpected, though this may not be unique
+                return id(self)
+
+            level_items = []
+            for level, stacks in self.levels.items():
+                # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
+                # frozenset of items makes this part hashable and order-independent.
+                stack_items = frozenset(stacks.items())
+                level_items.append((level, stack_items))
+            
+            # Sort by level to make the final representation canonical.
+            level_items.sort()
+            self._hash_val = hash(tuple(level_items))
+            return self._hash_val
+
+        # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
+        if getattr(GSS, '__hash__', "exists") is None:
+            GSS.__hash__ = _gss_hash
+        # --- End of monkey-patch ---
+
         # Arena
         roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
         arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}

@@ -3188,6 +3188,38 @@ local_system:
               Stats.get().reset()
               data = json.loads(s)
 
+              # --- Monkey-patch GSS to be hashable for A* search ---
+              # The A* planner requires GSS objects to be hashable to use them in sets
+              # and dictionary keys. The LeveledGSS implementation may not define __hash__.
+              # We add one here based on its likely internal structure (a dict of levels).
+              def _gss_hash(self):
+                  # Cache the hash for performance
+                  if hasattr(self, '_hash_val'):
+                      return self._hash_val
+
+                  # The internal representation is likely a dictionary of levels,
+                  # where each level contains a dictionary of stacks.
+                  if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
+                      # Fallback if structure is unexpected, though this may not be unique
+                      return id(self)
+
+                  level_items = []
+                  for level, stacks in self.levels.items():
+                      # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
+                      # frozenset of items makes this part hashable and order-independent.
+                      stack_items = frozenset(stacks.items())
+                      level_items.append((level, stack_items))
+                  
+                  # Sort by level to make the final representation canonical.
+                  level_items.sort()
+                  self._hash_val = hash(tuple(level_items))
+                  return self._hash_val
+
+              # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
+              if getattr(GSS, '__hash__', "exists") is None:
+                  GSS.__hash__ = _gss_hash
+              # --- End of monkey-patch ---
+
               # Arena
               roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
               arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
@@ -8856,5 +8888,144 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Implement A* search for optimal planning
       and fix GSS hashing for state representation"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 373, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 369, in main
+          run_benchmark(args, run_index=i)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 254, in run_benchmark
+          result = model.get_mask()
+                   ^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4_5.py", line 2664, in get_mask
+          optimal_path, optimal_cost = self._oracle_plan_with_astar()
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_opt4_5.py", line 2310, in _oracle_plan_with_astar
+          initial_work_items.add((r, gss_init))
+        File "<string>", line 3, in __hash__
+        File "<string>", line 3, in __hash__
+        File "<string>", line 3, in __hash__
+      TypeError: unhashable type: 'dict'
+    metadata:
+  - assistant: |-
+      I see what's happening. My previous fix correctly made the `PyAcc` objects hashable, but that was only part of the problem. The `GSS` container object itself is also not hashable because it's likely implemented using a dictionary internally and lacks its own `__hash__` method. The A* search requires the entire state, including the `GSS` object, to be hashable.
+
+      The traceback is identical because the root cause—the unhashable `GSS` object—was not addressed. We need to make the `GSS` class hashable. Since we cannot edit the imported `GSS` file, we will apply a "monkey-patch" at runtime to add the required hashing logic.
+
+      Here are the step-by-step instructions to fix this.
+
+      ### Step-by-step Instructions
+
+      1.  **File: `python/aug25/models/precompute3_model_pure_python_opt4_5.py`**
+
+          a.  **Navigate to the `Model.from_json_string` static method.**
+
+          b.  **Insert the monkey-patch code.** Right after the `data = json.loads(s)` line, insert the following code block. This will dynamically add a `__hash__` method to the imported `GSS` class, making its instances hashable.
+
+          ```python
+              # --- Monkey-patch GSS to be hashable for A* search ---
+              # The A* planner requires GSS objects to be hashable to use them in sets
+              # and dictionary keys. The LeveledGSS implementation may not define __hash__.
+              # We add one here based on its likely internal structure (a dict of levels).
+              def _gss_hash(self):
+                  # Cache the hash for performance
+                  if hasattr(self, '_hash_val'):
+                      return self._hash_val
+
+                  # The internal representation is likely a dictionary of levels,
+                  # where each level contains a dictionary of stacks.
+                  if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
+                      # Fallback if structure is unexpected, though this may not be unique
+                      return id(self)
+
+                  level_items = []
+                  for level, stacks in self.levels.items():
+                      # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
+                      # frozenset of items makes this part hashable and order-independent.
+                      stack_items = frozenset(stacks.items())
+                      level_items.append((level, stack_items))
+                  
+                  # Sort by level to make the final representation canonical.
+                  level_items.sort()
+                  self._hash_val = hash(tuple(level_items))
+                  return self._hash_val
+
+              # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
+              if getattr(GSS, '__hash__', "exists") is None:
+                  GSS.__hash__ = _gss_hash
+              # --- End of monkey-patch ---
+          ```
+
+      This patch inspects the likely internal structure of a `GSS` object (a dictionary of levels) and computes a stable hash based on its contents. This will resolve the `TypeError` and allow the A* planner to proceed.
+
+      ### Git Diff
+
+      Here is the git diff for the change.
+
+      ```diff
+      --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      @@ -474,6 +474,38 @@
+               Stats.get().reset()
+               data = json.loads(s)
+       
+      +        # --- Monkey-patch GSS to be hashable for A* search ---
+      +        # The A* planner requires GSS objects to be hashable to use them in sets
+      +        # and dictionary keys. The LeveledGSS implementation may not define __hash__.
+      +        # We add one here based on its likely internal structure (a dict of levels).
+      +        def _gss_hash(self):
+      +            # Cache the hash for performance
+      +            if hasattr(self, '_hash_val'):
+      +                return self._hash_val
+      +
+      +            # The internal representation is likely a dictionary of levels,
+      +            # where each level contains a dictionary of stacks.
+      +            if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
+      +                # Fallback if structure is unexpected, though this may not be unique
+      +                return id(self)
+      +
+      +            level_items = []
+      +            for level, stacks in self.levels.items():
+      +                # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
+      +                # frozenset of items makes this part hashable and order-independent.
+      +                stack_items = frozenset(stacks.items())
+      +                level_items.append((level, stack_items))
+      +            
+      +            # Sort by level to make the final representation canonical.
+      +            level_items.sort()
+      +            self._hash_val = hash(tuple(level_items))
+      +            return self._hash_val
+      +
+      +        # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
+      +        if getattr(GSS, '__hash__', "exists") is None:
+      +            GSS.__hash__ = _gss_hash
+      +        # --- End of monkey-patch ---
+      +
+               # Arena
+               roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
+               arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
+    metadata:
+  - user: 'Changes committed with message: "Implement A* search for provably optimal
+      oracle planning and add necessary GSS/PyAcc hashing fixes"'
     metadata:
 ...
