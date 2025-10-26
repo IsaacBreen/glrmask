@@ -351,7 +351,7 @@ class Model(GraphProvider):
                         enqueue(max_depth[d], d)
 
         if self.debug_logging:
-            print("final internal mask:", final_mask)
+            print("final internal mask:", final_mask.to_ranges())
 
         original_mask = ffi.Bitset.zeros()
         for i in final_mask.to_indices():
