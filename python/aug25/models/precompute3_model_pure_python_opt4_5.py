@@ -404,6 +404,7 @@ class Model(GraphProvider):
         # New: per-pop unions and descendant closures for stronger pruning
         model._compute_bucket_unions()
         model._compute_descendant_llm_closure()
+        model.optimize_traversal()
         model._compute_and_print_stats()
         return model
 
