@@ -359,4 +359,7 @@ class Model(GraphProvider):
                 for orig_id in self.internal_to_original_map[i]:
                     original_mask.insert(orig_id)
 
-        return RangeSet.from_ranges(original_mask.to_ranges())
+        x = RangeSet.from_ranges(original_mask.to_ranges())
+        if self.debug_logging:
+            print("original mask:", x)
+        return x
