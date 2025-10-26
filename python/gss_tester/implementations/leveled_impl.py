@@ -27,6 +27,12 @@ class UpperBranch(Generic[T, Acc]):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
         object.__setattr__(self, '_max_depth', depth)
 
+    def __hash__(self) -> int:
+        frozen_children = frozenset(
+            (k, frozenset(v.items())) for k, v in self.children.items()
+        )
+        return hash((frozen_children, self.empty))
+
     def _all_children(self) -> Iterator[Upper[T, Acc]]:
         """Returns an iterator over all child nodes."""
         for children_at_depth in self.children.values():
@@ -42,6 +48,12 @@ class Lower(Generic[T]):
     def __post_init__(self):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
         object.__setattr__(self, '_max_depth', depth)
+
+    def __hash__(self) -> int:
+        frozen_children = frozenset(
+            (k, frozenset(v.items())) for k, v in self.children.items()
+        )
+        return hash((frozen_children, self.empty))
 
     def _all_children(self) -> Iterator['Lower[T]']:
         for v_children in self.children.values():
