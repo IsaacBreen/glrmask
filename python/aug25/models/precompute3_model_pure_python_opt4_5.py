@@ -230,7 +230,7 @@ class ArenaNode:
     pop_to_state_union: Dict[int, StateIDSet] = field(default_factory=dict)
     pop_to_llm_union: Dict[int, LLMTokenSet] = field(default_factory=dict)
     pop_state_to_edge_indices: Dict[int, Dict[int, List[int]]] = field(default_factory=dict)
-    
+
 def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
         if not node.children:
@@ -555,11 +555,8 @@ class Model(GraphProvider):
             pop_state_map = collections.defaultdict(lambda: collections.defaultdict(list))
             for i, edge in enumerate(node.children):
                 edge.ensure_index()
-                # Build the new index: pop -> state_id -> list of edge indices
                 for dest in edge.dests:
                     for sid in dest.state_bv.iter_indices():
-                        # An edge is relevant if it contains a state_id in its destination state set.
-                        # We store the index 'i' of the edge.
                         pop_state_map[edge.pop][sid].append(i)
 
             # Finalize the map, making lists unique and sorted for determinism
@@ -851,7 +848,7 @@ class Model(GraphProvider):
         oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
         node_allowed_mask: Optional[LLMTokenSet] = None,
     ) -> Generator[Union[Enqueue, Suspend], None, None]:
-        """The core traversal logic for a single node in the arena graph, optimized using pop_state_to_edge_indices."""
+        """The core traversal logic for a single node in the arena graph."""
         stats = Stats.get()
         a_node = self.arena.get(node_id)
         if not a_node or not a_node.pop_state_to_edge_indices:
@@ -887,7 +884,7 @@ class Model(GraphProvider):
                     stats.start('get_mask.main_loop.edge.popn')
                     _t0 = _perf_now()
                     popped = gss_node.popn(pop)
-                    _t1 = _perf_counter()
+                    _t1 = _perf_now()
                     stats.stop('get_mask.main_loop.edge.popn')
                     if oracle_counters is not None and local_ctr is not None:
                         local_ctr["popn_calls"] = local_ctr.get("popn_calls", 0) + 1
@@ -919,23 +916,19 @@ class Model(GraphProvider):
                 stats.inc('get_mask.main_loop.bucket_pruned_llm')
                 continue
 
-            # 3. Find active edges for this pop and the peeked states using the new index.
-            # active_edges_map: edge_index -> list of relevant state_ids
-            active_edges_map: Dict[int, List[int]] = collections.defaultdict(list)
+            # 3. Find active edges for this pop and the peeked states.
+            edges_to_process: Dict[int, List[int]] = collections.defaultdict(list)
             pop_state_map = a_node.pop_state_to_edge_indices.get(pop, {})
-            
             for sid in peeked:
                 if (edge_indices := pop_state_map.get(sid)):
                     for edge_idx in edge_indices:
-                        active_edges_map[edge_idx].append(sid)
-            
-            if not active_edges_map:
+                        edges_to_process[edge_idx].append(sid)
+            if not edges_to_process:
                 continue
 
             # 4. Create edge iterator that respects oracle order.
-            active_edge_indices = set(active_edges_map.keys())
+            active_edge_indices = set(edges_to_process.keys())
             ordered_indices_all = edge_order_override_map.get(node_id) if edge_order_override_map else None
-            
             if ordered_indices_all:
                 ordered_active = [i for i in ordered_indices_all if i in active_edge_indices]
                 other_active = sorted(list(active_edge_indices - set(ordered_active)))
@@ -984,10 +977,9 @@ class Model(GraphProvider):
                         local_apply_cache[key_apply] = tmp
 
                 # Group states by destination for this edge.
-                sids_for_edge = active_edges_map[edge_i]
+                sids_for_edge = edges_to_process[edge_i]
                 grouped: Dict[int, List[int]] = collections.defaultdict(list)
                 m = edge.state_to_dest
-                
                 for sid in sids_for_edge:
                     if (dest_list := m.get(sid)):
                         for dest_j in dest_list:
@@ -1001,19 +993,16 @@ class Model(GraphProvider):
 
                 for dest_j in dest_keys:
                     if dests_proc >= max_dests:
-                        # Suspend at the destination level
                         priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
                         yield Suspend(int(node_id), priority, depth)
                         dests_proc = 0
 
                     dest = edge.dests[dest_j]
                     values_to_keep = grouped[dest_j]
-                    
-                    # Isolate GSS
+
                     if len(values_to_keep) == len(peeked):
                         child_gss = source_after_apply
                     else:
-                        # Use sorted tuple for cache key
                         key_isolate = (id(source_after_apply), tuple(sorted(values_to_keep)))
                         if isolate_cache is not None and key_isolate in isolate_cache:
                             stats.inc('get_mask.isolate_many.cache_hits')
@@ -1041,7 +1030,6 @@ class Model(GraphProvider):
                         local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
                 if edges_proc >= max_edges:
-                    # Suspend work after a batch of edges to allow priority reordering at the heap level
                     priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
                     yield Suspend(int(node_id), priority, depth)
                     edges_proc = 0
@@ -1330,7 +1318,7 @@ class Model(GraphProvider):
         ranked: List[Tuple[float, int]] = []
         for nid_str, cnt in node_costs.items():
             try:
-                nid = int(nid_str) if isinstance(nid_str, str) else int(nid_str)
+                nid = int(nid_str)
             except Exception:
                 nid = int(nid_str)
             edges = float(cnt.get("edges", 0))
@@ -1516,7 +1504,6 @@ class Model(GraphProvider):
                 for d in edge.dests:
                     s += int(scores.get(int(d.dest_idx), 0))
                 edge_scores.append((idx, s))
-            # If all scores zero, skip ordering for that node
             if any(s > 0 for (_, s) in edge_scores):
                 ordered = sorted(edge_scores, key=lambda t: t[1], reverse=True)
                 edge_order_map[int(u)] = [idx for (idx, _) in ordered]
