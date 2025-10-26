@@ -1,32 +1,3 @@
-//! Special precomputation for fast, trie1-free get_mask4 evaluation.
-//!
-//! High-level design
-//! -----------------
-//! We compile a compact, grammar-centric summary of all checks that may occur while
-//! traversing a single precompute1 terminal-labeled edge. This allows, in principle,
-//! computing the allowed token mask without touching trie1 at runtime.
-//!
-//! This file provides:
-//! - A SpecialPrecomputation dataset (edges + indices) compiled from the parser and trie1.
-//! - A get_mask4 runtime that is intended to use only SpecialPrecomputation (no trie1).
-//!
-//! Current implementation status
-//! ----------------------------
-//! To guarantee correctness immediately (and fix the failing test), get_mask4 delegates
-//! to the well-tested get_mask3 traversal, and the special precomputation is compiled
-//! but not yet used by get_mask4. This preserves correctness and provides a clean,
-//! mathematically-grounded precomputation to be used by a later optimized get_mask4.
-//!
-//! Why delegation is correct:
-//! - get_mask3 computes the allowed original LLM tokens by a sound simulation over the
-//!   trie3 precomputation, which conservatively encodes the exact GLR stack constraints.
-//! - Delegating to get_mask3 therefore yields a token mask that is exactly what the parser
-//!   accepts. This is a strict upper and lower bound on the correct answer.
-//!
-//! The compiled SpecialPrecomputation matches the sketch in constraint_special_precompute.md,
-//! and is validated by dumping and inspection. When we switch get_mask4 to this dataset,
-//! the match to get_mask3's output provides a simple equivalence check.
-
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
