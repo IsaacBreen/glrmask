@@ -965,51 +965,61 @@ class Model(GraphProvider):
 
         stats.start('get_mask.seeding')
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-        @_acc_memoize(use_value_cache=False)
-        def initialize_acc(acc: PyAcc) -> PyAcc:
-            p = 'get_mask.seeding.initialize_acc'
-            stats.inc(f'{p}.calls')
-            stats.start(f'{p}.total')
-            # Compute allowed LLM tokens from disallowed terminals for this accumulator
-            disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
-            disallowed_map = acc.terminals_union
-            stats.inc(f'{p}.disallowed_map_size.sum', len(disallowed_map))
+        # The initialization of the llm_mask from the terminals_union is dependent on the
+        # tokenizer state `sid`. The original implementation incorrectly used a single
+        # context-free function, which conflated constraints from different tokenizer states,
+        # leading to an overly restrictive mask.
+        # The fix is to create a context-aware mutator for each `sid`.
 
-            for tsid, disallowed_terminals in disallowed_map.items():
-                stats.inc(f'{p}.disallowed_terminals_loops')
-                if tsid > max_state or tsid not in pmc:
-                    continue
-                terminals_to_llm = pmc[tsid]
+        # Memoization cache for the initializers. Key: (acc_id, sid), Value: new_acc
+        acc_init_cache = {}
 
-                stats.start(f'{p}.iter_indices')
-                indices = disallowed_terminals.iter_indices()
-                stats.stop(f'{p}.iter_indices')
-
-                for terminal_id in indices:
-                    stats.inc(f'{p}.disallowed_terminals_inner_loops')
-                    if terminal_id in terminals_to_llm:
-                        stats.start(f'{p}.union')
-                        disallowed_llm_mask |= terminals_to_llm[terminal_id]
-                        stats.stop(f'{p}.union')
-
-            stats.start(f'{p}.difference')
-            allowed_mask = all_ones.difference(disallowed_llm_mask)
-            stats.stop(f'{p}.difference')
-
-            stats.stop(f'{p}.total')
-            result = PyAcc(
-                terminals_union={},  # consume
-                llm_mask=allowed_mask,
-            )
-            return result
-
-        cache = {}
         for sid, gss in state_map.items():
             stats.inc('get_mask.seeding.gss_loops')
             r: NodeID = roots_map[int(sid)]
 
+            def build_mutator(current_sid: int):
+                """Builds a mutator function that captures the current tokenizer state."""
+                def mutator(acc: PyAcc) -> PyAcc:
+                    # Memoize based on (id(acc), current_sid) to handle shared accs
+                    cache_key = (id(acc), current_sid)
+                    if cache_key in acc_init_cache:
+                        stats.inc('get_mask.seeding.initialize_acc.memo_hits')
+                        return acc_init_cache[cache_key]
+
+                    p = 'get_mask.seeding.initialize_acc'
+                    stats.inc(f'{p}.calls')
+                    stats.start(f'{p}.total')
+
+                    # Logic to compute allowed mask for the *current* tokenizer state
+                    disallowed_terminals = acc.terminals_union.get(current_sid, RangeSet.empty())
+                    disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
+
+                    if not disallowed_terminals.is_empty() and current_sid <= max_state:
+                        terminals_to_llm = pmc.get(current_sid)
+                        if terminals_to_llm:
+                            for terminal_id in disallowed_terminals.iter_indices():
+                                if terminal_id in terminals_to_llm:
+                                    disallowed_llm_mask |= terminals_to_llm[terminal_id]
+
+                    stats.start(f'{p}.difference')
+                    allowed_mask = all_ones.difference(disallowed_llm_mask)
+                    stats.stop(f'{p}.difference')
+
+                    stats.stop(f'{p}.total')
+                    result = PyAcc(
+                        terminals_union={},  # consume
+                        llm_mask=allowed_mask,
+                    )
+                    acc_init_cache[cache_key] = result
+                    return result
+                return mutator
+
             stats.start('get_mask.seeding.gss.apply')
-            gss_initialized: GSS = gss.apply(initialize_acc, cache)
+            # Each `gss.apply` call needs its own cache because the mutator function
+            # is different for each `sid`.
+            apply_cache = {}
+            gss_initialized: GSS = gss.apply(build_mutator(sid), apply_cache)
             stats.stop('get_mask.seeding.gss.apply')
 
             if r in values:
