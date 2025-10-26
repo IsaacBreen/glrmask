@@ -25,16 +25,24 @@ pub fn assert_no_pop0_nonroot_edges_trie3(
     }
 
     for n in all_nodes {
-        if roots_set.contains(&n) {
-            continue;
-        }
         let r = n.read(trie3_god).expect("read");
-        for ((pop, _llm_bv), _dm) in r.children() {
+        for ((pop, _llm_bv), dm) in r.children() {
             if *pop == 0 {
-                panic!(
-                    "Invariant violated: found pop=0 edge originating from non-root node {}",
-                    n
-                );
+                if !roots_set.contains(&n) {
+                    panic!(
+                        "Invariant violated: found pop=0 edge originating from non-root node {}",
+                        n
+                    );
+                }
+                for (dest, _) in dm {
+                    let dest_is_end = dest.read(trie3_god).map_or(false, |g| g.value.end);
+                    if !dest_is_end {
+                        panic!(
+                            "Invariant violated: found pop=0 edge from root {} to non-end node {}",
+                            n, dest
+                        );
+                    }
+                }
             }
         }
     }
@@ -50,7 +58,7 @@ pub fn eliminate_pop0_edges_except_roots_trie3(
 ) {
     crate::debug!(
         2,
-        "Eliminating pop=0 edges from non-root nodes in Trie3..."
+        "Eliminating pop=0 edges (except root->end) in Trie3..."
     );
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
@@ -105,32 +113,64 @@ pub fn eliminate_pop0_edges_except_roots_trie3(
         let mut removed_this_iter = 0usize;
 
         for (b, llm_bc, c, s_bc) in pop0_edges {
-            if roots_set.contains(&b) {
-                // pop=0 edge from a root is allowed by design, keep it
+            let c_is_end = c.read(trie3_god).map_or(false, |g| g.value.end);
+
+            // The only pop=0 edges we keep are from a root to an END node.
+            if roots_set.contains(&b) && c_is_end {
+                // pop=0 edge from a root to an END node is allowed.
                 continue;
             }
-            if let Some(preds) = incoming.get(&b) {
-                for (a, (p_ab, llm_ab), s_ab) in preds {
-                    // Compose constraints at the same position (pop=0 does not advance position)
-                    let new_llm = llm_ab & &llm_bc;
-                    if new_llm.is_empty() {
-                        continue;
+
+            // All other pop=0 edges must be eliminated. This includes:
+            //  1. Edges from a non-root node.
+            //  2. Edges from a root node to a non-end node.
+            if !roots_set.contains(&b) {
+                // Case 1: `b` is not a root. Compose with predecessors of `b`.
+                if let Some(preds) = incoming.get(&b) {
+                    for (a, (p_ab, llm_ab), s_ab) in preds {
+                        // Compose constraints at the same position (pop=0 does not advance position)
+                        let new_llm = llm_ab & &llm_bc;
+                        if new_llm.is_empty() {
+                            continue;
+                        }
+                        let new_sids = s_ab & &s_bc;
+                        if new_sids.is_empty() {
+                            continue;
+                        }
+                        // Create/update A -> C with (p_ab, new_llm) and SIDs = intersection
+                        if let Some(mut aw) = a.write(trie3_god) {
+                            let key_llm = new_llm.clone();
+                            let entry =
+                                aw.children_mut().entry((*p_ab, key_llm.clone())).or_default();
+                            entry
+                                .entry(c)
+                                .and_modify(|e| *e |= &new_sids)
+                                .or_insert(new_sids.clone());
+                            // keep live_tokens conservative; we'll recompute exactly later anyway
+                            aw.value.live_tokens |= &key_llm;
+                        }
                     }
-                    let new_sids = s_ab & &s_bc;
-                    if new_sids.is_empty() {
-                        continue;
-                    }
-                    // Create/update A -> C with (p_ab, new_llm) and SIDs = intersection
-                    if let Some(mut aw) = a.write(trie3_god) {
-                        let key_llm = new_llm.clone();
-                        let entry =
-                            aw.children_mut().entry((*p_ab, key_llm.clone())).or_default();
-                        entry
-                            .entry(c)
-                            .and_modify(|e| *e |= &new_sids)
-                            .or_insert(new_sids.clone());
-                        // keep live_tokens conservative; we'll recompute exactly later anyway
-                        aw.value.live_tokens |= &key_llm;
+                }
+            } else {
+                // Case 2: `b` is a root and `c` is not an end node. Compose with successors of `c`.
+                // To avoid holding a read guard on `c` while writing to `b`, we clone `c`'s children.
+                let c_children = c.read(trie3_god).map(|g| g.children().clone());
+                if let Some(c_children) = c_children {
+                    for ((p_cd, llm_cd), dm_cd) in c_children {
+                        for (d, s_cd) in dm_cd {
+                            let new_llm = &llm_bc & llm_cd;
+                            if new_llm.is_empty() { continue; }
+                            let new_sids = &s_bc & s_cd;
+                            if new_sids.is_empty() { continue; }
+
+                            // Add/update edge b -> d
+                            if let Some(mut b_guard) = b.write(trie3_god) {
+                                let key = (p_cd, new_llm.clone());
+                                let dm = b_guard.children_mut().entry(key).or_default();
+                                dm.entry(*d).and_modify(|e| *e |= &new_sids).or_insert(new_sids);
+                                b_guard.value.live_tokens |= &new_llm;
+                            }
+                        }
                     }
                 }
             }
@@ -186,7 +226,7 @@ pub fn eliminate_pop0_edges_except_roots_trie3(
     Trie::recompute_all_max_depths(trie3_god, &roots_vec2);
     crate::debug!(
         2,
-        "Eliminated {} pop=0 edges from non-root nodes.",
+        "Eliminated {} pop=0 edges.",
         total_removed
     );
 }
