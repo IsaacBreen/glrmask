@@ -416,7 +416,7 @@ class Model(GraphProvider):
     oracle_permute_top_ends: int = 8
     # Pre-computed static costs for oracle mode
     static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
-    oracle_use_astar: bool = False
+    oracle_use_astar: bool = True
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
