@@ -353,13 +353,12 @@ class Model(GraphProvider):
         if self.debug_logging:
             print("final internal mask:", final_mask.to_ranges())
 
-        original_mask = ffi.Bitset.zeros()
+        # original_mask = ffi.Bitset.zeros()
+        original_mask = set()
         for i in final_mask.to_indices():
-            if i in self.internal_to_original_map:
-                for orig_id in self.internal_to_original_map[i]:
-                    original_mask.insert(orig_id)
+            original_mask.update(self.internal_to_original_map[i])
 
-        x = RangeSet.from_ranges(original_mask.to_ranges())
+        x = RangeSet.from_indices(original_mask)
         if self.debug_logging:
             print("original mask:", x)
         return x
