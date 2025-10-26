@@ -2208,49 +2208,50 @@ class Model(GraphProvider):
                 raise ValueError(f'Unexpected work item: {work}')
 
             if gen:
-                try:
-                    if is_resumed_gen:
-                        yielded = gen.send(remaining_mask)
-                    else:
-                        yielded = next(gen)
-
-                    if isinstance(yielded, Enqueue):
-                        new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
-                        base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                        # Dynamic, target-aware child priority if enabled and reward masks present
-                        if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-                            child_priority = self._priority_for_node(
-                                new_node_id,
-                                new_depth,
-                                remaining_mask,
-                                guided_scores=guided_scores,
-                                oracle_reward_mask=oracle_reward_mask,
-                                analysis_node_costs=oracle_node_costs,
-                            )
-                        elif guided_scores is not None:
-                            child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
+                while True:
+                    try:
+                        if is_resumed_gen:
+                            yielded = gen.send(remaining_mask)
+                            is_resumed_gen = False  # Only send on the first iteration after resumption
                         else:
-                            child_priority = base_child_pri
-                        heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
-                        # Re-queue the parent generator so it can be resumed with a fresh mask.
-                        heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, work_llm_mask, depth)))
-                    elif isinstance(yielded, Suspend):
-                        # Recompute scheduling priority for the suspended work dynamically based on remaining_mask
-                        if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-                            susp_pri = self._priority_for_node(
-                                yielded.node_id,
-                                yielded.depth,
-                                remaining_mask,
-                                guided_scores=guided_scores,
-                                oracle_reward_mask=oracle_reward_mask,
-                                analysis_node_costs=oracle_node_costs,
-                            )
-                        else:
-                            susp_pri = yielded.priority
-                        heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
+                            yielded = next(gen)
 
-                except StopIteration:
-                    pass # Generator is done.
+                        if isinstance(yielded, Enqueue):
+                            new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                            base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                            # Dynamic, target-aware child priority if enabled and reward masks present
+                            if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                                child_priority = self._priority_for_node(
+                                    new_node_id,
+                                    new_depth,
+                                    remaining_mask,
+                                    guided_scores=guided_scores,
+                                    oracle_reward_mask=oracle_reward_mask,
+                                    analysis_node_costs=oracle_node_costs,
+                                )
+                            elif guided_scores is not None:
+                                child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
+                            else:
+                                child_priority = base_child_pri
+                            heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
+                        elif isinstance(yielded, Suspend):
+                            # Recompute scheduling priority for the suspended work dynamically based on remaining_mask
+                            if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                                susp_pri = self._priority_for_node(
+                                    yielded.node_id,
+                                    yielded.depth,
+                                    remaining_mask,
+                                    guided_scores=guided_scores,
+                                    oracle_reward_mask=oracle_reward_mask,
+                                    analysis_node_costs=oracle_node_costs,
+                                )
+                            else:
+                                susp_pri = yielded.priority
+                            heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
+                            break
+
+                    except StopIteration:
+                        break # Generator is done.
         stats.stop('get_mask.main_loop')
 
         stats.start('get_mask.final_conversion')

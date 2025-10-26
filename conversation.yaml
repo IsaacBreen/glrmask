@@ -922,7 +922,7 @@ local_system:
               dest_scores: Optional[Dict[int, int]] = None,
               oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
               node_allowed_mask: Optional[LLMTokenSet] = None,
-          ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+          ) -> Generator[Union[Enqueue, Suspend], None, None]:
               stats = Stats.get()
               a_node = self.arena.get(node_id)
               if not a_node:
@@ -1110,27 +1110,21 @@ local_system:
                               continue
 
                           d: NodeID = int(dest_id)
-                          new_mask = yield Enqueue(d, child_gss, depth + 1)
-                          if new_mask is not None:
-                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                          yield Enqueue(d, child_gss, depth + 1)
                           dests_proc += 1
                           if oracle_counters is not None and local_ctr is not None:
                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
                           if dests_proc >= max_dests:
                               priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                              new_mask = yield Suspend(node_id, priority, depth)
-                              if new_mask is not None:
-                                  active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                              yield Suspend(priority, depth)
                               dests_proc = 0
 
                           group_index += 1
 
                       if edges_proc >= max_edges:
                           priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                          new_mask = yield Suspend(int(node_id), priority, depth)
-                          if new_mask is not None:
-                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                          yield Suspend(int(node_id), priority, depth)
                           edges_proc = 0
                       edges_proc += 1
               else:
@@ -1273,9 +1267,7 @@ local_system:
                       for dest_j in dest_keys:
                           if dests_proc >= max_dests:
                               priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                              new_mask = yield Suspend(node_id, priority, depth)
-                              if new_mask is not None:
-                                  active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                              yield Suspend(priority, depth)
                               dests_proc = 0
                           dest = edge.dests[dest_j]
                           values_to_keep = grouped[dest_j]
@@ -1302,9 +1294,7 @@ local_system:
                                       isolate_cache[key_isolate] = child_gss
                           if child_gss.is_empty(): continue
                           d: NodeID = int(dest.dest_idx)
-                          new_mask = yield Enqueue(d, child_gss, depth + 1)
-                          if new_mask is not None:
-                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                          yield Enqueue(d, child_gss, depth + 1)
                           dests_proc += 1
                           if oracle_counters is not None and local_ctr is not None:
                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
@@ -1312,9 +1302,7 @@ local_system:
                       if edges_proc >= max_edges:
                           # Suspend work after a batch to allow priority reordering at the heap level
                           priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                          new_mask = yield Suspend(int(node_id), priority, depth)
-                          if new_mask is not None:
-                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                          yield Suspend(int(node_id), priority, depth)
                           edges_proc = 0
                       edges_proc += 1
               # When max_dests suspend triggers
@@ -2131,11 +2119,7 @@ local_system:
                   heap_item = heapq.heappop(work_heap)
                   priority, work = heap_item.priority, heap_item.item
 
-                  gen = None
-                  is_resumed_gen = False
-
                   if isinstance(work, WorkItemSuspended):
-                      is_resumed_gen = True
                       gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
 
                       if work_llm_mask.isdisjoint(remaining_mask):
@@ -2217,11 +2201,7 @@ local_system:
                   if gen:
                       while True:
                           try:
-                              if is_resumed_gen:
-                                  yielded = gen.send(remaining_mask)
-                                  is_resumed_gen = False  # Only send on the first iteration after resumption
-                              else:
-                                  yielded = next(gen)
+                              yielded = next(gen)
 
                               if isinstance(yielded, Enqueue):
                                   new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
@@ -4730,49 +4710,50 @@ local_system:
                       raise ValueError(f'Unexpected work item: {work}')
 
                   if gen:
-                      try:
-                          if is_resumed_gen:
-                              yielded = gen.send(remaining_mask)
-                          else:
-                              yielded = next(gen)
-
-                          if isinstance(yielded, Enqueue):
-                              new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
-                              base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                              # Dynamic, target-aware child priority if enabled and reward masks present
-                              if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-                                  child_priority = self._priority_for_node(
-                                      new_node_id,
-                                      new_depth,
-                                      remaining_mask,
-                                      guided_scores=guided_scores,
-                                      oracle_reward_mask=oracle_reward_mask,
-                                      analysis_node_costs=oracle_node_costs,
-                                  )
-                              elif guided_scores is not None:
-                                  child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
+                      while True:
+                          try:
+                              if is_resumed_gen:
+                                  yielded = gen.send(remaining_mask)
+                                  is_resumed_gen = False  # Only send on the first iteration after resumption
                               else:
-                                  child_priority = base_child_pri
-                              heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
-                              # Re-queue the parent generator so it can be resumed with a fresh mask.
-                              heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, work_llm_mask, depth)))
-                          elif isinstance(yielded, Suspend):
-                              # Recompute scheduling priority for the suspended work dynamically based on remaining_mask
-                              if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-                                  susp_pri = self._priority_for_node(
-                                      yielded.node_id,
-                                      yielded.depth,
-                                      remaining_mask,
-                                      guided_scores=guided_scores,
-                                      oracle_reward_mask=oracle_reward_mask,
-                                      analysis_node_costs=oracle_node_costs,
-                                  )
-                              else:
-                                  susp_pri = yielded.priority
-                              heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
+                                  yielded = next(gen)
 
-                      except StopIteration:
-                          pass # Generator is done.
+                              if isinstance(yielded, Enqueue):
+                                  new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                                  base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                                  # Dynamic, target-aware child priority if enabled and reward masks present
+                                  if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                                      child_priority = self._priority_for_node(
+                                          new_node_id,
+                                          new_depth,
+                                          remaining_mask,
+                                          guided_scores=guided_scores,
+                                          oracle_reward_mask=oracle_reward_mask,
+                                          analysis_node_costs=oracle_node_costs,
+                                      )
+                                  elif guided_scores is not None:
+                                      child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
+                                  else:
+                                      child_priority = base_child_pri
+                                  heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
+                              elif isinstance(yielded, Suspend):
+                                  # Recompute scheduling priority for the suspended work dynamically based on remaining_mask
+                                  if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                                      susp_pri = self._priority_for_node(
+                                          yielded.node_id,
+                                          yielded.depth,
+                                          remaining_mask,
+                                          guided_scores=guided_scores,
+                                          oracle_reward_mask=oracle_reward_mask,
+                                          analysis_node_costs=oracle_node_costs,
+                                      )
+                                  else:
+                                      susp_pri = yielded.priority
+                                  heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
+                                  break
+
+                          except StopIteration:
+                              break # Generator is done.
               stats.stop('get_mask.main_loop')
 
               stats.start('get_mask.final_conversion')
@@ -5993,7 +5974,7 @@ messages:
               dest_scores: Optional[Dict[int, int]] = None,
               oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
               node_allowed_mask: Optional[LLMTokenSet] = None,
-          ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+          ) -> Generator[Union[Enqueue, Suspend], None, None]:
               stats = Stats.get()
               a_node = self.arena.get(node_id)
               if not a_node:
@@ -6181,27 +6162,21 @@ messages:
                               continue
 
                           d: NodeID = int(dest_id)
-                          new_mask = yield Enqueue(d, child_gss, depth + 1)
-                          if new_mask is not None:
-                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                          yield Enqueue(d, child_gss, depth + 1)
                           dests_proc += 1
                           if oracle_counters is not None and local_ctr is not None:
                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
                           if dests_proc >= max_dests:
                               priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                              new_mask = yield Suspend(node_id, priority, depth)
-                              if new_mask is not None:
-                                  active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                              yield Suspend(priority, depth)
                               dests_proc = 0
 
                           group_index += 1
 
                       if edges_proc >= max_edges:
                           priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                          new_mask = yield Suspend(int(node_id), priority, depth)
-                          if new_mask is not None:
-                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                          yield Suspend(int(node_id), priority, depth)
                           edges_proc = 0
                       edges_proc += 1
               else:
@@ -6344,9 +6319,7 @@ messages:
                       for dest_j in dest_keys:
                           if dests_proc >= max_dests:
                               priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                              new_mask = yield Suspend(node_id, priority, depth)
-                              if new_mask is not None:
-                                  active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                              yield Suspend(priority, depth)
                               dests_proc = 0
                           dest = edge.dests[dest_j]
                           values_to_keep = grouped[dest_j]
@@ -6373,9 +6346,7 @@ messages:
                                       isolate_cache[key_isolate] = child_gss
                           if child_gss.is_empty(): continue
                           d: NodeID = int(dest.dest_idx)
-                          new_mask = yield Enqueue(d, child_gss, depth + 1)
-                          if new_mask is not None:
-                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                          yield Enqueue(d, child_gss, depth + 1)
                           dests_proc += 1
                           if oracle_counters is not None and local_ctr is not None:
                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
@@ -6383,9 +6354,7 @@ messages:
                       if edges_proc >= max_edges:
                           # Suspend work after a batch to allow priority reordering at the heap level
                           priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                          new_mask = yield Suspend(int(node_id), priority, depth)
-                          if new_mask is not None:
-                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                          yield Suspend(int(node_id), priority, depth)
                           edges_proc = 0
                       edges_proc += 1
               # When max_dests suspend triggers
@@ -7202,11 +7171,7 @@ messages:
                   heap_item = heapq.heappop(work_heap)
                   priority, work = heap_item.priority, heap_item.item
 
-                  gen = None
-                  is_resumed_gen = False
-
                   if isinstance(work, WorkItemSuspended):
-                      is_resumed_gen = True
                       gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
 
                       if work_llm_mask.isdisjoint(remaining_mask):
@@ -7288,11 +7253,7 @@ messages:
                   if gen:
                       while True:
                           try:
-                              if is_resumed_gen:
-                                  yielded = gen.send(remaining_mask)
-                                  is_resumed_gen = False  # Only send on the first iteration after resumption
-                              else:
-                                  yielded = next(gen)
+                              yielded = next(gen)
 
                               if isinstance(yielded, Enqueue):
                                   new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
@@ -7594,88 +7555,104 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt4_5.py
   - user: |-
-      **Prompt for AI Coding Assistant:**
+      Excellent. This is a high-impact fix. Here is a detailed, practical prompt for an LLM to implement the correction. It explains the flaw, proposes a specific solution using Python's generator features, and provides clear instructions.
+
+      ---
+
+      ### Prompt for AI Coding Assistant
 
       **High-Level Goal:**
 
-      Fix a critical performance bug in the `_get_mask_run` method where the pruning logic uses a stale `remaining_mask`. The task is to refactor the generator-based control flow to ensure the `_process_internal_node_gen` generator always operates on the most up-to-date `remaining_mask`, enabling effective, real-time pruning.
+      Fix a critical logical flaw in the `_get_mask_run` method's pruning logic. The current implementation uses a stale `remaining_mask` when processing nodes with many children (like a "mega-node"), causing the pruning of redundant paths to fail. The goal is to refactor the code to ensure that the traversal logic always uses the most up-to-date `remaining_mask`.
 
       **The Core Problem:**
 
-      The `_process_internal_node_gen` generator is created with a snapshot of `remaining_mask`. It continues to use this stale snapshot for its entire lifetime, even after its own children have found new tokens and updated the global `final_mask`. This prevents it from pruning redundant paths, leading to thousands of unnecessary edge traversals, especially on large "mega-nodes".
+      The `_process_internal_node_gen` function, which is a Python generator, receives a `remaining_mask` at the moment of its creation. It then iterates through hundreds or thousands of a node's children, yielding `Enqueue` and `Suspend` events. In the meantime, the main `_get_mask_run` loop processes other work items, finds end-nodes, and updates the global `final_mask` (and thus the true `remaining_mask`).
 
-      **The Task: Refactor to a Coroutine with `generator.send()`**
+      However, when the original generator for the mega-node is resumed, it continues operating with its initial, now-stale copy of `remaining_mask`. It is blind to the progress made by its own children. This prevents it from correctly pruning its later children, leading to a massive amount of unnecessary work.
 
-      You will convert `_process_internal_node_gen` from a simple generator into a coroutine that can receive data. The main loop in `_get_mask_run` will be updated to drive this coroutine, sending it the latest `remaining_mask` every time it is resumed.
+      **The Task: Implement a Real-Time Mask Update Mechanism**
+
+      Refactor the code to pass the updated `remaining_mask` back into the suspended generator every time it is resumed. This will be achieved using the `generator.send()` method.
 
       **Step-by-Step Implementation Plan:**
 
-      1.  **Modify `_process_internal_node_gen` to become a coroutine:**
-          *   The generator must now be designed to receive data via `yield`. The value sent by the caller will appear as the return value of the `yield` expression.
-          *   Inside the main work loop (e.g., `for (dest_id, llm_bv_id) in dest_keys:`), the generator will `yield` a work item (like `Enqueue` or `Suspend`) and then, upon resuming, its `yield` expression will resolve to the new, updated `remaining_mask` sent from the caller.
-          *   Add an early-exit condition at the top of this loop: if the received `active_remaining_mask` is empty, the generator should `return` immediately.
+      1.  **Modify `_process_internal_node_gen` to Accept Updates:**
+          *   The generator needs to be able to receive a new mask. The `yield` statement can both send a value out and receive a value in.
+          *   Inside the main loop that iterates over edges/children, you will need to add a `yield` expression to receive the updated mask.
+          *   The generator should be primed by yielding `None` initially to signal it's ready for its first real command.
 
-          **Conceptual Code for `_process_internal_node_gen`:**
+          **Example Structure for `_process_internal_node_gen`:**
+
           ```python
-          def _process_internal_node_gen(self, ..., remaining_mask: LLMTokenSet, ...):
+          def _process_internal_node_gen(self, ..., remaining_mask: LLMTokenSet, ...) -> Generator:
               active_remaining_mask = remaining_mask
-              # ... setup and build dest_keys ...
+              
+              # Prime the generator
+              yielded_value = yield
+              if yielded_value is not None:
+                  active_remaining_mask = yielded_value
 
-              for (dest_id, llm_bv_id) in dest_keys:
-                  # The per-edge pruning check now uses the live mask
-                  llm_bv = groups[(dest_id, llm_bv_id)]["llm_bv"]
-                  if llm_bv.isdisjoint(active_remaining_mask):
+              # Main loop over edges (conceptual)
+              for edge in a_node.children:
+                  # Pruning check using the potentially updated mask
+                  if edge.llm_bv.isdisjoint(active_remaining_mask):
                       continue
 
-                  # ... perform expensive GSS operations (apply, isolate) ...
-                  
-                  # Yield the work item. When resumed, this expression will
-                  # evaluate to the new mask sent by the caller.
-                  new_mask = yield Enqueue(d, child_gss, depth + 1)
-                  
-                  # Update the local mask with the fresh data for the next iteration
-                  if new_mask is not None:
-                      active_remaining_mask = new_mask
+                  # ... existing logic to process the edge ...
 
-                  # Add the early-exit check for the next iteration
-                  if active_remaining_mask.is_empty():
-                      return
+                  # Yield the work item and wait for the next command/mask
+                  yielded_value = yield Enqueue(d, child_gss, depth + 1)
+                  if yielded_value is not None:
+                      active_remaining_mask = yielded_value
+              
+              # Handle suspension similarly
           ```
+          *Self-correction: A simpler way might be to make the generator yield control and expect a `send` on the next iteration, rather than yielding and receiving in the same statement. Choose the cleanest implementation.*
 
-      2.  **Modify `_get_mask_run` to drive the coroutine:**
-          *   The logic for handling `WorkItemNew` and `WorkItemSuspended` must change.
-          *   **When creating a new generator:** After `gen = self._process_internal_node_gen(...)`, you must "prime" it by calling `next(gen)`. This starts the generator, runs it to its first `yield`, and returns the first work item.
-          *   **When resuming a suspended generator:** You must now call `gen.send(remaining_mask)`. This wakes up the generator, passes the current `remaining_mask` into it (where it becomes the result of the `yield` expression), and runs it until it yields the next work item.
-          *   Handle the `StopIteration` exception, which now signals that a generator has completed its work (either by finishing its loop or by hitting the new `return` statement).
+      2.  **Modify `_get_mask_run` to Drive the Generator with `send()`:**
+          *   The main loop in `_get_mask_run` needs to be updated to handle the new generator protocol.
+          *   **When creating a new generator:** After creating it with `gen = self._process_internal_node_gen(...)`, you must "prime" it by calling `next(gen)` once. This will execute the code up to the first `yield`.
+          *   **When resuming a suspended generator:** Instead of calling `next(gen)`, you must now call `gen.send(remaining_mask)`. This will resume the generator and pass the *current*, up-to-date `remaining_mask` into it.
 
-          **Conceptual Code for `_get_mask_run`:**
+          **Example Structure for `_get_mask_run`:**
+
           ```python
-          # In _get_mask_run's main while loop
-          
-          # --- Handling a suspended generator ---
-          if isinstance(work, WorkItemSuspended):
-              gen = work.generator
-              try:
-                  # RESUME with the LATEST mask
-                  yielded = gen.send(remaining_mask)
-                  # ... handle the yielded Enqueue/Suspend object ...
-              except StopIteration:
-                  continue # Generator is done, process next item from heap
+          # In _get_mask_run
+          while work_heap:
+              # ...
+              if isinstance(work, WorkItemSuspended):
+                  gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
+                  # ...
+                  try:
+                      # RESUME with the LATEST mask
+                      yielded = gen.send(remaining_mask)
+                      # ... handle yielded Enqueue/Suspend ...
+                  except StopIteration:
+                      break
 
-          # --- Handling a new node ---
-          elif isinstance(work, WorkItemNew):
-              gen = self._process_internal_node_gen(...)
-              try:
-                  # PRIME the generator to its first yield
-                  yielded = next(gen)
-                  # ... handle the first yielded Enqueue/Suspend object ...
-              except StopIteration:
-                  continue # Generator finished immediately, process next
+              elif isinstance(work, WorkItemNew):
+                  # ...
+                  gen = self._process_internal_node_gen(
+                      node_id, gss_node, remaining_mask, ...
+                  )
+                  try:
+                      # PRIME the generator
+                      yielded = next(gen)
+                      # ... handle the first yielded Enqueue/Suspend ...
+                  except StopIteration:
+                      continue
           ```
+
+      **Important Considerations:**
+
+      *   **Suspension (`Suspend` object):** The logic for suspending and resuming work needs to be carefully handled. When a generator yields a `Suspend` object, it will be put back on the heap. When it's popped later as a `WorkItemSuspended`, the `gen.send(remaining_mask)` call will correctly resume it with fresh data.
+      *   **State Management:** Ensure that the `WorkItemSuspended` object correctly stores the generator instance so it can be resumed. The current implementation already does this, so it should be compatible.
+      *   **Cleanliness:** The goal is to make the control flow as clear as possible. The interaction between `yield`, `next()`, and `send()` can be tricky, so add comments explaining the new protocol.
 
       **Expected Outcome:**
 
-      This change will fix the stale mask bug. When processing a mega-node, the `_process_internal_node_gen` coroutine will receive live updates. After the first few children find some tokens, the `active_remaining_mask` inside the generator will shrink, causing the per-edge pruning check (`llm_bv.isdisjoint(...)`) to become highly effective. The early-exit (`if active_remaining_mask.is_empty()`) will terminate the loop as soon as the final mask is complete. The `best_edges_traversed` count in the oracle's output should drop dramatically.
+      After this refactoring, the pruning check inside `_process_internal_node_gen` will always use the latest `remaining_mask`. When processing a mega-node, after the first few children are processed and update the global `final_mask`, the generator will receive this new, smaller `remaining_mask`. This will cause the pruning check to succeed for many of the subsequent children, drastically reducing the number of traversed edges and significantly improving the performance of `get_mask`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7695,113 +7672,150 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to fix the performance bug, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to implement the fix, followed by the corresponding git diff.
 
       ### Step-by-Step Instructions
 
-      I will refactor the generator control flow to ensure that the `_process_internal_node_gen` coroutine always operates on the latest `remaining_mask`. This will fix the stale mask bug and significantly improve pruning effectiveness.
+      I will refactor the model's traversal logic to fix a critical flaw where a stale `remaining_mask` was used, leading to inefficient pruning. This is achieved by modifying the generator function to accept updates via `send()` and adjusting the driving loop to provide the current mask upon resuming a suspended generator.
 
-      #### 1. Modify `_process_internal_node_gen` to become a coroutine
+      #### File: `python/aug25/models/precompute3_model_pure_python_opt4_5.py`
 
-      In the file `python/aug25/models/precompute3_model_pure_python_opt4_5.py`, I will update the `_process_internal_node_gen` method to receive data via `yield`. This allows the main loop to send it the most up-to-date `remaining_mask`.
+      1.  **Update `_process_internal_node_gen` Method Signature:**
+          *   Locate the method definition for `_process_internal_node_gen` around line 1184.
+          *   Change its return type hint to indicate that it can receive values.
+          *   **From:**
+              ```python
+              ) -> Generator[Union[Enqueue, Suspend], None, None]:
+              ```
+          *   **To:**
+              ```python
+              ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+              ```
 
-      I will modify all `yield` statements within this method to capture the value sent by the caller and update the local `active_remaining_mask`.
+      2.  **Modify `yield` Statements in `_process_internal_node_gen`:**
+          *   Throughout this method, every `yield` statement needs to be updated to receive a new mask and update its internal `active_remaining_mask`.
+          *   **For `Enqueue` yields:**
+              *   Locate the line `yield Enqueue(d, child_gss, depth + 1)` (appears twice, around lines 1329 and 1472).
+              *   Replace it with:
+                  ```python
+                  new_mask = yield Enqueue(d, child_gss, depth + 1)
+                  if new_mask is not None:
+                      active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                  ```
+          *   **For `Suspend` yields (and fix incorrect calls):**
+              *   Locate the line `yield Suspend(priority, depth)` around line 1332. This call is missing the `node_id`.
+              *   Replace it with the corrected call and the mask-update logic:
+                  ```python
+                  new_mask = yield Suspend(node_id, priority, depth)
+                  if new_mask is not None:
+                      active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                  dests_proc = 0
+                  ```
+              *   Locate the line `yield Suspend(int(node_id), priority, depth)` around line 1339.
+              *   Replace it with:
+                  ```python
+                  new_mask = yield Suspend(int(node_id), priority, depth)
+                  if new_mask is not None:
+                      active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                  edges_proc = 0
+                  ```
+              *   Repeat these replacements for the two `Suspend` yields in the `else` block (around lines 1475 and 1490), making sure to fix the call that is missing `node_id`.
 
-      **Changes:**
+      3.  **Refactor the `_get_mask_run` Driving Loop:**
+          *   Locate the `_get_mask_run` method around line 1630.
+          *   Inside the `while work_heap:` loop, right after `priority, work = heap_item.priority, heap_item.item`, initialize two new variables to manage the generator state:
+              ```python
+              gen = None
+              is_resumed_gen = False
+              ```
+          *   In the `if isinstance(work, WorkItemSuspended):` block, set the flag for resumption:
+              ```python
+              is_resumed_gen = True
+              ```
+          *   Locate the `if gen:` block (around line 1774) and its inner `while True:` loop.
+          *   Inside this `while True:` loop, replace the call to `next(gen)` with logic that uses `gen.send()` for resumed generators:
+          *   **From:**
+              ```python
+              yielded = next(gen)
+              ```
+          *   **To:**
+              ```python
+              if is_resumed_gen:
+                  yielded = gen.send(remaining_mask)
+                  is_resumed_gen = False  # Only send on the first iteration after resumption
+              else:
+                  yielded = next(gen)
+              ```
 
-      -   Around line 1118, inside the `if a_node.fast_children:` block, change `yield Enqueue(...)` to:
-          ```python
-          new_mask = yield Enqueue(d, child_gss, depth + 1)
-          if new_mask is not None:
-              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
-          ```
-      -   Around line 1125, change `yield Suspend(...)` to:
-          ```python
-          new_mask = yield Suspend(node_id, priority, depth)
-          if new_mask is not None:
-              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
-          ```
-      -   Around line 1135, change the other `yield Suspend(...)` to:
-          ```python
-          new_mask = yield Suspend(int(node_id), priority, depth)
-          if new_mask is not None:
-              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
-          ```
-      -   Repeat these changes for the `yield` statements in the `else` (fallback) block:
-          -   Around line 1254, for `yield Suspend(...)`.
-          -   Around line 1278, for `yield Enqueue(...)`.
-          -   Around line 1288, for the final `yield Suspend(...)`.
-
-      #### 2. Refactor the `_get_mask_run` main loop
-
-      Next, I will update the main loop in `_get_mask_run` to correctly drive the new coroutine. The existing `while True:` loop, which causes the stale mask issue, will be removed. Instead, the generator will be advanced by a single step, and then re-queued onto the heap, allowing the `remaining_mask` to be updated before it resumes.
-
-      **Changes:**
-
-      -   In `_get_mask_run`, locate the `if gen:` block around line 1684.
-      -   Replace the entire `while True:` loop (from line 1685 to 1729) with a new control flow that:
-          1.  Advances the generator by one step using `gen.send(remaining_mask)` for resumed generators or `next(gen)` for new ones.
-          2.  If the generator yields an `Enqueue` item, the new work item is pushed to the heap, and the parent generator is immediately re-queued as a `WorkItemSuspended` to be resumed later with a fresh mask.
-          3.  If the generator yields a `Suspend` item, it is re-queued with its specified priority, as before.
-          4.  Handles the `StopIteration` exception when the generator completes.
-
-      This change ensures that after every single piece of work is yielded, the main loop can update `remaining_mask` before that generator is resumed.
+      These changes will ensure the generator always uses the most up-to-date mask for pruning, significantly improving performance.
 
       ### Git Diff
 
-      Here is the git diff for the changes.
+      Here is the git diff for the changes:
 
       ```diff
       --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      @@ -1115,22 +1115,22 @@
+      @@ -1191,7 +1191,7 @@
+               dest_scores: Optional[Dict[int, int]] = None,
+               oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
+               node_allowed_mask: Optional[LLMTokenSet] = None,
+      -    ) -> Generator[Union[Enqueue, Suspend], None, None]:
+      +    ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+               stats = Stats.get()
+               a_node = self.arena.get(node_id)
+               if not a_node:
+      @@ -1326,18 +1326,27 @@
                                continue
        
                            d: NodeID = int(dest_id)
-      -                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      -                    yield Enqueue(d, child_gss, depth + 1)
       +                    new_mask = yield Enqueue(d, child_gss, depth + 1)
-                           if new_mask is not None:
-                               active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                            dests_proc += 1
                            if oracle_counters is not None and local_ctr is not None:
                                local_ctr["dests"] = local_ctr.get("dests", 0) + 1
        
                            if dests_proc >= max_dests:
                                priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-      -                        new_mask = yield Suspend(node_id, priority, depth)
+      -                        yield Suspend(priority, depth)
       +                        new_mask = yield Suspend(node_id, priority, depth)
-                               if new_mask is not None:
-                                   active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+      +                        if new_mask is not None:
+      +                            active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                                dests_proc = 0
        
                            group_index += 1
        
                        if edges_proc >= max_edges:
                            priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-      -                    new_mask = yield Suspend(int(node_id), priority, depth)
+      -                    yield Suspend(int(node_id), priority, depth)
       +                    new_mask = yield Suspend(int(node_id), priority, depth)
-                           if new_mask is not None:
-                               active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                            edges_proc = 0
-      @@ -1248,7 +1248,7 @@
+                       edges_proc += 1
+               else:
+      @@ -1472,8 +1481,12 @@
+                           dest_keys.sort()
                        for dest_j in dest_keys:
                            if dests_proc >= max_dests:
                                priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-      -                        new_mask = yield Suspend(node_id, priority, depth)
+      -                        yield Suspend(priority, depth)
       +                        new_mask = yield Suspend(node_id, priority, depth)
-                               if new_mask is not None:
-                                   active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+      +                        if new_mask is not None:
+      +                            active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                                dests_proc = 0
-      @@ -1275,14 +1275,14 @@
-                                       local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
-                                   if isolate_cache is not None:
+                           dest = edge.dests[dest_j]
+                           values_to_keep = grouped[dest_j]
+      @@ -1496,14 +1509,19 @@
                                        isolate_cache[key_isolate] = child_gss
                            if child_gss.is_empty(): continue
                            d: NodeID = int(dest.dest_idx)
-      -                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      -                    yield Enqueue(d, child_gss, depth + 1)
       +                    new_mask = yield Enqueue(d, child_gss, depth + 1)
-                           if new_mask is not None:
-                               active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                            dests_proc += 1
                            if oracle_counters is not None and local_ctr is not None:
                                local_ctr["dests"] = local_ctr.get("dests", 0) + 1
@@ -7809,105 +7823,44 @@ messages:
                        if edges_proc >= max_edges:
                            # Suspend work after a batch to allow priority reordering at the heap level
                            priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-      -                    new_mask = yield Suspend(int(node_id), priority, depth)
+      -                    yield Suspend(int(node_id), priority, depth)
       +                    new_mask = yield Suspend(int(node_id), priority, depth)
-                           if new_mask is not None:
-                               active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                            edges_proc = 0
-      @@ -1681,50 +1681,49 @@
-                   else:
-                       raise ValueError(f'Unexpected work item: {work}')
+                       edges_proc += 1
+               # When max_dests suspend triggers
+      @@ -1678,13 +1696,19 @@
+                   stats.inc('get_mask.traversal.depth_heap.pops')
+                   heap_item = heapq.heappop(work_heap)
+                   priority, work = heap_item.priority, heap_item.item
+       
+      +            gen = None
+      +            is_resumed_gen = False
+      +
+                   if isinstance(work, WorkItemSuspended):
+      +                is_resumed_gen = True
+                       gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
+       
+                       if work_llm_mask.isdisjoint(remaining_mask):
+                           continue
+                   elif isinstance(work, WorkItemNew):
+                       stats.inc('get_mask.traversal.nodes_processed')
+                       node_id, gss_node, depth = work.node_id, work.gss, work.depth
+      @@ -1758,8 +1782,12 @@
        
                    if gen:
-      -                while True:
-      -                    try:
-      -                        if is_resumed_gen:
-      -                            yielded = gen.send(remaining_mask)
-      -                            is_resumed_gen = False  # Only send on the first iteration after resumption
-      +                try:
-      +                    if is_resumed_gen:
-      +                        yielded = gen.send(remaining_mask)
-      +                    else:
-      +                        yielded = next(gen)
-      +
-      +                    if isinstance(yielded, Enqueue):
-      +                        new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
-      +                        base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
-      +                        # Dynamic, target-aware child priority if enabled and reward masks present
-      +                        if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-      +                            child_priority = self._priority_for_node(
-      +                                new_node_id,
-      +                                new_depth,
-      +                                remaining_mask,
-      +                                guided_scores=guided_scores,
-      +                                oracle_reward_mask=oracle_reward_mask,
-      +                                analysis_node_costs=oracle_node_costs,
-      +                            )
-      +                        elif guided_scores is not None:
-      +                            child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
-                               else:
-      -                            yielded = next(gen)
-      -
-      -                        if isinstance(yielded, Enqueue):
-      -                            new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
-      -                            base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
-      -                            # Dynamic, target-aware child priority if enabled and reward masks present
-      -                            if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-      -                                child_priority = self._priority_for_node(
-      -                                    new_node_id,
-      -                                    new_depth,
-      -                                    remaining_mask,
-      -                                    guided_scores=guided_scores,
-      -                                    oracle_reward_mask=oracle_reward_mask,
-      -                                    analysis_node_costs=oracle_node_costs,
-      -                                )
-      -                            elif guided_scores is not None:
-      -                                child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
-      -                            else:
-      -                                child_priority = base_child_pri
-      -                            heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
-      -                        elif isinstance(yielded, Suspend):
-      -                            # Recompute scheduling priority for the suspended work dynamically based on remaining_mask
-      -                            if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-      -                                susp_pri = self._priority_for_node(
-      -                                    yielded.node_id,
-      -                                    yielded.depth,
-      -                                    remaining_mask,
-      -                                    guided_scores=guided_scores,
-      -                                    oracle_reward_mask=oracle_reward_mask,
-      -                                    analysis_node_costs=oracle_node_costs,
-      -                                )
-      -                            else:
-      -                                susp_pri = yielded.priority
-      -                            heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
-      -                            break
-      -
-      -                    except StopIteration:
-      -                        break # Generator is done.
-      +                            child_priority = base_child_pri
-      +                        heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
-      +                        # Re-queue the parent generator so it can be resumed with a fresh mask.
-      +                        heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, work_llm_mask, depth)))
-      +                    elif isinstance(yielded, Suspend):
-      +                        # Recompute scheduling priority for the suspended work dynamically based on remaining_mask
-      +                        if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-      +                            susp_pri = self._priority_for_node(
-      +                                yielded.node_id,
-      +                                yielded.depth,
-      +                                remaining_mask,
-      +                                guided_scores=guided_scores,
-      +                                oracle_reward_mask=oracle_reward_mask,
-      +                                analysis_node_costs=oracle_node_costs,
-      +                            )
+                       while True:
+                           try:
+      -                        yielded = next(gen)
+      +                        if is_resumed_gen:
+      +                            yielded = gen.send(remaining_mask)
+      +                            is_resumed_gen = False  # Only send on the first iteration after resumption
       +                        else:
-      +                            susp_pri = yielded.priority
-      +                        heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, work_llm_mask, yielded.depth)))
-      +
-      +                except StopIteration:
-      +                    pass # Generator is done.
-               stats.stop('get_mask.main_loop')
+      +                            yielded = next(gen)
        
-               stats.start('get_mask.final_conversion')
+                               if isinstance(yielded, Enqueue):
+                                   new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
 
       ```
     metadata:
@@ -7920,7 +7873,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor internal node processing to use
-      coroutines for live mask updates and fix stale mask bug"'
+  - user: 'Changes committed with message: "Refactor: Fix stale mask pruning in internal
+      node processing by enabling generator mask updates via send()"'
     metadata:
 ...
