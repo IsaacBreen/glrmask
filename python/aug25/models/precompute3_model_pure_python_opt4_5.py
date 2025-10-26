@@ -415,6 +415,8 @@ class Model(GraphProvider):
     oracle_hotspot_report_top_k: int = 10
     # Try random permutations of the top-K largest end masks
     oracle_permute_top_ends: int = 8
+    # Pre-computed static costs for oracle mode
+    static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -496,6 +498,7 @@ class Model(GraphProvider):
         model._build_fast_children()
         model.optimize_traversal()
         model._compute_and_print_stats()
+        model._precompute_static_costs()
         return model
     def _compute_edge_accelerators(self) -> None:
         all_ones = self.all_internal_llm_tokens_bitset
@@ -1310,6 +1313,51 @@ class Model(GraphProvider):
         self.reverse_adj = dict(parents)
         return self.reverse_adj
 
+    def _precompute_static_costs(self) -> None:
+        """
+        Pre-computes the minimum static path cost from every node back to any root.
+        This is done via a single multi-source Dijkstra search on the reverse graph.
+        The result is stored in self.static_path_costs for O(1) lookup later.
+        """
+        rev_adj = self._ensure_reverse_adjacency()
+        roots: Set[int] = {int(r) for r in self.roots_map.values()}
+
+        # 1. Calculate the static traversal cost for each node (using the fallback logic)
+        static_node_costs: Dict[NodeID, float] = {
+            nid: self._oracle_node_cost(nid) for nid in self.arena
+        }
+
+        # 2. Multi-source Dijkstra from all roots outwards (on the reverse graph)
+        import heapq as _hq
+        INF = float('inf')
+        self.static_path_costs = {}
+        pq: List[Tuple[float, int]] = []
+
+        # Initialize distances and priority queue with roots
+        for node_id in self.arena:
+            self.static_path_costs[node_id] = INF
+            if node_id in roots:
+                cost = static_node_costs.get(node_id, 1.0)
+                self.static_path_costs[node_id] = cost
+                _hq.heappush(pq, (cost, node_id))
+
+        while pq:
+            cost, u = _hq.heappop(pq)
+
+            if cost > self.static_path_costs.get(u, INF):
+                continue
+
+            # Propagate costs to parents (which are neighbors in the reverse graph)
+            for parent_id in rev_adj.get(u, []):
+                v = int(parent_id)
+                # The cost to reach a root from parent 'v' is its own static cost
+                # plus the minimum path cost from its child 'u'.
+                path_cost_through_u = cost + static_node_costs.get(v, 1.0)
+
+                if path_cost_through_u < self.static_path_costs.get(v, INF):
+                    self.static_path_costs[v] = path_cost_through_u
+                    _hq.heappush(pq, (path_cost_through_u, v))
+
     def _oracle_compute_reward_masks(self, end_events: List[Tuple[int, LLMTokenSet]]) -> Dict[int, LLMTokenSet]:
         """Compute target-specific reward masks per node:
         For each node u, reward[u] is the set of tokens that appear in some end_event and
@@ -1449,39 +1497,12 @@ class Model(GraphProvider):
         return reward
 
     def _oracle_estimate_end_cost(self, end_node_id: int, analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None) -> float:
-        """Estimate minimal cost from any root to the given end node by reverse Dijkstra over parents.
-        Edge costs are modeled by node costs (sum along a path). This is a heuristic but helps the oracle order ends."""
-        rev = self._ensure_reverse_adjacency()
-        roots: Set[int] = set(int(r) for r in self.roots_map.values())
-        # If end is itself a root
-        if int(end_node_id) in roots:
-            return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
-        # Dijkstra from end toward roots via parents (reverse edges)
-        import heapq as _hq
-        INF = float('inf')
-        dist: Dict[int, float] = {}
-        pq: List[Tuple[float, int]] = []
-        start = int(end_node_id)
-        dist[start] = self._oracle_node_cost(start, analysis_node_costs)
-        _hq.heappush(pq, (dist[start], start))
-        best_to_any_root = INF
-        while pq:
-            cd, u = _hq.heappop(pq)
-            if cd > dist.get(u, INF):
-                continue
-            if u in roots:
-                best_to_any_root = min(best_to_any_root, cd)
-                break
-            for parent in rev.get(u, ()):
-                v = int(parent)
-                nd = cd + self._oracle_node_cost(v, analysis_node_costs)
-                if nd < dist.get(v, INF):
-                    dist[v] = nd
-                    _hq.heappush(pq, (nd, v))
-        if best_to_any_root == INF:
-            # Fallback: just return cost of this node
-            return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
-        return best_to_any_root
+        """
+        Returns the pre-computed minimum static path cost from the given end node to any root.
+        This is an O(1) lookup. The analysis_node_costs parameter is ignored for this static estimation.
+        """
+        # Fallback to a large number if the node is somehow not in the pre-computed map.
+        return self.static_path_costs.get(int(end_node_id), float('inf'))
 
     def _oracle_beam_search_end_sequence(
         self,
