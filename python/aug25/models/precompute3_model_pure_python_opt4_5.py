@@ -404,8 +404,7 @@ class PyAcc:
 
     def __hash__(self):
         # Correctly hash the dictionary content for memoization
-        terminals_hashable = frozenset(self.terminals_union.items())
-        return hash((terminals_hashable, self.llm_mask))
+        return hash((len(self.terminals_union), self.llm_mask))
 
     def merge(self, other: "PyAcc") -> "PyAcc":
         new_terminals_union = self.terminals_union.copy()
@@ -500,44 +499,12 @@ class Model(GraphProvider):
     oracle_permute_top_ends: int = 8
     # Pre-computed static costs for oracle mode
     static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
-    oracle_use_astar: bool = True
+    oracle_use_astar: bool = False
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
         Stats.get().reset()
         data = json.loads(s)
-
-        # --- Monkey-patch GSS to be hashable for A* search ---
-        # The A* planner requires GSS objects to be hashable to use them in sets
-        # and dictionary keys. The LeveledGSS implementation may not define __hash__.
-        # We add one here based on its likely internal structure (a dict of levels).
-        def _gss_hash(self):
-            # Cache the hash for performance
-            if hasattr(self, '_hash_val'):
-                return self._hash_val
-
-            # The internal representation is likely a dictionary of levels,
-            # where each level contains a dictionary of stacks.
-            if not hasattr(self, 'levels') or not isinstance(self.levels, dict):
-                # Fallback if structure is unexpected, though this may not be unique
-                return id(self)
-
-            level_items = []
-            for level, stacks in self.levels.items():
-                # stacks is Dict[Tuple, PyAcc]. PyAcc is hashable. Tuple is hashable.
-                # frozenset of items makes this part hashable and order-independent.
-                stack_items = frozenset(stacks.items())
-                level_items.append((level, stack_items))
-            
-            # Sort by level to make the final representation canonical.
-            level_items.sort()
-            self._hash_val = hash(tuple(level_items))
-            return self._hash_val
-
-        # Unconditionally patch GSS to ensure our hash function is used for the A* search,
-        # which requires value-based hashing for GSS objects.
-        GSS.__hash__ = _gss_hash
-        # --- End of monkey-patch ---
 
         # Arena
         roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
