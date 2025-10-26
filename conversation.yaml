@@ -422,6 +422,8 @@ local_system:
           oracle_hotspot_report_top_k: int = 10
           # Try random permutations of the top-K largest end masks
           oracle_permute_top_ends: int = 8
+          # Pre-computed static costs for oracle mode
+          static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -503,6 +505,7 @@ local_system:
               model._build_fast_children()
               model.optimize_traversal()
               model._compute_and_print_stats()
+              model._precompute_static_costs()
               return model
           def _compute_edge_accelerators(self) -> None:
               all_ones = self.all_internal_llm_tokens_bitset
@@ -1317,6 +1320,51 @@ local_system:
               self.reverse_adj = dict(parents)
               return self.reverse_adj
 
+          def _precompute_static_costs(self) -> None:
+              """
+              Pre-computes the minimum static path cost from every node back to any root.
+              This is done via a single multi-source Dijkstra search on the reverse graph.
+              The result is stored in self.static_path_costs for O(1) lookup later.
+              """
+              rev_adj = self._ensure_reverse_adjacency()
+              roots: Set[int] = {int(r) for r in self.roots_map.values()}
+
+              # 1. Calculate the static traversal cost for each node (using the fallback logic)
+              static_node_costs: Dict[NodeID, float] = {
+                  nid: self._oracle_node_cost(nid) for nid in self.arena
+              }
+
+              # 2. Multi-source Dijkstra from all roots outwards (on the reverse graph)
+              import heapq as _hq
+              INF = float('inf')
+              self.static_path_costs = {}
+              pq: List[Tuple[float, int]] = []
+
+              # Initialize distances and priority queue with roots
+              for node_id in self.arena:
+                  self.static_path_costs[node_id] = INF
+                  if node_id in roots:
+                      cost = static_node_costs.get(node_id, 1.0)
+                      self.static_path_costs[node_id] = cost
+                      _hq.heappush(pq, (cost, node_id))
+
+              while pq:
+                  cost, u = _hq.heappop(pq)
+
+                  if cost > self.static_path_costs.get(u, INF):
+                      continue
+
+                  # Propagate costs to parents (which are neighbors in the reverse graph)
+                  for parent_id in rev_adj.get(u, []):
+                      v = int(parent_id)
+                      # The cost to reach a root from parent 'v' is its own static cost
+                      # plus the minimum path cost from its child 'u'.
+                      path_cost_through_u = cost + static_node_costs.get(v, 1.0)
+
+                      if path_cost_through_u < self.static_path_costs.get(v, INF):
+                          self.static_path_costs[v] = path_cost_through_u
+                          _hq.heappush(pq, (path_cost_through_u, v))
+
           def _oracle_compute_reward_masks(self, end_events: List[Tuple[int, LLMTokenSet]]) -> Dict[int, LLMTokenSet]:
               """Compute target-specific reward masks per node:
               For each node u, reward[u] is the set of tokens that appear in some end_event and
@@ -1456,39 +1504,12 @@ local_system:
               return reward
 
           def _oracle_estimate_end_cost(self, end_node_id: int, analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None) -> float:
-              """Estimate minimal cost from any root to the given end node by reverse Dijkstra over parents.
-              Edge costs are modeled by node costs (sum along a path). This is a heuristic but helps the oracle order ends."""
-              rev = self._ensure_reverse_adjacency()
-              roots: Set[int] = set(int(r) for r in self.roots_map.values())
-              # If end is itself a root
-              if int(end_node_id) in roots:
-                  return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
-              # Dijkstra from end toward roots via parents (reverse edges)
-              import heapq as _hq
-              INF = float('inf')
-              dist: Dict[int, float] = {}
-              pq: List[Tuple[float, int]] = []
-              start = int(end_node_id)
-              dist[start] = self._oracle_node_cost(start, analysis_node_costs)
-              _hq.heappush(pq, (dist[start], start))
-              best_to_any_root = INF
-              while pq:
-                  cd, u = _hq.heappop(pq)
-                  if cd > dist.get(u, INF):
-                      continue
-                  if u in roots:
-                      best_to_any_root = min(best_to_any_root, cd)
-                      break
-                  for parent in rev.get(u, ()):
-                      v = int(parent)
-                      nd = cd + self._oracle_node_cost(v, analysis_node_costs)
-                      if nd < dist.get(v, INF):
-                          dist[v] = nd
-                          _hq.heappush(pq, (nd, v))
-              if best_to_any_root == INF:
-                  # Fallback: just return cost of this node
-                  return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
-              return best_to_any_root
+              """
+              Returns the pre-computed minimum static path cost from the given end node to any root.
+              This is an O(1) lookup. The analysis_node_costs parameter is ignored for this static estimation.
+              """
+              # Fallback to a large number if the node is somehow not in the pre-computed map.
+              return self.static_path_costs.get(int(end_node_id), float('inf'))
 
           def _oracle_beam_search_end_sequence(
               self,
@@ -3396,7 +3417,7 @@ local_system:
               dest_scores: Optional[Dict[int, int]] = None,
               oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
               node_allowed_mask: Optional[LLMTokenSet] = None,
-          ) -> Generator[Union[Enqueue, Suspend], None, None]:
+          ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
               stats = Stats.get()
               a_node = self.arena.get(node_id)
               if not a_node:
@@ -3584,21 +3605,27 @@ local_system:
                               continue
 
                           d: NodeID = int(dest_id)
-                          yield Enqueue(d, child_gss, depth + 1)
+                          new_mask = yield Enqueue(d, child_gss, depth + 1)
+                          if new_mask is not None:
+                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                           dests_proc += 1
                           if oracle_counters is not None and local_ctr is not None:
                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
                           if dests_proc >= max_dests:
                               priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                              yield Suspend(priority, depth)
+                              new_mask = yield Suspend(node_id, priority, depth)
+                              if new_mask is not None:
+                                  active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                               dests_proc = 0
 
                           group_index += 1
 
                       if edges_proc >= max_edges:
                           priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                          yield Suspend(int(node_id), priority, depth)
+                          new_mask = yield Suspend(int(node_id), priority, depth)
+                          if new_mask is not None:
+                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                           edges_proc = 0
                       edges_proc += 1
               else:
@@ -3741,7 +3768,9 @@ local_system:
                       for dest_j in dest_keys:
                           if dests_proc >= max_dests:
                               priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                              yield Suspend(priority, depth)
+                              new_mask = yield Suspend(node_id, priority, depth)
+                              if new_mask is not None:
+                                  active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                               dests_proc = 0
                           dest = edge.dests[dest_j]
                           values_to_keep = grouped[dest_j]
@@ -3768,7 +3797,9 @@ local_system:
                                       isolate_cache[key_isolate] = child_gss
                           if child_gss.is_empty(): continue
                           d: NodeID = int(dest.dest_idx)
-                          yield Enqueue(d, child_gss, depth + 1)
+                          new_mask = yield Enqueue(d, child_gss, depth + 1)
+                          if new_mask is not None:
+                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                           dests_proc += 1
                           if oracle_counters is not None and local_ctr is not None:
                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
@@ -3776,7 +3807,9 @@ local_system:
                       if edges_proc >= max_edges:
                           # Suspend work after a batch to allow priority reordering at the heap level
                           priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                          yield Suspend(int(node_id), priority, depth)
+                          new_mask = yield Suspend(int(node_id), priority, depth)
+                          if new_mask is not None:
+                              active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                           edges_proc = 0
                       edges_proc += 1
               # When max_dests suspend triggers
@@ -4593,7 +4626,11 @@ local_system:
                   heap_item = heapq.heappop(work_heap)
                   priority, work = heap_item.priority, heap_item.item
 
+                  gen = None
+                  is_resumed_gen = False
+
                   if isinstance(work, WorkItemSuspended):
+                      is_resumed_gen = True
                       gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
 
                       if work_llm_mask.isdisjoint(remaining_mask):
@@ -4675,7 +4712,11 @@ local_system:
                   if gen:
                       while True:
                           try:
-                              yielded = next(gen)
+                              if is_resumed_gen:
+                                  yielded = gen.send(remaining_mask)
+                                  is_resumed_gen = False  # Only send on the first iteration after resumption
+                              else:
+                                  yielded = next(gen)
 
                               if isinstance(yielded, Enqueue):
                                   new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
@@ -4974,7 +5015,7 @@ local_system:
 
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: plan-git-llm
+  prev_apply_mode: git-llm
   default_end_line:
 system:
   message: |-
@@ -4992,7 +5033,7 @@ system:
     - gf
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: plan-git-llm
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -5433,6 +5474,8 @@ messages:
           oracle_hotspot_report_top_k: int = 10
           # Try random permutations of the top-K largest end masks
           oracle_permute_top_ends: int = 8
+          # Pre-computed static costs for oracle mode
+          static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -5514,6 +5557,7 @@ messages:
               model._build_fast_children()
               model.optimize_traversal()
               model._compute_and_print_stats()
+              model._precompute_static_costs()
               return model
           def _compute_edge_accelerators(self) -> None:
               all_ones = self.all_internal_llm_tokens_bitset
@@ -6328,6 +6372,51 @@ messages:
               self.reverse_adj = dict(parents)
               return self.reverse_adj
 
+          def _precompute_static_costs(self) -> None:
+              """
+              Pre-computes the minimum static path cost from every node back to any root.
+              This is done via a single multi-source Dijkstra search on the reverse graph.
+              The result is stored in self.static_path_costs for O(1) lookup later.
+              """
+              rev_adj = self._ensure_reverse_adjacency()
+              roots: Set[int] = {int(r) for r in self.roots_map.values()}
+
+              # 1. Calculate the static traversal cost for each node (using the fallback logic)
+              static_node_costs: Dict[NodeID, float] = {
+                  nid: self._oracle_node_cost(nid) for nid in self.arena
+              }
+
+              # 2. Multi-source Dijkstra from all roots outwards (on the reverse graph)
+              import heapq as _hq
+              INF = float('inf')
+              self.static_path_costs = {}
+              pq: List[Tuple[float, int]] = []
+
+              # Initialize distances and priority queue with roots
+              for node_id in self.arena:
+                  self.static_path_costs[node_id] = INF
+                  if node_id in roots:
+                      cost = static_node_costs.get(node_id, 1.0)
+                      self.static_path_costs[node_id] = cost
+                      _hq.heappush(pq, (cost, node_id))
+
+              while pq:
+                  cost, u = _hq.heappop(pq)
+
+                  if cost > self.static_path_costs.get(u, INF):
+                      continue
+
+                  # Propagate costs to parents (which are neighbors in the reverse graph)
+                  for parent_id in rev_adj.get(u, []):
+                      v = int(parent_id)
+                      # The cost to reach a root from parent 'v' is its own static cost
+                      # plus the minimum path cost from its child 'u'.
+                      path_cost_through_u = cost + static_node_costs.get(v, 1.0)
+
+                      if path_cost_through_u < self.static_path_costs.get(v, INF):
+                          self.static_path_costs[v] = path_cost_through_u
+                          _hq.heappush(pq, (path_cost_through_u, v))
+
           def _oracle_compute_reward_masks(self, end_events: List[Tuple[int, LLMTokenSet]]) -> Dict[int, LLMTokenSet]:
               """Compute target-specific reward masks per node:
               For each node u, reward[u] is the set of tokens that appear in some end_event and
@@ -6467,39 +6556,12 @@ messages:
               return reward
 
           def _oracle_estimate_end_cost(self, end_node_id: int, analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None) -> float:
-              """Estimate minimal cost from any root to the given end node by reverse Dijkstra over parents.
-              Edge costs are modeled by node costs (sum along a path). This is a heuristic but helps the oracle order ends."""
-              rev = self._ensure_reverse_adjacency()
-              roots: Set[int] = set(int(r) for r in self.roots_map.values())
-              # If end is itself a root
-              if int(end_node_id) in roots:
-                  return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
-              # Dijkstra from end toward roots via parents (reverse edges)
-              import heapq as _hq
-              INF = float('inf')
-              dist: Dict[int, float] = {}
-              pq: List[Tuple[float, int]] = []
-              start = int(end_node_id)
-              dist[start] = self._oracle_node_cost(start, analysis_node_costs)
-              _hq.heappush(pq, (dist[start], start))
-              best_to_any_root = INF
-              while pq:
-                  cd, u = _hq.heappop(pq)
-                  if cd > dist.get(u, INF):
-                      continue
-                  if u in roots:
-                      best_to_any_root = min(best_to_any_root, cd)
-                      break
-                  for parent in rev.get(u, ()):
-                      v = int(parent)
-                      nd = cd + self._oracle_node_cost(v, analysis_node_costs)
-                      if nd < dist.get(v, INF):
-                          dist[v] = nd
-                          _hq.heappush(pq, (nd, v))
-              if best_to_any_root == INF:
-                  # Fallback: just return cost of this node
-                  return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
-              return best_to_any_root
+              """
+              Returns the pre-computed minimum static path cost from the given end node to any root.
+              This is an O(1) lookup. The analysis_node_costs parameter is ignored for this static estimation.
+              """
+              # Fallback to a large number if the node is somehow not in the pre-computed map.
+              return self.static_path_costs.get(int(end_node_id), float('inf'))
 
           def _oracle_beam_search_end_sequence(
               self,
@@ -7493,160 +7555,109 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt4_5.py
   - user: |-
+      Excellent. This is a high-impact fix. Here is a detailed, practical prompt for an LLM to implement the correction. It explains the flaw, proposes a specific solution using Python's generator features, and provides clear instructions.
+
+      ---
+
+      ### Prompt for AI Coding Assistant
+
       **High-Level Goal:**
 
-      Refactor the `Model` class to significantly speed up the "planning phase" of the `oracle_mode` in the `get_mask` method. The goal is to eliminate redundant, per-call graph analysis by pre-computing a static cost model for all nodes at initialization.
+      Fix a critical logical flaw in the `_get_mask_run` method's pruning logic. The current implementation uses a stale `remaining_mask` when processing nodes with many children (like a "mega-node"), causing the pruning of redundant paths to fail. The goal is to refactor the code to ensure that the traversal logic always uses the most up-to-date `remaining_mask`.
 
-      **Context:**
+      **The Core Problem:**
 
-      The current implementation of `oracle_mode` is powerful but inefficient. On every call to `get_mask`, it performs a "planning run" which involves discovering the computational cost of paths through the static `arena` graph. A key bottleneck is the `_oracle_estimate_end_cost` function, which effectively runs a Dijkstra-like search on the reverse graph to find the cheapest path from an end-node back to a root. This entire search is repeated for many nodes on every single `get_mask` call, even though the underlying graph and its structural costs are static.
+      The `_process_internal_node_gen` function, which is a Python generator, receives a `remaining_mask` at the moment of its creation. It then iterates through hundreds or thousands of a node's children, yielding `Enqueue` and `Suspend` events. In the meantime, the main `_get_mask_run` loop processes other work items, finds end-nodes, and updates the global `final_mask` (and thus the true `remaining_mask`).
 
-      **The Task:**
+      However, when the original generator for the mega-node is resumed, it continues operating with its initial, now-stale copy of `remaining_mask`. It is blind to the progress made by its own children. This prevents it from correctly pruning its later children, leading to a massive amount of unnecessary work.
 
-      Your task is to replace this repeated, dynamic search with a one-time, pre-computed static cost model. This model will calculate the minimum estimated cost from every reachable node in the `arena` back to any root node.
+      **The Task: Implement a Real-Time Mask Update Mechanism**
 
-      **Proposed Solution - Step-by-Step:**
+      Refactor the code to pass the updated `remaining_mask` back into the suspended generator every time it is resumed. This will be achieved using the `generator.send()` method.
 
-      1.  **Define a Static Node Cost Metric:**
-          We need a simple, static cost for traversing any given node. Use the fallback metric already present in the `_oracle_node_cost` function: `cost = 1.0 + len(node.children) + 0.25 * total_dests_in_node`. This metric is based purely on the node's structure.
+      **Step-by-Step Implementation Plan:**
 
-      2.  **Implement the Pre-computation Algorithm:**
-          Create a new private method, for example, `_precompute_static_costs(self)`. This method will perform the following:
-          *   It will run a **single, multi-source Dijkstra search** on the **reverse** `arena` graph.
-          *   The "sources" for this search will be all the root nodes (from `self.roots_map.values()`). The initial cost for all root nodes is their own static cost.
-          *   The search will propagate outwards from the roots to all reachable nodes, calculating the minimum cumulative cost from each node back to *any* root.
-          *   You will need the reverse adjacency graph for this, which is already available via `self._ensure_reverse_adjacency()`.
+      1.  **Modify `_process_internal_node_gen` to Accept Updates:**
+          *   The generator needs to be able to receive a new mask. The `yield` statement can both send a value out and receive a value in.
+          *   Inside the main loop that iterates over edges/children, you will need to add a `yield` expression to receive the updated mask.
+          *   The generator should be primed by yielding `None` initially to signal it's ready for its first real command.
 
-      3.  **Store the Results:**
-          The result of this computation should be a dictionary, `self.static_path_costs: Dict[NodeID, float]`, mapping every reachable node ID to its minimum pre-computed path cost to a root. This dictionary will be the new, fast lookup table.
+          **Example Structure for `_process_internal_node_gen`:**
 
-      4.  **Integrate the Pre-computation:**
-          *   Call your new `_precompute_static_costs()` method once at the end of the `Model.from_json_string` constructor, after the arena and reverse adjacency graph are fully built.
-          *   Modify the `_oracle_node_cost` and `_oracle_estimate_end_cost` methods. The logic should be updated to prioritize using the pre-computed data. `_oracle_estimate_end_cost(self, end_node_id, ...)` should become a simple, O(1) lookup: `return self.static_path_costs.get(end_node_id, fallback_value)`. The dynamic `analysis_node_costs` can still be used by other parts of the oracle, but the expensive pathfinding search should be completely removed from the per-call execution path.
+          ```python
+          def _process_internal_node_gen(self, ..., remaining_mask: LLMTokenSet, ...) -> Generator:
+              active_remaining_mask = remaining_mask
+              
+              # Prime the generator
+              yielded_value = yield
+              if yielded_value is not None:
+                  active_remaining_mask = yielded_value
+
+              # Main loop over edges (conceptual)
+              for edge in a_node.children:
+                  # Pruning check using the potentially updated mask
+                  if edge.llm_bv.isdisjoint(active_remaining_mask):
+                      continue
+
+                  # ... existing logic to process the edge ...
+
+                  # Yield the work item and wait for the next command/mask
+                  yielded_value = yield Enqueue(d, child_gss, depth + 1)
+                  if yielded_value is not None:
+                      active_remaining_mask = yielded_value
+              
+              # Handle suspension similarly
+          ```
+          *Self-correction: A simpler way might be to make the generator yield control and expect a `send` on the next iteration, rather than yielding and receiving in the same statement. Choose the cleanest implementation.*
+
+      2.  **Modify `_get_mask_run` to Drive the Generator with `send()`:**
+          *   The main loop in `_get_mask_run` needs to be updated to handle the new generator protocol.
+          *   **When creating a new generator:** After creating it with `gen = self._process_internal_node_gen(...)`, you must "prime" it by calling `next(gen)` once. This will execute the code up to the first `yield`.
+          *   **When resuming a suspended generator:** Instead of calling `next(gen)`, you must now call `gen.send(remaining_mask)`. This will resume the generator and pass the *current*, up-to-date `remaining_mask` into it.
+
+          **Example Structure for `_get_mask_run`:**
+
+          ```python
+          # In _get_mask_run
+          while work_heap:
+              # ...
+              if isinstance(work, WorkItemSuspended):
+                  gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
+                  # ...
+                  try:
+                      # RESUME with the LATEST mask
+                      yielded = gen.send(remaining_mask)
+                      # ... handle yielded Enqueue/Suspend ...
+                  except StopIteration:
+                      break
+
+              elif isinstance(work, WorkItemNew):
+                  # ...
+                  gen = self._process_internal_node_gen(
+                      node_id, gss_node, remaining_mask, ...
+                  )
+                  try:
+                      # PRIME the generator
+                      yielded = next(gen)
+                      # ... handle the first yielded Enqueue/Suspend ...
+                  except StopIteration:
+                      continue
+          ```
+
+      **Important Considerations:**
+
+      *   **Suspension (`Suspend` object):** The logic for suspending and resuming work needs to be carefully handled. When a generator yields a `Suspend` object, it will be put back on the heap. When it's popped later as a `WorkItemSuspended`, the `gen.send(remaining_mask)` call will correctly resume it with fresh data.
+      *   **State Management:** Ensure that the `WorkItemSuspended` object correctly stores the generator instance so it can be resumed. The current implementation already does this, so it should be compatible.
+      *   **Cleanliness:** The goal is to make the control flow as clear as possible. The interaction between `yield`, `next()`, and `send()` can be tricky, so add comments explaining the new protocol.
 
       **Expected Outcome:**
 
-      The `_oracle_estimate_end_cost` function will be transformed from an expensive graph search into a fast dictionary lookup. This will significantly reduce the overhead of the oracle's planning phase, making each `get_mask` call faster, while preserving the effectiveness of the cost-aware guidance heuristics. The overall logic of the oracle (generating candidates, evaluating them, and running a final guided pass) will remain the same, but it will operate on the pre-computed static costs.
+      After this refactoring, the pruning check inside `_process_internal_node_gen` will always use the latest `remaining_mask`. When processing a mega-node, after the first few children are processed and update the global `final_mask`, the generator will receive this new, smaller `remaining_mask`. This will cause the pruning check to succeed for many of the subsequent children, drastically reducing the number of traversed edges and significantly improving the performance of `get_mask`.
     metadata:
   - user: |-
-      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
-                  - Give concrete, step-by-step edits the user can apply.
-                  - Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: llm
-      phase: instructions-only
-  - assistant: |-
-      Of course. Here are the step-by-step instructions to refactor the `oracle_mode` planning phase by pre-computing static costs.
-
-      ### Step 1: Add `static_path_costs` Attribute to `Model`
-
-      In the file `python/aug25/models/precompute3_model_pure_python_opt4_5.py`, locate the `@dataclass class Model(GraphProvider):` definition. Add a new field to store the pre-computed costs.
-
-      **Location:** Inside the `Model` dataclass definition, around line 490.
-
-      **Action:** Add the following line alongside the other class attributes:
-
-      ```python
-          # Pre-computed static costs for oracle mode
-          static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
-      ```
-
-      ### Step 2: Implement the Pre-computation Method
-
-      Next, add the new private method `_precompute_static_costs` to the `Model` class. This method will perform the one-time cost calculation.
-
-      **Location:** Inside the `Model` class, a good place is after the `_ensure_reverse_adjacency` method (around line 1470).
-
-      **Action:** Insert the following new method:
-
-      ```python
-          def _precompute_static_costs(self) -> None:
-              """
-              Pre-computes the minimum static path cost from every node back to any root.
-              This is done via a single multi-source Dijkstra search on the reverse graph.
-              The result is stored in self.static_path_costs for O(1) lookup later.
-              """
-              rev_adj = self._ensure_reverse_adjacency()
-              roots: Set[int] = {int(r) for r in self.roots_map.values()}
-
-              # 1. Calculate the static traversal cost for each node (using the fallback logic)
-              static_node_costs: Dict[NodeID, float] = {
-                  nid: self._oracle_node_cost(nid) for nid in self.arena
-              }
-
-              # 2. Multi-source Dijkstra from all roots outwards (on the reverse graph)
-              import heapq as _hq
-              INF = float('inf')
-              self.static_path_costs = {}
-              pq: List[Tuple[float, int]] = []
-
-              # Initialize distances and priority queue with roots
-              for node_id in self.arena:
-                  self.static_path_costs[node_id] = INF
-                  if node_id in roots:
-                      cost = static_node_costs.get(node_id, 1.0)
-                      self.static_path_costs[node_id] = cost
-                      _hq.heappush(pq, (cost, node_id))
-
-              while pq:
-                  cost, u = _hq.heappop(pq)
-
-                  if cost > self.static_path_costs.get(u, INF):
-                      continue
-
-                  # Propagate costs to parents (which are neighbors in the reverse graph)
-                  for parent_id in rev_adj.get(u, []):
-                      v = int(parent_id)
-                      # The cost to reach a root from parent 'v' is its own static cost
-                      # plus the minimum path cost from its child 'u'.
-                      path_cost_through_u = cost + static_node_costs.get(v, 1.0)
-
-                      if path_cost_through_u < self.static_path_costs.get(v, INF):
-                          self.static_path_costs[v] = path_cost_through_u
-                          _hq.heappush(pq, (path_cost_through_u, v))
-
-      ```
-
-      ### Step 3: Integrate Pre-computation into Model Initialization
-
-      Call the new method once when the model is loaded.
-
-      **Location:** Inside the `Model.from_json_string` static method, just before the final `return model` statement (around line 603).
-
-      **Action:** Add this line:
-
-      ```python
-              model._precompute_static_costs()
-      ```
-
-      ### Step 4: Replace the Dynamic Pathfinding Logic
-
-      Finally, replace the expensive, per-call Dijkstra search in `_oracle_estimate_end_cost` with a simple, fast lookup into the pre-computed table.
-
-      **Location:** The `_oracle_estimate_end_cost` method (starts around line 1608).
-
-      **Action:** Replace the entire body of the `_oracle_estimate_end_cost` method with the following code:
-
-      ```python
-          def _oracle_estimate_end_cost(self, end_node_id: int, analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None) -> float:
-              """
-              Returns the pre-computed minimum static path cost from the given end node to any root.
-              This is an O(1) lookup. The analysis_node_costs parameter is ignored for this static estimation.
-              """
-              # Fallback to a large number if the node is somehow not in the pre-computed map.
-              return self.static_path_costs.get(int(end_node_id), float('inf'))
-      ```
-
-      After applying these changes, the oracle's planning phase will be significantly faster as it will no longer perform redundant graph searches on every `get_mask` call.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, output git diff patches.
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
                   - Use one fenced ```diff code block per file.
                   - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
                   - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
@@ -7658,132 +7669,203 @@ messages:
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: git
-      phase: diff-after-plan
+      mode: git-llm
+      phase: default
   - assistant: |-
+      Of course. Here are the step-by-step instructions to implement the fix, followed by the corresponding git diff.
+
+      ### Step-by-Step Instructions
+
+      I will refactor the model's traversal logic to fix a critical flaw where a stale `remaining_mask` was used, leading to inefficient pruning. This is achieved by modifying the generator function to accept updates via `send()` and adjusting the driving loop to provide the current mask upon resuming a suspended generator.
+
+      #### File: `python/aug25/models/precompute3_model_pure_python_opt4_5.py`
+
+      1.  **Update `_process_internal_node_gen` Method Signature:**
+          *   Locate the method definition for `_process_internal_node_gen` around line 1184.
+          *   Change its return type hint to indicate that it can receive values.
+          *   **From:**
+              ```python
+              ) -> Generator[Union[Enqueue, Suspend], None, None]:
+              ```
+          *   **To:**
+              ```python
+              ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+              ```
+
+      2.  **Modify `yield` Statements in `_process_internal_node_gen`:**
+          *   Throughout this method, every `yield` statement needs to be updated to receive a new mask and update its internal `active_remaining_mask`.
+          *   **For `Enqueue` yields:**
+              *   Locate the line `yield Enqueue(d, child_gss, depth + 1)` (appears twice, around lines 1329 and 1472).
+              *   Replace it with:
+                  ```python
+                  new_mask = yield Enqueue(d, child_gss, depth + 1)
+                  if new_mask is not None:
+                      active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                  ```
+          *   **For `Suspend` yields (and fix incorrect calls):**
+              *   Locate the line `yield Suspend(priority, depth)` around line 1332. This call is missing the `node_id`.
+              *   Replace it with the corrected call and the mask-update logic:
+                  ```python
+                  new_mask = yield Suspend(node_id, priority, depth)
+                  if new_mask is not None:
+                      active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                  dests_proc = 0
+                  ```
+              *   Locate the line `yield Suspend(int(node_id), priority, depth)` around line 1339.
+              *   Replace it with:
+                  ```python
+                  new_mask = yield Suspend(int(node_id), priority, depth)
+                  if new_mask is not None:
+                      active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                  edges_proc = 0
+                  ```
+              *   Repeat these replacements for the two `Suspend` yields in the `else` block (around lines 1475 and 1490), making sure to fix the call that is missing `node_id`.
+
+      3.  **Refactor the `_get_mask_run` Driving Loop:**
+          *   Locate the `_get_mask_run` method around line 1630.
+          *   Inside the `while work_heap:` loop, right after `priority, work = heap_item.priority, heap_item.item`, initialize two new variables to manage the generator state:
+              ```python
+              gen = None
+              is_resumed_gen = False
+              ```
+          *   In the `if isinstance(work, WorkItemSuspended):` block, set the flag for resumption:
+              ```python
+              is_resumed_gen = True
+              ```
+          *   Locate the `if gen:` block (around line 1774) and its inner `while True:` loop.
+          *   Inside this `while True:` loop, replace the call to `next(gen)` with logic that uses `gen.send()` for resumed generators:
+          *   **From:**
+              ```python
+              yielded = next(gen)
+              ```
+          *   **To:**
+              ```python
+              if is_resumed_gen:
+                  yielded = gen.send(remaining_mask)
+                  is_resumed_gen = False  # Only send on the first iteration after resumption
+              else:
+                  yielded = next(gen)
+              ```
+
+      These changes will ensure the generator always uses the most up-to-date mask for pruning, significantly improving performance.
+
+      ### Git Diff
+
+      Here is the git diff for the changes:
+
       ```diff
       --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
-      @@ -529,6 +529,8 @@
-           oracle_hotspot_report_top_k: int = 10
-           # Try random permutations of the top-K largest end masks
-           oracle_permute_top_ends: int = 8
-      +    # Pre-computed static costs for oracle mode
-      +    static_path_costs: Dict[NodeID, float] = field(default_factory=dict)
+      @@ -1191,7 +1191,7 @@
+               dest_scores: Optional[Dict[int, int]] = None,
+               oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
+               node_allowed_mask: Optional[LLMTokenSet] = None,
+      -    ) -> Generator[Union[Enqueue, Suspend], None, None]:
+      +    ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+               stats = Stats.get()
+               a_node = self.arena.get(node_id)
+               if not a_node:
+      @@ -1326,18 +1326,27 @@
+                               continue
        
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-      @@ -600,6 +602,7 @@
-               model._build_fast_children()
-               model.optimize_traversal()
-               model._compute_and_print_stats()
-      +        model._precompute_static_costs()
-               return model
-           def _compute_edge_accelerators(self) -> None:
-               all_ones = self.all_internal_llm_tokens_bitset
-      @@ -1469,6 +1472,49 @@
-               self.reverse_adj = dict(parents)
-               return self.reverse_adj
+                           d: NodeID = int(dest_id)
+      -                    yield Enqueue(d, child_gss, depth + 1)
+      +                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                           dests_proc += 1
+                           if oracle_counters is not None and local_ctr is not None:
+                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
        
-      +    def _precompute_static_costs(self) -> None:
-      +        """
-      +        Pre-computes the minimum static path cost from every node back to any root.
-      +        This is done via a single multi-source Dijkstra search on the reverse graph.
-      +        The result is stored in self.static_path_costs for O(1) lookup later.
-      +        """
-      +        rev_adj = self._ensure_reverse_adjacency()
-      +        roots: Set[int] = {int(r) for r in self.roots_map.values()}
-      +
-      +        # 1. Calculate the static traversal cost for each node (using the fallback logic)
-      +        static_node_costs: Dict[NodeID, float] = {
-      +            nid: self._oracle_node_cost(nid) for nid in self.arena
-      +        }
-      +
-      +        # 2. Multi-source Dijkstra from all roots outwards (on the reverse graph)
-      +        import heapq as _hq
-      +        INF = float('inf')
-      +        self.static_path_costs = {}
-      +        pq: List[Tuple[float, int]] = []
-      +
-      +        # Initialize distances and priority queue with roots
-      +        for node_id in self.arena:
-      +            self.static_path_costs[node_id] = INF
-      +            if node_id in roots:
-      +                cost = static_node_costs.get(node_id, 1.0)
-      +                self.static_path_costs[node_id] = cost
-      +                _hq.heappush(pq, (cost, node_id))
-      +
-      +        while pq:
-      +            cost, u = _hq.heappop(pq)
-      +
-      +            if cost > self.static_path_costs.get(u, INF):
-      +                continue
-      +
-      +            # Propagate costs to parents (which are neighbors in the reverse graph)
-      +            for parent_id in rev_adj.get(u, []):
-      +                v = int(parent_id)
-      +                # The cost to reach a root from parent 'v' is its own static cost
-      +                # plus the minimum path cost from its child 'u'.
-      +                path_cost_through_u = cost + static_node_costs.get(v, 1.0)
-      +
-      +                if path_cost_through_u < self.static_path_costs.get(v, INF):
-      +                    self.static_path_costs[v] = path_cost_through_u
-      +                    _hq.heappush(pq, (path_cost_through_u, v))
-      +
-           def _oracle_compute_reward_masks(self, end_events: List[Tuple[int, LLMTokenSet]]) -> Dict[int, LLMTokenSet]:
-               """Compute target-specific reward masks per node:
-               For each node u, reward[u] is the set of tokens that appear in some end_event and
-      @@ -1605,37 +1651,11 @@
-               return reward
+                           if dests_proc >= max_dests:
+                               priority = (-self.max_depth.get(node_id, 0), group_index, 0)
+      -                        yield Suspend(priority, depth)
+      +                        new_mask = yield Suspend(node_id, priority, depth)
+      +                        if new_mask is not None:
+      +                            active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                               dests_proc = 0
        
-           def _oracle_estimate_end_cost(self, end_node_id: int, analysis_node_costs: Optional[Dict[int, Dict[str, int]]] = None) -> float:
-      -        """Estimate minimal cost from any root to the given end node by reverse Dijkstra over parents.
-      -        Edge costs are modeled by node costs (sum along a path). This is a heuristic but helps the oracle order ends."""
-      -        rev = self._ensure_reverse_adjacency()
-      -        roots: Set[int] = set(int(r) for r in self.roots_map.values())
-      -        # If end is itself a root
-      -        if int(end_node_id) in roots:
-      -            return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
-      -        # Dijkstra from end toward roots via parents (reverse edges)
-      -        import heapq as _hq
-      -        INF = float('inf')
-      -        dist: Dict[int, float] = {}
-      -        pq: List[Tuple[float, int]] = []
-      -        start = int(end_node_id)
-      -        dist[start] = self._oracle_node_cost(start, analysis_node_costs)
-      -        _hq.heappush(pq, (dist[start], start))
-      -        best_to_any_root = INF
-      -        while pq:
-      -            cd, u = _hq.heappop(pq)
-      -            if cd > dist.get(u, INF):
-      -                continue
-      -            if u in roots:
-      -                best_to_any_root = min(best_to_any_root, cd)
-      -                break
-      -            for parent in rev.get(u, ()):
-      -                v = int(parent)
-      -                nd = cd + self._oracle_node_cost(v, analysis_node_costs)
-      -                if nd < dist.get(v, INF):
-      -                    dist[v] = nd
-      -                    _hq.heappush(pq, (nd, v))
-      -        if best_to_any_root == INF:
-      -            # Fallback: just return cost of this node
-      -            return self._oracle_node_cost(int(end_node_id), analysis_node_costs)
-      -        return best_to_any_root
-      +        """
-      +        Returns the pre-computed minimum static path cost from the given end node to any root.
-      +        This is an O(1) lookup. The analysis_node_costs parameter is ignored for this static estimation.
-      +        """
-      +        # Fallback to a large number if the node is somehow not in the pre-computed map.
-      +        return self.static_path_costs.get(int(end_node_id), float('inf'))
+                           group_index += 1
        
-           def _oracle_beam_search_end_sequence(
-               self,
+                       if edges_proc >= max_edges:
+                           priority = (-self.max_depth.get(node_id, 0), group_index, 0)
+      -                    yield Suspend(int(node_id), priority, depth)
+      +                    new_mask = yield Suspend(int(node_id), priority, depth)
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                           edges_proc = 0
+                       edges_proc += 1
+               else:
+      @@ -1472,8 +1481,12 @@
+                           dest_keys.sort()
+                       for dest_j in dest_keys:
+                           if dests_proc >= max_dests:
+                               priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+      -                        yield Suspend(priority, depth)
+      +                        new_mask = yield Suspend(node_id, priority, depth)
+      +                        if new_mask is not None:
+      +                            active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                               dests_proc = 0
+                           dest = edge.dests[dest_j]
+                           values_to_keep = grouped[dest_j]
+      @@ -1496,14 +1509,19 @@
+                                       isolate_cache[key_isolate] = child_gss
+                           if child_gss.is_empty(): continue
+                           d: NodeID = int(dest.dest_idx)
+      -                    yield Enqueue(d, child_gss, depth + 1)
+      +                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                           dests_proc += 1
+                           if oracle_counters is not None and local_ctr is not None:
+                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+       
+                       if edges_proc >= max_edges:
+                           # Suspend work after a batch to allow priority reordering at the heap level
+                           priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
+      -                    yield Suspend(int(node_id), priority, depth)
+      +                    new_mask = yield Suspend(int(node_id), priority, depth)
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
+                           edges_proc = 0
+                       edges_proc += 1
+               # When max_dests suspend triggers
+      @@ -1678,13 +1696,19 @@
+                   stats.inc('get_mask.traversal.depth_heap.pops')
+                   heap_item = heapq.heappop(work_heap)
+                   priority, work = heap_item.priority, heap_item.item
+       
+      +            gen = None
+      +            is_resumed_gen = False
+      +
+                   if isinstance(work, WorkItemSuspended):
+      +                is_resumed_gen = True
+                       gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
+       
+                       if work_llm_mask.isdisjoint(remaining_mask):
+                           continue
+                   elif isinstance(work, WorkItemNew):
+                       stats.inc('get_mask.traversal.nodes_processed')
+                       node_id, gss_node, depth = work.node_id, work.gss, work.depth
+      @@ -1758,8 +1782,12 @@
+       
+                   if gen:
+                       while True:
+                           try:
+      -                        yielded = next(gen)
+      +                        if is_resumed_gen:
+      +                            yielded = gen.send(remaining_mask)
+      +                            is_resumed_gen = False  # Only send on the first iteration after resumption
+      +                        else:
+      +                            yielded = next(gen)
+       
+                               if isinstance(yielded, Enqueue):
+                                   new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
 
       ```
     metadata:
   - user: |
-      Apply result (plan-git-llm mode):
+      Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
@@ -7791,7 +7873,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor oracle mode planning: Pre-compute
-      static path costs to roots via multi-source Dijkstra and use O(1) lookup."'
+  - user: 'Changes committed with message: "Refactor: Fix stale mask pruning in internal
+      node processing by enabling generator mask updates via send()"'
     metadata:
 ...

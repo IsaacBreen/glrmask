@@ -915,7 +915,7 @@ class Model(GraphProvider):
         dest_scores: Optional[Dict[int, int]] = None,
         oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
         node_allowed_mask: Optional[LLMTokenSet] = None,
-    ) -> Generator[Union[Enqueue, Suspend], None, None]:
+    ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
         stats = Stats.get()
         a_node = self.arena.get(node_id)
         if not a_node:
@@ -1103,21 +1103,27 @@ class Model(GraphProvider):
                         continue
 
                     d: NodeID = int(dest_id)
-                    yield Enqueue(d, child_gss, depth + 1)
+                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+                    if new_mask is not None:
+                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                     dests_proc += 1
                     if oracle_counters is not None and local_ctr is not None:
                         local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
                     if dests_proc >= max_dests:
                         priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                        yield Suspend(priority, depth)
+                        new_mask = yield Suspend(node_id, priority, depth)
+                        if new_mask is not None:
+                            active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                         dests_proc = 0
 
                     group_index += 1
 
                 if edges_proc >= max_edges:
                     priority = (-self.max_depth.get(node_id, 0), group_index, 0)
-                    yield Suspend(int(node_id), priority, depth)
+                    new_mask = yield Suspend(int(node_id), priority, depth)
+                    if new_mask is not None:
+                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                     edges_proc = 0
                 edges_proc += 1
         else:
@@ -1260,7 +1266,9 @@ class Model(GraphProvider):
                 for dest_j in dest_keys:
                     if dests_proc >= max_dests:
                         priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                        yield Suspend(priority, depth)
+                        new_mask = yield Suspend(node_id, priority, depth)
+                        if new_mask is not None:
+                            active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                         dests_proc = 0
                     dest = edge.dests[dest_j]
                     values_to_keep = grouped[dest_j]
@@ -1287,7 +1295,9 @@ class Model(GraphProvider):
                                 isolate_cache[key_isolate] = child_gss
                     if child_gss.is_empty(): continue
                     d: NodeID = int(dest.dest_idx)
-                    yield Enqueue(d, child_gss, depth + 1)
+                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+                    if new_mask is not None:
+                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                     dests_proc += 1
                     if oracle_counters is not None and local_ctr is not None:
                         local_ctr["dests"] = local_ctr.get("dests", 0) + 1
@@ -1295,7 +1305,9 @@ class Model(GraphProvider):
                 if edges_proc >= max_edges:
                     # Suspend work after a batch to allow priority reordering at the heap level
                     priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                    yield Suspend(int(node_id), priority, depth)
+                    new_mask = yield Suspend(int(node_id), priority, depth)
+                    if new_mask is not None:
+                        active_remaining_mask = new_mask if node_allowed_mask is None else new_mask.intersection(node_allowed_mask)
                     edges_proc = 0
                 edges_proc += 1
         # When max_dests suspend triggers
@@ -2112,7 +2124,11 @@ class Model(GraphProvider):
             heap_item = heapq.heappop(work_heap)
             priority, work = heap_item.priority, heap_item.item
 
+            gen = None
+            is_resumed_gen = False
+
             if isinstance(work, WorkItemSuspended):
+                is_resumed_gen = True
                 gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
 
                 if work_llm_mask.isdisjoint(remaining_mask):
@@ -2194,7 +2210,11 @@ class Model(GraphProvider):
             if gen:
                 while True:
                     try:
-                        yielded = next(gen)
+                        if is_resumed_gen:
+                            yielded = gen.send(remaining_mask)
+                            is_resumed_gen = False  # Only send on the first iteration after resumption
+                        else:
+                            yielded = next(gen)
 
                         if isinstance(yielded, Enqueue):
                             new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
