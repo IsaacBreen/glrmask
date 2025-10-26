@@ -872,7 +872,7 @@ class Model(GraphProvider):
             for (dest_idx, llm), values_to_keep in group_items:
                 if dests_proc >= max_dests:
                     priority = (-self.max_depth.get(node_id, 0), pop_val, int(dest_idx))
-                    yield Suspend(int(node_id), priority, depth)
+                    yield Suspend(priority, depth)
                     dests_proc = 0
 
                 # Apply-and-prune caching across groups sharing the same llm_bv
@@ -1734,14 +1734,13 @@ class Model(GraphProvider):
             stats.inc('get_mask.traversal.depth_heap.pops')
             heap_item = heapq.heappop(work_heap)
             priority, work = heap_item.priority, heap_item.item
-            gen = None
 
-            if hasattr(work, 'generator'):
+            if isinstance(work, WorkItemSuspended):
                 gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
 
                 if work_llm_mask.isdisjoint(remaining_mask):
                     continue
-            elif hasattr(work, 'gss'):
+            elif isinstance(work, WorkItemNew):
                 stats.inc('get_mask.traversal.nodes_processed')
                 node_id, gss_node, depth = work.node_id, work.gss, work.depth
                 stats.counts['get_mask.traversal.max_depth'] = max(stats.counts.get('get_mask.traversal.max_depth', 0), depth)
@@ -1815,7 +1814,7 @@ class Model(GraphProvider):
             else:
                 raise ValueError(f'Unexpected work item: {work}')
 
-            if gen is not None:
+            if gen:
                 while True:
                     try:
                         yielded = next(gen)
