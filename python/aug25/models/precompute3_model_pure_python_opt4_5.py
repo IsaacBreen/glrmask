@@ -2416,13 +2416,16 @@ class Model(GraphProvider):
 
         new_work_items: Set[Tuple[int, GSS]] = set()
         next_send = remaining_mask
-        while True:
-            try:
-                yielded = gen.send(next_send)
+        try:
+            # Prime the generator.
+            yielded = next(gen)
+            while True:
                 if isinstance(yielded, Enqueue):
                     new_work_items.add((yielded.node_id, yielded.gss))
-            except StopIteration:
-                break
+                yielded = gen.send(next_send)
+        except StopIteration:
+            # Generator finished, which is expected.
+            pass
 
         node_counters = counters.get(int(node_id), {})
         edges_traversed = node_counters.get("edges", 0)
