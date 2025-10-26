@@ -158,16 +158,16 @@ pub fn eliminate_pop0_edges_except_roots_trie3(
                 if let Some(c_children) = c_children {
                     for ((p_cd, llm_cd), dm_cd) in c_children {
                         for (d, s_cd) in dm_cd {
-                            let new_llm = &llm_bc & llm_cd;
+                            let new_llm = &llm_bc & &llm_cd;
                             if new_llm.is_empty() { continue; }
-                            let new_sids = &s_bc & s_cd;
+                            let new_sids = &s_bc & &s_cd;
                             if new_sids.is_empty() { continue; }
 
                             // Add/update edge b -> d
                             if let Some(mut b_guard) = b.write(trie3_god) {
                                 let key = (p_cd, new_llm.clone());
                                 let dm = b_guard.children_mut().entry(key).or_default();
-                                dm.entry(*d).and_modify(|e| *e |= &new_sids).or_insert(new_sids);
+                                dm.entry(d).and_modify(|e| *e |= &new_sids).or_insert(new_sids);
                                 b_guard.value.live_tokens |= &new_llm;
                             }
                         }
