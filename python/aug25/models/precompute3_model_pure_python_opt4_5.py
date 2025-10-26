@@ -2373,16 +2373,29 @@ class Model(GraphProvider):
                         break
 
                 a_node = self.arena.get(node_id)
-                # Exact, GSS-aware frontier for this (node, gss)
-                frontier_mask = self._compute_exact_frontier(
-                    int(node_id),
-                    gss_node,
-                    frontier_cache,
-                    apply_cache=apply_cache_by_bv,
-                    isolate_cache=isolate_many_cache,
-                ) if a_node else RangeSet.empty()
-                work_llm_mask = frontier_mask
-                
+                # For planning runs, compute the exact GSS-aware frontier.
+                # For guided/normal runs, use the faster static descendant closure.
+                if record_end_unions:
+                    # Exact, GSS-aware frontier for this (node, gss)
+                    frontier_mask = self._compute_exact_frontier(
+                        int(node_id),
+                        gss_node,
+                        frontier_cache,
+                        apply_cache=apply_cache_by_bv,
+                        isolate_cache=isolate_many_cache,
+                    ) if a_node else RangeSet.empty()
+                    work_llm_mask = frontier_mask
+                    node_allowed_mask_for_gen = frontier_mask
+                else:
+                    # Stronger upper bound than llm_bv_union: descendant closure
+                    if oracle_reward_mask is not None and a_node:
+                        node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
+                    else:
+                        node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
+                    work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
+                    # Replicate original logic for guided runs
+                    node_allowed_mask_for_gen = node_desc_mask if oracle_reward_mask is not None else None
+
                 if not a_node or not a_node.children:
                     # Still record frontier mask for planning if requested
                     if record_end_unions and a_node:
@@ -2408,8 +2421,7 @@ class Model(GraphProvider):
                     edge_order_override_map=edge_order_map,
                     dest_scores=guided_scores,
                     oracle_counters=analysis_node_costs if record_end_unions else None,
-                    # Use exact frontier for pruning regardless of oracle_reward_mask
-                    node_allowed_mask=frontier_mask,
+                    node_allowed_mask=node_allowed_mask_for_gen,
                 )
                 # Record frontier for planning if requested
                 if record_end_unions and a_node:

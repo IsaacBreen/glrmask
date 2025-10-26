@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python_opt4_5.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python_opt4_5.py: |+
@@ -4912,16 +4912,29 @@ local_system:
                               break
 
                       a_node = self.arena.get(node_id)
-                      # Exact, GSS-aware frontier for this (node, gss)
-                      frontier_mask = self._compute_exact_frontier(
-                          int(node_id),
-                          gss_node,
-                          frontier_cache,
-                          apply_cache=apply_cache_by_bv,
-                          isolate_cache=isolate_many_cache,
-                      ) if a_node else RangeSet.empty()
-                      work_llm_mask = frontier_mask
-                      
+                      # For planning runs, compute the exact GSS-aware frontier.
+                      # For guided/normal runs, use the faster static descendant closure.
+                      if record_end_unions:
+                          # Exact, GSS-aware frontier for this (node, gss)
+                          frontier_mask = self._compute_exact_frontier(
+                              int(node_id),
+                              gss_node,
+                              frontier_cache,
+                              apply_cache=apply_cache_by_bv,
+                              isolate_cache=isolate_many_cache,
+                          ) if a_node else RangeSet.empty()
+                          work_llm_mask = frontier_mask
+                          node_allowed_mask_for_gen = frontier_mask
+                      else:
+                          # Stronger upper bound than llm_bv_union: descendant closure
+                          if oracle_reward_mask is not None and a_node:
+                              node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
+                          else:
+                              node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
+                          work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
+                          # Replicate original logic for guided runs
+                          node_allowed_mask_for_gen = node_desc_mask if oracle_reward_mask is not None else None
+
                       if not a_node or not a_node.children:
                           # Still record frontier mask for planning if requested
                           if record_end_unions and a_node:
@@ -4947,8 +4960,7 @@ local_system:
                           edge_order_override_map=edge_order_map,
                           dest_scores=guided_scores,
                           oracle_counters=analysis_node_costs if record_end_unions else None,
-                          # Use exact frontier for pruning regardless of oracle_reward_mask
-                          node_allowed_mask=frontier_mask,
+                          node_allowed_mask=node_allowed_mask_for_gen,
                       )
                       # Record frontier for planning if requested
                       if record_end_unions and a_node:
@@ -5262,7 +5274,7 @@ local_system:
 
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: plan-git-llm
+  prev_apply_mode: git-llm
   default_end_line:
 system:
   message: |-
@@ -5280,7 +5292,7 @@ system:
     - gf
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: plan-git-llm
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -8483,5 +8495,175 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Oracle: Implement GSS-aware exact frontier
       computation for planning and pruning"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: This actually hurts performance. I suspect it's because _compute_exact_frontier
+      is used not just for the oracle but also a runtime. Is that right?
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      You are correct. The performance degradation is because the expensive `_compute_exact_frontier` method was being used for all runs, including the final timed/guided run, not just the oracle's offline planning phase.
+
+      The fix is to ensure this exact computation only happens during the planning run (when `record_end_unions` is true) and to revert to the faster, static-analysis-based pruning for the final guided run.
+
+      Here are the step-by-step instructions to correct this.
+
+      ### Instructions
+
+      **File to Edit:** `python/aug25/models/precompute3_model_pure_python_opt4_5.py`
+
+      1.  **Locate the `_get_mask_run` method.** Inside this method, find the `WorkItemNew` processing block, which starts around line 1720.
+
+      2.  **Replace the frontier computation logic.** Find and select the following block of code that unconditionally computes and uses the exact frontier:
+
+          ```python
+                      a_node = self.arena.get(node_id)
+                      # Exact, GSS-aware frontier for this (node, gss)
+                      frontier_mask = self._compute_exact_frontier(
+                          int(node_id),
+                          gss_node,
+                          frontier_cache,
+                          apply_cache=apply_cache_by_bv,
+                          isolate_cache=isolate_many_cache,
+                      ) if a_node else RangeSet.empty()
+                      work_llm_mask = frontier_mask
+          ```
+
+      3.  **Replace the selected block** with the following conditional logic. This new code computes the exact frontier only for planning runs and uses the faster static logic otherwise:
+
+          ```python
+                      a_node = self.arena.get(node_id)
+                      # For planning runs, compute the exact GSS-aware frontier.
+                      # For guided/normal runs, use the faster static descendant closure.
+                      if record_end_unions:
+                          # Exact, GSS-aware frontier for this (node, gss)
+                          frontier_mask = self._compute_exact_frontier(
+                              int(node_id),
+                              gss_node,
+                              frontier_cache,
+                              apply_cache=apply_cache_by_bv,
+                              isolate_cache=isolate_many_cache,
+                          ) if a_node else RangeSet.empty()
+                          work_llm_mask = frontier_mask
+                          node_allowed_mask_for_gen = frontier_mask
+                      else:
+                          # Stronger upper bound than llm_bv_union: descendant closure
+                          if oracle_reward_mask is not None and a_node:
+                              node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
+                          else:
+                              node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
+                          work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
+                          # Replicate original logic for guided runs
+                          node_allowed_mask_for_gen = node_desc_mask if oracle_reward_mask is not None else None
+          ```
+
+      4.  **Update the generator call.** A few lines down, find the call to `self._process_internal_node_gen`. Modify the `node_allowed_mask` argument.
+
+          *   **Change this line:**
+              ```python
+                              # Use exact frontier for pruning regardless of oracle_reward_mask
+                              node_allowed_mask=frontier_mask,
+              ```
+          *   **To this:**
+              ```python
+                              node_allowed_mask=node_allowed_mask_for_gen,
+              ```
+
+      This change restores performance for the guided run while retaining the improved accuracy for the oracle's planning phase.
+
+      ### Git Diff
+
+      Here is the git diff to apply these changes.
+
+      ```diff
+      --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      @@ -1746,20 +1746,29 @@
+                               stats.inc('get_mask.early_exit_full_mask')
+                               break
+       
+      -                a_node = self.arena.get(node_id)
+      -                # Exact, GSS-aware frontier for this (node, gss)
+      -                frontier_mask = self._compute_exact_frontier(
+      -                    int(node_id),
+      -                    gss_node,
+      -                    frontier_cache,
+      -                    apply_cache=apply_cache_by_bv,
+      -                    isolate_cache=isolate_many_cache,
+      -                ) if a_node else RangeSet.empty()
+      -                work_llm_mask = frontier_mask
+      -                
+      +                a_node = self.arena.get(node_id)
+      +                # For planning runs, compute the exact GSS-aware frontier.
+      +                # For guided/normal runs, use the faster static descendant closure.
+      +                if record_end_unions:
+      +                    # Exact, GSS-aware frontier for this (node, gss)
+      +                    frontier_mask = self._compute_exact_frontier(
+      +                        int(node_id),
+      +                        gss_node,
+      +                        frontier_cache,
+      +                        apply_cache=apply_cache_by_bv,
+      +                        isolate_cache=isolate_many_cache,
+      +                    ) if a_node else RangeSet.empty()
+      +                    work_llm_mask = frontier_mask
+      +                    node_allowed_mask_for_gen = frontier_mask
+      +                else:
+      +                    # Stronger upper bound than llm_bv_union: descendant closure
+      +                    if oracle_reward_mask is not None and a_node:
+      +                        node_desc_mask = oracle_reward_mask.get(int(node_id), RangeSet.empty())
+      +                    else:
+      +                        node_desc_mask = a_node.llm_bv_descendant if a_node and a_node.llm_bv_descendant is not None else RangeSet.empty()
+      +                    work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask) if a_node else RangeSet.empty()
+      +                    # Replicate original logic for guided runs
+      +                    node_allowed_mask_for_gen = node_desc_mask if oracle_reward_mask is not None else None
+      +
+                       if not a_node or not a_node.children:
+                           # Still record frontier mask for planning if requested
+                           if record_end_unions and a_node:
+      @@ -1785,8 +1794,7 @@
+                           edge_order_override_map=edge_order_map,
+                           dest_scores=guided_scores,
+                           oracle_counters=analysis_node_costs if record_end_unions else None,
+      -                    # Use exact frontier for pruning regardless of oracle_reward_mask
+      -                    node_allowed_mask=frontier_mask,
+      +                    node_allowed_mask=node_allowed_mask_for_gen,
+                       )
+                       # Record frontier for planning if requested
+                       if record_end_unions and a_node:
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Restrict GSS-aware exact frontier
+      computation to oracle planning phase only"'
     metadata:
 ...
