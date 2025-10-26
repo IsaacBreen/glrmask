@@ -14,7 +14,7 @@ use crate::glr::grammar::Terminal;
 use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
 use crate::glr::table::{StateID, TerminalID};
 use crate::hit;
-use crate::tokenizer::LLMTokenID;
+use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use bimap::BiBTreeMap;
 use profiler_macro::time_it;
 
@@ -648,12 +648,46 @@ pub(crate) fn disallow_terminals_and_prune_arc(
 
 pub fn prune_llm_tokens_by_disallowed_terminals(
     root_arc: &mut Arc<GSSNode>,
-    possible_matches: &BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>,
-    _memo: &mut PruneAndTransformRecursiveMemo,
+    possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    // Very simplified: keep as-is (no change). Implement exact logic later.
-    let _ = possible_matches;
-    let _ = root_arc;
+    transform_all(root_arc, |acc| {
+        if acc.terminals_union == HybridL2Bitset::all() {
+            return Some(acc.clone());
+        }
+
+        let mut forbidden_llm_tokens = LLMTokenBV::zeros();
+        let disallowed_terminals_l2 = acc.terminals_union.complement();
+
+        for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
+            if disallowed_terminals_for_range.is_empty() {
+                continue;
+            }
+
+            let relevant_possible_matches = possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
+
+            for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
+                for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
+                    if disallowed_terminals_for_range.contains(terminal_id.0) {
+                        forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+                    }
+                }
+            }
+        }
+
+        if forbidden_llm_tokens.is_empty() {
+            return Some(acc.clone());
+        }
+
+        let mut new_acc = acc.clone();
+        new_acc.llm_tokens_union -= &forbidden_llm_tokens;
+
+        if new_acc.llm_tokens_union.is_empty() {
+            None // Prune this path
+        } else {
+            Some(new_acc)
+        }
+    });
 }
 
 pub fn prune_disallowed_terminals(
