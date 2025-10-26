@@ -403,12 +403,12 @@ class Model(GraphProvider):
     # New oracle controls
     oracle_dynamic_prioritization: bool = True
     # Stronger oracle search and planning controls
-    oracle_beam_width: int = 8
-    oracle_search_trials: int = 16
-    oracle_edge_trials_per_node: int = 64
-    oracle_meganode_top_k: int = 10
+    oracle_beam_width: int = 4
+    oracle_search_trials: int = 8
+    oracle_edge_trials_per_node: int = 16
+    oracle_meganode_top_k: int = 0
     oracle_plan_use_exact_end_masks: bool = True
-    oracle_use_beam_search: bool = True
+    oracle_use_beam_search: bool = False
     oracle_debug_verbose: bool = False
     oracle_hotspot_report_top_k: int = 10
     # Try random permutations of the top-K largest end masks
