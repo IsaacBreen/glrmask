@@ -945,6 +945,7 @@ class Model(GraphProvider):
 
         # Fast-path: if per-state adjacency exists, avoid scanning irrelevant edges.
         if a_node.fast_children:
+            stats.inc('get_mask.main_loop.fast_path')
             pops_in_node = sorted(a_node.fast_children.keys())
             group_index = 0  # for Suspend priority tie-breaking
 
@@ -1138,6 +1139,7 @@ class Model(GraphProvider):
                     edges_proc = 0
                 edges_proc += 1
         else:
+            stats.inc('get_mask.main_loop.slow_path')
             # Fallback: original edge-scanning block (leave as-is)
             edge_iterator = None
             ordered_indices = edge_order_override_map.get(node_id) if edge_order_override_map else None
