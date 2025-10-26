@@ -10,6 +10,8 @@ import math
 import random
 import time
 from dataclasses import dataclass, field
+import hashlib
+import struct
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple, Generator, Any
 import types
 from ..stats import Stats
@@ -30,6 +32,87 @@ NodeID = int
 LLMTokenSet = RangeSet
 StateIDSet = RangeSetStates
 TerminalIdSet = RangeSet
+
+# --- Immutable Bloom filter for token-pair correlation ---
+# Fixed-parameter bloom to ensure consistent hashing; safe copies for immutability.
+class PairBloom:
+    __slots__ = ("m", "k", "_bits")
+    # Default: ~262k bits, k=6; tune if needed
+    DEFAULT_M_BITS = 262144
+    DEFAULT_K = 6
+
+    def __init__(self, m_bits: int = None, k: int = None, bits: Optional[int] = None):
+        self.m = int(m_bits if m_bits is not None else self.DEFAULT_M_BITS)
+        self.k = int(k if k is not None else self.DEFAULT_K)
+        self._bits = int(bits) if bits is not None else 0
+
+    def _hashes(self, key: bytes):
+        # Double hashing from a single 128-bit blake2b
+        h = hashlib.blake2b(key, digest_size=16).digest()
+        h1 = int.from_bytes(h[:8], 'big')
+        h2 = int.from_bytes(h[8:], 'big') or 0x9E3779B97F4A7C15  # ensure non-zero second hash
+        m = self.m
+        for i in range(self.k):
+            yield (h1 + i * h2) % m
+
+    def add(self, key: bytes):
+        bits = self._bits
+        for pos in self._hashes(key):
+            bits |= (1 << pos)
+        # Important: PairBloom is logically immutable single-assignment at callers; but this instance
+        # provides add only for local construction before storing in caches. We never mutate cached instances.
+        self._bits = bits
+
+    def __contains__(self, key: bytes) -> bool:
+        bits = self._bits
+        for pos in self._hashes(key):
+            if (bits >> pos) & 1 == 0:
+                return False
+        return True
+
+    @staticmethod
+    def _pair_key(a: int, b: int) -> bytes:
+        # canonicalize order to avoid (a,b) vs (b,a) duplication
+        x, y = (a, b) if a <= b else (b, a)
+        return struct.pack('>II', int(x), int(y))
+
+    def add_pair(self, a: int, b: int):
+        self.add(self._pair_key(a, b))
+
+    def contains_pair(self, a: int, b: int) -> bool:
+        return (self._pair_key(a, b) in self)
+
+    def copy(self) -> "PairBloom":
+        # Returns a new instance with identical configuration and bitset.
+        return PairBloom(self.m, self.k, self._bits)
+
+    def union(self, other: Optional["PairBloom"]) -> "PairBloom":
+        # Returns a new instance; never mutates self or other.
+        if other is None:
+            return self.copy()
+        if not isinstance(other, PairBloom):
+            raise TypeError("PairBloom.union expects a PairBloom")
+        # Both m and k are fixed at construction site; all instances created with defaults are compatible.
+        return PairBloom(self.m, self.k, self._bits | other._bits)
+
+    def is_empty(self) -> bool:
+        return self._bits == 0
+
+    def __eq__(self, o: object) -> bool:
+        return isinstance(o, PairBloom) and self.m == o.m and self.k == o.k and self._bits == o._bits
+
+# Helper: build a PairBloom from a token mask by inserting all unordered pairs
+def bloom_from_mask(mask: "LLMTokenSet") -> PairBloom:
+    bf = PairBloom()
+    tokens = list(mask.iter_indices())
+    n = len(tokens)
+    # Note: O(n^2) construction; acceptable for planning scale. Tune if needed.
+    for i in range(n):
+        a = tokens[i]
+        for j in range(i + 1, n):
+            bf.add_pair(a, tokens[j])
+    return bf
+# --- End Bloom filter ---
 
 # --- Monkey-patch RangeSet to collect stats on union/intersection ---
 # This is to fulfill the request of tracking ffi.Bitset.union and intersection calls.
@@ -948,6 +1031,7 @@ class Model(GraphProvider):
         dest_scores: Optional[Dict[int, int]] = None,
         oracle_counters: Optional[Dict[int, Dict[str, int]]] = None,
         node_allowed_mask: Optional[LLMTokenSet] = None,
+        oracle_frontier_blooms: Optional[Dict[int, PairBloom]] = None,
     ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
         stats = Stats.get()
         a_node = self.arena.get(node_id)
@@ -962,6 +1046,25 @@ class Model(GraphProvider):
         if remaining_mask.is_empty():
             return
         active_remaining_mask = remaining_mask if node_allowed_mask is None else remaining_mask.intersection(node_allowed_mask)
+
+        # Frontier Bloom for correlation-aware pruning (planned and aggregated per node).
+        node_bloom = oracle_frontier_blooms.get(int(node_id)) if oracle_frontier_blooms else None
+
+        def _pairs_ok(mask: LLMTokenSet) -> bool:
+            # Stage-2 pruning: ensure all pairs among (remaining ∩ mask) are seen in the node’s frontier bloom.
+            if node_bloom is None:
+                return True
+            cand = mask.intersection(active_remaining_mask)
+            toks = list(cand.iter_indices())
+            if len(toks) <= 1:
+                return True
+            for i in range(len(toks)):
+                a = toks[i]
+                for j in range(i + 1, len(toks)):
+                    b = toks[j]
+                    if not node_bloom.contains_pair(a, b):
+                        return False
+            return True
 
         max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
         edges_proc, dests_proc = 0, 0
@@ -1084,6 +1187,12 @@ class Model(GraphProvider):
                         stats.inc('get_mask.main_loop.edge.jit_pruned')
                         continue
 
+                    # Stage-2 correlation pruning via Bloom: prune if any required pair is missing
+                    if not _pairs_ok(llm_bv):
+                        stats.inc('get_mask.main_loop.edge.bloom_pruned')
+                        continue
+
+
                     # Apply-and-prune cache per (popped, llm_bv)
                     source_after_apply = popped
                     # The check against popped_acc.llm_mask is now done during group building.
@@ -1193,6 +1302,11 @@ class Model(GraphProvider):
                 if edge.llm_bv.isdisjoint(active_remaining_mask):
                     stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
                     continue
+                # Stage-2 correlation pruning via Bloom
+                if not _pairs_ok(edge.llm_bv):
+                    stats.inc('get_mask.main_loop.edge.bloom_pruned')
+                    continue
+
                 if edge.llm_bv.isdisjoint(gss_mask):
                     stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
                     continue
@@ -1391,33 +1505,31 @@ class Model(GraphProvider):
         self,
         node_id: int,
         gss_node: GSS,
-        cache: Dict[Tuple[int, int], LLMTokenSet],
+        cache: Dict[Tuple[int, int], Tuple[LLMTokenSet, PairBloom]],
         apply_cache: Optional[Dict[Tuple[int, int], GSS]] = None,
         isolate_cache: Optional[Dict[Tuple[int, Tuple[int, ...]], GSS]] = None,
-    ) -> LLMTokenSet:
+    ) -> Tuple[LLMTokenSet, PairBloom]:
         """
         Computes the exact set of LLM tokens reachable from a specific (node_id, gss_node)
-        state, i.e., tokens t for which there exists a path to a clean_end that can be traversed
-        while keeping t feasible at every step (respecting all GSS pop/isolate/apply constraints).
-        Uses a per-call cache keyed by (node_id, id(gss_node)). Builds the local subgraph of
-        (node, gss) pairs reachable from the start pair and solves the resulting monotone system
-        via a fixed-point iteration to handle cycles exactly.
+        state, and a correlation Bloom filter over token pairs that can co-occur along valid outputs.
+        Returns (mask, bloom). Uses a per-call cache keyed by (node_id, id(gss_node)).
+        Critical: never mutate a cached bloom (always use copy() and union() that return new objects).
         """
         stats = Stats.get()
         key0 = (int(node_id), id(gss_node))
-        if key0 in cache:
+        cached = cache.get(key0)
+        if cached is not None:
             stats.inc('oracle.frontier.cache_hits')
-            return cache[key0]
+            return cached
 
         stats.inc('oracle.frontier.calls')
-        # Build local pair-graph reachable from (node_id, gss_node)
+
         from collections import deque
 
-        # Graph: key -> list of child keys
+        # Graph over local (node, gss) pairs
         children: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
-        # Seeds: immediate token contribution at a key (clean_end contributes its GSS llm_mask)
-        seeds: Dict[Tuple[int, int], LLMTokenSet] = {}
-        # Store the actual GSS object for each key to compute transitions
+        seeds_mask: Dict[Tuple[int, int], LLMTokenSet] = {}
+        seeds_bloom: Dict[Tuple[int, int], PairBloom] = {}
         key_to_gss: Dict[Tuple[int, int], GSS] = {}
 
         q = deque()
@@ -1447,18 +1559,20 @@ class Model(GraphProvider):
             key_to_gss[cur_key] = cur_gss
             children[cur_key] = []
 
-            # Seed: end-node contributes its current allowed tokens directly
             cur_acc = cur_gss.reduce_acc()
+
+            # Seed mask+bloom: end-node contributes current allowed tokens and their pairwise correlations
             if self.is_end(int(cur_node_id)) and cur_acc and not cur_acc.llm_mask.is_empty():
-                seeds[cur_key] = cur_acc.llm_mask
+                seeds_mask[cur_key] = cur_acc.llm_mask
+                seeds_bloom[cur_key] = bloom_from_mask(cur_acc.llm_mask)
             else:
-                seeds[cur_key] = RangeSet.empty()
+                seeds_mask[cur_key] = RangeSet.empty()
+                seeds_bloom[cur_key] = PairBloom()  # empty
 
             a_node = self.arena.get(int(cur_node_id))
             if not a_node or not a_node.children:
                 continue
 
-            # Enumerate pops present at this node
             pops_to_consider: List[int]
             if a_node.fast_children:
                 pops_to_consider = sorted(a_node.fast_children.keys())
@@ -1466,7 +1580,7 @@ class Model(GraphProvider):
                 pops_to_consider = sorted({edge.pop for edge in a_node.children})
 
             for pop_val in pops_to_consider:
-                # Pop
+                # Pop step
                 if pop_val == 0:
                     popped = cur_gss
                 else:
@@ -1483,7 +1597,6 @@ class Model(GraphProvider):
                     continue
                 peek_rs = RangeSetStates.from_indices(peeked)
 
-                # Build dest -> (states_to_keep, llm_bv_union) for this pop bucket
                 dest_to_states: Dict[int, List[int]] = collections.defaultdict(list)
                 dest_to_llm: Dict[int, LLMTokenSet] = {}
 
@@ -1501,7 +1614,6 @@ class Model(GraphProvider):
                             prev = dest_to_llm.get(int(dest_id))
                             dest_to_llm[int(dest_id)] = llm_bv if prev is None else prev.union(llm_bv)
                 else:
-                    # Fallback path: group using original edges
                     for edge in a_node.children:
                         if int(edge.pop) != int(pop_val):
                             continue
@@ -1524,17 +1636,14 @@ class Model(GraphProvider):
                 if not dest_to_states:
                     continue
 
-                # For each destination, create the child (dest_id, child_gss) pair and add to graph
                 for dest_id, states_to_keep in dest_to_states.items():
                     llm_bv_union = dest_to_llm.get(int(dest_id), RangeSet.empty())
                     if popped_acc.llm_mask.isdisjoint(llm_bv_union):
                         continue
-                    # Apply mask for this pop/dest (union across relevant edges)
                     source_after_apply = _apply_llm(popped, llm_bv_union)
                     if source_after_apply.is_empty():
                         continue
 
-                    # Isolate only contributing heads if needed
                     if len(states_to_keep) == len(peeked):
                         child_gss = source_after_apply
                     else:
@@ -1555,18 +1664,28 @@ class Model(GraphProvider):
                         key_to_gss[child_key] = child_gss
                         q.append((int(dest_id), child_gss))
 
-        # Fixed-point solve over the discovered subgraph
-        values: Dict[Tuple[int, int], LLMTokenSet] = {k: seeds.get(k, RangeSet.empty()) for k in discovered}
+        # Fixed-point solve over the discovered subgraph: values[key] -> (mask, bloom)
+        values: Dict[Tuple[int, int], Tuple[LLMTokenSet, PairBloom]] = {
+            k: (seeds_mask.get(k, RangeSet.empty()), seeds_bloom.get(k, PairBloom()))
+            for k in discovered
+        }
         changed = True
         while changed:
             changed = False
             for k in discovered:
-                accum = values[k]
-                # Union in contributions from all children
+                cur_mask, cur_bloom = values[k]
+                # Start from seeds
+                accum_mask = seeds_mask.get(k, RangeSet.empty())
+                accum_bloom = seeds_bloom.get(k, PairBloom()).copy()  # copy to avoid mutating seeds
+
+                # Union in contributions from all children (never mutate child blooms)
                 for ch in children.get(k, ()):
-                    accum = accum.union(values.get(ch, RangeSet.empty()))
-                if accum != values[k]:
-                    values[k] = accum
+                    ch_mask, ch_bloom = values.get(ch, (RangeSet.empty(), PairBloom()))
+                    accum_mask = accum_mask.union(ch_mask)
+                    accum_bloom = accum_bloom.union(ch_bloom)
+
+                if accum_mask != cur_mask or accum_bloom != cur_bloom:
+                    values[k] = (accum_mask, accum_bloom)
                     changed = True
 
         # Commit results to the per-call cache
@@ -2337,14 +2456,16 @@ class Model(GraphProvider):
         initial_work_items = set()
         for sid, gss in self.state.items():
             r = self.roots_map[int(sid)]
-            gss_init = gss.apply(initialize_acc, init_cache)
+            # gss_init = gss.apply(initialize_acc, init_cache)
+            gss_init = gss.apply(initialize_acc)
             if not gss_init.is_empty():
                 initial_work_items.add((r, gss_init))
 
         frontier_cache, apply_cache_ft, isolate_cache_ft = {}, {}, {}
         target_mask = RangeSet.empty()
         for node_id, gss in initial_work_items:
-            target_mask |= self._compute_exact_frontier(node_id, gss, frontier_cache, apply_cache_ft, isolate_cache_ft)
+            _mask, _bf = self._compute_exact_frontier(node_id, gss, frontier_cache, apply_cache_ft, isolate_cache_ft)
+            target_mask |= _mask
 
         if target_mask.is_empty():
             print("[oracle] A*: Target mask is empty. Nothing to do.")
@@ -2405,6 +2526,7 @@ class Model(GraphProvider):
         oracle_target_mask: Optional[LLMTokenSet] = None,
         oracle_reward_mask: Optional[Dict[int, LLMTokenSet]] = None,
         oracle_node_costs: Optional[Dict[int, Dict[str, int]]] = None,
+        oracle_frontier_blooms: Optional[Dict[int, PairBloom]] = None,
         ) -> Tuple[Dict, Dict]:
 
         """Internal engine behind get_mask.
@@ -2424,7 +2546,7 @@ class Model(GraphProvider):
         apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
         isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
         # Exact frontier cache for this get_mask_run: (node_id, id(gss)) -> LLMTokenSet
-        frontier_cache: Dict[Tuple[int, int], LLMTokenSet] = {}
+        frontier_cache: Dict[Tuple[int, int], Tuple[LLMTokenSet, PairBloom]] = {}
         @dataclass
         class HeapItem:
             priority: Any
@@ -2483,6 +2605,7 @@ class Model(GraphProvider):
         analysis_frontiers: Dict[int, LLMTokenSet] = {} if record_end_unions else None
         analysis_node_costs: Dict[int, Dict[str, int]] = {} if record_end_unions else None
         analysis_end_masks: Dict[int, LLMTokenSet] = {} if record_end_unions else None
+        analysis_frontier_blooms: Dict[int, PairBloom] = {} if record_end_unions else None
         while work_heap:
             if not record_end_unions and remaining_mask.is_empty():
                 stats.inc('get_mask.early_exit_full_mask')
@@ -2537,16 +2660,24 @@ class Model(GraphProvider):
                 if record_end_unions:
                     stats.start('get_mask.main_loop.node.exact_frontier')
                     # Exact, GSS-aware frontier for this (node, gss)
-                    frontier_mask = self._compute_exact_frontier(
-                        int(node_id),
-                        gss_node,
-                        frontier_cache,
-                        apply_cache=apply_cache_by_bv,
-                        isolate_cache=isolate_many_cache,
-                    ) if a_node else RangeSet.empty()
+                    if a_node:
+                        frontier_mask, frontier_bloom = self._compute_exact_frontier(
+                            int(node_id),
+                            gss_node,
+                            frontier_cache,
+                            apply_cache=apply_cache_by_bv,
+                            isolate_cache=isolate_many_cache,
+                        )
+                    else:
+                        frontier_mask, frontier_bloom = (RangeSet.empty(), PairBloom())
                     stats.stop('get_mask.main_loop.node.exact_frontier')
                     work_llm_mask = frontier_mask
                     node_allowed_mask_for_gen = frontier_mask
+                    # Aggregate per-node blooms for planning output
+                    if record_end_unions and analysis_frontier_blooms is not None:
+                        prev_bf = analysis_frontier_blooms.get(int(node_id))
+                        analysis_frontier_blooms[int(node_id)] = frontier_bloom if prev_bf is None else prev_bf.union(frontier_bloom)
+
                 else:
                     stats.start('get_mask.main_loop.node.desc_closure_intersect')
                     # Stronger upper bound than llm_bv_union: descendant closure
@@ -2563,9 +2694,16 @@ class Model(GraphProvider):
                     # Still record frontier mask for planning if requested
                     if record_end_unions and a_node:
                         if analysis_frontiers is not None:
-                            if not work_llm_mask.is_empty():
-                                prev = analysis_frontiers.get(int(node_id))
-                                analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
+                        if not work_llm_mask.is_empty():
+                            prev = analysis_frontiers.get(int(node_id))
+                            analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
+                    # Also record the bloom (empty if leaf)
+                    if record_end_unions and analysis_frontier_blooms is not None:
+                        prev_bf = analysis_frontier_blooms.get(int(node_id))
+                        # Use the last computed frontier_bloom if available; else an empty bloom
+                        leaf_bf = frontier_bloom if 'frontier_bloom' in locals() else PairBloom()
+                        analysis_frontier_blooms[int(node_id)] = leaf_bf if prev_bf is None else prev_bf.union(leaf_bf)
+
                     continue
                 # Closure-based pruning
                 if work_llm_mask.isdisjoint(remaining_mask):
@@ -2585,12 +2723,19 @@ class Model(GraphProvider):
                     dest_scores=guided_scores,
                     oracle_counters=analysis_node_costs if record_end_unions else None,
                     node_allowed_mask=node_allowed_mask_for_gen,
+                    oracle_frontier_blooms=oracle_frontier_blooms,
                 )
                 # Record frontier for planning if requested
                 if record_end_unions and a_node:
                     if analysis_frontiers is not None and not work_llm_mask.is_empty():
                         prev = analysis_frontiers.get(int(node_id))
                         analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
+                if record_end_unions and analysis_frontier_blooms is not None:
+                    # frontier_bloom variable exists in planning branch above; if not, default to empty
+                    bf = frontier_bloom if 'frontier_bloom' in locals() else PairBloom()
+                    prev_bf = analysis_frontier_blooms.get(int(node_id))
+                    analysis_frontier_blooms[int(node_id)] = bf if prev_bf is None else prev_bf.union(bf)
+
                 stats.stop('get_mask.main_loop.work_item_new')
             else:
                 raise ValueError(f'Unexpected work item: {work}')
@@ -2675,6 +2820,7 @@ class Model(GraphProvider):
             oracle_data = {
                 "end_events": end_union_events,
                 "frontiers": analysis_frontiers or {},
+                "frontier_blooms": analysis_frontier_blooms or {},
                 "node_costs": analysis_node_costs or {},
                 "end_masks": analysis_end_masks or {},
             }
@@ -2865,6 +3011,7 @@ class Model(GraphProvider):
                 oracle_target_mask=target_mask,
                 oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
                 oracle_node_costs=plan.get("node_costs", {}),
+                oracle_frontier_blooms=plan.get("frontier_blooms", {}),
             )
             edges = int(Stats.get().counts.get('get_mask.traversal.edges_traversed', 0))
             time_ms = float(Stats.get().times.get('get_mask.main_loop', 0.0) * 1000.0)
@@ -2904,6 +3051,7 @@ class Model(GraphProvider):
                     oracle_target_mask=target_mask,
                     oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
                     oracle_node_costs=plan.get("node_costs", {}),
+                    oracle_frontier_blooms=plan.get("frontier_blooms", {}),
                 )
                 edges = int(Stats.get().counts.get('get_mask.traversal.edges_traversed', 0))
                 time_ms = float(Stats.get().times.get('get_mask.main_loop', 0.0) * 1000.0)
@@ -2928,6 +3076,7 @@ class Model(GraphProvider):
             oracle_target_mask=target_mask,
             oracle_reward_mask=reward_masks if self.oracle_reward_prune else None,
             oracle_node_costs=plan.get("node_costs", {}),
+            oracle_frontier_blooms=plan.get("frontier_blooms", {}),
         )
         return out
 
