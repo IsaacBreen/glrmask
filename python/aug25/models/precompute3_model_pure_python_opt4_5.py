@@ -2697,9 +2697,9 @@ class Model(GraphProvider):
                     # Still record frontier mask for planning if requested
                     if record_end_unions and a_node:
                         if analysis_frontiers is not None:
-                        if not work_llm_mask.is_empty():
-                            prev = analysis_frontiers.get(int(node_id))
-                            analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
+                            if not work_llm_mask.is_empty():
+                                prev = analysis_frontiers.get(int(node_id))
+                                analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
                     # Also record the bloom (empty if leaf)
                     if record_end_unions and analysis_frontier_blooms is not None:
                         prev_bf = analysis_frontier_blooms.get(int(node_id))
