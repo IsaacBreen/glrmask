@@ -1688,8 +1688,7 @@ class Model(GraphProvider):
 
         # Optional internal stats printout (suppressed by default)
         if not self.suppress_stats_report:
-            if Stats.get().times['get_mask.main_loop']*1000 > 1:
-                Stats.get().report()
+            Stats.get().report()
 
         if record_end_unions:
             oracle_data = {
