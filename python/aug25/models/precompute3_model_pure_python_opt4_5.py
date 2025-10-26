@@ -767,18 +767,35 @@ class Model(GraphProvider):
 
             # TODO: Oracle guidance to reorder transitions.items()
 
-            for (dest_id, llm_bv_tuple), states in transitions.items():
+            transition_items = list(transitions.items())
+
+            for (dest_id, llm_bv_tuple), states in transition_items:
+                if dests_proc >= max_dests:
+                    priority = (-self.max_depth.get(node_id, 0), edges_proc, dests_proc)
+                    yield Suspend(int(node_id), priority, depth)
+                    dests_proc = 0
+
+                if edges_proc >= max_edges:
+                    # Suspend work after a batch to allow priority reordering at the heap level
+                    priority = (-self.max_depth.get(node_id, 0), edges_proc, 0)
+                    yield Suspend(int(node_id), priority, depth)
+                    edges_proc = 0
+
+                edges_proc += 1
+                stats.inc('get_mask.traversal.edges_traversed')
+                if oracle_counters is not None and local_ctr is not None: local_ctr["edges"] += 1
+
                 llm_bv, llm_bv_not = llm_bv_tuple
-                
+
                 if llm_bv.isdisjoint(active_remaining_mask): continue
                 if popped_acc and llm_bv.isdisjoint(popped_acc.llm_mask): continue
             
             # Apply-and-prune caching across edges sharing the same llm_bv
             source_after_apply = popped
-            if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+            if not (llm_bv_not and popped_acc.llm_mask.isdisjoint(llm_bv_not)):
+                if popped_acc.llm_mask.isdisjoint(llm_bv):
                     continue
-                key_apply = (id(popped), id(edge.llm_bv))
+                key_apply = (id(popped), id(llm_bv))
                 cached_apply = local_apply_cache.get(key_apply)
                 if cached_apply is not None:
                     source_after_apply = cached_apply
