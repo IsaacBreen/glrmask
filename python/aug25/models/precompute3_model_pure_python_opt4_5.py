@@ -16,7 +16,6 @@ from ..stats import Stats
 
 import _sep1 as ffi
 from tqdm import tqdm
-from pybloom_live import BloomFilter
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
@@ -1358,18 +1357,17 @@ class Model(GraphProvider):
         self,
         node_id: int,
         gss_node: GSS,
-        cache: Dict[Tuple[int, int], Tuple[LLMTokenSet, Optional[BloomFilter]]],
+        cache: Dict[Tuple[int, int], LLMTokenSet],
         apply_cache: Optional[Dict[Tuple[int, int], GSS]] = None,
         isolate_cache: Optional[Dict[Tuple[int, Tuple[int, ...]], GSS]] = None,
-    ) -> Tuple[LLMTokenSet, Optional[BloomFilter]]:
+    ) -> LLMTokenSet:
         """
-        Computes the exact set of LLM tokens and token-pair correlations reachable from a
-        specific (node_id, gss_node) state.
-        Returns a tuple: (LLMTokenSet, Optional[BloomFilter]).
-        The LLMTokenSet is the union of all possible tokens.
-        The BloomFilter stores co-occurring token pairs `f"{t1},{t2}"` from any single
-        reachable end state, to address the "union fallacy".
-        Uses a per-call cache and a fixed-point iteration over the reachable subgraph.
+        Computes the exact set of LLM tokens reachable from a specific (node_id, gss_node)
+        state, i.e., tokens t for which there exists a path to a clean_end that can be traversed
+        while keeping t feasible at every step (respecting all GSS pop/isolate/apply constraints).
+        Uses a per-call cache keyed by (node_id, id(gss_node)). Builds the local subgraph of
+        (node, gss) pairs reachable from the start pair and solves the resulting monotone system
+        via a fixed-point iteration to handle cycles exactly.
         """
         stats = Stats.get()
         key0 = (int(node_id), id(gss_node))
@@ -1384,7 +1382,7 @@ class Model(GraphProvider):
         # Graph: key -> list of child keys
         children: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
         # Seeds: immediate token contribution at a key (clean_end contributes its GSS llm_mask)
-        seeds: Dict[Tuple[int, int], Tuple[LLMTokenSet, Optional[BloomFilter]]] = {}
+        seeds: Dict[Tuple[int, int], LLMTokenSet] = {}
         # Store the actual GSS object for each key to compute transitions
         key_to_gss: Dict[Tuple[int, int], GSS] = {}
 
@@ -1418,19 +1416,9 @@ class Model(GraphProvider):
             # Seed: end-node contributes its current allowed tokens directly
             cur_acc = cur_gss.reduce_acc()
             if self.is_end(int(cur_node_id)) and cur_acc and not cur_acc.llm_mask.is_empty():
-                mask = cur_acc.llm_mask
-                bloom = None
-                indices = list(mask.iter_indices())
-                if len(indices) > 1:
-                    num_pairs = len(indices) * (len(indices) - 1) // 2
-                    if num_pairs > 0:
-                        capacity = min(num_pairs, 1_000_000)
-                        bloom = BloomFilter(capacity=capacity, error_rate=0.001)
-                        for t1, t2 in itertools.combinations(indices, 2):
-                            bloom.add(f"{t1},{t2}")
-                seeds[cur_key] = (mask, bloom)
+                seeds[cur_key] = cur_acc.llm_mask
             else:
-                seeds[cur_key] = (RangeSet.empty(), None)
+                seeds[cur_key] = RangeSet.empty()
 
             a_node = self.arena.get(int(cur_node_id))
             if not a_node or not a_node.children:
@@ -1534,29 +1522,17 @@ class Model(GraphProvider):
                         q.append((int(dest_id), child_gss))
 
         # Fixed-point solve over the discovered subgraph
-        values: Dict[Tuple[int, int], Tuple[LLMTokenSet, Optional[BloomFilter]]] = {
-            k: seeds.get(k, (RangeSet.empty(), None)) for k in discovered
-        }
+        values: Dict[Tuple[int, int], LLMTokenSet] = {k: seeds.get(k, RangeSet.empty()) for k in discovered}
         changed = True
         while changed:
             changed = False
             for k in discovered:
-                # Recompute from seed and children's current values
-                accum_mask, accum_bloom_orig = seeds.get(k, (RangeSet.empty(), None))
-                accum_bloom = accum_bloom_orig.copy() if accum_bloom_orig else None
-
+                accum = values[k]
+                # Union in contributions from all children
                 for ch in children.get(k, ()):
-                    child_mask, child_bloom = values.get(ch, (RangeSet.empty(), None))
-                    accum_mask |= child_mask
-                    if child_bloom:
-                        if accum_bloom is None:
-                            accum_bloom = child_bloom.copy()
-                        else:
-                            accum_bloom.union(child_bloom)
-
-                prev_mask, prev_bloom = values[k]
-                if prev_mask != accum_mask or (accum_bloom != prev_bloom):
-                    values[k] = (accum_mask, accum_bloom)
+                    accum = accum.union(values.get(ch, RangeSet.empty()))
+                if accum != values[k]:
+                    values[k] = accum
                     changed = True
 
         # Commit results to the per-call cache
@@ -1947,14 +1923,7 @@ class Model(GraphProvider):
         for v in items_by_end.values():
             universe |= v
         end_items: List[Tuple[int, LLMTokenSet]] = list(items_by_end.items())
-        raw_frontiers = plan.get('frontiers', {})
-        frontiers: Dict[int, LLMTokenSet] = {}
-        for k, v in raw_frontiers.items():
-            # The frontier value can be a tuple (mask, bloom_filter) or just a mask
-            if isinstance(v, tuple):
-                frontiers[int(k)] = v[0]
-            else:
-                frontiers[int(k)] = v
+        frontiers: Dict[int, LLMTokenSet] = {int(k): v for k, v in plan.get('frontiers', {}).items()}
         node_costs_raw: Dict[int, Dict[str, int]] = {int(k): v for k, v in plan.get('node_costs', {}).items()}
         # 2) Build node cost weights
         def node_weight(u: int) -> float:
@@ -2303,8 +2272,8 @@ class Model(GraphProvider):
         global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
         apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
         isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
-        # Exact frontier cache for this get_mask_run: (node_id, id(gss)) -> (LLMTokenSet, BloomFilter)
-        frontier_cache: Dict[Tuple[int, int], Tuple[LLMTokenSet, Optional[BloomFilter]]] = {}
+        # Exact frontier cache for this get_mask_run: (node_id, id(gss)) -> LLMTokenSet
+        frontier_cache: Dict[Tuple[int, int], LLMTokenSet] = {}
         @dataclass
         class HeapItem:
             priority: Any
@@ -2360,7 +2329,7 @@ class Model(GraphProvider):
         stats.start('get_mask.main_loop')
         remaining_mask = all_ones
         # Oracle planning accumulators
-        analysis_frontiers: Dict[int, Tuple[LLMTokenSet, Optional[BloomFilter]]] = {} if record_end_unions else None
+        analysis_frontiers: Dict[int, LLMTokenSet] = {} if record_end_unions else None
         analysis_node_costs: Dict[int, Dict[str, int]] = {} if record_end_unions else None
         analysis_end_masks: Dict[int, LLMTokenSet] = {} if record_end_unions else None
         while work_heap:
@@ -2417,13 +2386,13 @@ class Model(GraphProvider):
                 if record_end_unions:
                     stats.start('get_mask.main_loop.node.exact_frontier')
                     # Exact, GSS-aware frontier for this (node, gss)
-                    frontier_mask, frontier_bloom = self._compute_exact_frontier(
+                    frontier_mask = self._compute_exact_frontier(
                         int(node_id),
                         gss_node,
                         frontier_cache,
                         apply_cache=apply_cache_by_bv,
                         isolate_cache=isolate_many_cache,
-                    ) if a_node else (RangeSet.empty(), None)
+                    ) if a_node else RangeSet.empty()
                     stats.stop('get_mask.main_loop.node.exact_frontier')
                     work_llm_mask = frontier_mask
                     node_allowed_mask_for_gen = frontier_mask
@@ -2444,33 +2413,13 @@ class Model(GraphProvider):
                     if record_end_unions and a_node:
                         if analysis_frontiers is not None:
                             if not work_llm_mask.is_empty():
-                                prev_mask, prev_bloom = analysis_frontiers.get(int(node_id), (RangeSet.empty(), None))
-                                new_mask = prev_mask.union(work_llm_mask)
-                                new_bloom = prev_bloom
-                                if frontier_bloom:
-                                    if new_bloom is None:
-                                        new_bloom = frontier_bloom.copy()
-                                    else:
-                                        new_bloom.union(frontier_bloom)
-                                analysis_frontiers[int(node_id)] = (new_mask, new_bloom)
+                                prev = analysis_frontiers.get(int(node_id))
+                                analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
                     continue
                 # Closure-based pruning
                 if work_llm_mask.isdisjoint(remaining_mask):
                     stats.inc('get_mask.main_loop.node.closure_pruned')
                     continue
-
-                # New Stage 2 pruning with Bloom Filter for planning runs
-                if record_end_unions:
-                    needed_and_available = work_llm_mask.intersection(remaining_mask)
-                    if len(needed_and_available) > 1 and frontier_bloom is not None:
-                        prune_by_bloom = False
-                        for t1, t2 in itertools.combinations(needed_and_available.iter_indices(), 2):
-                            if f"{t1},{t2}" not in frontier_bloom:
-                                prune_by_bloom = True
-                                break
-                        if prune_by_bloom:
-                            stats.inc('get_mask.main_loop.node.bloom_pruned')
-                            continue
 
                 gen = self._process_internal_node_gen(
                     node_id,
@@ -2489,15 +2438,8 @@ class Model(GraphProvider):
                 # Record frontier for planning if requested
                 if record_end_unions and a_node:
                     if analysis_frontiers is not None and not work_llm_mask.is_empty():
-                        prev_mask, prev_bloom = analysis_frontiers.get(int(node_id), (RangeSet.empty(), None))
-                        new_mask = prev_mask.union(work_llm_mask)
-                        new_bloom = prev_bloom
-                        if frontier_bloom:
-                            if new_bloom is None:
-                                new_bloom = frontier_bloom.copy()
-                            else:
-                                new_bloom.union(frontier_bloom)
-                        analysis_frontiers[int(node_id)] = (new_mask, new_bloom)
+                        prev = analysis_frontiers.get(int(node_id))
+                        analysis_frontiers[int(node_id)] = work_llm_mask if prev is None else prev.union(work_llm_mask)
                 stats.stop('get_mask.main_loop.work_item_new')
             else:
                 raise ValueError(f'Unexpected work item: {work}')
