@@ -147,6 +147,7 @@ fn test_constraint_simple() {
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
+    constraint.dump_precomputed_special();
 
     let mut constraint_state = constraint.init();
 
