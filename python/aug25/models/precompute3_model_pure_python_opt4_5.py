@@ -1074,14 +1074,12 @@ class Model(GraphProvider):
                 continue
             # Compute deterministic edge weights from child rewards
             base_weights: List[Tuple[int, int]] = []
-            for idx, (pop, state_map) in enumerate(node.children.items()):
+            for idx, edge in enumerate(node.children):
                 s = 0
-                # Sum rewards from all destinations reachable through this pop bucket
-                for state_id, dest_map in state_map.items():
-                    for dest_idx in dest_map.keys():
-                        cm = reward_masks.get(int(dest_idx))
-                        if cm is not None and not cm.is_empty():
-                            s += int(len(cm.intersection(target_mask)))
+                for d in edge.dests:
+                    cm = reward_masks.get(int(d.dest_idx))
+                    if cm is not None and not cm.is_empty():
+                        s += int(len(cm.intersection(target_mask)))
                 base_weights.append((idx, s))
             if not any(w > 0 for (_, w) in base_weights):
                 # Nothing to bias on; skip
