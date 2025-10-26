@@ -2446,36 +2446,36 @@ class Model(GraphProvider):
                 else:
                     yielded = gen.send(remaining_mask)
 
-                while True: # Drive this generator until it suspends or finishes
-                    if isinstance(yielded, Enqueue):
-                        new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
-                        base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                        if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-                            child_priority = self._priority_for_node(
-                                new_node_id, new_depth, remaining_mask,
-                                guided_scores=guided_scores,
-                                oracle_reward_mask=oracle_reward_mask,
-                                analysis_node_costs=oracle_node_costs,
-                            )
-                        elif guided_scores is not None:
-                            child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
-                        else:
-                            child_priority = base_child_pri
-                        heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
-                    elif isinstance(yielded, Suspend):
-                        if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
-                            susp_pri = self._priority_for_node(
-                                yielded.node_id, yielded.depth, remaining_mask,
-                                guided_scores=guided_scores,
-                                oracle_reward_mask=oracle_reward_mask,
-                                analysis_node_costs=oracle_node_costs,
-                            )
-                        else:
-                            susp_pri = yielded.priority
-                        heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
-                        break # Stop driving this generator
-
-                    yielded = gen.send(remaining_mask)
+                # The generator yields one item, we process it, and then the main loop continues.
+                if isinstance(yielded, Enqueue):
+                    new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                    base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                    if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                        child_priority = self._priority_for_node(
+                            new_node_id, new_depth, remaining_mask,
+                            guided_scores=guided_scores,
+                            oracle_reward_mask=oracle_reward_mask,
+                            analysis_node_costs=oracle_node_costs,
+                        )
+                    elif guided_scores is not None:
+                        child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
+                    else:
+                        child_priority = base_child_pri
+                    heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
+                    # The parent generator is implicitly suspended; put it back on the heap to be resumed later.
+                    # Use its original priority to allow children to be processed first if they have higher priority.
+                    heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, depth)))
+                elif isinstance(yielded, Suspend):
+                    if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                        susp_pri = self._priority_for_node(
+                            yielded.node_id, yielded.depth, remaining_mask,
+                            guided_scores=guided_scores,
+                            oracle_reward_mask=oracle_reward_mask,
+                            analysis_node_costs=oracle_node_costs,
+                        )
+                    else:
+                        susp_pri = yielded.priority
+                    heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
             except StopIteration:
                 pass # Generator is done.
 
