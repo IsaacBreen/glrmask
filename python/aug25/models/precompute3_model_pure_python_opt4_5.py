@@ -451,9 +451,9 @@ class Model(GraphProvider):
             self._hash_val = hash(tuple(level_items))
             return self._hash_val
 
-        # Only patch if __hash__ is missing (e.g., set to None by a class with eq=True)
-        if getattr(GSS, '__hash__', "exists") is None:
-            GSS.__hash__ = _gss_hash
+        # Unconditionally patch GSS to ensure our hash function is used for the A* search,
+        # which requires value-based hashing for GSS objects.
+        GSS.__hash__ = _gss_hash
         # --- End of monkey-patch ---
 
         # Arena
