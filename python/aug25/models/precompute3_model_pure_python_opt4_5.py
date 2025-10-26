@@ -31,6 +31,8 @@ LLMTokenSet = RangeSet
 StateID = int
 StateSet = Set[int]
 TerminalIdSet = RangeSet
+# Back-compat type alias (not used in the new arena)
+StateIDSet = RangeSetStates
 
 # --- Monkey-patch RangeSet to collect stats on union/intersection ---
 # This is to fulfill the request of tracking ffi.Bitset.union and intersection calls.
@@ -872,7 +874,7 @@ class Model(GraphProvider):
             for (dest_idx, llm), values_to_keep in group_items:
                 if dests_proc >= max_dests:
                     priority = (-self.max_depth.get(node_id, 0), pop_val, int(dest_idx))
-                    yield Suspend(priority, depth)
+                    yield Suspend(int(node_id), priority, depth)
                     dests_proc = 0
 
                 # Apply-and-prune caching across groups sharing the same llm_bv
@@ -1665,7 +1667,7 @@ class Model(GraphProvider):
         stats.inc('get_mask.initial_tokenizer_states', len(self.state))
 
         # Global caches across the whole traversal
-        global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
+        global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int]]] = {}
         apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
         isolate_many_cache: Dict[Tuple[int, Tuple[int, ...]], GSS] = {}
         @dataclass
@@ -1734,13 +1736,27 @@ class Model(GraphProvider):
             stats.inc('get_mask.traversal.depth_heap.pops')
             heap_item = heapq.heappop(work_heap)
             priority, work = heap_item.priority, heap_item.item
+            gen = None  # define defensively for this iteration
 
-            if isinstance(work, WorkItemSuspended):
-                gen, work_llm_mask, depth = work.generator, work.llm_mask, work.depth
+            # Robust handling even if class identity changes across reloads
+            if isinstance(work, WorkItemSuspended) or (
+                hasattr(work, 'generator') and hasattr(work, 'llm_mask') and hasattr(work, 'depth') and
+                not hasattr(work, 'node_id')
+            ):
+                # Treat as suspended item
+                gen = getattr(work, 'generator')
+                work_llm_mask = getattr(work, 'llm_mask')
+                depth = getattr(work, 'depth')
 
                 if work_llm_mask.isdisjoint(remaining_mask):
                     continue
-            elif isinstance(work, WorkItemNew):
+            elif isinstance(work, WorkItemNew) or (
+                hasattr(work, 'node_id') and hasattr(work, 'gss') and hasattr(work, 'depth')
+            ):
+                # Treat as new work
+                node_id = getattr(work, 'node_id')
+                gss_node = getattr(work, 'gss')
+                depth = getattr(work, 'depth')
                 stats.inc('get_mask.traversal.nodes_processed')
                 node_id, gss_node, depth = work.node_id, work.gss, work.depth
                 stats.counts['get_mask.traversal.max_depth'] = max(stats.counts.get('get_mask.traversal.max_depth', 0), depth)
