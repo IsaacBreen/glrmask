@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, BTreeSet, VecDeque};
 
 use ordered_hash_map::OrderedHashMap;
 
@@ -11,8 +11,10 @@ pub fn pop_is_zero(ek: &(isize, LLMTokenBV)) -> bool {
     ek.0 == 0
 }
 
-/// Assert that no pop=0 edges exist from non-root nodes.
-/// When enabled in config, this runs after eliminating pop0 edges.
+/// Assert that:
+/// - no pop=0 edges exist from non-root nodes, and
+/// - all remaining pop=0 edges (if any) are from root nodes directly to end nodes.
+/// When enabled in config, this runs after eliminating/rewiring pop0 edges.
 pub fn assert_no_pop0_nonroot_edges_trie3(
     roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
@@ -25,16 +27,26 @@ pub fn assert_no_pop0_nonroot_edges_trie3(
     }
 
     for n in all_nodes {
-        if roots_set.contains(&n) {
-            continue;
-        }
+        let is_root = roots_set.contains(&n);
         let r = n.read(trie3_god).expect("read");
-        for ((pop, _llm_bv), _dm) in r.children() {
+        for ((pop, _llm_bv), dm) in r.children() {
             if *pop == 0 {
-                panic!(
-                    "Invariant violated: found pop=0 edge originating from non-root node {}",
-                    n
-                );
+                if !is_root {
+                    panic!(
+                        "Invariant violated: found pop=0 edge originating from non-root node {}",
+                        n
+                    );
+                } else {
+                    for (dst, _sids) in dm {
+                        let dst_is_end = dst.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+                        if !dst_is_end {
+                            panic!(
+                                "Invariant violated: found pop=0 edge from root {} to non-end node {}",
+                                n, dst
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -44,6 +56,13 @@ pub fn assert_no_pop0_nonroot_edges_trie3(
 /// For each 0-pop edge B --(0, L_bc, S_bc)--> C and each incoming edge
 /// A --(p_ab, L_ab, S_ab)--> B, add/update A --(p_ab, L_ab∧L_bc, S_ab∧S_bc)--> C.
 /// Then remove the original B->C (0, L_bc) mapping. Iterate until no such edges remain.
+/// Additionally, rewire any remaining root-origin pop=0 edges so they target end nodes only:
+/// For each root R and each R --(0, L0, S0)--> C where C is not end, perform a forward closure
+/// along 0-pop edges from C, emitting:
+///   - R --(0, L0∧...∧Lk, S0∧...∧Sk)--> E for each end E reachable via only 0-pop edges, and
+///   - R --(p, L0∧...∧Lk∧L, S0∧...∧Sk∧S)--> X for each nonzero-pop edge (p, L, S) encountered
+///     after some 0-pop chain.
+/// Then remove the original R -> C (0, L0) mapping for that destination.
 pub fn eliminate_pop0_edges_except_roots_trie3(
     roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
@@ -156,11 +175,11 @@ pub fn eliminate_pop0_edges_except_roots_trie3(
                     }
                     bw.value.live_tokens = new_live;
                 }
-            }
         }
+    }
 
-        total_removed += removed_this_iter;
-        crate::debug!(
+    total_removed += removed_this_iter;
+    crate::debug!(
             3,
             "Pop0-elim iter {}: removed {} pop=0 edges.",
             iter,
@@ -168,6 +187,106 @@ pub fn eliminate_pop0_edges_except_roots_trie3(
         );
         if removed_this_iter == 0 {
             break;
+        }
+    }
+
+    // Rewire remaining root-origin pop=0 edges so that they target only END nodes.
+    // For each root R and each R --(0, L0, S0)--> C with C not end:
+    // - traverse 0-pop closure from C, composing constraints (∧) and states (∧),
+    // - emit root edges:
+    //     * (0, L', S') to every end reached via 0-pop,
+    //     * (p, L', S') to every nonzero-pop outgoing edge encountered after some 0-pop path,
+    // - remove the original R->C under (0, L0).
+    let mut root_nonend_pop0_edges: Vec<(
+        PrecomputeNode3Index,
+        LLMTokenBV,
+        PrecomputeNode3Index,
+        StateIDBV,
+    )> = Vec::new();
+    for r in &roots_vec {
+        if let Some(rr) = r.read(trie3_god) {
+            for (ek, dm) in rr.children() {
+                if pop_is_zero(ek) {
+                    for (dst, sids) in dm {
+                        let is_end = dst.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+                        if !is_end {
+                            root_nonend_pop0_edges
+                                .push((*r, ek.1.clone(), *dst, sids.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (root_idx, llm_rc, c_idx, s_rc) in root_nonend_pop0_edges {
+        // BFS along 0-pop closure starting at c_idx with accumulated constraints/states.
+        let mut q: VecDeque<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)> = VecDeque::new();
+        q.push_back((c_idx, llm_rc.clone(), s_rc.clone()));
+        // Track visited triples to avoid cycles; intersections only shrink, so finiteness holds.
+        let mut visited: BTreeSet<(PrecomputeNode3Index, LLMTokenBV, StateIDBV)> = BTreeSet::new();
+
+        while let Some((u, l_acc, s_acc)) = q.pop_front() {
+            if !visited.insert((u, l_acc.clone(), s_acc.clone())) {
+                continue;
+            }
+            if let Some(ur) = u.read(trie3_god) {
+                for ((p, llm_bv), dm) in ur.children() {
+                    for (v, sids_uv) in dm {
+                        let new_llm = l_acc.clone() & llm_bv;
+                        if new_llm.is_empty() {
+                            continue;
+                        }
+                        let new_sids = s_acc.clone() & sids_uv;
+                        if new_sids.is_empty() {
+                            continue;
+                        }
+                        if *p == 0 {
+                            let v_is_end =
+                                v.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+                            if v_is_end {
+                                if let Some(mut rw) = root_idx.write(trie3_god) {
+                                    let entry = rw
+                                        .children_mut()
+                                        .entry((0isize, new_llm.clone()))
+                                        .or_default();
+                                    entry
+                                        .entry(*v)
+                                        .and_modify(|e| *e |= &new_sids)
+                                        .or_insert(new_sids.clone());
+                                    // Conservative update; exact recomputation happens after.
+                                    rw.value.live_tokens |= &new_llm;
+                                }
+                            } else {
+                                q.push_back((*v, new_llm, new_sids));
+                            }
+                        } else {
+                            if let Some(mut rw) = root_idx.write(trie3_god) {
+                                let entry = rw
+                                    .children_mut()
+                                    .entry((*p, new_llm.clone()))
+                                    .or_default();
+                                entry
+                                    .entry(*v)
+                                    .and_modify(|e| *e |= &new_sids)
+                                    .or_insert(new_sids.clone());
+                                rw.value.live_tokens |= &new_llm;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove the original specific R -> C mapping under (0, llm_rc).
+        if let Some(mut rw) = root_idx.write(trie3_god) {
+            let key = (0isize, llm_rc.clone());
+            if let Some(dm) = rw.children_mut().get_mut(&key) {
+                dm.remove(&c_idx);
+                if dm.is_empty() {
+                    rw.children_mut().remove(&key);
+                }
+            }
         }
     }
 
