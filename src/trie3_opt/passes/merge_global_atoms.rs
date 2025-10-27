@@ -39,7 +39,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
 
         let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
         let mut atoms_by_pop: BTreeMap<isize, Vec<SortedSet>> = BTreeMap::new();
-        for (pop, masks) in by_pop_masks {
+        for (pop, masks) in &by_pop_masks {
             let mut blocks = vec![universe.clone()];
             let mut aborted = false;
             for m in masks {
@@ -60,7 +60,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                 }
                 blocks = next_blocks;
             }
-            atoms_by_pop.insert(pop, if aborted { vec![universe.clone()] } else { blocks });
+            atoms_by_pop.insert(*pop, if aborted { vec![universe.clone()] } else { blocks });
         }
 
         // Precompute atom overlaps for each unique token set.
@@ -182,7 +182,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
         }
 
         // Rewire and rebuild.
-        let final_partition = prev_class;
+        let final_partition = &prev_class;
         let num_classes = prev_class.iter().max().map_or(0, |m| m + 1);
         let mut representatives: Vec<Option<NodeId>> = vec![None; num_classes];
         for (u_idx, &class_id) in prev_class.iter().enumerate() {
