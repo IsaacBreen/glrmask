@@ -25,9 +25,7 @@ impl NumericStats {
 
     pub fn to_json(&self) -> JSONNode {
         if self.values.is_empty() {
-            let mut obj = BTreeMap::new();
-            obj.insert("count".to_string(), 0.to_json());
-            return JSONNode::Object(obj);
+            return "count=0".to_string().to_json();
         }
 
         let mut sorted_values = self.values.clone();
@@ -53,19 +51,11 @@ impl NumericStats {
         let variance = self.values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
         let stdev = variance.sqrt();
 
-        let mut obj = BTreeMap::new();
-        obj.insert("count".to_string(), count.to_json());
-        obj.insert("sum".to_string(), sum.to_json());
-        obj.insert("mean".to_string(), mean.to_json());
-        obj.insert("stdev".to_string(), stdev.to_json());
-        obj.insert("min".to_string(), min.to_json());
-        obj.insert("p25".to_string(), p25.to_json());
-        obj.insert("median".to_string(), median.to_json());
-        obj.insert("p75".to_string(), p75.to_json());
-        obj.insert("p95".to_string(), p95.to_json());
-        obj.insert("max".to_string(), max.to_json());
-
-        JSONNode::Object(obj)
+        let summary = format!(
+            "count={}, sum={:.2}, mean={:.2}, stdev={:.2}, min={:.2}, p25={:.2}, med={:.2}, p75={:.2}, p95={:.2}, max={:.2}",
+            count, sum, mean, stdev, min, p25, median, p75, p95, max
+        );
+        summary.to_json()
     }
 }
 
