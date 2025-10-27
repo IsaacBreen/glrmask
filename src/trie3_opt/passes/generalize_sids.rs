@@ -120,19 +120,18 @@ impl OptimizationPass for GeneralizeSidsPass {
         }
 
         for node in &mut trie.nodes {
-            let s_u = possible_states.get(&node.id).cloned().unwrap_or_default();
-            for (ek, dm) in &mut node.children {
-                let s_u_popped = if ek.pop > 0 {
-                    apply_n_step_back(&s_u, ek.pop as usize)
-                } else {
-                    s_u.clone()
-                };
-                dm.retain(|_, sids| {
-                    let intersection = s_u_popped.intersect(sids);
-                    if !intersection.is_empty() {
-                        *sids = intersection;
-                        true
+            for (_ek, dm) in &mut node.children {
+                dm.retain(|v_id, sids| {
+                    if let Some(s_v) = possible_states.get(v_id) {
+                        let intersection = sids.intersect(s_v);
+                        if !intersection.is_empty() {
+                            *sids = intersection;
+                            true
+                        } else {
+                            false
+                        }
                     } else {
+                        // v is not reachable with any valid state, so this edge is dead.
                         false
                     }
                 });

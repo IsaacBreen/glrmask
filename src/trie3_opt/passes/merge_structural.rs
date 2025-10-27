@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::trie3_opt::context::OptimizationContext;
-use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
+use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
 use crate::trie3_opt::passes::OptimizationPass;
 
 /// Merge nodes with identical structure via iterative refinement. Signature includes:
@@ -129,22 +129,41 @@ impl OptimizationPass for MergeStructuralPass {
             rep_of_node.insert(*node_id, rep_of_class[cid].unwrap());
         }
 
-        // Rewire edges to representatives and union state-sets
-        for node in trie.nodes.iter_mut() {
-            let mut new_children: BTreeMap<_, _> = BTreeMap::new();
-            for (ek, dm) in node.children.clone() {
-                let mut d2: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
-                for (dst, sids) in dm {
-                    let rep = *rep_of_node.get(&dst).unwrap_or(&dst);
-                    d2.entry(rep)
-                        .and_modify(|e| e.union_inplace(&sids))
-                        .or_insert(sids);
+        let original_nodes = trie.nodes.clone();
+        for (cid, rep_id_opt) in rep_of_class.iter().enumerate() {
+            if let Some(rep_id) = rep_id_opt {
+                let exemplar_idx = prev_class.iter().position(|&c| c == cid).unwrap();
+                let exemplar_node = &original_nodes[exemplar_idx];
+
+                let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
+                    BTreeMap::new();
+                for (ek, dm) in &exemplar_node.children {
+                    let mut new_dm = BTreeMap::new();
+                    for (dst, sids) in dm {
+                        let rep = *rep_of_node.get(dst).unwrap();
+                        new_dm.entry(rep).or_default().union_inplace(sids);
+                    }
+                    if !new_dm.is_empty() {
+                        new_children.insert(ek.clone(), new_dm);
+                    }
                 }
-                if !d2.is_empty() {
-                    new_children.insert(ek, d2);
-                }
+                trie.nodes[*rep_id as usize].children = new_children;
             }
-            node.children = new_children;
         }
+
+        let rep_set: std::collections::HashSet<NodeId> =
+            rep_of_class.iter().filter_map(|&x| x).collect();
+        for node in &mut trie.nodes {
+            if !rep_set.contains(&node.id) {
+                node.children.clear();
+                node.end = false;
+            }
+        }
+
+        trie.root_ids = trie
+            .root_ids
+            .iter()
+            .map(|r| *rep_of_node.get(r).unwrap())
+            .collect();
     }
 }
