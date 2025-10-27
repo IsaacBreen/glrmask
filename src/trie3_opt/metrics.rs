@@ -30,28 +30,58 @@ impl NumericStats {
             return "{ count: 0 }".to_string();
         }
 
-        let mut sorted_values = self.values.clone();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
+        // Fast O(N) pass for sum/mean/stdev/min/max (no full sort).
         let count = self.values.len();
-        let sum: f64 = self.values.iter().sum();
+        let mut sum = 0.0;
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for &v in &self.values {
+            sum += v;
+            if v < min { min = v; }
+            if v > max { max = v; }
+        }
         let mean = sum / count as f64;
-
-        let min = sorted_values[0];
-        let max = sorted_values[count - 1];
-
-        let median = if count % 2 == 1 {
-            sorted_values[count / 2]
-        } else {
-            (sorted_values[count / 2 - 1] + sorted_values[count / 2]) / 2.0
-        };
-
-        let p25 = sorted_values[(count as f64 * 0.25).floor() as usize];
-        let p75 = sorted_values[(count as f64 * 0.75).floor() as usize];
-        let p95 = sorted_values[(count as f64 * 0.95).floor() as usize];
-
-        let variance = self.values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
+        let mut m2 = 0.0;
+        for &v in &self.values {
+            let diff = v - mean;
+            m2 += diff * diff;
+        }
+        let variance = m2 / count as f64;
         let stdev = variance.sqrt();
+
+        // Approximate quantiles from a bounded sample to avoid O(N log N) sort.
+        // Adjust MAX_SAMPLE if needed for speed/accuracy tradeoff.
+        const MAX_SAMPLE: usize = 100_000;
+        let target = MAX_SAMPLE.min(count);
+        let mut sample: Vec<f64> = Vec::with_capacity(target);
+        if count <= MAX_SAMPLE {
+            // Small enough: use exact quantiles.
+            sample.extend_from_slice(&self.values);
+        } else {
+            // Deterministic uniform sampling with a stride.
+            // This avoids storing or sorting the entire dataset.
+            let stride = (count + target - 1) / target; // ceil(count/target)
+            let offset = stride / 2;
+            let mut i = offset;
+            while i < count {
+                sample.push(self.values[i]);
+                i += stride;
+            }
+            if sample.is_empty() {
+                sample.push(self.values[0]);
+                sample.push(self.values[count - 1]);
+            }
+        }
+        sample.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let slen = sample.len();
+        let q_index = |p: f64| -> usize {
+            // Clamp index to valid range.
+            ((p * (slen as f64 - 1.0)).floor() as usize).min(slen - 1)
+        };
+        let p25 = sample[q_index(0.25)];
+        let median = sample[q_index(0.50)];
+        let p75 = sample[q_index(0.75)];
+        let p95 = sample[q_index(0.95)];
 
         format!(
             "{{ count: {}, sum: {:.2}, mean: {:.2}, stdev: {:.2}, min: {:.2}, p25: {:.2}, median: {:.2}, p75: {:.2}, p95: {:.2}, max: {:.2} }}",
@@ -278,28 +308,33 @@ impl Metric for NonRootEdgeOverlapMetric {
     }
 }
 
-/// Helper to compute state fanout values for a single node.
-fn compute_state_fanout_for_node(node: &crate::trie3_opt::core::Node) -> Vec<f64> {
-    use std::collections::BTreeMap;
+/// Helper to compute state fanout values for a single node and append them to stats.
+/// This avoids per-node Vec allocations and uses HashMap for faster aggregation.
+fn compute_state_fanout_for_node_into(
+    node: &crate::trie3_opt::core::Node,
+    stats: &mut NumericStats,
+) {
+    use std::collections::HashMap;
 
-    // For this node, build a map from (pop, state_id) -> count of active edges.
-    // This is much faster than the old version which cloned token sets.
-    let mut fanout_counts: BTreeMap<(isize, usize), usize> = BTreeMap::new();
+    // For this node, build: pop -> (state_id -> count of outgoing transitions)
+    let mut by_pop: HashMap<isize, HashMap<usize, usize>> = HashMap::new();
 
     for (edge_key, dest_map) in &node.children {
         let pop = edge_key.pop;
+        let state_counts = by_pop.entry(pop).or_default();
         for (_dest, state_set) in dest_map {
             for state_id in state_set.iter() {
-                *fanout_counts.entry((pop, state_id)).or_default() += 1;
+                *state_counts.entry(state_id).or_default() += 1;
             }
         }
     }
 
-    // Collect fanout values for this node
-    fanout_counts
-        .values()
-        .map(|&count| count as f64)
-        .collect()
+    // Append counts for this node into the shared stats accumulator.
+    for inner in by_pop.values() {
+        for &count in inner.values() {
+            stats.push(count as f64);
+        }
+    }
 }
 
 pub struct StateFanoutMetric;
@@ -320,9 +355,7 @@ impl Metric for StateFanoutMetric {
         let it = trie.nodes.iter();
 
         for node in it {
-            for val in compute_state_fanout_for_node(node) {
-                stats.push(val);
-            }
+            compute_state_fanout_for_node_into(node, &mut stats);
         }
 
         stats.to_pretty_string()
@@ -352,9 +385,7 @@ impl Metric for RootStateFanoutMetric {
         let it = root_nodes.iter();
 
         for node in it {
-            for val in compute_state_fanout_for_node(node) {
-                stats.push(val);
-            }
+            compute_state_fanout_for_node_into(node, &mut stats);
         }
         stats.to_pretty_string()
     }
@@ -383,9 +414,7 @@ impl Metric for NonRootStateFanoutMetric {
         let it = non_root_nodes.iter();
 
         for node in it {
-            for val in compute_state_fanout_for_node(node) {
-                stats.push(val);
-            }
+            compute_state_fanout_for_node_into(node, &mut stats);
         }
         stats.to_pretty_string()
     }
