@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use ordered_hash_map::OrderedHashMap;
+use kdam::{tqdm, BarExt};
+
+use crate::profiler::PROGRESS_BAR_ENABLED;
 
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::metrics::run_all_metrics;
@@ -91,22 +94,47 @@ pub(crate) fn export_to_mini(
     max_state_id: usize,
 ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
     let mut mini = MiniTrie::new();
-
-    // BFS from roots to collect reachable nodes and assign NodeId
     let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
-    let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
 
-    for (_k, r) in roots {
-        if !map_old_to_new.contains_key(r) {
-            let end = r.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-            let id = mini.add_node(end);
-            map_old_to_new.insert(*r, id);
-            q.push_back(*r);
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+
+    // First, create all nodes in MiniTrie and map old to new
+    #[cfg(not(rustrover))]
+    let it_create = kdam::tqdm!(
+        all_nodes.iter(),
+        desc = "Trie3 Export (create nodes)",
+        total = all_nodes.len(),
+        disable = !PROGRESS_BAR_ENABLED,
+        leave = true
+    );
+    #[cfg(rustrover)]
+    let it_create = all_nodes.iter();
+    for old_idx in it_create {
+        let end = old_idx.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+        let id = mini.add_node(end);
+        map_old_to_new.insert(*old_idx, id);
+    }
+
+    // Mark roots in MiniTrie
+    for r_idx in &roots_vec {
+        if let Some(&id) = map_old_to_new.get(r_idx) {
             mini.add_root(id);
         }
     }
 
-    while let Some(old_idx) = q.pop_front() {
+    // Second, add all edges
+    #[cfg(not(rustrover))]
+    let it_edges = kdam::tqdm!(
+        all_nodes.iter(),
+        desc = "Trie3 Export (add edges)",
+        total = all_nodes.len(),
+        disable = !PROGRESS_BAR_ENABLED,
+        leave = true
+    );
+    #[cfg(rustrover)]
+    let it_edges = all_nodes.iter();
+    for old_idx in it_edges {
         let new_id = *map_old_to_new.get(&old_idx).unwrap();
         let r = if let Some(g) = old_idx.read(trie3_god) { g } else { continue };
 
@@ -125,16 +153,7 @@ pub(crate) fn export_to_mini(
             }
             let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks.clone());
             for (dst, sids) in dm {
-                // Ensure dst is mapped
-                let dst_id = if let Some(id) = map_old_to_new.get(dst) {
-                    *id
-                } else {
-                    let end = dst.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-                    let id = mini.add_node(end);
-                    map_old_to_new.insert(*dst, id);
-                    q.push_back(*dst);
-                    id
-                };
+                let dst_id = *map_old_to_new.get(dst).unwrap();
                 // Build state set
                 let mut st = SortedSet::new();
                 if sids.is_all() {

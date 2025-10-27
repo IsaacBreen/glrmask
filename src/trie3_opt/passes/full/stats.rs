@@ -31,6 +31,7 @@ pub fn compute_and_print_precompute_stats3(
     calculate_final_stats3(roots, &mut stats, trie3_god);
     print_precompute_stats3(&stats, trie3_god);
 
+    crate::debug!(2, "  Exporting to MiniTrie for extended metrics...");
     // Also print new MiniTrie-based metrics
     let (mini, _, _) = crate::trie3_opt::coordinator::export_to_mini(
         roots,

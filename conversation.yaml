@@ -3569,7 +3569,6 @@ local_system:
           }
       }
     src/trie3_opt/context.rs: |
-      use crate::json_serialization::JSONNode;
       use std::collections::BTreeMap;
       use std::fmt;
 
@@ -3581,8 +3580,8 @@ local_system:
           pub max_state_id: usize,
           pub iteration_budget: usize,
           pub debug_level: u8,
-          pub metrics_before: BTreeMap<String, JSONNode>,
-          pub metrics_after: BTreeMap<String, JSONNode>,
+          pub metrics_before: BTreeMap<String, String>,
+          pub metrics_after: BTreeMap<String, String>,
       }
 
       impl OptimizationContext {
@@ -3878,8 +3877,8 @@ local_system:
           if ctx.debug_level > 0 {
               crate::debug!(
                   1,
-                  "[Trie3 Opt] Metrics before optimization: {:?}",
-                  ctx.metrics_before
+                  "[Trie3 Opt] Metrics before optimization: {}",
+                  crate::trie3_opt::metrics::pretty_print_metrics_map(&ctx.metrics_before)
               );
           }
 
@@ -3895,9 +3894,9 @@ local_system:
                   let metrics = run_all_metrics(&mini);
                   crate::debug!(
                       1,
-                      "[Trie3 Opt] Metrics after '{}': {:?}",
+                      "[Trie3 Opt] Metrics after '{}': {}",
                       pass.name(),
-                      metrics
+                      crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics)
                   );
               }
           }
@@ -3905,7 +3904,9 @@ local_system:
           // Run final metrics
           ctx.metrics_after = run_all_metrics(&mini);
           if ctx.debug_level > 0 {
-              crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {:?}", ctx.metrics_after);
+              crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {}",
+                  crate::trie3_opt::metrics::pretty_print_metrics_map(&ctx.metrics_after)
+              );
           }
 
           // Import the result back and finalize
@@ -4186,8 +4187,7 @@ local_system:
               productive
           }
       }
-    src/trie3_opt/metrics.rs: |
-      use crate::json_serialization::{JSONConvertible, JSONNode};
+    src/trie3_opt/metrics.rs: |+
       use crate::trie3_opt::core::MiniTrie;
       use std::collections::BTreeMap;
       use std::fmt::Write;
@@ -4213,11 +4213,9 @@ local_system:
               self.values.push(value.into());
           }
 
-          pub fn to_json(&self) -> JSONNode {
+          pub fn to_pretty_string(&self) -> String {
               if self.values.is_empty() {
-                  let mut obj = BTreeMap::new();
-                  obj.insert("count".to_string(), 0.to_json());
-                  return JSONNode::Object(obj);
+                  return "{ count: 0 }".to_string();
               }
 
               let mut sorted_values = self.values.clone();
@@ -4243,19 +4241,10 @@ local_system:
               let variance = self.values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
               let stdev = variance.sqrt();
 
-              let mut obj = BTreeMap::new();
-              obj.insert("count".to_string(), count.to_json());
-              obj.insert("sum".to_string(), sum.to_json());
-              obj.insert("mean".to_string(), mean.to_json());
-              obj.insert("stdev".to_string(), stdev.to_json());
-              obj.insert("min".to_string(), min.to_json());
-              obj.insert("p25".to_string(), p25.to_json());
-              obj.insert("median".to_string(), median.to_json());
-              obj.insert("p75".to_string(), p75.to_json());
-              obj.insert("p95".to_string(), p95.to_json());
-              obj.insert("max".to_string(), max.to_json());
-
-              JSONNode::Object(obj)
+              format!(
+                  "{{ count: {}, sum: {:.2}, mean: {:.2}, stdev: {:.2}, min: {:.2}, p25: {:.2}, median: {:.2}, p75: {:.2}, p95: {:.2}, max: {:.2} }}",
+                  count, sum, mean, stdev, min, p25, median, p75, p95, max
+              )
           }
       }
 
@@ -4263,8 +4252,8 @@ local_system:
       pub trait Metric {
           /// The name of the metric.
           fn name(&self) -> &'static str;
-          /// Computes the metric and returns a serializable JSON value.
-          fn compute(&self, trie: &MiniTrie) -> JSONNode;
+          /// Computes the metric and returns a formatted string.
+          fn compute(&self, trie: &MiniTrie) -> String;
       }
 
       // --- Concrete Metric Implementations ---
@@ -4272,75 +4261,75 @@ local_system:
       pub struct NumNodesMetric;
       impl Metric for NumNodesMetric {
           fn name(&self) -> &'static str { "num_nodes" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.nodes.len().to_json() }
+          fn compute(&self, trie: &MiniTrie) -> String { trie.nodes.len().to_string() }
       }
 
       pub struct NumEdgesMetric;
       impl Metric for NumEdgesMetric {
           fn name(&self) -> &'static str { "num_edges" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
-              trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_json()
+          fn compute(&self, trie: &MiniTrie) -> String {
+              trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_string()
           }
       }
 
       pub struct NumRootsMetric;
       impl Metric for NumRootsMetric {
           fn name(&self) -> &'static str { "num_roots" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.root_ids.len().to_json() }
+          fn compute(&self, trie: &MiniTrie) -> String { trie.root_ids.len().to_string() }
       }
 
       pub struct NumEndNodesMetric;
       impl Metric for NumEndNodesMetric {
           fn name(&self) -> &'static str { "num_end_nodes" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
-              trie.nodes.iter().filter(|n| n.end).count().to_json()
+          fn compute(&self, trie: &MiniTrie) -> String {
+              trie.nodes.iter().filter(|n| n.end).count().to_string()
           }
       }
 
       pub struct NumReachableNodesMetric;
       impl Metric for NumReachableNodesMetric {
           fn name(&self) -> &'static str { "num_reachable_nodes" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.reachable_from_roots().len().to_json() }
+          fn compute(&self, trie: &MiniTrie) -> String { trie.reachable_from_roots().len().to_string() }
       }
 
       pub struct NumProductiveNodesMetric;
       impl Metric for NumProductiveNodesMetric {
           fn name(&self) -> &'static str { "num_productive_nodes" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.can_reach_end().len().to_json() }
+          fn compute(&self, trie: &MiniTrie) -> String { trie.can_reach_end().len().to_string() }
       }
 
       pub struct RootFanoutMetric;
       impl Metric for RootFanoutMetric {
           fn name(&self) -> &'static str { "root_fanout" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+          fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
                   .nodes
                   .iter()
                   .filter(|n| trie.root_ids.contains(&n.id))
                   .map(|n| n.out_degree() as f64)
                   .collect();
-              NumericStats::from_samples(&fanouts).to_json()
+              NumericStats::from_samples(&fanouts).to_pretty_string()
           }
       }
 
       pub struct NonRootFanoutMetric;
       impl Metric for NonRootFanoutMetric {
           fn name(&self) -> &'static str { "non_root_fanout" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+          fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
                   .nodes
                   .iter()
                   .filter(|n| !trie.root_ids.contains(&n.id))
                   .map(|n| n.out_degree() as f64)
                   .collect();
-              NumericStats::from_samples(&fanouts).to_json()
+              NumericStats::from_samples(&fanouts).to_pretty_string()
           }
       }
 
       pub struct EdgeOverlapMetric;
       impl Metric for EdgeOverlapMetric {
           fn name(&self) -> &'static str { "edge_overlap" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+          fn compute(&self, trie: &MiniTrie) -> String {
               use crate::trie3_opt::core::{NodeId, SortedSet};
               use std::collections::BTreeMap;
 
@@ -4379,14 +4368,14 @@ local_system:
                       scores.push(node_score);
                   }
               }
-              NumericStats::from_samples(&scores).to_json()
+              NumericStats::from_samples(&scores).to_pretty_string()
           }
       }
 
       pub struct StateFanoutMetric;
       impl Metric for StateFanoutMetric {
           fn name(&self) -> &'static str { "state_fanout" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+          fn compute(&self, trie: &MiniTrie) -> String {
               use crate::trie3_opt::core::{NodeId, SortedSet};
               use std::collections::BTreeMap;
 
@@ -4416,12 +4405,12 @@ local_system:
                   }
               }
 
-              stats.to_json()
+              stats.to_pretty_string()
           }
       }
 
       /// Instantiates and runs all standard metrics on a given trie.
-      pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
+      pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, String> {
           let metrics: Vec<Box<dyn Metric>> = vec![
               Box::new(NumNodesMetric),
               Box::new(NumEdgesMetric),
@@ -4443,7 +4432,7 @@ local_system:
       }
 
       /// Formats a map of metrics into a pretty, indented string.
-      pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, JSONNode>) -> String {
+      pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, String>) -> String {
           let mut buf = String::new();
           buf.push_str("{\n");
           let mut first = true;
@@ -4452,42 +4441,12 @@ local_system:
                   buf.push_str(",\n");
               }
               first = false;
-              buf.push_str(&" ".repeat(2));
-              write!(buf, "\"{}\": ", k).unwrap();
-              format_json_node_recursive(v, &mut buf, 2);
+              write!(buf, "  \"{}\": {}", k, v).unwrap();
           }
           buf.push_str("\n}");
           buf
       }
 
-      /// Recursive helper to format a JSONNode into a string buffer.
-      fn format_json_node_recursive(node: &JSONNode, buf: &mut String, indent: usize) {
-          // This implementation relies on the `Debug` output of `JSONNode` as its internal
-          // structure is not available here. It parses the debug string to re-format it.
-          let debug_str = format!("{:?}", node);
-
-          if let Some(s) = debug_str.strip_prefix("Object(").and_then(|s| s.strip_suffix(')')) {
-              // It's an object. We can't deserialize it, but we can format it better.
-              // For simplicity, we'll just replace the verbose debug format with a cleaner one.
-              // A full recursive parse of the debug string is too brittle.
-              // Let's just make it a bit more compact and readable.
-              let inner = s.replace("\n", &format!("\n{}", " ".repeat(indent + 2)));
-              buf.push_str(&inner);
-          } else if let Some(s) = debug_str.strip_prefix("UInt(").and_then(|s| s.strip_suffix(')')) {
-              buf.push_str(s);
-          } else if let Some(s) = debug_str.strip_prefix("Int(").and_then(|s| s.strip_suffix(')')) {
-              buf.push_str(s);
-          } else if let Some(s) = debug_str.strip_prefix("Float(").and_then(|s| s.strip_suffix(')')) {
-              if let Ok(f) = s.parse::<f64>() {
-                  write!(buf, "{:.4}", f).unwrap();
-              } else {
-                  buf.push_str(s);
-              }
-          } else {
-              // Fallback for other types (Array, String, etc.)
-              buf.push_str(&debug_str);
-          }
-      }
     src/trie3_opt/mod.rs: |
       pub mod core;
       pub mod context;
@@ -13605,6 +13564,9 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
       use ordered_hash_map::OrderedHashMap;
+      use kdam::{tqdm, BarExt};
+
+      use crate::profiler::PROGRESS_BAR_ENABLED;
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::metrics::run_all_metrics;
@@ -13695,22 +13657,47 @@ local_system:
           max_state_id: usize,
       ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
           let mut mini = MiniTrie::new();
-
-          // BFS from roots to collect reachable nodes and assign NodeId
           let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
-          let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
 
-          for (_k, r) in roots {
-              if !map_old_to_new.contains_key(r) {
-                  let end = r.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-                  let id = mini.add_node(end);
-                  map_old_to_new.insert(*r, id);
-                  q.push_back(*r);
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+
+          // First, create all nodes in MiniTrie and map old to new
+          #[cfg(not(rustrover))]
+          let it_create = kdam::tqdm!(
+              all_nodes.iter(),
+              desc = "Trie3 Export (create nodes)",
+              total = all_nodes.len(),
+              disable = !PROGRESS_BAR_ENABLED,
+              leave = true
+          );
+          #[cfg(rustrover)]
+          let it_create = all_nodes.iter();
+          for old_idx in it_create {
+              let end = old_idx.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+              let id = mini.add_node(end);
+              map_old_to_new.insert(*old_idx, id);
+          }
+
+          // Mark roots in MiniTrie
+          for r_idx in &roots_vec {
+              if let Some(&id) = map_old_to_new.get(r_idx) {
                   mini.add_root(id);
               }
           }
 
-          while let Some(old_idx) = q.pop_front() {
+          // Second, add all edges
+          #[cfg(not(rustrover))]
+          let it_edges = kdam::tqdm!(
+              all_nodes.iter(),
+              desc = "Trie3 Export (add edges)",
+              total = all_nodes.len(),
+              disable = !PROGRESS_BAR_ENABLED,
+              leave = true
+          );
+          #[cfg(rustrover)]
+          let it_edges = all_nodes.iter();
+          for old_idx in it_edges {
               let new_id = *map_old_to_new.get(&old_idx).unwrap();
               let r = if let Some(g) = old_idx.read(trie3_god) { g } else { continue };
 
@@ -13729,16 +13716,7 @@ local_system:
                   }
                   let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks.clone());
                   for (dst, sids) in dm {
-                      // Ensure dst is mapped
-                      let dst_id = if let Some(id) = map_old_to_new.get(dst) {
-                          *id
-                      } else {
-                          let end = dst.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-                          let id = mini.add_node(end);
-                          map_old_to_new.insert(*dst, id);
-                          q.push_back(*dst);
-                          id
-                      };
+                      let dst_id = *map_old_to_new.get(dst).unwrap();
                       // Build state set
                       let mut st = SortedSet::new();
                       if sids.is_all() {
@@ -19379,6 +19357,7 @@ local_system:
           calculate_final_stats3(roots, &mut stats, trie3_god);
           print_precompute_stats3(&stats, trie3_god);
 
+          crate::debug!(2, "  Exporting to MiniTrie for extended metrics...");
           // Also print new MiniTrie-based metrics
           let (mini, _, _) = crate::trie3_opt::coordinator::export_to_mini(
               roots,
@@ -23559,7 +23538,6 @@ messages:
       filename: src/datastructures/trie.rs
   - user: |-
       ```rust "src/trie3_opt/context.rs"
-      use crate::json_serialization::JSONNode;
       use std::collections::BTreeMap;
       use std::fmt;
 
@@ -23571,8 +23549,8 @@ messages:
           pub max_state_id: usize,
           pub iteration_budget: usize,
           pub debug_level: u8,
-          pub metrics_before: BTreeMap<String, JSONNode>,
-          pub metrics_after: BTreeMap<String, JSONNode>,
+          pub metrics_before: BTreeMap<String, String>,
+          pub metrics_after: BTreeMap<String, String>,
       }
 
       impl OptimizationContext {
@@ -23873,8 +23851,8 @@ messages:
           if ctx.debug_level > 0 {
               crate::debug!(
                   1,
-                  "[Trie3 Opt] Metrics before optimization: {:?}",
-                  ctx.metrics_before
+                  "[Trie3 Opt] Metrics before optimization: {}",
+                  crate::trie3_opt::metrics::pretty_print_metrics_map(&ctx.metrics_before)
               );
           }
 
@@ -23890,9 +23868,9 @@ messages:
                   let metrics = run_all_metrics(&mini);
                   crate::debug!(
                       1,
-                      "[Trie3 Opt] Metrics after '{}': {:?}",
+                      "[Trie3 Opt] Metrics after '{}': {}",
                       pass.name(),
-                      metrics
+                      crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics)
                   );
               }
           }
@@ -23900,7 +23878,9 @@ messages:
           // Run final metrics
           ctx.metrics_after = run_all_metrics(&mini);
           if ctx.debug_level > 0 {
-              crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {:?}", ctx.metrics_after);
+              crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {}",
+                  crate::trie3_opt::metrics::pretty_print_metrics_map(&ctx.metrics_after)
+              );
           }
 
           // Import the result back and finalize
@@ -24192,7 +24172,6 @@ messages:
       filename: src/trie3_opt/core.rs
   - user: |-
       ```rust "src/trie3_opt/metrics.rs"
-      use crate::json_serialization::{JSONConvertible, JSONNode};
       use crate::trie3_opt::core::MiniTrie;
       use std::collections::BTreeMap;
       use std::fmt::Write;
@@ -24218,11 +24197,9 @@ messages:
               self.values.push(value.into());
           }
 
-          pub fn to_json(&self) -> JSONNode {
+          pub fn to_pretty_string(&self) -> String {
               if self.values.is_empty() {
-                  let mut obj = BTreeMap::new();
-                  obj.insert("count".to_string(), 0.to_json());
-                  return JSONNode::Object(obj);
+                  return "{ count: 0 }".to_string();
               }
 
               let mut sorted_values = self.values.clone();
@@ -24248,19 +24225,10 @@ messages:
               let variance = self.values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
               let stdev = variance.sqrt();
 
-              let mut obj = BTreeMap::new();
-              obj.insert("count".to_string(), count.to_json());
-              obj.insert("sum".to_string(), sum.to_json());
-              obj.insert("mean".to_string(), mean.to_json());
-              obj.insert("stdev".to_string(), stdev.to_json());
-              obj.insert("min".to_string(), min.to_json());
-              obj.insert("p25".to_string(), p25.to_json());
-              obj.insert("median".to_string(), median.to_json());
-              obj.insert("p75".to_string(), p75.to_json());
-              obj.insert("p95".to_string(), p95.to_json());
-              obj.insert("max".to_string(), max.to_json());
-
-              JSONNode::Object(obj)
+              format!(
+                  "{{ count: {}, sum: {:.2}, mean: {:.2}, stdev: {:.2}, min: {:.2}, p25: {:.2}, median: {:.2}, p75: {:.2}, p95: {:.2}, max: {:.2} }}",
+                  count, sum, mean, stdev, min, p25, median, p75, p95, max
+              )
           }
       }
 
@@ -24268,8 +24236,8 @@ messages:
       pub trait Metric {
           /// The name of the metric.
           fn name(&self) -> &'static str;
-          /// Computes the metric and returns a serializable JSON value.
-          fn compute(&self, trie: &MiniTrie) -> JSONNode;
+          /// Computes the metric and returns a formatted string.
+          fn compute(&self, trie: &MiniTrie) -> String;
       }
 
       // --- Concrete Metric Implementations ---
@@ -24277,75 +24245,75 @@ messages:
       pub struct NumNodesMetric;
       impl Metric for NumNodesMetric {
           fn name(&self) -> &'static str { "num_nodes" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.nodes.len().to_json() }
+          fn compute(&self, trie: &MiniTrie) -> String { trie.nodes.len().to_string() }
       }
 
       pub struct NumEdgesMetric;
       impl Metric for NumEdgesMetric {
           fn name(&self) -> &'static str { "num_edges" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
-              trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_json()
+          fn compute(&self, trie: &MiniTrie) -> String {
+              trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_string()
           }
       }
 
       pub struct NumRootsMetric;
       impl Metric for NumRootsMetric {
           fn name(&self) -> &'static str { "num_roots" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.root_ids.len().to_json() }
+          fn compute(&self, trie: &MiniTrie) -> String { trie.root_ids.len().to_string() }
       }
 
       pub struct NumEndNodesMetric;
       impl Metric for NumEndNodesMetric {
           fn name(&self) -> &'static str { "num_end_nodes" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
-              trie.nodes.iter().filter(|n| n.end).count().to_json()
+          fn compute(&self, trie: &MiniTrie) -> String {
+              trie.nodes.iter().filter(|n| n.end).count().to_string()
           }
       }
 
       pub struct NumReachableNodesMetric;
       impl Metric for NumReachableNodesMetric {
           fn name(&self) -> &'static str { "num_reachable_nodes" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.reachable_from_roots().len().to_json() }
+          fn compute(&self, trie: &MiniTrie) -> String { trie.reachable_from_roots().len().to_string() }
       }
 
       pub struct NumProductiveNodesMetric;
       impl Metric for NumProductiveNodesMetric {
           fn name(&self) -> &'static str { "num_productive_nodes" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.can_reach_end().len().to_json() }
+          fn compute(&self, trie: &MiniTrie) -> String { trie.can_reach_end().len().to_string() }
       }
 
       pub struct RootFanoutMetric;
       impl Metric for RootFanoutMetric {
           fn name(&self) -> &'static str { "root_fanout" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+          fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
                   .nodes
                   .iter()
                   .filter(|n| trie.root_ids.contains(&n.id))
                   .map(|n| n.out_degree() as f64)
                   .collect();
-              NumericStats::from_samples(&fanouts).to_json()
+              NumericStats::from_samples(&fanouts).to_pretty_string()
           }
       }
 
       pub struct NonRootFanoutMetric;
       impl Metric for NonRootFanoutMetric {
           fn name(&self) -> &'static str { "non_root_fanout" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+          fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
                   .nodes
                   .iter()
                   .filter(|n| !trie.root_ids.contains(&n.id))
                   .map(|n| n.out_degree() as f64)
                   .collect();
-              NumericStats::from_samples(&fanouts).to_json()
+              NumericStats::from_samples(&fanouts).to_pretty_string()
           }
       }
 
       pub struct EdgeOverlapMetric;
       impl Metric for EdgeOverlapMetric {
           fn name(&self) -> &'static str { "edge_overlap" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+          fn compute(&self, trie: &MiniTrie) -> String {
               use crate::trie3_opt::core::{NodeId, SortedSet};
               use std::collections::BTreeMap;
 
@@ -24384,14 +24352,14 @@ messages:
                       scores.push(node_score);
                   }
               }
-              NumericStats::from_samples(&scores).to_json()
+              NumericStats::from_samples(&scores).to_pretty_string()
           }
       }
 
       pub struct StateFanoutMetric;
       impl Metric for StateFanoutMetric {
           fn name(&self) -> &'static str { "state_fanout" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+          fn compute(&self, trie: &MiniTrie) -> String {
               use crate::trie3_opt::core::{NodeId, SortedSet};
               use std::collections::BTreeMap;
 
@@ -24421,12 +24389,12 @@ messages:
                   }
               }
 
-              stats.to_json()
+              stats.to_pretty_string()
           }
       }
 
       /// Instantiates and runs all standard metrics on a given trie.
-      pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
+      pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, String> {
           let metrics: Vec<Box<dyn Metric>> = vec![
               Box::new(NumNodesMetric),
               Box::new(NumEdgesMetric),
@@ -24448,7 +24416,7 @@ messages:
       }
 
       /// Formats a map of metrics into a pretty, indented string.
-      pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, JSONNode>) -> String {
+      pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, String>) -> String {
           let mut buf = String::new();
           buf.push_str("{\n");
           let mut first = true;
@@ -24457,42 +24425,12 @@ messages:
                   buf.push_str(",\n");
               }
               first = false;
-              buf.push_str(&" ".repeat(2));
-              write!(buf, "\"{}\": ", k).unwrap();
-              format_json_node_recursive(v, &mut buf, 2);
+              write!(buf, "  \"{}\": {}", k, v).unwrap();
           }
           buf.push_str("\n}");
           buf
       }
 
-      /// Recursive helper to format a JSONNode into a string buffer.
-      fn format_json_node_recursive(node: &JSONNode, buf: &mut String, indent: usize) {
-          // This implementation relies on the `Debug` output of `JSONNode` as its internal
-          // structure is not available here. It parses the debug string to re-format it.
-          let debug_str = format!("{:?}", node);
-
-          if let Some(s) = debug_str.strip_prefix("Object(").and_then(|s| s.strip_suffix(')')) {
-              // It's an object. We can't deserialize it, but we can format it better.
-              // For simplicity, we'll just replace the verbose debug format with a cleaner one.
-              // A full recursive parse of the debug string is too brittle.
-              // Let's just make it a bit more compact and readable.
-              let inner = s.replace("\n", &format!("\n{}", " ".repeat(indent + 2)));
-              buf.push_str(&inner);
-          } else if let Some(s) = debug_str.strip_prefix("UInt(").and_then(|s| s.strip_suffix(')')) {
-              buf.push_str(s);
-          } else if let Some(s) = debug_str.strip_prefix("Int(").and_then(|s| s.strip_suffix(')')) {
-              buf.push_str(s);
-          } else if let Some(s) = debug_str.strip_prefix("Float(").and_then(|s| s.strip_suffix(')')) {
-              if let Ok(f) = s.parse::<f64>() {
-                  write!(buf, "{:.4}", f).unwrap();
-              } else {
-                  buf.push_str(s);
-              }
-          } else {
-              // Fallback for other types (Array, String, etc.)
-              buf.push_str(&debug_str);
-          }
-      }
 
       ```
     metadata:
@@ -30195,9 +30133,32 @@ messages:
     metadata:
       filename: src/trie3_opt/passes/prune_dead_paths.rs
   - user: |-
-      Make metrics printing more readable overall. Think about what the best Rust tools are for this.
-      We want indentation to work as expected. We want the output to be readable, not some JSON. No newlines where they aren't needed.
-      Allow each metric to decide how it will be displayed.
+      ```
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:77: Optimizing Trie 3 size...
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:80: Initial stats:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 75732 unique nodes, of which
+          - 169 are roots
+          - 75563 are non-roots, of which
+              - 75562 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 75732
+        Total Edges: 282724
+        Nodes with End Marker: 1
+        Average edge fanout:    3.69
+        Total ranges in all HybridBitsets: 455324
+      ---------------------------------
+      ```
+
+      The code seems to hang after this point. I can't tell where it's at.
+      Ensure it's possible to see clearly what the code is up to.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -30217,349 +30178,286 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to make your metrics printing more readable, followed by the corresponding git diffs.
+      Of course. It seems like the program is hanging during a potentially long-running operation without giving any progress updates. I'll add logging and progress bars to the `export_to_mini` function, which is the likely culprit, to provide visibility into its progress.
 
-      ### Step-by-Step Instructions
+      Here are the step-by-step instructions to apply the changes, followed by the git diffs.
 
-      1.  **File: `src/trie3_opt/metrics.rs`**
-          *   In the `NumericStats` struct, rename the `to_json` method to `to_pretty_string` and change its return type to `String`. Update its implementation to produce a formatted, single-line string that summarizes the statistics.
-          *   Modify the `Metric` trait by changing the return type of the `compute` method from `JSONNode` to `String`.
-          *   Update all structs that implement the `Metric` trait (e.g., `NumNodesMetric`, `NumEdgesMetric`, `RootFanoutMetric`). Their `compute` methods should now return a `String`. For simple numeric metrics, you can call `.to_string()`. For metrics based on `NumericStats`, call the new `.to_pretty_string()` method.
-          *   In `run_all_metrics`, change the return type to `BTreeMap<String, String>`.
-          *   Update the `pretty_print_metrics_map` function to accept a `&BTreeMap<String, String>` and format it into a multi-line, indented string.
-          *   Remove the `format_json_node_recursive` function and the `JSONConvertible` import, as they are no longer needed.
+      ### Step-by-step Instructions
 
-      2.  **File: `src/trie3_opt/context.rs`**
-          *   In the `OptimizationContext` struct, update the types of the `metrics_before` and `metrics_after` fields from `BTreeMap<String, JSONNode>` to `BTreeMap<String, String>`.
-          *   In the `new` function, ensure these fields are initialized as empty `BTreeMap<String, String>`.
-          *   Update the `Debug` implementation for `OptimizationContext` to correctly handle the changed field types.
-          *   Remove the unused `JSONNode` import.
+      1.  **File: `src/trie3_opt/passes/full/stats.rs`**
+          -   Open the file `src/trie3_opt/passes/full/stats.rs`.
+          -   Locate the `compute_and_print_precompute_stats3` function.
+          -   Just before the line that calls `crate::trie3_opt::coordinator::export_to_mini`, insert the following line to add a debug message. This will confirm that the program is about to start the export process.
+              ```rust
+              crate::debug!(2, "  Exporting to MiniTrie for extended metrics...");
+              ```
 
-      3.  **File: `src/trie3_opt/coordinator.rs`**
-          *   In the `run_pipeline_on_precompute3` function, locate the `crate::debug!` macros that print the metrics.
-          *   Modify these macros to use `crate::trie3_opt::metrics::pretty_print_metrics_map` for formatting, which will produce a more readable, multi-line output instead of the default `Debug` format.
+      2.  **File: `src/trie3_opt/coordinator.rs`**
+          -   Open the file `src/trie3_opt/coordinator.rs`.
+          -   At the top of the file, add the following `use` statements to import the necessary components for progress bars and Trie traversal:
+              ```rust
+              use kdam::{tqdm, BarExt};
+
+              use crate::profiler::PROGRESS_BAR_ENABLED;
+              ```
+          -   Replace the entire body of the `export_to_mini` function with the new version below. This refactored implementation first collects all reachable nodes, allowing it to display progress bars for both the node creation and edge creation phases of the export.
+
+              ```rust
+              pub(crate) fn export_to_mini(
+                  roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+                  trie3_god: &Trie3GodWrapper,
+                  max_llm_token_id: usize,
+                  max_state_id: usize,
+              ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
+                  let mut mini = MiniTrie::new();
+                  let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
+
+                  let roots_vec: Vec<_> = roots.values().cloned().collect();
+                  let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+
+                  // First, create all nodes in MiniTrie and map old to new
+                  #[cfg(not(rustrover))]
+                  let it_create = kdam::tqdm!(
+                      all_nodes.iter(),
+                      desc = "Trie3 Export (create nodes)",
+                      total = all_nodes.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = true
+                  );
+                  #[cfg(rustrover)]
+                  let it_create = all_nodes.iter();
+                  for old_idx in it_create {
+                      let end = old_idx.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+                      let id = mini.add_node(end);
+                      map_old_to_new.insert(*old_idx, id);
+                  }
+
+                  // Mark roots in MiniTrie
+                  for r_idx in &roots_vec {
+                      if let Some(&id) = map_old_to_new.get(r_idx) {
+                          mini.add_root(id);
+                      }
+                  }
+
+                  // Second, add all edges
+                  #[cfg(not(rustrover))]
+                  let it_edges = kdam::tqdm!(
+                      all_nodes.iter(),
+                      desc = "Trie3 Export (add edges)",
+                      total = all_nodes.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = true
+                  );
+                  #[cfg(rustrover)]
+                  let it_edges = all_nodes.iter();
+                  for old_idx in it_edges {
+                      let new_id = *map_old_to_new.get(&old_idx).unwrap();
+                      let r = if let Some(g) = old_idx.read(trie3_god) { g } else { continue };
+
+                      for (ek, dm) in r.children() {
+                          // Build token set
+                          let mut toks = SortedSet::new();
+                          if ek.1.is_all() {
+                              toks = SortedSet::from_iter(0..=max_llm_token_id);
+                          } else {
+                              for t in ek.1.iter() {
+                                  toks.insert(t);
+                              }
+                          }
+                          if toks.is_empty() {
+                              continue;
+                          }
+                          let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks.clone());
+                          for (dst, sids) in dm {
+                              let dst_id = *map_old_to_new.get(dst).unwrap();
+                              // Build state set
+                              let mut st = SortedSet::new();
+                              if sids.is_all() {
+                                  st = SortedSet::from_iter(0..=max_state_id);
+                              } else {
+                                  for s in sids.iter() {
+                                      st.insert(s);
+                                  }
+                              }
+                              if !st.is_empty() {
+                                  mini.add_edge(new_id, key.clone(), dst_id, st);
+                              }
+                          }
+                      }
+                  }
+
+                  // Stable root list preserving the original key ordering
+                  let mut root_pairs: Vec<(TokenizerStateID, NodeId)> = Vec::new();
+                  for (k, r) in roots {
+                      if let Some(id) = map_old_to_new.get(r).cloned() {
+                          root_pairs.push((*k, id));
+                      }
+                  }
+
+                  (mini, root_pairs, map_old_to_new)
+              }
+              ```
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes:
-
-      ```diff
-      --- a/src/trie3_opt/context.rs
-      +++ b/src/trie3_opt/context.rs
-      @@ -1,4 +1,3 @@
-      -use crate::json_serialization::JSONNode;
-       use std::collections::BTreeMap;
-       use std::fmt;
-       
-      @@ -9,8 +8,8 @@
-           pub max_state_id: usize,
-           pub iteration_budget: usize,
-           pub debug_level: u8,
-      -    pub metrics_before: BTreeMap<String, JSONNode>,
-      -    pub metrics_after: BTreeMap<String, JSONNode>,
-      +    pub metrics_before: BTreeMap<String, String>,
-      +    pub metrics_after: BTreeMap<String, String>,
-       }
-       
-       impl OptimizationContext {
-
-      ```
+      Here are the corresponding git diffs to apply these changes.
 
       ```diff
       --- a/src/trie3_opt/coordinator.rs
       +++ b/src/trie3_opt/coordinator.rs
-      @@ -211,9 +211,9 @@
-           ctx.metrics_before = run_all_metrics(&mini);
-           if ctx.debug_level > 0 {
-               crate::debug!(
-                   1,
-      -            "[Trie3 Opt] Metrics before optimization: {:?}",
-      -            ctx.metrics_before
-      +            "[Trie3 Opt] Metrics before optimization: {}",
-      +            crate::trie3_opt::metrics::pretty_print_metrics_map(&ctx.metrics_before)
-               );
-           }
+      @@ -1,6 +1,9 @@
+       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
        
-      @@ -226,16 +226,19 @@
-               pass.run(&mut mini, &mut ctx);
-               if ctx.debug_level > 0 {
-                   let metrics = run_all_metrics(&mini);
-                   crate::debug!(
-                       1,
-      -                "[Trie3 Opt] Metrics after '{}': {:?}",
-      +                "[Trie3 Opt] Metrics after '{}': {}",
-                       pass.name(),
-      -                metrics
-      +                crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics)
-                   );
+       use ordered_hash_map::OrderedHashMap;
+      +use kdam::{tqdm, BarExt};
+      +
+      +use crate::profiler::PROGRESS_BAR_ENABLED;
+       
+       use crate::trie3_opt::context::OptimizationContext;
+       use crate::trie3_opt::metrics::run_all_metrics;
+      @@ -81,78 +84,81 @@
+           max_llm_token_id: usize,
+           max_state_id: usize,
+       ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
+           let mut mini = MiniTrie::new();
+      -
+      -    // BFS from roots to collect reachable nodes and assign NodeId
+           let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
+      -    let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
+      -
+      -    for (_k, r) in roots {
+      -        if !map_old_to_new.contains_key(r) {
+      -            let end = r.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+      -            let id = mini.add_node(end);
+      -            map_old_to_new.insert(*r, id);
+      -            q.push_back(*r);
+      +
+      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
+      +    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+      +
+      +    // First, create all nodes in MiniTrie and map old to new
+      +    #[cfg(not(rustrover))]
+      +    let it_create = kdam::tqdm!(
+      +        all_nodes.iter(),
+      +        desc = "Trie3 Export (create nodes)",
+      +        total = all_nodes.len(),
+      +        disable = !PROGRESS_BAR_ENABLED,
+      +        leave = true
+      +    );
+      +    #[cfg(rustrover)]
+      +    let it_create = all_nodes.iter();
+      +    for old_idx in it_create {
+      +        let end = old_idx.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+      +        let id = mini.add_node(end);
+      +        map_old_to_new.insert(*old_idx, id);
+      +    }
+      +
+      +    // Mark roots in MiniTrie
+      +    for r_idx in &roots_vec {
+      +        if let Some(&id) = map_old_to_new.get(r_idx) {
+                   mini.add_root(id);
                }
            }
        
-           // Run final metrics
-           ctx.metrics_after = run_all_metrics(&mini);
-           if ctx.debug_level > 0 {
-      -        crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {:?}", ctx.metrics_after);
-      +        crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {}",
-      +            crate::trie3_opt::metrics::pretty_print_metrics_map(&ctx.metrics_after)
-      +        );
+      -    while let Some(old_idx) = q.pop_front() {
+      +    // Second, add all edges
+      +    #[cfg(not(rustrover))]
+      +    let it_edges = kdam::tqdm!(
+      +        all_nodes.iter(),
+      +        desc = "Trie3 Export (add edges)",
+      +        total = all_nodes.len(),
+      +        disable = !PROGRESS_BAR_ENABLED,
+      +        leave = true
+      +    );
+      +    #[cfg(rustrover)]
+      +    let it_edges = all_nodes.iter();
+      +    for old_idx in it_edges {
+               let new_id = *map_old_to_new.get(&old_idx).unwrap();
+               let r = if let Some(g) = old_idx.read(trie3_god) { g } else { continue };
+       
+               for (ek, dm) in r.children() {
+                   // Build token set
+                   let mut toks = SortedSet::new();
+                   if ek.1.is_all() {
+                       toks = SortedSet::from_iter(0..=max_llm_token_id);
+                   } else {
+                       for t in ek.1.iter() {
+                           toks.insert(t);
+                       }
+                   }
+                   if toks.is_empty() {
+                       continue;
+                   }
+                   let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks.clone());
+                   for (dst, sids) in dm {
+      -                // Ensure dst is mapped
+      -                let dst_id = if let Some(id) = map_old_to_new.get(dst) {
+      -                    *id
+      -                } else {
+      -                    let end = dst.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+      -                    let id = mini.add_node(end);
+      -                    map_old_to_new.insert(*dst, id);
+      -                    q.push_back(*dst);
+      -                    id
+      -                };
+      +                let dst_id = *map_old_to_new.get(dst).unwrap();
+                       // Build state set
+                       let mut st = SortedSet::new();
+                       if sids.is_all() {
+                           st = SortedSet::from_iter(0..=max_state_id);
+                       } else {
+                           for s in sids.iter() {
+                               st.insert(s);
+                           }
+                       }
+                       if !st.is_empty() {
+                           mini.add_edge(new_id, key.clone(), dst_id, st);
+                       }
+                   }
+               }
            }
        
-           // Import the result back and finalize
+           // Stable root list preserving the original key ordering
+           let mut root_pairs: Vec<(TokenizerStateID, NodeId)> = Vec::new();
+           for (k, r) in roots {
+               if let Some(id) = map_old_to_new.get(r).cloned() {
+                   root_pairs.push((*k, id));
+               }
+           }
+       
+           (mini, root_pairs, map_old_to_new)
+       }
 
       ```
-
       ```diff
-      --- a/src/trie3_opt/metrics.rs
-      +++ b/src/trie3_opt/metrics.rs
-      @@ -1,4 +1,3 @@
-      -use crate::json_serialization::{JSONConvertible, JSONNode};
-       use crate::trie3_opt::core::MiniTrie;
-       use std::collections::BTreeMap;
-       use std::fmt::Write;
-      @@ -22,12 +21,12 @@
-               self.values.push(value.into());
-           }
+      --- a/src/trie3_opt/passes/full/stats.rs
+      +++ b/src/trie3_opt/passes/full/stats.rs
+      @@ -26,6 +26,7 @@
+           calculate_final_stats3(roots, &mut stats, trie3_god);
+           print_precompute_stats3(&stats, trie3_god);
        
-      -    pub fn to_json(&self) -> JSONNode {
-      +    pub fn to_pretty_string(&self) -> String {
-               if self.values.is_empty() {
-      -            let mut obj = BTreeMap::new();
-      -            obj.insert("count".to_string(), 0.to_json());
-      -            return JSONNode::Object(obj);
-      +            return "{ count: 0 }".to_string();
-               }
-       
-               let mut sorted_values = self.values.clone();
-      @@ -52,30 +51,29 @@
-               let variance = self.values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
-               let stdev = variance.sqrt();
-       
-      -        let mut obj = BTreeMap::new();
-      -        obj.insert("count".to_string(), count.to_json());
-      -        obj.insert("sum".to_string(), sum.to_json());
-      -        obj.insert("mean".to_string(), mean.to_json());
-      -        obj.insert("stdev".to_string(), stdev.to_json());
-      -        obj.insert("min".to_string(), min.to_json());
-      -        obj.insert("p25".to_string(), p25.to_json());
-      -        obj.insert("median".to_string(), median.to_json());
-      -        obj.insert("p75".to_string(), p75.to_json());
-      -        obj.insert("p95".to_string(), p95.to_json());
-      -        obj.insert("max".to_string(), max.to_json());
-      -
-      -        JSONNode::Object(obj)
-      +        format!(
-      +            "{{ count: {}, sum: {:.2}, mean: {:.2}, stdev: {:.2}, min: {:.2}, p25: {:.2}, median: {:.2}, p75: {:.2}, p95: {:.2}, max: {:.2} }}",
-      +            count, sum, mean, stdev, min, p25, median, p75, p95, max
-      +        )
-           }
-       }
-       
-       /// A trait for a modular metric that can be computed on a MiniTrie.
-       pub trait Metric {
-           /// The name of the metric.
-           fn name(&self) -> &'static str;
-      -    /// Computes the metric and returns a serializable JSON value.
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode;
-      +    /// Computes the metric and returns a formatted string.
-      +    fn compute(&self, trie: &MiniTrie) -> String;
-       }
-       
-       // --- Concrete Metric Implementations ---
-       
-       pub struct NumNodesMetric;
-       impl Metric for NumNodesMetric {
-           fn name(&self) -> &'static str { "num_nodes" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.nodes.len().to_json() }
-      +    fn compute(&self, trie: &MiniTrie) -> String { trie.nodes.len().to_string() }
-       }
-       
-       pub struct NumEdgesMetric;
-       impl Metric for NumEdgesMetric {
-           fn name(&self) -> &'static str { "num_edges" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode {
-      -        trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_json()
-      +    fn compute(&self, trie: &MiniTrie) -> String {
-      +        trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_string()
-           }
-       }
-       
-       pub struct NumRootsMetric;
-       impl Metric for NumRootsMetric {
-           fn name(&self) -> &'static str { "num_roots" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.root_ids.len().to_json() }
-      +    fn compute(&self, trie: &MiniTrie) -> String { trie.root_ids.len().to_string() }
-       }
-       
-       pub struct NumEndNodesMetric;
-       impl Metric for NumEndNodesMetric {
-           fn name(&self) -> &'static str { "num_end_nodes" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode {
-      -        trie.nodes.iter().filter(|n| n.end).count().to_json()
-      +    fn compute(&self, trie: &MiniTrie) -> String {
-      +        trie.nodes.iter().filter(|n| n.end).count().to_string()
-           }
-       }
-       
-       pub struct NumReachableNodesMetric;
-       impl Metric for NumReachableNodesMetric {
-           fn name(&self) -> &'static str { "num_reachable_nodes" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.reachable_from_roots().len().to_json() }
-      +    fn compute(&self, trie: &MiniTrie) -> String { trie.reachable_from_roots().len().to_string() }
-       }
-       
-       pub struct NumProductiveNodesMetric;
-       impl Metric for NumProductiveNodesMetric {
-           fn name(&self) -> &'static str { "num_productive_nodes" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.can_reach_end().len().to_json() }
-      +    fn compute(&self, trie: &MiniTrie) -> String { trie.can_reach_end().len().to_string() }
-       }
-       
-       pub struct RootFanoutMetric;
-       impl Metric for RootFanoutMetric {
-           fn name(&self) -> &'static str { "root_fanout" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode {
-      +    fn compute(&self, trie: &MiniTrie) -> String {
-               let fanouts: Vec<f64> = trie
-                   .nodes
-                   .iter()
-                   .filter(|n| trie.root_ids.contains(&n.id))
-                   .map(|n| n.out_degree() as f64)
-                   .collect();
-      -        NumericStats::from_samples(&fanouts).to_json()
-      +        NumericStats::from_samples(&fanouts).to_pretty_string()
-           }
-       }
-       
-       pub struct NonRootFanoutMetric;
-       impl Metric for NonRootFanoutMetric {
-           fn name(&self) -> &'static str { "non_root_fanout" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode {
-      +    fn compute(&self, trie: &MiniTrie) -> String {
-               let fanouts: Vec<f64> = trie
-                   .nodes
-                   .iter()
-                   .filter(|n| !trie.root_ids.contains(&n.id))
-                   .map(|n| n.out_degree() as f64)
-                   .collect();
-      -        NumericStats::from_samples(&fanouts).to_json()
-      +        NumericStats::from_samples(&fanouts).to_pretty_string()
-           }
-       }
-       
-       pub struct EdgeOverlapMetric;
-       impl Metric for EdgeOverlapMetric {
-           fn name(&self) -> &'static str { "edge_overlap" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode {
-      +    fn compute(&self, trie: &MiniTrie) -> String {
-               use crate::trie3_opt::core::{NodeId, SortedSet};
-               use std::collections::BTreeMap;
-       
-      @@ -136,14 +135,14 @@
-                       scores.push(node_score);
-                   }
-               }
-      -        NumericStats::from_samples(&scores).to_json()
-      +        NumericStats::from_samples(&scores).to_pretty_string()
-           }
-       }
-       
-       pub struct StateFanoutMetric;
-       impl Metric for StateFanoutMetric {
-           fn name(&self) -> &'static str { "state_fanout" }
-      -    fn compute(&self, trie: &MiniTrie) -> JSONNode {
-      +    fn compute(&self, trie: &MiniTrie) -> String {
-               use crate::trie3_opt::core::{NodeId, SortedSet};
-               use std::collections::BTreeMap;
-       
-      @@ -170,12 +169,12 @@
-                   }
-               }
-       
-      -        stats.to_json()
-      +        stats.to_pretty_string()
-           }
-       }
-       
-       /// Instantiates and runs all standard metrics on a given trie.
-      -pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
-      +pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, String> {
-           let metrics: Vec<Box<dyn Metric>> = vec![
-               Box::new(NumNodesMetric),
-               Box::new(NumEdgesMetric),
-      @@ -196,46 +195,19 @@
-       }
-       
-       /// Formats a map of metrics into a pretty, indented string.
-      -pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, JSONNode>) -> String {
-      +pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, String>) -> String {
-           let mut buf = String::new();
-           buf.push_str("{\n");
-           let mut first = true;
-           for (k, v) in metrics {
-               if !first {
-                   buf.push_str(",\n");
-               }
-               first = false;
-      -        buf.push_str(&" ".repeat(2));
-      -        write!(buf, "\"{}\": ", k).unwrap();
-      -        format_json_node_recursive(v, &mut buf, 2);
-      +        write!(buf, "  \"{}\": {}", k, v).unwrap();
-           }
-           buf.push_str("\n}");
-           buf
-       }
-       
-      -/// Recursive helper to format a JSONNode into a string buffer.
-      -fn format_json_node_recursive(node: &JSONNode, buf: &mut String, indent: usize) {
-      -    // This implementation relies on the `Debug` output of `JSONNode` as its internal
-      -    // structure is not available here. It parses the debug string to re-format it.
-      -    let debug_str = format!("{:?}", node);
-      -
-      -    if let Some(s) = debug_str.strip_prefix("Object(").and_then(|s| s.strip_suffix(')')) {
-      -        // It's an object. We can't deserialize it, but we can format it better.
-      -        // For simplicity, we'll just replace the verbose debug format with a cleaner one.
-      -        // A full recursive parse of the debug string is too brittle.
-      -        // Let's just make it a bit more compact and readable.
-      -        let inner = s.replace("\n", &format!("\n{}", " ".repeat(indent + 2)));
-      -        buf.push_str(&inner);
-      -    } else if let Some(s) = debug_str.strip_prefix("UInt(").and_then(|s| s.strip_suffix(')')) {
-      -        buf.push_str(s);
-      -    } else if let Some(s) = debug_str.strip_prefix("Int(").and_then(|s| s.strip_suffix(')')) {
-      -        buf.push_str(s);
-      -    } else if let Some(s) = debug_str.strip_prefix("Float(").and_then(|s| s.strip_suffix(')')) {
-      -        if let Ok(f) = s.parse::<f64>() {
-      -            write!(buf, "{:.4}", f).unwrap();
-      -        } else {
-      -            buf.push_str(s);
-      -        }
-      -    } else {
-      -        // Fallback for other types (Array, String, etc.)
-      -        buf.push_str(&debug_str);
-      -    }
-      -}
+      +    crate::debug!(2, "  Exporting to MiniTrie for extended metrics...");
+           // Also print new MiniTrie-based metrics
+           let (mini, _, _) = crate::trie3_opt::coordinator::export_to_mini(
+               roots,
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/context.rs
-      Applying patch to 'src/trie3_opt/context.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/context.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/trie3_opt/coordinator.rs
       Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
 
-      --- Processing Diff Block 3 ---
-      Identified target file: src/trie3_opt/metrics.rs
-      Applying patch to 'src/trie3_opt/metrics.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/metrics.rs.
+      --- Processing Diff Block 2 ---
+      Identified target file: src/trie3_opt/passes/full/stats.rs
+      Applying patch to 'src/trie3_opt/passes/full/stats.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/full/stats.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Make metric printing more readable
-      by using formatted strings instead of JSONNode"'
+  - user: 'Changes committed with message: "Add progress bars to Trie3 to MiniTrie
+      export for better visibility during optimization."'
     metadata:
 ...
