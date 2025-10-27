@@ -3613,6 +3613,9 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
       use ordered_hash_map::OrderedHashMap;
+      use kdam::{tqdm, BarExt};
+
+      use crate::profiler::PROGRESS_BAR_ENABLED;
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::metrics::run_all_metrics;
@@ -3703,22 +3706,47 @@ local_system:
           max_state_id: usize,
       ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
           let mut mini = MiniTrie::new();
-
-          // BFS from roots to collect reachable nodes and assign NodeId
           let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
-          let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
 
-          for (_k, r) in roots {
-              if !map_old_to_new.contains_key(r) {
-                  let end = r.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-                  let id = mini.add_node(end);
-                  map_old_to_new.insert(*r, id);
-                  q.push_back(*r);
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+
+          // First, create all nodes in MiniTrie and map old to new
+          #[cfg(not(rustrover))]
+          let it_create = kdam::tqdm!(
+              all_nodes.iter(),
+              desc = "Trie3 Export (create nodes)",
+              total = all_nodes.len(),
+              disable = !PROGRESS_BAR_ENABLED,
+              leave = true
+          );
+          #[cfg(rustrover)]
+          let it_create = all_nodes.iter();
+          for old_idx in it_create {
+              let end = old_idx.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+              let id = mini.add_node(end);
+              map_old_to_new.insert(*old_idx, id);
+          }
+
+          // Mark roots in MiniTrie
+          for r_idx in &roots_vec {
+              if let Some(&id) = map_old_to_new.get(r_idx) {
                   mini.add_root(id);
               }
           }
 
-          while let Some(old_idx) = q.pop_front() {
+          // Second, add all edges
+          #[cfg(not(rustrover))]
+          let it_edges = kdam::tqdm!(
+              all_nodes.iter(),
+              desc = "Trie3 Export (add edges)",
+              total = all_nodes.len(),
+              disable = !PROGRESS_BAR_ENABLED,
+              leave = true
+          );
+          #[cfg(rustrover)]
+          let it_edges = all_nodes.iter();
+          for old_idx in it_edges {
               let new_id = *map_old_to_new.get(&old_idx).unwrap();
               let r = if let Some(g) = old_idx.read(trie3_god) { g } else { continue };
 
@@ -3737,16 +3765,7 @@ local_system:
                   }
                   let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks.clone());
                   for (dst, sids) in dm {
-                      // Ensure dst is mapped
-                      let dst_id = if let Some(id) = map_old_to_new.get(dst) {
-                          *id
-                      } else {
-                          let end = dst.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-                          let id = mini.add_node(end);
-                          map_old_to_new.insert(*dst, id);
-                          q.push_back(*dst);
-                          id
-                      };
+                      let dst_id = *map_old_to_new.get(dst).unwrap();
                       // Build state set
                       let mut st = SortedSet::new();
                       if sids.is_all() {
@@ -9387,6 +9406,7 @@ local_system:
           calculate_final_stats3(roots, &mut stats, trie3_god);
           print_precompute_stats3(&stats, trie3_god);
 
+          crate::debug!(2, "  Exporting to MiniTrie for extended metrics...");
           // Also print new MiniTrie-based metrics
           let (mini, _, _) = crate::trie3_opt::coordinator::export_to_mini(
               roots,
@@ -14161,6 +14181,8 @@ local_system:
       use crate::trie3_opt::core::MiniTrie;
       use std::collections::BTreeMap;
       use std::fmt::Write;
+      use kdam::{tqdm, BarExt};
+      use crate::profiler::PROGRESS_BAR_ENABLED;
 
       /// A helper for collecting numeric data and computing summary statistics.
       #[derive(Debug, Clone, Default)]
@@ -14304,7 +14326,18 @@ local_system:
               use std::collections::BTreeMap;
 
               let mut scores: Vec<f64> = Vec::new();
-              for node in &trie.nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(
+                  trie.nodes.iter(),
+                  desc = "Metric: EdgeOverlap",
+                  total = trie.nodes.len(),
+                  disable = !PROGRESS_BAR_ENABLED,
+                  leave = false
+              );
+              #[cfg(rustrover)]
+              let it = trie.nodes.iter();
+
+              for node in it {
                   let mut node_score = 0.0;
 
                   // Group destination maps by pop
@@ -14351,7 +14384,18 @@ local_system:
 
               let mut stats = NumericStats::new();
 
-              for node in &trie.nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(
+                  trie.nodes.iter(),
+                  desc = "Metric: StateFanout",
+                  total = trie.nodes.len(),
+                  disable = !PROGRESS_BAR_ENABLED,
+                  leave = false
+              );
+              #[cfg(rustrover)]
+              let it = trie.nodes.iter();
+
+              for node in it {
                   // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
                   let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
 
@@ -14396,6 +14440,7 @@ local_system:
 
           let mut results = BTreeMap::new();
           for metric in metrics {
+              crate::debug!(3, "  Computing metric: {}", metric.name());
               results.insert(metric.name().to_string(), metric.compute(trie));
           }
           results
@@ -23587,6 +23632,9 @@ messages:
       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
       use ordered_hash_map::OrderedHashMap;
+      use kdam::{tqdm, BarExt};
+
+      use crate::profiler::PROGRESS_BAR_ENABLED;
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::metrics::run_all_metrics;
@@ -23677,22 +23725,47 @@ messages:
           max_state_id: usize,
       ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
           let mut mini = MiniTrie::new();
-
-          // BFS from roots to collect reachable nodes and assign NodeId
           let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
-          let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
 
-          for (_k, r) in roots {
-              if !map_old_to_new.contains_key(r) {
-                  let end = r.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-                  let id = mini.add_node(end);
-                  map_old_to_new.insert(*r, id);
-                  q.push_back(*r);
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+
+          // First, create all nodes in MiniTrie and map old to new
+          #[cfg(not(rustrover))]
+          let it_create = kdam::tqdm!(
+              all_nodes.iter(),
+              desc = "Trie3 Export (create nodes)",
+              total = all_nodes.len(),
+              disable = !PROGRESS_BAR_ENABLED,
+              leave = true
+          );
+          #[cfg(rustrover)]
+          let it_create = all_nodes.iter();
+          for old_idx in it_create {
+              let end = old_idx.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
+              let id = mini.add_node(end);
+              map_old_to_new.insert(*old_idx, id);
+          }
+
+          // Mark roots in MiniTrie
+          for r_idx in &roots_vec {
+              if let Some(&id) = map_old_to_new.get(r_idx) {
                   mini.add_root(id);
               }
           }
 
-          while let Some(old_idx) = q.pop_front() {
+          // Second, add all edges
+          #[cfg(not(rustrover))]
+          let it_edges = kdam::tqdm!(
+              all_nodes.iter(),
+              desc = "Trie3 Export (add edges)",
+              total = all_nodes.len(),
+              disable = !PROGRESS_BAR_ENABLED,
+              leave = true
+          );
+          #[cfg(rustrover)]
+          let it_edges = all_nodes.iter();
+          for old_idx in it_edges {
               let new_id = *map_old_to_new.get(&old_idx).unwrap();
               let r = if let Some(g) = old_idx.read(trie3_god) { g } else { continue };
 
@@ -23711,16 +23784,7 @@ messages:
                   }
                   let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks.clone());
                   for (dst, sids) in dm {
-                      // Ensure dst is mapped
-                      let dst_id = if let Some(id) = map_old_to_new.get(dst) {
-                          *id
-                      } else {
-                          let end = dst.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-                          let id = mini.add_node(end);
-                          map_old_to_new.insert(*dst, id);
-                          q.push_back(*dst);
-                          id
-                      };
+                      let dst_id = *map_old_to_new.get(dst).unwrap();
                       // Build state set
                       let mut st = SortedSet::new();
                       if sids.is_all() {
@@ -29506,6 +29570,7 @@ messages:
           calculate_final_stats3(roots, &mut stats, trie3_god);
           print_precompute_stats3(&stats, trie3_god);
 
+          crate::debug!(2, "  Exporting to MiniTrie for extended metrics...");
           // Also print new MiniTrie-based metrics
           let (mini, _, _) = crate::trie3_opt::coordinator::export_to_mini(
               roots,
@@ -30133,7 +30198,6 @@ messages:
     metadata:
       filename: src/trie3_opt/passes/prune_dead_paths.rs
   - user: |-
-      ```
       [DEBUG] 2] src/trie3_opt/optimizer.rs:77: Optimizing Trie 3 size...
       [DEBUG] 2] src/trie3_opt/optimizer.rs:80: Initial stats:
       [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
@@ -30155,8 +30219,10 @@ messages:
         Average edge fanout:    3.69
         Total ranges in all HybridBitsets: 455324
       ---------------------------------
-      ```
-
+      [DEBUG] 2] src/trie3_opt/passes/full/stats.rs:34:   Exporting to MiniTrie for extended metrics...
+      Trie3 Export (add edges): 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 75732/75732 [00:09<00:00, 7716.93it/s]
+    metadata:
+  - user: |-
       The code seems to hang after this point. I can't tell where it's at.
       Ensure it's possible to see clearly what the code is up to.
     metadata:
@@ -30178,286 +30244,160 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. It seems like the program is hanging during a potentially long-running operation without giving any progress updates. I'll add logging and progress bars to the `export_to_mini` function, which is the likely culprit, to provide visibility into its progress.
+      Of course. It appears the program is hanging during the metric calculation phase after exporting the trie structure. To help diagnose this, I'll add more detailed logging and progress bars to the metric computation functions. This will pinpoint exactly which metric is causing the slowdown or hang.
 
-      Here are the step-by-step instructions to apply the changes, followed by the git diffs.
+      Here are the step-by-step instructions to apply the changes:
 
       ### Step-by-step Instructions
 
-      1.  **File: `src/trie3_opt/passes/full/stats.rs`**
-          -   Open the file `src/trie3_opt/passes/full/stats.rs`.
-          -   Locate the `compute_and_print_precompute_stats3` function.
-          -   Just before the line that calls `crate::trie3_opt::coordinator::export_to_mini`, insert the following line to add a debug message. This will confirm that the program is about to start the export process.
+      1.  **Open `src/trie3_opt/metrics.rs`**
+
+      2.  **Add `use` statements:** At the top of the file, add the following lines to import the progress bar library and configuration:
+
+          ```rust
+          use kdam::{tqdm, BarExt};
+          use crate::profiler::PROGRESS_BAR_ENABLED;
+          ```
+
+      3.  **Add logging to `run_all_metrics`:** In the `run_all_metrics` function, insert a debug log inside the `for` loop to show which metric is starting.
+
+          *   **Find this code:**
               ```rust
-              crate::debug!(2, "  Exporting to MiniTrie for extended metrics...");
+              for metric in metrics {
+                  results.insert(metric.name().to_string(), metric.compute(trie));
+              }
               ```
-
-      2.  **File: `src/trie3_opt/coordinator.rs`**
-          -   Open the file `src/trie3_opt/coordinator.rs`.
-          -   At the top of the file, add the following `use` statements to import the necessary components for progress bars and Trie traversal:
+          *   **Change it to:**
               ```rust
-              use kdam::{tqdm, BarExt};
-
-              use crate::profiler::PROGRESS_BAR_ENABLED;
-              ```
-          -   Replace the entire body of the `export_to_mini` function with the new version below. This refactored implementation first collects all reachable nodes, allowing it to display progress bars for both the node creation and edge creation phases of the export.
-
-              ```rust
-              pub(crate) fn export_to_mini(
-                  roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-                  trie3_god: &Trie3GodWrapper,
-                  max_llm_token_id: usize,
-                  max_state_id: usize,
-              ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
-                  let mut mini = MiniTrie::new();
-                  let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
-
-                  let roots_vec: Vec<_> = roots.values().cloned().collect();
-                  let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-
-                  // First, create all nodes in MiniTrie and map old to new
-                  #[cfg(not(rustrover))]
-                  let it_create = kdam::tqdm!(
-                      all_nodes.iter(),
-                      desc = "Trie3 Export (create nodes)",
-                      total = all_nodes.len(),
-                      disable = !PROGRESS_BAR_ENABLED,
-                      leave = true
-                  );
-                  #[cfg(rustrover)]
-                  let it_create = all_nodes.iter();
-                  for old_idx in it_create {
-                      let end = old_idx.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-                      let id = mini.add_node(end);
-                      map_old_to_new.insert(*old_idx, id);
-                  }
-
-                  // Mark roots in MiniTrie
-                  for r_idx in &roots_vec {
-                      if let Some(&id) = map_old_to_new.get(r_idx) {
-                          mini.add_root(id);
-                      }
-                  }
-
-                  // Second, add all edges
-                  #[cfg(not(rustrover))]
-                  let it_edges = kdam::tqdm!(
-                      all_nodes.iter(),
-                      desc = "Trie3 Export (add edges)",
-                      total = all_nodes.len(),
-                      disable = !PROGRESS_BAR_ENABLED,
-                      leave = true
-                  );
-                  #[cfg(rustrover)]
-                  let it_edges = all_nodes.iter();
-                  for old_idx in it_edges {
-                      let new_id = *map_old_to_new.get(&old_idx).unwrap();
-                      let r = if let Some(g) = old_idx.read(trie3_god) { g } else { continue };
-
-                      for (ek, dm) in r.children() {
-                          // Build token set
-                          let mut toks = SortedSet::new();
-                          if ek.1.is_all() {
-                              toks = SortedSet::from_iter(0..=max_llm_token_id);
-                          } else {
-                              for t in ek.1.iter() {
-                                  toks.insert(t);
-                              }
-                          }
-                          if toks.is_empty() {
-                              continue;
-                          }
-                          let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks.clone());
-                          for (dst, sids) in dm {
-                              let dst_id = *map_old_to_new.get(dst).unwrap();
-                              // Build state set
-                              let mut st = SortedSet::new();
-                              if sids.is_all() {
-                                  st = SortedSet::from_iter(0..=max_state_id);
-                              } else {
-                                  for s in sids.iter() {
-                                      st.insert(s);
-                                  }
-                              }
-                              if !st.is_empty() {
-                                  mini.add_edge(new_id, key.clone(), dst_id, st);
-                              }
-                          }
-                      }
-                  }
-
-                  // Stable root list preserving the original key ordering
-                  let mut root_pairs: Vec<(TokenizerStateID, NodeId)> = Vec::new();
-                  for (k, r) in roots {
-                      if let Some(id) = map_old_to_new.get(r).cloned() {
-                          root_pairs.push((*k, id));
-                      }
-                  }
-
-                  (mini, root_pairs, map_old_to_new)
+              for metric in metrics {
+                  crate::debug!(3, "  Computing metric: {}", metric.name());
+                  results.insert(metric.name().to_string(), metric.compute(trie));
               }
               ```
 
+      4.  **Add a progress bar to `EdgeOverlapMetric`:** In the `compute` method for the `EdgeOverlapMetric` struct, wrap the main node iteration with a `tqdm` progress bar.
+
+          *   **Find this line:**
+              ```rust
+              for node in &trie.nodes {
+              ```
+          *   **Replace it with:**
+              ```rust
+              #[cfg(not(rustrover))]
+              let it = tqdm!(
+                  trie.nodes.iter(),
+                  desc = "Metric: EdgeOverlap",
+                  total = trie.nodes.len(),
+                  disable = !PROGRESS_BAR_ENABLED,
+                  leave = false
+              );
+              #[cfg(rustrover)]
+              let it = trie.nodes.iter();
+
+              for node in it {
+              ```
+
+      5.  **Add a progress bar to `StateFanoutMetric`:** In the `compute` method for the `StateFanoutMetric` struct, wrap the main node iteration with a `tqdm` progress bar.
+
+          *   **Find this line:**
+              ```rust
+              for node in &trie.nodes {
+              ```
+          *   **Replace it with:**
+              ```rust
+              #[cfg(not(rustrover))]
+              let it = tqdm!(
+                  trie.nodes.iter(),
+                  desc = "Metric: StateFanout",
+                  total = trie.nodes.len(),
+                  disable = !PROGRESS_BAR_ENABLED,
+                  leave = false
+              );
+              #[cfg(rustrover)]
+              let it = trie.nodes.iter();
+
+              for node in it {
+              ```
+
+      These changes will give you much better visibility into where the program is spending its time during the initial metric calculation.
+
       ### Git Diffs
 
-      Here are the corresponding git diffs to apply these changes.
+      Here is the git diff for the changes described above.
 
       ```diff
-      --- a/src/trie3_opt/coordinator.rs
-      +++ b/src/trie3_opt/coordinator.rs
-      @@ -1,6 +1,9 @@
-       use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-       
-       use ordered_hash_map::OrderedHashMap;
+      --- a/src/trie3_opt/metrics.rs
+      +++ b/src/trie3_opt/metrics.rs
+      @@ -1,5 +1,7 @@
+       use crate::trie3_opt::core::MiniTrie;
+       use std::collections::BTreeMap;
+       use std::fmt::Write;
       +use kdam::{tqdm, BarExt};
-      +
       +use crate::profiler::PROGRESS_BAR_ENABLED;
        
-       use crate::trie3_opt::context::OptimizationContext;
-       use crate::trie3_opt::metrics::run_all_metrics;
-      @@ -81,78 +84,81 @@
-           max_llm_token_id: usize,
-           max_state_id: usize,
-       ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
-           let mut mini = MiniTrie::new();
-      -
-      -    // BFS from roots to collect reachable nodes and assign NodeId
-           let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
-      -    let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
-      -
-      -    for (_k, r) in roots {
-      -        if !map_old_to_new.contains_key(r) {
-      -            let end = r.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-      -            let id = mini.add_node(end);
-      -            map_old_to_new.insert(*r, id);
-      -            q.push_back(*r);
+       /// A helper for collecting numeric data and computing summary statistics.
+       #[derive(Debug, Clone, Default)]
+      @@ -148,7 +150,19 @@
+               use std::collections::BTreeMap;
+       
+               let mut scores: Vec<f64> = Vec::new();
+      -        for node in &trie.nodes {
+      +        #[cfg(not(rustrover))]
+      +        let it = tqdm!(
+      +            trie.nodes.iter(),
+      +            desc = "Metric: EdgeOverlap",
+      +            total = trie.nodes.len(),
+      +            disable = !PROGRESS_BAR_ENABLED,
+      +            leave = false
+      +        );
+      +        #[cfg(rustrover)]
+      +        let it = trie.nodes.iter();
       +
-      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      +    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+      +        for node in it {
+                   let mut node_score = 0.0;
+       
+                   // Group destination maps by pop
+      @@ -194,8 +208,18 @@
+       
+               let mut stats = NumericStats::new();
+       
+      -        for node in &trie.nodes {
+      +        #[cfg(not(rustrover))]
+      +        let it = tqdm!(
+      +            trie.nodes.iter(),
+      +            desc = "Metric: StateFanout",
+      +            total = trie.nodes.len(),
+      +            disable = !PROGRESS_BAR_ENABLED,
+      +            leave = false
+      +        );
+      +        #[cfg(rustrover)]
+      +        let it = trie.nodes.iter();
       +
-      +    // First, create all nodes in MiniTrie and map old to new
-      +    #[cfg(not(rustrover))]
-      +    let it_create = kdam::tqdm!(
-      +        all_nodes.iter(),
-      +        desc = "Trie3 Export (create nodes)",
-      +        total = all_nodes.len(),
-      +        disable = !PROGRESS_BAR_ENABLED,
-      +        leave = true
-      +    );
-      +    #[cfg(rustrover)]
-      +    let it_create = all_nodes.iter();
-      +    for old_idx in it_create {
-      +        let end = old_idx.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-      +        let id = mini.add_node(end);
-      +        map_old_to_new.insert(*old_idx, id);
-      +    }
-      +
-      +    // Mark roots in MiniTrie
-      +    for r_idx in &roots_vec {
-      +        if let Some(&id) = map_old_to_new.get(r_idx) {
-                   mini.add_root(id);
-               }
+      +        for node in it {
+                   // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
+                   let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
+       
+      @@ -236,7 +260,8 @@
+       
+           let mut results = BTreeMap::new();
+           for metric in metrics {
+      +        crate::debug!(3, "  Computing metric: {}", metric.name());
+               results.insert(metric.name().to_string(), metric.compute(trie));
            }
-       
-      -    while let Some(old_idx) = q.pop_front() {
-      +    // Second, add all edges
-      +    #[cfg(not(rustrover))]
-      +    let it_edges = kdam::tqdm!(
-      +        all_nodes.iter(),
-      +        desc = "Trie3 Export (add edges)",
-      +        total = all_nodes.len(),
-      +        disable = !PROGRESS_BAR_ENABLED,
-      +        leave = true
-      +    );
-      +    #[cfg(rustrover)]
-      +    let it_edges = all_nodes.iter();
-      +    for old_idx in it_edges {
-               let new_id = *map_old_to_new.get(&old_idx).unwrap();
-               let r = if let Some(g) = old_idx.read(trie3_god) { g } else { continue };
-       
-               for (ek, dm) in r.children() {
-                   // Build token set
-                   let mut toks = SortedSet::new();
-                   if ek.1.is_all() {
-                       toks = SortedSet::from_iter(0..=max_llm_token_id);
-                   } else {
-                       for t in ek.1.iter() {
-                           toks.insert(t);
-                       }
-                   }
-                   if toks.is_empty() {
-                       continue;
-                   }
-                   let key = crate::trie3_opt::core::EdgeKey::new(ek.0, toks.clone());
-                   for (dst, sids) in dm {
-      -                // Ensure dst is mapped
-      -                let dst_id = if let Some(id) = map_old_to_new.get(dst) {
-      -                    *id
-      -                } else {
-      -                    let end = dst.read(trie3_god).map(|g| g.value.end).unwrap_or(false);
-      -                    let id = mini.add_node(end);
-      -                    map_old_to_new.insert(*dst, id);
-      -                    q.push_back(*dst);
-      -                    id
-      -                };
-      +                let dst_id = *map_old_to_new.get(dst).unwrap();
-                       // Build state set
-                       let mut st = SortedSet::new();
-                       if sids.is_all() {
-                           st = SortedSet::from_iter(0..=max_state_id);
-                       } else {
-                           for s in sids.iter() {
-                               st.insert(s);
-                           }
-                       }
-                       if !st.is_empty() {
-                           mini.add_edge(new_id, key.clone(), dst_id, st);
-                       }
-                   }
-               }
-           }
-       
-           // Stable root list preserving the original key ordering
-           let mut root_pairs: Vec<(TokenizerStateID, NodeId)> = Vec::new();
-           for (k, r) in roots {
-               if let Some(id) = map_old_to_new.get(r).cloned() {
-                   root_pairs.push((*k, id));
-               }
-           }
-       
-           (mini, root_pairs, map_old_to_new)
-       }
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/full/stats.rs
-      +++ b/src/trie3_opt/passes/full/stats.rs
-      @@ -26,6 +26,7 @@
-           calculate_final_stats3(roots, &mut stats, trie3_god);
-           print_precompute_stats3(&stats, trie3_god);
-       
-      +    crate::debug!(2, "  Exporting to MiniTrie for extended metrics...");
-           // Also print new MiniTrie-based metrics
-           let (mini, _, _) = crate::trie3_opt::coordinator::export_to_mini(
-               roots,
+           results
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/coordinator.rs
-      Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/trie3_opt/passes/full/stats.rs
-      Applying patch to 'src/trie3_opt/passes/full/stats.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/full/stats.rs.
+      Identified target file: src/trie3_opt/metrics.rs
+      Applying patch to 'src/trie3_opt/metrics.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/metrics.rs.
     metadata:
-  - user: 'Changes committed with message: "Add progress bars to Trie3 to MiniTrie
-      export for better visibility during optimization."'
+  - user: 'Changes committed with message: "Add progress bars and logging to metric
+      computation in Trie3 optimization"'
     metadata:
 ...

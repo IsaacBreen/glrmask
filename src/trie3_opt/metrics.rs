@@ -1,6 +1,8 @@
 use crate::trie3_opt::core::MiniTrie;
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use kdam::{tqdm, BarExt};
+use crate::profiler::PROGRESS_BAR_ENABLED;
 
 /// A helper for collecting numeric data and computing summary statistics.
 #[derive(Debug, Clone, Default)]
@@ -144,7 +146,18 @@ impl Metric for EdgeOverlapMetric {
         use std::collections::BTreeMap;
 
         let mut scores: Vec<f64> = Vec::new();
-        for node in &trie.nodes {
+        #[cfg(not(rustrover))]
+        let it = tqdm!(
+            trie.nodes.iter(),
+            desc = "Metric: EdgeOverlap",
+            total = trie.nodes.len(),
+            disable = !PROGRESS_BAR_ENABLED,
+            leave = false
+        );
+        #[cfg(rustrover)]
+        let it = trie.nodes.iter();
+
+        for node in it {
             let mut node_score = 0.0;
 
             // Group destination maps by pop
@@ -191,7 +204,18 @@ impl Metric for StateFanoutMetric {
 
         let mut stats = NumericStats::new();
 
-        for node in &trie.nodes {
+        #[cfg(not(rustrover))]
+        let it = tqdm!(
+            trie.nodes.iter(),
+            desc = "Metric: StateFanout",
+            total = trie.nodes.len(),
+            disable = !PROGRESS_BAR_ENABLED,
+            leave = false
+        );
+        #[cfg(rustrover)]
+        let it = trie.nodes.iter();
+
+        for node in it {
             // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
             let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
 
@@ -236,6 +260,7 @@ pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, String> {
 
     let mut results = BTreeMap::new();
     for metric in metrics {
+        crate::debug!(3, "  Computing metric: {}", metric.name());
         results.insert(metric.name().to_string(), metric.compute(trie));
     }
     results
