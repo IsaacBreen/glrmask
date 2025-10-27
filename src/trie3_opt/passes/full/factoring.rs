@@ -8,6 +8,72 @@ use crate::constraint::{
 use crate::datastructures::EntryApi;
 use crate::datastructures::trie::Trie;
 
+/// Reduces state fanout by factoring edges. For each node, it groups outgoing edges
+/// by (pop, destination). For each group, it merges the edges by unioning their
+/// token sets and state ID sets. This can reduce the number of distinct edges
+/// a single (pop, state_id) transition can take, thus lowering state fanout.
+pub fn factor_state_fanout_trie3(
+    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+) {
+    crate::debug!(2, "Factoring state fanout in Trie3...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    for node_idx in &all_nodes {
+        let mut w = if let Some(guard) = node_idx.write(trie3_god) {
+            guard
+        } else {
+            continue;
+        };
+        if w.children().is_empty() {
+            continue;
+        }
+
+        let old_children = std::mem::take(w.children_mut());
+
+        // Group by (pop, destination)
+        let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+            BTreeMap::new();
+
+        for ((pop, llm_bv), dm) in old_children.iter() {
+            for (dest, sids) in dm.iter() {
+                let key = (*pop, *dest);
+                let entry = grouped_edges
+                    .entry(key)
+                    .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
+                entry.0 |= llm_bv;
+                entry.1 |= sids;
+            }
+        }
+
+        // Rebuild children from factored edges.
+        // Group again by (pop, tokens) to form valid edges.
+        let mut new_children: BTreeMap<
+            (isize, LLMTokenBV),
+            OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+        > = BTreeMap::new();
+
+        for ((pop, dest), (tokens, sids)) in grouped_edges {
+            if !tokens.is_empty() && !sids.is_empty() {
+                let dm = new_children.entry((pop, tokens)).or_default();
+                dm.insert(dest, sids);
+            }
+        }
+
+        // Recompute live tokens and update children
+        let mut new_live = LLMTokenBV::zeros();
+        for ((_, llm_bv), _) in &new_children {
+            new_live |= llm_bv;
+        }
+        w.value.live_tokens = new_live;
+        *w.children_mut() = new_children;
+    }
+}
+
 /// Factor out common destinations: create intermediates when many sources share the same dest map.
 pub fn factor_common_destinations_trie3(
     roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,

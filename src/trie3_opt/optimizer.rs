@@ -17,7 +17,7 @@ use crate::trie3_opt::passes::full::{
     cycles::{
         assert_pop0_paths_to_end_are_short, has_true_cycle_trie3, has_true_cycle_trie3_llm_only,
     },
-    factoring::factor_common_destinations_trie3,
+    factoring::{factor_common_destinations_trie3, factor_state_fanout_trie3},
     factor_root::factor_root_fanout_via_atoms,
     global_atoms_merge::merge_nodes_trie3_global_atoms,
     merges::{merge_nodes_trie3, merge_nodes_trie3_structural, merge_nodes_trie3_ultrafast},
@@ -193,6 +193,12 @@ pub fn optimize_trie3_size(
         if config.simplify_llm_token_bvs {
             run_pass!("Simplifying LLM token bitsets", {
                 simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+            });
+        }
+
+        if config.factor_state_fanout {
+            run_pass!("Factoring state fanout", {
+                factor_state_fanout_trie3(roots, trie3_god);
             });
         }
 

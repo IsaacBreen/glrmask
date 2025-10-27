@@ -48,6 +48,7 @@ pub struct Trie3Config {
     pub refine_token_atoms_exact: bool,
     pub refine_token_atoms_max_blocks: usize,
     pub factor_common_destinations: bool,
+    pub factor_state_fanout: bool,
     // NEW: root fanout factoring via token atoms (p>0 only)
     pub factor_root_fanout: bool,
     // NEW: global-atoms bisimulation merge
@@ -89,6 +90,7 @@ impl Default for Trie3Config {
             merge_nodes_global_atoms: true,
             merge_nodes_global_atoms_max_iters: 2,
             merge_nodes_global_atoms_max_atoms_per_pop: 4096,
+            factor_state_fanout: true,
             factor_common_destinations: true,
             factor_common_destinations_min_incoming: 12,
             stochastic_equivalence_check: false,
@@ -118,6 +120,7 @@ impl Trie3Config {
             generalize_sids: false,
             refine_token_atoms: false,
             refine_token_atoms_exact: false,
+            factor_state_fanout: false,
             factor_root_fanout: false,
             factor_root_fanout_max_atoms_per_pop: 0,
             refine_token_atoms_max_blocks: 0,
