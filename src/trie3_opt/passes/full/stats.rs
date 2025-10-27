@@ -28,6 +28,11 @@ pub fn compute_and_print_precompute_stats3(
     let mut stats = PrecomputeStats::default();
     calculate_final_stats3(roots, &mut stats, trie3_god);
     print_precompute_stats3(&stats, trie3_god);
+
+    // Also print new MiniTrie-based metrics
+    let (mini, _, _) = crate::trie3_opt::coordinator::export_to_mini(roots, trie3_god);
+    let metrics = crate::trie3_opt::metrics::run_all_metrics(&mini);
+    println!("  MiniTrie Metrics: {:#?}", metrics);
 }
 
 /// Debug utility to remove all edges with pop>0, preserving pop<=0 edges.
