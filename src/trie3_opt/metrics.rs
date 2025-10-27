@@ -280,28 +280,22 @@ impl Metric for NonRootEdgeOverlapMetric {
 
 /// Helper to compute state fanout values for a single node.
 fn compute_state_fanout_for_node(node: &crate::trie3_opt::core::Node) -> Vec<f64> {
-    use crate::trie3_opt::core::{NodeId, SortedSet};
     use std::collections::BTreeMap;
 
-    // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
-    let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
+    // For this node, build a map from (pop, state_id) -> count of outgoing transitions
+    let mut fanout_counts: BTreeMap<(isize, usize), usize> = BTreeMap::new();
 
     for (edge_key, dest_map) in &node.children {
         let pop = edge_key.pop;
-        let tokens = &edge_key.tokens;
-
-        for (dest, state_set) in dest_map {
+        for (_dest, state_set) in dest_map {
             for state_id in state_set.iter() {
-                fanout_map
-                    .entry((pop, state_id))
-                    .or_default()
-                    .push((*dest, tokens.clone()));
+                *fanout_counts.entry((pop, state_id)).or_default() += 1;
             }
         }
     }
 
     // Collect fanout values for this node
-    fanout_map.values().map(|fanout_vec| fanout_vec.len() as f64).collect()
+    fanout_counts.into_values().map(|count| count as f64).collect()
 }
 
 pub struct StateFanoutMetric;
