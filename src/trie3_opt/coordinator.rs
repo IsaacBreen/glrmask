@@ -8,7 +8,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::metrics::run_all_metrics;
 use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-use crate::trie3_opt::passes::{
+use crate::trie3_opt::passes::{FactorStateFanoutPass,
     CanonicalizeEndNodesPass, CompressEdgesPass, EliminatePop0ExceptRootsPass, MergeStructuralPass,
     OptimizationPass, PruneDeadPathsPass,
 };
@@ -29,6 +29,7 @@ pub struct CoordinatorConfig {
     pub merge_structural_max_iters: usize,
     pub enable_eliminate_pop0_except_roots: bool,
     pub enable_canonicalize_end_nodes: bool,
+    pub enable_factor_state_fanout: bool,
 }
 
 impl Default for CoordinatorConfig {
@@ -40,6 +41,7 @@ impl Default for CoordinatorConfig {
             merge_structural_max_iters: 4,
             enable_eliminate_pop0_except_roots: true,
             enable_canonicalize_end_nodes: true,
+            enable_factor_state_fanout: true,
         }
     }
 }
@@ -53,6 +55,7 @@ impl CoordinatorConfig {
             merge_structural_max_iters: 0,
             enable_eliminate_pop0_except_roots: false,
             enable_canonicalize_end_nodes: false,
+            enable_factor_state_fanout: false,
         }
     }
 }
@@ -69,6 +72,9 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
     }
     if config.enable_compress_edges {
         pipeline.push(Box::new(CompressEdgesPass));
+    }
+    if config.enable_factor_state_fanout {
+        pipeline.push(Box::new(FactorStateFanoutPass));
     }
     if config.enable_merge_structural {
         pipeline.push(Box::new(MergeStructuralPass::new(
