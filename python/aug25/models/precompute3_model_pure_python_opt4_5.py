@@ -1077,9 +1077,12 @@ class Model(GraphProvider):
                     for dest_id, triple in per_state_map.items():
                         llm_bv, llm_bv_not, llm_bv_thru = triple
                         # Strong gating: if no token can reach an end via this (dest) with the current GSS mask, skip
+                        stats.start('get_mask.main_loop.fast_path.group_building.isdisjoint')
                         if popped_acc.llm_mask.isdisjoint(llm_bv_thru):
                             stats.inc('get_mask.main_loop.edge.descendant_pruned_gss')
+                            stats.stop('get_mask.main_loop.fast_path.group_building.isdisjoint')
                             continue
+                        stats.stop('get_mask.main_loop.fast_path.group_building.isdisjoint')
                         key = (int(dest_id), id(llm_bv_thru))
                         entry = groups.get(key)
                         if entry is None:
@@ -1127,7 +1130,9 @@ class Model(GraphProvider):
                     else:
                         @_acc_memoize(use_value_cache=False)
                         def intersect(acc: PyAcc):
+                            stats.start('get_mask.apply.intersect')
                             new_mask = acc.llm_mask.intersection(llm_bv)
+                            stats.stop('get_mask.apply.intersect')
                             return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
                         if oracle_counters is not None and local_ctr is not None:
                             local_ctr["apply"] = local_ctr.get("apply", 0) + 1
@@ -1150,6 +1155,7 @@ class Model(GraphProvider):
                         local_ctr["edges"] = local_ctr.get("edges", 0) + 1
 
                     # Isolate only the contributing heads if necessary
+                    stats.start('get_mask.main_loop.fast_path.isolate_many')
                     stats.start('get_mask.main_loop.fast_path.isolate_check')
                     if len(states_to_keep) == len(peeked):
                         child_gss = source_after_apply
@@ -1173,6 +1179,7 @@ class Model(GraphProvider):
                                 isolate_cache[key_isolate] = child_gss
                         continue
                     stats.stop('get_mask.main_loop.fast_path.isolate_check')
+                    stats.stop('get_mask.main_loop.fast_path.isolate_many')
 
                     if child_gss.is_empty():
                         continue
@@ -1333,7 +1340,9 @@ class Model(GraphProvider):
                     else:
                         @_acc_memoize(use_value_cache=False)
                         def intersect(acc: PyAcc):
+                            stats.start('get_mask.apply.intersect')
                             new_mask = acc.llm_mask.intersection(edge.llm_bv)
+                            stats.stop('get_mask.apply.intersect')
                             return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
                         if oracle_counters is not None and local_ctr is not None: local_ctr["apply"] += 1
                         stats.start('get_mask.main_loop.edge.apply_and_prune')
@@ -1355,6 +1364,7 @@ class Model(GraphProvider):
                 stats.start('get_mask.main_loop.slow_path.group_building')
                 grouped: Dict[int, List[int]] = {}
                 m = edge.state_to_dest
+                stats.start('get_mask.main_loop.slow_path.group_building.get_dests')
                 for sid in peeked:
                     dest_list = m.get(sid)
                     if not dest_list: continue
@@ -1362,6 +1372,7 @@ class Model(GraphProvider):
                         lst = grouped.get(dest_j)
                         if lst is None: grouped[dest_j] = [sid]
                         else: lst.append(sid)
+                stats.stop('get_mask.main_loop.slow_path.group_building.get_dests')
                 stats.stop('get_mask.main_loop.slow_path.group_building')
 
                 stats.start('get_mask.main_loop.slow_path.group_sorting')
@@ -1387,6 +1398,7 @@ class Model(GraphProvider):
                     dest = edge.dests[dest_j]
                     values_to_keep = grouped[dest_j]
                     # If all heads survive, reuse popped directly
+                    stats.start('get_mask.main_loop.slow_path.isolate_many')
                     stats.start('get_mask.main_loop.slow_path.isolate_check')
                     if len(values_to_keep) == len(peeked):
                         child_gss = source_after_apply
@@ -1410,6 +1422,7 @@ class Model(GraphProvider):
                             if isolate_cache is not None:
                                 isolate_cache[key_isolate] = child_gss
                         continue
+                    stats.stop('get_mask.main_loop.slow_path.isolate_many')
                     stats.stop('get_mask.main_loop.slow_path.isolate_check')
                     if child_gss.is_empty(): continue
                     d: NodeID = int(dest.dest_idx)
@@ -2328,15 +2341,20 @@ class Model(GraphProvider):
         Tie-breakers: guided score (if any) and max_depth.
         """
         node_id_i = int(node_id)
+        stats = Stats.get()
         # Estimated token gain if we fully explore this node's subtree.
+        stats.start('get_mask.priority.get_desc_mask')
         if oracle_reward_mask is not None:
             m = oracle_reward_mask.get(node_id_i, RangeSet.empty())
         else:
             an = self.arena.get(node_id_i)
             m = an.llm_bv_descendant if an else RangeSet.empty()
+        stats.stop('get_mask.priority.get_desc_mask')
         gain = 0
         if m is not None and not m.is_empty():
+            stats.start('get_mask.priority.intersect_and_len')
             gain = int(len(m.intersection(remaining_mask)))
+            stats.stop('get_mask.priority.intersect_and_len')
         cost = self._oracle_node_cost(node_id_i, analysis_node_costs)
         gs = int(guided_scores.get(node_id_i, 0)) if guided_scores is not None else 0
         # Negative for min-heap; depth tiebreaker to encourage shallower early
@@ -2525,7 +2543,9 @@ class Model(GraphProvider):
         init_cache = {}
         for sid, gss in self.state.items():
             r = self.roots_map[int(sid)]
+            stats.start('get_mask.seeding.apply')
             gss_init = gss.apply(initialize_acc, init_cache)
+            stats.stop('get_mask.seeding.apply')
             if not gss_init.is_empty():
                 base_pri = (-self.max_depth.get(r, 0), 0, 0)
                 # Dynamic, target-aware seeding priority if reward masks present
@@ -2578,8 +2598,10 @@ class Model(GraphProvider):
                 stats.start('get_mask.main_loop.node.reduce_acc')
                 gss_acc = gss_node.reduce_acc()
                 stats.stop('get_mask.main_loop.node.reduce_acc')
-
+                
+                stats.start('get_mask.main_loop.work_item_new.is_end_check')
                 if self.is_end(node_id):
+                    stats.stop('get_mask.main_loop.work_item_new.is_end_check')
                     stats.inc('get_mask.traversal.end_nodes')
                     # Record delta for planning analysis (before union)
                     if not final_mask.issuperset(gss_acc.llm_mask):
@@ -2594,11 +2616,15 @@ class Model(GraphProvider):
                     stats.start('get_mask.main_loop.end_node.final_mask_union')
                     final_mask |= gss_acc.llm_mask
                     stats.stop('get_mask.main_loop.end_node.final_mask_union')
+                    stats.start('get_mask.main_loop.update_remaining_mask')
                     remaining_mask = all_ones.difference(final_mask)
+                    stats.stop('get_mask.main_loop.update_remaining_mask')
                     stats.stop('get_mask.main_loop.end_node.update_masks')
                     if remaining_mask.is_empty():
                         stats.inc('get_mask.early_exit_full_mask')
                         break
+                else:
+                    stats.stop('get_mask.main_loop.work_item_new.is_end_check')
 
                 a_node = self.arena.get(node_id)
                 # For planning runs, compute the exact GSS-aware frontier.
