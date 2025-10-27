@@ -914,7 +914,7 @@ class Model(GraphProvider):
                     if new_mask is not None:
                         active_remaining_mask = new_mask
                     if edge.llm_bv.isdisjoint(active_remaining_mask):
-                        stats.inc('get_mask.traversal.dest_keys.skip')
+                        stats.inc('get_mask.traversal.dest_keys.skip2')
                         break
                     dests_proc = 0
 
@@ -943,7 +943,7 @@ class Model(GraphProvider):
                 if new_mask is not None:
                     active_remaining_mask = new_mask
                 if edge.llm_bv.isdisjoint(active_remaining_mask):
-                    stats.inc('get_mask.traversal.dest_keys.skip2')
+                    stats.inc('get_mask.traversal.dest_keys.skip3')
                     break
 
                 dests_proc += 1
