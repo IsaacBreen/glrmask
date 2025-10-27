@@ -346,6 +346,7 @@ class Model(GraphProvider):
     state: Dict[int, GSS]
     gm_max_edges: int = 256
     gm_max_dests: int = 4096
+    stats: Dict[str, int] = field(default_factory=lambda: collections.defaultdict(int), repr=False)
     node_distance_to_end: Dict[NodeID, int] = field(default_factory=dict)
 
     @staticmethod
@@ -734,6 +735,7 @@ class Model(GraphProvider):
         global_pop_cache: Optional[Dict] = None,
         apply_cache: Optional[Dict] = None,
         isolate_cache: Optional[Dict] = None,
+        stats: Optional[Dict[str, int]] = None,
     ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
         a_node = self.arena.get(node_id)
         if not a_node:
@@ -837,7 +839,12 @@ class Model(GraphProvider):
                 states_to_keep: List[int] = entry["states"]
 
                 if llm_bv.isdisjoint(active_remaining_mask):
+                    if stats is not None:
+                        stats['edges_skipped_no_new_tokens'] += 1
                     continue
+
+                if stats is not None:
+                    stats['edges_traversed'] += 1
 
                 source_after_apply = popped
                 key_apply = (id(popped), id(llm_bv))
@@ -907,6 +914,7 @@ class Model(GraphProvider):
             edges_proc += 1
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
+        self.stats.clear()
         all_ones = self.all_internal_llm_tokens_bitset
         final_mask = RangeSet.empty()
         work_heap = []
@@ -990,6 +998,7 @@ class Model(GraphProvider):
                     global_pop_cache=global_pop_cache,
                     apply_cache=apply_cache_by_bv,
                     isolate_cache=isolate_many_cache,
+                    stats=self.stats,
                 )
             else:
                 raise ValueError(f'Unexpected work item: {work}')
@@ -1019,5 +1028,10 @@ class Model(GraphProvider):
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
+
+        print(f"\n--- Basic Stats ---")
+        print(f"  Edges traversed: {self.stats['edges_traversed']:,}")
+        print(f"  Edges skipped (no new tokens): {self.stats['edges_skipped_no_new_tokens']:,}")
+        print(f"-------------------\n")
 
         return original_indices
