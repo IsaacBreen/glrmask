@@ -21,31 +21,46 @@ impl OptimizationPass for FactorStateFanoutPass {
                 continue;
             }
 
-            // Group by (pop, canonical destination map) and union tokens. This is sound.
-            let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
-
-            for (ek, dm) in node.children.iter() {
-                let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
-                dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
-
-                by_pop.entry(ek.pop).or_default()
-                    .entry(dest_vec)
-                    .or_default()
-                    .union_inplace(&ek.tokens);
+            // Step 1: Deconstruct children into a per-destination view.
+            // Map from (pop, dest) -> list of (tokens, states)
+            let mut per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+                BTreeMap::new();
+            for (ek, dm) in &node.children {
+                for (dest, states) in dm {
+                    per_dest
+                        .entry((ek.pop, *dest))
+                        .or_default()
+                        .push((ek.tokens.clone(), states.clone()));
+                }
             }
 
-            // Rebuild children from factored edges.
+            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+            let mut merged_per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+                BTreeMap::new();
+            for ((pop, dest), edges) in per_dest {
+                // Group by state set
+                let mut by_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+                for (tokens, states) in edges {
+                    by_states
+                        .entry(states)
+                        .or_default()
+                        .union_inplace(&tokens);
+                }
+
+                let new_edges: Vec<(SortedSet, SortedSet)> =
+                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
+                merged_per_dest.insert((pop, dest), new_edges);
+            }
+
+            // Step 3: Reconstruct node.children from the per-destination merged edges.
             let mut new_children = BTreeMap::new();
-            for (pop, groups) in by_pop {
-                for (dest_vec, tokens) in groups {
-                    if tokens.is_empty() { continue; }
-                    let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
-                    if !dm.is_empty() {
-                        new_children.insert(
-                            crate::trie3_opt::core::EdgeKey::new(pop, tokens),
-                            dm,
-                        );
+            for ((pop, dest), edges) in merged_per_dest {
+                for (tokens, states) in edges {
+                    if tokens.is_empty() || states.is_empty() {
+                        continue;
                     }
+                    let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+                    new_children.entry(key).or_default().insert(dest, states);
                 }
             }
             node.children = new_children;

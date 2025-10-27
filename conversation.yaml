@@ -14,6 +14,7 @@ local_system:
     - src/trie3_opt/passes/full/atoms.rs
     - src/trie3_opt/passes/full/canonicalize.rs
     - src/trie3_opt/passes/full/clone.rs
+    - src/trie3_opt/passes/full/compress_chains.rs
     - src/trie3_opt/passes/full/compress.rs
     - src/trie3_opt/passes/full/config.rs
     - src/trie3_opt/passes/full/constrain.rs
@@ -26,6 +27,8 @@ local_system:
     - src/trie3_opt/passes/full/mod.rs
     - src/trie3_opt/passes/full/normalize.rs
     - src/trie3_opt/passes/full/pop0.rs
+    - src/trie3_opt/passes/full/prune_end_reach.rs
+    - src/trie3_opt/passes/full/prune.rs
     - src/trie3_opt/passes/full/reorder.rs
     - src/trie3_opt/passes/full/rewire.rs
     - src/trie3_opt/passes/full/simplify.rs
@@ -34,7 +37,6 @@ local_system:
     - src/trie3_opt/passes/merge_structural.rs
     - src/trie3_opt/passes/mod.rs
     - src/trie3_opt/passes/prune_dead_paths.rs
-    - src/trie3_opt/passes/compress_chains.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -5680,7 +5682,7 @@ local_system:
           }
       }
     src/trie3_opt/passes/factor_state_fanout.rs: |
-      use std::collections::BTreeMap;
+      use std::collections::{BTreeMap, HashMap};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
@@ -5703,39 +5705,33 @@ local_system:
                       continue;
                   }
 
-                  // Group by (pop, destination)
-                  let mut grouped_edges: BTreeMap<(isize, NodeId), (SortedSet, SortedSet)> = BTreeMap::new();
+                  // Group by (pop, canonical destination map) and union tokens. This is sound.
+                  let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
 
                   for (ek, dm) in node.children.iter() {
-                      for (dest, sids) in dm.iter() {
-                          let key = (ek.pop, *dest);
-                          let entry = grouped_edges.entry(key).or_insert_with(|| (SortedSet::new(), SortedSet::new()));
-                          entry.0.union_inplace(&ek.tokens); // union tokens
-                          entry.1.union_inplace(sids);      // union sids
-                      }
+                      let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+                      dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
+
+                      by_pop.entry(ek.pop).or_default()
+                          .entry(dest_vec)
+                          .or_default()
+                          .union_inplace(&ek.tokens);
                   }
 
                   // Rebuild children from factored edges.
-                  // We need to group again by (pop, tokens) to form valid edges.
-                  let mut new_children_intermediate: BTreeMap<(isize, SortedSet), BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-
-                  for ((pop, dest), (tokens, sids)) in grouped_edges {
-                      let key = (pop, tokens);
-                      let dm = new_children_intermediate.entry(key).or_insert_with(BTreeMap::new);
-                      dm.insert(dest, sids);
-                  }
-
-                  // Finalize into BTreeMap<EdgeKey, ...>
                   let mut new_children = BTreeMap::new();
-                  for ((pop, tokens), dm) in new_children_intermediate {
-                      if !tokens.is_empty() && !dm.is_empty() {
-                          new_children.insert(
-                              crate::trie3_opt::core::EdgeKey::new(pop, tokens),
-                              dm,
-                          );
+                  for (pop, groups) in by_pop {
+                      for (dest_vec, tokens) in groups {
+                          if tokens.is_empty() { continue; }
+                          let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
+                          if !dm.is_empty() {
+                              new_children.insert(
+                                  crate::trie3_opt::core::EdgeKey::new(pop, tokens),
+                                  dm,
+                              );
+                          }
                       }
                   }
-
                   node.children = new_children;
               }
           }
@@ -6436,6 +6432,147 @@ local_system:
 
           Trie::recompute_all_max_depths(trie3_god, &[new_root]);
           (new_root, map)
+      }
+    src/trie3_opt/passes/full/compress_chains.rs: |
+      use std::collections::{BTreeMap, HashMap, HashSet};
+
+      use ordered_hash_map::OrderedHashMap;
+
+      use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
+      use crate::datastructures::EntryApi;
+      use crate::datastructures::trie::{Trie, Trie2Index};
+
+      /// Contract unary chains where a node U has exactly one incoming edge and one outgoing edge,
+      /// both under the same (pop, LLMTokenBV) key, U is not an end node or a root, and the outgoing
+      /// edge maps to exactly one destination. The rewrite composes SIDs as intersection and rewires
+      /// the predecessor P to the child V, deleting the P->U entry. This preserves semantics and is
+      /// cycle-safe (may reduce multi-node cycles to a self-loop with intersected SIDs).
+      pub fn compress_unary_chains_trie3(
+          roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+      ) {
+          crate::debug!(2, "Contracting unary chains in Trie3...");
+
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+          if all_nodes.is_empty() {
+              return;
+          }
+
+          let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
+
+          // Iterate a few times until no more rewrites are possible.
+          let mut total_rewired = 0usize;
+          let max_outer_iters = 8usize;
+          for _iter in 0..max_outer_iters {
+              // Build indegree counts and track unique predecessor + edge-key for nodes with indegree == 1.
+              let mut indegree: HashMap<PrecomputeNode3Index, usize> = HashMap::new();
+              let mut unique_parent: HashMap<
+                  PrecomputeNode3Index,
+                  (PrecomputeNode3Index, (isize, LLMTokenBV)),
+              > = HashMap::new();
+
+              for src in &all_nodes {
+                  if let Some(g) = src.read(trie3_god) {
+                      for (ek, dm) in g.children() {
+                          for (dst, _sid) in dm {
+                              let cnt = indegree.entry(*dst).or_insert(0);
+                              *cnt += 1;
+                              if *cnt == 1 {
+                                  unique_parent.insert(*dst, (*src, ek.clone()));
+                              } else {
+                                  // More than one distinct incoming, not a unique-predecessor case.
+                                  unique_parent.remove(dst);
+                              }
+                          }
+                      }
+                  }
+              }
+
+              // For outdegree, record nodes that have exactly one outgoing destination overall
+              // (across all keys combined) and are not end nodes; also capture that single edge.
+              let mut out_info: HashMap<
+                  PrecomputeNode3Index,
+                  ((isize, LLMTokenBV), PrecomputeNode3Index, StateIDBV),
+              > = HashMap::new();
+
+              for u in &all_nodes {
+                  if let Some(g) = u.read(trie3_god) {
+                      if g.value.end {
+                          continue; // Don't contract through accept nodes.
+                      }
+                      let mut total_dests = 0usize;
+                      let mut only_key: Option<(isize, LLMTokenBV)> = None;
+                      let mut only_dst: Option<PrecomputeNode3Index> = None;
+                      let mut only_sid: Option<StateIDBV> = None;
+
+                      for (ek, dm) in g.children() {
+                          for (dst, sid) in dm {
+                              total_dests += 1;
+                              if total_dests == 1 {
+                                  only_key = Some(ek.clone());
+                                  only_dst = Some(*dst);
+                                  only_sid = Some(sid.clone());
+                              }
+                          }
+                      }
+                      if total_dests == 1 {
+                          out_info.insert(*u, (only_key.unwrap(), only_dst.unwrap(), only_sid.unwrap()));
+                      }
+                  }
+              }
+
+              // Find candidates: nodes with indegree==1, outdegree==1, not roots, and matching keys on both sides.
+              let mut rewired_this_iter = 0usize;
+              for u in &all_nodes {
+                  let u_idx = *u;
+                  if roots_set.contains(&u_idx) {
+                      continue; // Never rewire through a root.
+                  }
+                  let Some((out_key, v_idx, s_uv)) = out_info.get(&u_idx).cloned() else { continue };
+                  let Some((p_idx, in_key)) = unique_parent.get(&u_idx).cloned() else { continue };
+                  if p_idx == u_idx {
+                      continue; // Avoid attempting to rewire a pure self-loop through itself.
+                  }
+                  // Only contract if the incoming and outgoing (pop, LLMTokenBV) keys match exactly.
+                  if in_key != out_key {
+                      continue;
+                  }
+
+                  // Perform the rewrite: in parent P, remove the U mapping under in_key,
+                  // and add/union V mapping with SIDs intersection S(P->U) ∧ S(U->V).
+                  if let Some(mut pw) = p_idx.write(trie3_god) {
+                      let (pop, llm) = in_key.clone();
+                      if let Some(dm) = pw.children_mut().get_mut(&(pop, llm.clone())) {
+                          if let Some(s_pu_actual) = dm.remove(&u_idx) {
+                              let s_comp = &s_pu_actual & &s_uv;
+                              if !s_comp.is_empty() {
+                                  dm.entry(v_idx)
+                                      .and_modify(|e| *e |= &s_comp)
+                                      .or_insert(s_comp);
+                              }
+                              if dm.is_empty() {
+                                  pw.children_mut().remove(&(pop, llm.clone()));
+                              }
+                              // Recompute live tokens as union of outgoing LLM masks for robustness.
+                              let mut new_live = LLMTokenBV::zeros();
+                              for ((_, llm_bv), _) in pw.children() {
+                                  new_live |= llm_bv;
+                              }
+                              pw.value.live_tokens = new_live;
+                              rewired_this_iter += 1;
+                          }
+                      }
+                  }
+              }
+
+              total_rewired += rewired_this_iter;
+              if rewired_this_iter == 0 {
+                  break;
+              }
+          }
+
+          crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
       }
     src/trie3_opt/passes/full/compress.rs: |
       use std::collections::{BTreeMap, HashMap};
@@ -7418,32 +7555,35 @@ local_system:
 
               let old_children = std::mem::take(w.children_mut());
 
-              // Group by (pop, destination)
-              let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+              // Group by (pop, canonical destination map) and union tokens. This is sound.
+              let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
                   BTreeMap::new();
 
               for ((pop, llm_bv), dm) in old_children.iter() {
-                  for (dest, sids) in dm.iter() {
-                      let key = (*pop, *dest);
-                      let entry = grouped_edges
-                          .entry(key)
-                          .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
-                      entry.0 |= llm_bv;
-                      entry.1 |= sids;
-                  }
+                  // Canonicalize dest_map into a sorted Vec for use as a key.
+                  let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+                  dest_vec.sort_unstable_by_key(|(d, _)| *d);
+
+                  let entry = by_pop.entry(*pop).or_default()
+                      .entry(dest_vec)
+                      .or_insert_with(LLMTokenBV::zeros);
+                  *entry |= llm_bv;
               }
 
               // Rebuild children from factored edges.
-              // Group again by (pop, tokens) to form valid edges.
               let mut new_children: BTreeMap<
                   (isize, LLMTokenBV),
                   OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
               > = BTreeMap::new();
 
-              for ((pop, dest), (tokens, sids)) in grouped_edges {
-                  if !tokens.is_empty() && !sids.is_empty() {
-                      let dm = new_children.entry((pop, tokens)).or_default();
-                      dm.insert(dest, sids);
+              for (pop, groups) in by_pop {
+                  for (dest_vec, tokens) in groups {
+                      if !tokens.is_empty() {
+                          let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
+                          if !dm.is_empty() {
+                              new_children.insert((pop, tokens), dm);
+                          }
+                      }
                   }
               }
 
@@ -9082,6 +9222,246 @@ local_system:
               total_removed
           );
       }
+    src/trie3_opt/passes/full/prune_end_reach.rs: |
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, BTreeMap as OrderedBTreeMap};
+
+      use ordered_hash_map::OrderedHashMap;
+
+      use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
+      use crate::datastructures::EntryApi;
+      use crate::datastructures::trie::{Trie, Trie2Index};
+
+      /// Prune nodes that cannot reach any end node via reverse reachability.
+      pub fn prune_nodes_not_reaching_end_trie3(
+          roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+      ) {
+          crate::debug!(
+              2,
+              "Pruning Trie3 nodes that cannot reach any end node (reverse reachability)..."
+          );
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          if roots_vec.is_empty() {
+              return;
+          }
+
+          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+          if all_nodes.is_empty() {
+              return;
+          }
+
+          // Build reverse adjacency: dest -> sources
+          let mut incoming: HashMap<PrecomputeNode3Index, Vec<PrecomputeNode3Index>> = HashMap::new();
+          for src in &all_nodes {
+              let g = src.read(trie3_god).expect("read");
+              for (_ek, dm) in g.children() {
+                  for (dst, _bv) in dm {
+                      incoming.entry(*dst).or_default().push(*src);
+                  }
+              }
+          }
+
+          // Initialize worklist with all end nodes
+          let mut productive: HashSet<PrecomputeNode3Index> = HashSet::new();
+          let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
+          let mut end_nodes_count = 0usize;
+          for n in &all_nodes {
+              let r = n.read(trie3_god).expect("read");
+              if r.value.end {
+                  end_nodes_count += 1;
+                  if productive.insert(*n) {
+                      q.push_back(*n);
+                  }
+              }
+          }
+          if end_nodes_count == 0 {
+              crate::debug!(
+                  2,
+                  "No end nodes found in Trie3; skipping end-reachability pruning."
+              );
+              return;
+          }
+
+          // Reverse BFS
+          while let Some(d) = q.pop_front() {
+              if let Some(srcs) = incoming.get(&d) {
+                  for s in srcs {
+                      if productive.insert(*s) {
+                          q.push_back(*s);
+                      }
+                  }
+              }
+          }
+
+          let total_nodes = all_nodes.len();
+          let productive_nodes = productive.len();
+          let prunable = total_nodes.saturating_sub(productive_nodes);
+          crate::debug!(
+              2,
+              "Trie3 end-reachability: total={}, productive={}, prunable={}",
+              total_nodes,
+              productive_nodes,
+              prunable
+          );
+          if prunable == 0 {
+              return;
+          }
+
+          // Remove any edge to a non-productive destination
+          for n in &all_nodes {
+              let mut w = n.write(trie3_god).expect("write");
+              let mut new_children: BTreeMap<
+                  (isize, LLMTokenBV),
+                  OrderedHashMap<Trie2Index, StateIDBV>,
+              > = BTreeMap::new();
+              for (ek, dm) in w.children().clone() {
+                  let mut new_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
+                  for (dst, bv) in dm {
+                      if productive.contains(&dst) {
+                          new_dm.insert(dst, bv);
+                      }
+                  }
+                  if !new_dm.is_empty() {
+                      new_children.insert(ek, new_dm);
+                  }
+              }
+              *w.children_mut() = new_children;
+          }
+
+          // GC everything now unreachable from roots
+          let roots_vec2: Vec<_> = roots.values().cloned().collect();
+          Trie::gc(trie3_god, &roots_vec2);
+          Trie::recompute_all_max_depths(trie3_god, &roots_vec2);
+
+          crate::debug!(2, "Finished end-reachability pruning in Trie3.");
+      }
+    src/trie3_opt/passes/full/prune.rs: |
+      use std::collections::{BTreeMap, HashMap, VecDeque};
+
+      use indicatif::{ProgressBar, ProgressStyle};
+      use ordered_hash_map::OrderedHashMap;
+
+      use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
+      use crate::datastructures::EntryApi;
+      use crate::datastructures::trie::{Trie, Trie2Index};
+      use crate::profiler::PROGRESS_BAR_ENABLED;
+
+      /// Backwards reachability pruning on token-liveness through edge masks.
+      /// Removes edges that cannot lead to an end (w.r.t. tokens and states).
+      pub fn prune_dead_paths_trie3(
+          roots: &mut BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+      ) {
+          crate::debug!(2, "Pruning dead paths from precomputed trie 3.");
+
+          let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+          if all_nodes.is_empty() {
+              return;
+          }
+
+          let mut predecessors: HashMap<
+              PrecomputeNode3Index,
+              Vec<(PrecomputeNode3Index, (isize, LLMTokenBV))>,
+          > = HashMap::new();
+          let mut worklist = VecDeque::new();
+          let mut live: HashMap<PrecomputeNode3Index, LLMTokenBV> = HashMap::new();
+
+          // 1. Initialize live sets and build predecessor map.
+          for node_arc in &all_nodes {
+              let node_ptr = *node_arc;
+              live.insert(node_ptr, LLMTokenBV::zeros());
+
+              let guard = node_arc.read(trie3_god).unwrap();
+              if guard.value.end {
+                  // Seed end nodes with 'all tokens' to allow backward propagation through edge masks.
+                  live.insert(node_ptr, LLMTokenBV::max_ones());
+                  worklist.push_back(node_ptr);
+              }
+
+              for (edge_key, dest_map) in guard.children() {
+                  for child_wrap in dest_map.keys() {
+                      predecessors
+                          .entry(*child_wrap)
+                          .or_default()
+                          .push((node_ptr, edge_key.clone()));
+                  }
+              }
+          }
+
+          #[cfg(not(rustrover))]
+          let pb = {
+              let pb = ProgressBar::new(all_nodes.len() as u64);
+              pb.set_style(
+                  ProgressStyle::default_bar()
+                      .template(
+                          "{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
+                      )
+                      .unwrap(),
+              );
+              if !PROGRESS_BAR_ENABLED {
+                  pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+              }
+              pb.set_position(0);
+              pb
+          };
+          #[cfg(rustrover)]
+          let pb = ProgressBar::hidden();
+
+          // 2. Propagate liveness until a fixed point is reached.
+          while let Some(node_ptr) = worklist.pop_front() {
+              pb.inc(1);
+
+              let live_at_node = live.get(&node_ptr).unwrap().clone();
+              if let Some(preds) = predecessors.get(&node_ptr) {
+                  for (pred_ptr, edge_key) in preds {
+                      let live_from_edge = &live_at_node & &edge_key.1;
+                      if live_from_edge.is_empty() {
+                          continue;
+                      }
+
+                      let pred_live = live.get_mut(pred_ptr).unwrap();
+                      let old_len = pred_live.len();
+                      *pred_live |= &live_from_edge;
+                      if pred_live.len() > old_len {
+                          worklist.push_back(*pred_ptr);
+                      }
+                  }
+              }
+          }
+          pb.finish_and_clear();
+
+          // 3. Prune the graph based on the computed live sets.
+          for node_arc in &all_nodes {
+              let mut guard = node_arc.write(trie3_god).unwrap();
+              let mut new_children: BTreeMap<
+                  (isize, LLMTokenBV),
+                  OrderedHashMap<Trie2Index, StateIDBV>,
+              > = BTreeMap::new();
+
+              for (edge_key, dest_map) in guard.children() {
+                  for (child_wrapper, edge_value_sids) in dest_map {
+                      let live_from_child = live.get(child_wrapper).unwrap();
+
+                      let live_on_edge = &edge_key.1 & live_from_child;
+
+                      if !live_on_edge.is_empty() {
+                          let new_edge_key = (edge_key.0, live_on_edge);
+                          let new_dest_map_for_key = new_children.entry(new_edge_key).or_default();
+                          new_dest_map_for_key
+                              .entry(*child_wrapper)
+                              .and_modify(|v| *v |= edge_value_sids)
+                              .or_insert_with(|| edge_value_sids.clone());
+                      }
+                  }
+              }
+              *guard.children_mut() = new_children;
+
+              // Update the node's own live_tokens field with the final computed value.
+              let node_ptr = *node_arc;
+              guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
+          }
+          crate::debug!(2, "Finished pruning dead paths from trie 3.");
+      }
     src/trie3_opt/passes/full/reorder.rs: |
       use std::collections::{BTreeMap, HashMap};
 
@@ -9975,98 +10355,6 @@ local_system:
                       }
                   }
                   n.children = new_children;
-              }
-          }
-      }
-    src/trie3_opt/passes/compress_chains.rs: |
-      use std::collections::{BTreeMap, HashMap};
-
-      use crate::trie3_opt::context::OptimizationContext;
-      use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
-      use crate::trie3_opt::passes::OptimizationPass;
-
-      /// Compresses unary chains in the trie.
-      /// A unary chain occurs when a node `u` has exactly one predecessor `p` and one
-      /// successor `v`, and the edge keys `p->u` and `u->v` are identical.
-      /// This pass rewires `p` to point directly to `v`, bypassing `u`.
-      pub struct CompressChainsPass;
-
-      impl OptimizationPass for CompressChainsPass {
-          fn name(&self) -> &'static str {
-              "CompressChains"
-          }
-
-          fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              if trie.nodes.is_empty() {
-                  return;
-              }
-
-              for _ in 0..8 {
-                  // Iterate a few times to handle chains of chains.
-                  let mut indegree: HashMap<NodeId, usize> = HashMap::new();
-                  let mut outdegree: HashMap<NodeId, usize> = HashMap::new();
-                  let mut incoming_edges: HashMap<NodeId, Vec<(NodeId, EdgeKey, SortedSet)>> =
-                      HashMap::new();
-
-                  for node in &trie.nodes {
-                      *outdegree.entry(node.id).or_default() += node.out_degree();
-                      for (ek, dm) in &node.children {
-                          for (dst, sids) in dm {
-                              *indegree.entry(*dst).or_default() += 1;
-                              incoming_edges
-                                  .entry(*dst)
-                                  .or_default()
-                                  .push((node.id, ek.clone(), sids.clone()));
-                          }
-                      }
-                  }
-
-                  let mut rewrites: HashMap<NodeId, Vec<(NodeId, EdgeKey, SortedSet)>> = HashMap::new();
-                  let mut edges_to_remove: HashMap<NodeId, Vec<EdgeKey>> = HashMap::new();
-                  let mut changed = false;
-
-                  for u_node in &trie.nodes {
-                      let u = u_node.id;
-                      if trie.root_ids.contains(&u) || u_node.end {
-                          continue;
-                      }
-
-                      if indegree.get(&u).cloned().unwrap_or(0) == 1
-                          && outdegree.get(&u).cloned().unwrap_or(0) == 1
-                      {
-                          let (p, in_key, s_pu) = incoming_edges.get(&u).unwrap()[0].clone();
-
-                          let (out_key, out_dm) = u_node.children.iter().next().unwrap();
-                          let (v, s_uv) = out_dm.iter().next().unwrap();
-
-                          if in_key == *out_key {
-                              let s_pv = s_pu.intersect(s_uv);
-                              if !s_pv.is_empty() {
-                                  rewrites.entry(p).or_default().push((*v, in_key.clone(), s_pv));
-                                  edges_to_remove.entry(p).or_default().push(in_key);
-                                  changed = true;
-                              }
-                          }
-                      }
-                  }
-
-                  if !changed {
-                      break;
-                  }
-
-                  // Apply changes
-                  for p_node in trie.nodes.iter_mut() {
-                      if let Some(keys_to_remove) = edges_to_remove.get(&p_node.id) {
-                          p_node.children.retain(|k, _| !keys_to_remove.contains(k));
-                      }
-                      if let Some(new_edges) = rewrites.get(&p_node.id) {
-                          for (v, key, sids) in new_edges {
-                              p_node.children.entry(key.clone()).or_default().entry(*v).and_modify(
-                                  |s| s.union_inplace(sids),
-                              ).or_insert_with(|| sids.clone());
-                          }
-                      }
-                  }
               }
           }
       }
@@ -15713,7 +16001,7 @@ local_system:
           }
       }
     src/trie3_opt/passes/factor_state_fanout.rs: |
-      use std::collections::BTreeMap;
+      use std::collections::{BTreeMap, HashMap};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
@@ -15736,39 +16024,48 @@ local_system:
                       continue;
                   }
 
-                  // Group by (pop, destination)
-                  let mut grouped_edges: BTreeMap<(isize, NodeId), (SortedSet, SortedSet)> = BTreeMap::new();
-
-                  for (ek, dm) in node.children.iter() {
-                      for (dest, sids) in dm.iter() {
-                          let key = (ek.pop, *dest);
-                          let entry = grouped_edges.entry(key).or_insert_with(|| (SortedSet::new(), SortedSet::new()));
-                          entry.0.union_inplace(&ek.tokens); // union tokens
-                          entry.1.union_inplace(sids);      // union sids
+                  // Step 1: Deconstruct children into a per-destination view.
+                  // Map from (pop, dest) -> list of (tokens, states)
+                  let mut per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+                      BTreeMap::new();
+                  for (ek, dm) in &node.children {
+                      for (dest, states) in dm {
+                          per_dest
+                              .entry((ek.pop, *dest))
+                              .or_default()
+                              .push((ek.tokens.clone(), states.clone()));
                       }
                   }
 
-                  // Rebuild children from factored edges.
-                  // We need to group again by (pop, tokens) to form valid edges.
-                  let mut new_children_intermediate: BTreeMap<(isize, SortedSet), BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+                  // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+                  let mut merged_per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+                      BTreeMap::new();
+                  for ((pop, dest), edges) in per_dest {
+                      // Group by state set
+                      let mut by_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+                      for (tokens, states) in edges {
+                          by_states
+                              .entry(states)
+                              .or_default()
+                              .union_inplace(&tokens);
+                      }
 
-                  for ((pop, dest), (tokens, sids)) in grouped_edges {
-                      let key = (pop, tokens);
-                      let dm = new_children_intermediate.entry(key).or_insert_with(BTreeMap::new);
-                      dm.insert(dest, sids);
+                      let new_edges: Vec<(SortedSet, SortedSet)> =
+                          by_states.into_iter().map(|(s, t)| (t, s)).collect();
+                      merged_per_dest.insert((pop, dest), new_edges);
                   }
 
-                  // Finalize into BTreeMap<EdgeKey, ...>
+                  // Step 3: Reconstruct node.children from the per-destination merged edges.
                   let mut new_children = BTreeMap::new();
-                  for ((pop, tokens), dm) in new_children_intermediate {
-                      if !tokens.is_empty() && !dm.is_empty() {
-                          new_children.insert(
-                              crate::trie3_opt::core::EdgeKey::new(pop, tokens),
-                              dm,
-                          );
+                  for ((pop, dest), edges) in merged_per_dest {
+                      for (tokens, states) in edges {
+                          if tokens.is_empty() || states.is_empty() {
+                              continue;
+                          }
+                          let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+                          new_children.entry(key).or_default().insert(dest, states);
                       }
                   }
-
                   node.children = new_children;
               }
           }
@@ -16469,6 +16766,147 @@ local_system:
 
           Trie::recompute_all_max_depths(trie3_god, &[new_root]);
           (new_root, map)
+      }
+    src/trie3_opt/passes/full/compress_chains.rs: |
+      use std::collections::{BTreeMap, HashMap, HashSet};
+
+      use ordered_hash_map::OrderedHashMap;
+
+      use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
+      use crate::datastructures::EntryApi;
+      use crate::datastructures::trie::{Trie, Trie2Index};
+
+      /// Contract unary chains where a node U has exactly one incoming edge and one outgoing edge,
+      /// both under the same (pop, LLMTokenBV) key, U is not an end node or a root, and the outgoing
+      /// edge maps to exactly one destination. The rewrite composes SIDs as intersection and rewires
+      /// the predecessor P to the child V, deleting the P->U entry. This preserves semantics and is
+      /// cycle-safe (may reduce multi-node cycles to a self-loop with intersected SIDs).
+      pub fn compress_unary_chains_trie3(
+          roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+      ) {
+          crate::debug!(2, "Contracting unary chains in Trie3...");
+
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+          if all_nodes.is_empty() {
+              return;
+          }
+
+          let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
+
+          // Iterate a few times until no more rewrites are possible.
+          let mut total_rewired = 0usize;
+          let max_outer_iters = 8usize;
+          for _iter in 0..max_outer_iters {
+              // Build indegree counts and track unique predecessor + edge-key for nodes with indegree == 1.
+              let mut indegree: HashMap<PrecomputeNode3Index, usize> = HashMap::new();
+              let mut unique_parent: HashMap<
+                  PrecomputeNode3Index,
+                  (PrecomputeNode3Index, (isize, LLMTokenBV)),
+              > = HashMap::new();
+
+              for src in &all_nodes {
+                  if let Some(g) = src.read(trie3_god) {
+                      for (ek, dm) in g.children() {
+                          for (dst, _sid) in dm {
+                              let cnt = indegree.entry(*dst).or_insert(0);
+                              *cnt += 1;
+                              if *cnt == 1 {
+                                  unique_parent.insert(*dst, (*src, ek.clone()));
+                              } else {
+                                  // More than one distinct incoming, not a unique-predecessor case.
+                                  unique_parent.remove(dst);
+                              }
+                          }
+                      }
+                  }
+              }
+
+              // For outdegree, record nodes that have exactly one outgoing destination overall
+              // (across all keys combined) and are not end nodes; also capture that single edge.
+              let mut out_info: HashMap<
+                  PrecomputeNode3Index,
+                  ((isize, LLMTokenBV), PrecomputeNode3Index, StateIDBV),
+              > = HashMap::new();
+
+              for u in &all_nodes {
+                  if let Some(g) = u.read(trie3_god) {
+                      if g.value.end {
+                          continue; // Don't contract through accept nodes.
+                      }
+                      let mut total_dests = 0usize;
+                      let mut only_key: Option<(isize, LLMTokenBV)> = None;
+                      let mut only_dst: Option<PrecomputeNode3Index> = None;
+                      let mut only_sid: Option<StateIDBV> = None;
+
+                      for (ek, dm) in g.children() {
+                          for (dst, sid) in dm {
+                              total_dests += 1;
+                              if total_dests == 1 {
+                                  only_key = Some(ek.clone());
+                                  only_dst = Some(*dst);
+                                  only_sid = Some(sid.clone());
+                              }
+                          }
+                      }
+                      if total_dests == 1 {
+                          out_info.insert(*u, (only_key.unwrap(), only_dst.unwrap(), only_sid.unwrap()));
+                      }
+                  }
+              }
+
+              // Find candidates: nodes with indegree==1, outdegree==1, not roots, and matching keys on both sides.
+              let mut rewired_this_iter = 0usize;
+              for u in &all_nodes {
+                  let u_idx = *u;
+                  if roots_set.contains(&u_idx) {
+                      continue; // Never rewire through a root.
+                  }
+                  let Some((out_key, v_idx, s_uv)) = out_info.get(&u_idx).cloned() else { continue };
+                  let Some((p_idx, in_key)) = unique_parent.get(&u_idx).cloned() else { continue };
+                  if p_idx == u_idx {
+                      continue; // Avoid attempting to rewire a pure self-loop through itself.
+                  }
+                  // Only contract if the incoming and outgoing (pop, LLMTokenBV) keys match exactly.
+                  if in_key != out_key {
+                      continue;
+                  }
+
+                  // Perform the rewrite: in parent P, remove the U mapping under in_key,
+                  // and add/union V mapping with SIDs intersection S(P->U) ∧ S(U->V).
+                  if let Some(mut pw) = p_idx.write(trie3_god) {
+                      let (pop, llm) = in_key.clone();
+                      if let Some(dm) = pw.children_mut().get_mut(&(pop, llm.clone())) {
+                          if let Some(s_pu_actual) = dm.remove(&u_idx) {
+                              let s_comp = &s_pu_actual & &s_uv;
+                              if !s_comp.is_empty() {
+                                  dm.entry(v_idx)
+                                      .and_modify(|e| *e |= &s_comp)
+                                      .or_insert(s_comp);
+                              }
+                              if dm.is_empty() {
+                                  pw.children_mut().remove(&(pop, llm.clone()));
+                              }
+                              // Recompute live tokens as union of outgoing LLM masks for robustness.
+                              let mut new_live = LLMTokenBV::zeros();
+                              for ((_, llm_bv), _) in pw.children() {
+                                  new_live |= llm_bv;
+                              }
+                              pw.value.live_tokens = new_live;
+                              rewired_this_iter += 1;
+                          }
+                      }
+                  }
+              }
+
+              total_rewired += rewired_this_iter;
+              if rewired_this_iter == 0 {
+                  break;
+              }
+          }
+
+          crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
       }
     src/trie3_opt/passes/full/compress.rs: |
       use std::collections::{BTreeMap, HashMap};
@@ -17440,53 +17878,70 @@ local_system:
           }
 
           for node_idx in &all_nodes {
-              let mut w = if let Some(guard) = node_idx.write(trie3_god) {
-                  guard
-              } else {
-                  continue;
-              };
-              if w.children().is_empty() {
-                  continue;
-              }
-
-              let old_children = std::mem::take(w.children_mut());
-
-              // Group by (pop, destination)
-              let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
-                  BTreeMap::new();
-
-              for ((pop, llm_bv), dm) in old_children.iter() {
-                  for (dest, sids) in dm.iter() {
-                      let key = (*pop, *dest);
-                      let entry = grouped_edges
-                          .entry(key)
-                          .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
-                      entry.0 |= llm_bv;
-                      entry.1 |= sids;
+              if let Some(mut w) = node_idx.write(trie3_god) {
+                  if w.children().is_empty() {
+                      continue;
                   }
-              }
 
-              // Rebuild children from factored edges.
-              // Group again by (pop, tokens) to form valid edges.
-              let mut new_children: BTreeMap<
-                  (isize, LLMTokenBV),
-                  OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
-              > = BTreeMap::new();
+                  let old_children = std::mem::take(w.children_mut());
 
-              for ((pop, dest), (tokens, sids)) in grouped_edges {
-                  if !tokens.is_empty() && !sids.is_empty() {
-                      let dm = new_children.entry((pop, tokens)).or_default();
-                      dm.insert(dest, sids);
+                  // Step 1: Deconstruct children into a per-destination view.
+                  // Map from (pop, dest) -> list of (tokens, states)
+                  let mut per_dest: BTreeMap<(isize, PrecomputeNode3Index), Vec<(LLMTokenBV, StateIDBV)>> =
+                      BTreeMap::new();
+
+                  for ((pop, tokens), dm) in &old_children {
+                      for (dest, states) in dm {
+                          per_dest
+                              .entry((*pop, *dest))
+                              .or_default()
+                              .push((tokens.clone(), states.clone()));
+                      }
                   }
-              }
 
-              // Recompute live tokens and update children
-              let mut new_live = LLMTokenBV::zeros();
-              for ((_, llm_bv), _) in &new_children {
-                  new_live |= llm_bv;
+                  // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+                  let mut merged_per_dest: BTreeMap<
+                      (isize, PrecomputeNode3Index),
+                      Vec<(LLMTokenBV, StateIDBV)>,
+                  > = BTreeMap::new();
+                  for ((pop, dest), edges) in per_dest {
+                      // Group by state set
+                      let mut by_states: BTreeMap<StateIDBV, LLMTokenBV> = BTreeMap::new();
+                      for (tokens, states) in edges {
+                          let entry = by_states.entry(states).or_default();
+                          *entry |= &tokens;
+                      }
+
+                      let new_edges: Vec<(LLMTokenBV, StateIDBV)> =
+                          by_states.into_iter().map(|(s, t)| (t, s)).collect();
+                      merged_per_dest.insert((pop, dest), new_edges);
+                  }
+
+                  // Step 3: Reconstruct node.children from the per-destination merged edges.
+                  let mut new_children: BTreeMap<
+                      (isize, LLMTokenBV),
+                      OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+                  > = BTreeMap::new();
+                  for ((pop, dest), edges) in merged_per_dest {
+                      for (tokens, states) in edges {
+                          if tokens.is_empty() || states.is_empty() {
+                              continue;
+                          }
+                          new_children
+                              .entry((pop, tokens))
+                              .or_default()
+                              .insert(dest, states);
+                      }
+                  }
+
+                  // Recompute live tokens and update children
+                  let mut new_live = LLMTokenBV::zeros();
+                  for ((_, llm_bv), _) in &new_children {
+                      new_live |= llm_bv;
+                  }
+                  w.value.live_tokens = new_live;
+                  *w.children_mut() = new_children;
               }
-              w.value.live_tokens = new_live;
-              *w.children_mut() = new_children;
           }
       }
 
@@ -19115,6 +19570,246 @@ local_system:
               total_removed
           );
       }
+    src/trie3_opt/passes/full/prune_end_reach.rs: |
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, BTreeMap as OrderedBTreeMap};
+
+      use ordered_hash_map::OrderedHashMap;
+
+      use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
+      use crate::datastructures::EntryApi;
+      use crate::datastructures::trie::{Trie, Trie2Index};
+
+      /// Prune nodes that cannot reach any end node via reverse reachability.
+      pub fn prune_nodes_not_reaching_end_trie3(
+          roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+      ) {
+          crate::debug!(
+              2,
+              "Pruning Trie3 nodes that cannot reach any end node (reverse reachability)..."
+          );
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          if roots_vec.is_empty() {
+              return;
+          }
+
+          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+          if all_nodes.is_empty() {
+              return;
+          }
+
+          // Build reverse adjacency: dest -> sources
+          let mut incoming: HashMap<PrecomputeNode3Index, Vec<PrecomputeNode3Index>> = HashMap::new();
+          for src in &all_nodes {
+              let g = src.read(trie3_god).expect("read");
+              for (_ek, dm) in g.children() {
+                  for (dst, _bv) in dm {
+                      incoming.entry(*dst).or_default().push(*src);
+                  }
+              }
+          }
+
+          // Initialize worklist with all end nodes
+          let mut productive: HashSet<PrecomputeNode3Index> = HashSet::new();
+          let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
+          let mut end_nodes_count = 0usize;
+          for n in &all_nodes {
+              let r = n.read(trie3_god).expect("read");
+              if r.value.end {
+                  end_nodes_count += 1;
+                  if productive.insert(*n) {
+                      q.push_back(*n);
+                  }
+              }
+          }
+          if end_nodes_count == 0 {
+              crate::debug!(
+                  2,
+                  "No end nodes found in Trie3; skipping end-reachability pruning."
+              );
+              return;
+          }
+
+          // Reverse BFS
+          while let Some(d) = q.pop_front() {
+              if let Some(srcs) = incoming.get(&d) {
+                  for s in srcs {
+                      if productive.insert(*s) {
+                          q.push_back(*s);
+                      }
+                  }
+              }
+          }
+
+          let total_nodes = all_nodes.len();
+          let productive_nodes = productive.len();
+          let prunable = total_nodes.saturating_sub(productive_nodes);
+          crate::debug!(
+              2,
+              "Trie3 end-reachability: total={}, productive={}, prunable={}",
+              total_nodes,
+              productive_nodes,
+              prunable
+          );
+          if prunable == 0 {
+              return;
+          }
+
+          // Remove any edge to a non-productive destination
+          for n in &all_nodes {
+              let mut w = n.write(trie3_god).expect("write");
+              let mut new_children: BTreeMap<
+                  (isize, LLMTokenBV),
+                  OrderedHashMap<Trie2Index, StateIDBV>,
+              > = BTreeMap::new();
+              for (ek, dm) in w.children().clone() {
+                  let mut new_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
+                  for (dst, bv) in dm {
+                      if productive.contains(&dst) {
+                          new_dm.insert(dst, bv);
+                      }
+                  }
+                  if !new_dm.is_empty() {
+                      new_children.insert(ek, new_dm);
+                  }
+              }
+              *w.children_mut() = new_children;
+          }
+
+          // GC everything now unreachable from roots
+          let roots_vec2: Vec<_> = roots.values().cloned().collect();
+          Trie::gc(trie3_god, &roots_vec2);
+          Trie::recompute_all_max_depths(trie3_god, &roots_vec2);
+
+          crate::debug!(2, "Finished end-reachability pruning in Trie3.");
+      }
+    src/trie3_opt/passes/full/prune.rs: |
+      use std::collections::{BTreeMap, HashMap, VecDeque};
+
+      use indicatif::{ProgressBar, ProgressStyle};
+      use ordered_hash_map::OrderedHashMap;
+
+      use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
+      use crate::datastructures::EntryApi;
+      use crate::datastructures::trie::{Trie, Trie2Index};
+      use crate::profiler::PROGRESS_BAR_ENABLED;
+
+      /// Backwards reachability pruning on token-liveness through edge masks.
+      /// Removes edges that cannot lead to an end (w.r.t. tokens and states).
+      pub fn prune_dead_paths_trie3(
+          roots: &mut BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+      ) {
+          crate::debug!(2, "Pruning dead paths from precomputed trie 3.");
+
+          let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+          if all_nodes.is_empty() {
+              return;
+          }
+
+          let mut predecessors: HashMap<
+              PrecomputeNode3Index,
+              Vec<(PrecomputeNode3Index, (isize, LLMTokenBV))>,
+          > = HashMap::new();
+          let mut worklist = VecDeque::new();
+          let mut live: HashMap<PrecomputeNode3Index, LLMTokenBV> = HashMap::new();
+
+          // 1. Initialize live sets and build predecessor map.
+          for node_arc in &all_nodes {
+              let node_ptr = *node_arc;
+              live.insert(node_ptr, LLMTokenBV::zeros());
+
+              let guard = node_arc.read(trie3_god).unwrap();
+              if guard.value.end {
+                  // Seed end nodes with 'all tokens' to allow backward propagation through edge masks.
+                  live.insert(node_ptr, LLMTokenBV::max_ones());
+                  worklist.push_back(node_ptr);
+              }
+
+              for (edge_key, dest_map) in guard.children() {
+                  for child_wrap in dest_map.keys() {
+                      predecessors
+                          .entry(*child_wrap)
+                          .or_default()
+                          .push((node_ptr, edge_key.clone()));
+                  }
+              }
+          }
+
+          #[cfg(not(rustrover))]
+          let pb = {
+              let pb = ProgressBar::new(all_nodes.len() as u64);
+              pb.set_style(
+                  ProgressStyle::default_bar()
+                      .template(
+                          "{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
+                      )
+                      .unwrap(),
+              );
+              if !PROGRESS_BAR_ENABLED {
+                  pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+              }
+              pb.set_position(0);
+              pb
+          };
+          #[cfg(rustrover)]
+          let pb = ProgressBar::hidden();
+
+          // 2. Propagate liveness until a fixed point is reached.
+          while let Some(node_ptr) = worklist.pop_front() {
+              pb.inc(1);
+
+              let live_at_node = live.get(&node_ptr).unwrap().clone();
+              if let Some(preds) = predecessors.get(&node_ptr) {
+                  for (pred_ptr, edge_key) in preds {
+                      let live_from_edge = &live_at_node & &edge_key.1;
+                      if live_from_edge.is_empty() {
+                          continue;
+                      }
+
+                      let pred_live = live.get_mut(pred_ptr).unwrap();
+                      let old_len = pred_live.len();
+                      *pred_live |= &live_from_edge;
+                      if pred_live.len() > old_len {
+                          worklist.push_back(*pred_ptr);
+                      }
+                  }
+              }
+          }
+          pb.finish_and_clear();
+
+          // 3. Prune the graph based on the computed live sets.
+          for node_arc in &all_nodes {
+              let mut guard = node_arc.write(trie3_god).unwrap();
+              let mut new_children: BTreeMap<
+                  (isize, LLMTokenBV),
+                  OrderedHashMap<Trie2Index, StateIDBV>,
+              > = BTreeMap::new();
+
+              for (edge_key, dest_map) in guard.children() {
+                  for (child_wrapper, edge_value_sids) in dest_map {
+                      let live_from_child = live.get(child_wrapper).unwrap();
+
+                      let live_on_edge = &edge_key.1 & live_from_child;
+
+                      if !live_on_edge.is_empty() {
+                          let new_edge_key = (edge_key.0, live_on_edge);
+                          let new_dest_map_for_key = new_children.entry(new_edge_key).or_default();
+                          new_dest_map_for_key
+                              .entry(*child_wrapper)
+                              .and_modify(|v| *v |= edge_value_sids)
+                              .or_insert_with(|| edge_value_sids.clone());
+                      }
+                  }
+              }
+              *guard.children_mut() = new_children;
+
+              // Update the node's own live_tokens field with the final computed value.
+              let node_ptr = *node_arc;
+              guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
+          }
+          crate::debug!(2, "Finished pruning dead paths from trie 3.");
+      }
     src/trie3_opt/passes/full/reorder.rs: |
       use std::collections::{BTreeMap, HashMap};
 
@@ -20011,99 +20706,7 @@ local_system:
               }
           }
       }
-    src/trie3_opt/passes/compress_chains.rs: |
-      use std::collections::{BTreeMap, HashMap};
-
-      use crate::trie3_opt::context::OptimizationContext;
-      use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
-      use crate::trie3_opt::passes::OptimizationPass;
-
-      /// Compresses unary chains in the trie.
-      /// A unary chain occurs when a node `u` has exactly one predecessor `p` and one
-      /// successor `v`, and the edge keys `p->u` and `u->v` are identical.
-      /// This pass rewires `p` to point directly to `v`, bypassing `u`.
-      pub struct CompressChainsPass;
-
-      impl OptimizationPass for CompressChainsPass {
-          fn name(&self) -> &'static str {
-              "CompressChains"
-          }
-
-          fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              if trie.nodes.is_empty() {
-                  return;
-              }
-
-              for _ in 0..8 {
-                  // Iterate a few times to handle chains of chains.
-                  let mut indegree: HashMap<NodeId, usize> = HashMap::new();
-                  let mut outdegree: HashMap<NodeId, usize> = HashMap::new();
-                  let mut incoming_edges: HashMap<NodeId, Vec<(NodeId, EdgeKey, SortedSet)>> =
-                      HashMap::new();
-
-                  for node in &trie.nodes {
-                      *outdegree.entry(node.id).or_default() += node.out_degree();
-                      for (ek, dm) in &node.children {
-                          for (dst, sids) in dm {
-                              *indegree.entry(*dst).or_default() += 1;
-                              incoming_edges
-                                  .entry(*dst)
-                                  .or_default()
-                                  .push((node.id, ek.clone(), sids.clone()));
-                          }
-                      }
-                  }
-
-                  let mut rewrites: HashMap<NodeId, Vec<(NodeId, EdgeKey, SortedSet)>> = HashMap::new();
-                  let mut edges_to_remove: HashMap<NodeId, Vec<EdgeKey>> = HashMap::new();
-                  let mut changed = false;
-
-                  for u_node in &trie.nodes {
-                      let u = u_node.id;
-                      if trie.root_ids.contains(&u) || u_node.end {
-                          continue;
-                      }
-
-                      if indegree.get(&u).cloned().unwrap_or(0) == 1
-                          && outdegree.get(&u).cloned().unwrap_or(0) == 1
-                      {
-                          let (p, in_key, s_pu) = incoming_edges.get(&u).unwrap()[0].clone();
-
-                          let (out_key, out_dm) = u_node.children.iter().next().unwrap();
-                          let (v, s_uv) = out_dm.iter().next().unwrap();
-
-                          if in_key == *out_key {
-                              let s_pv = s_pu.intersect(s_uv);
-                              if !s_pv.is_empty() {
-                                  rewrites.entry(p).or_default().push((*v, in_key.clone(), s_pv));
-                                  edges_to_remove.entry(p).or_default().push(in_key);
-                                  changed = true;
-                              }
-                          }
-                      }
-                  }
-
-                  if !changed {
-                      break;
-                  }
-
-                  // Apply changes
-                  for p_node in trie.nodes.iter_mut() {
-                      if let Some(keys_to_remove) = edges_to_remove.get(&p_node.id) {
-                          p_node.children.retain(|k, _| !keys_to_remove.contains(k));
-                      }
-                      if let Some(new_edges) = rewrites.get(&p_node.id) {
-                          for (v, key, sids) in new_edges {
-                              p_node.children.entry(key.clone()).or_default().entry(*v).and_modify(
-                                  |s| s.union_inplace(sids),
-                              ).or_insert_with(|| sids.clone());
-                          }
-                      }
-                  }
-              }
-          }
-      }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
   default_end_line:
@@ -25838,7 +26441,7 @@ messages:
       filename: src/trie3_opt/passes/eliminate_pop0.rs
   - user: |-
       ```rust "src/trie3_opt/passes/factor_state_fanout.rs"
-      use std::collections::BTreeMap;
+      use std::collections::{BTreeMap, HashMap};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
@@ -25861,39 +26464,33 @@ messages:
                       continue;
                   }
 
-                  // Group by (pop, destination)
-                  let mut grouped_edges: BTreeMap<(isize, NodeId), (SortedSet, SortedSet)> = BTreeMap::new();
+                  // Group by (pop, canonical destination map) and union tokens. This is sound.
+                  let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
 
                   for (ek, dm) in node.children.iter() {
-                      for (dest, sids) in dm.iter() {
-                          let key = (ek.pop, *dest);
-                          let entry = grouped_edges.entry(key).or_insert_with(|| (SortedSet::new(), SortedSet::new()));
-                          entry.0.union_inplace(&ek.tokens); // union tokens
-                          entry.1.union_inplace(sids);      // union sids
-                      }
+                      let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+                      dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
+
+                      by_pop.entry(ek.pop).or_default()
+                          .entry(dest_vec)
+                          .or_default()
+                          .union_inplace(&ek.tokens);
                   }
 
                   // Rebuild children from factored edges.
-                  // We need to group again by (pop, tokens) to form valid edges.
-                  let mut new_children_intermediate: BTreeMap<(isize, SortedSet), BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-
-                  for ((pop, dest), (tokens, sids)) in grouped_edges {
-                      let key = (pop, tokens);
-                      let dm = new_children_intermediate.entry(key).or_insert_with(BTreeMap::new);
-                      dm.insert(dest, sids);
-                  }
-
-                  // Finalize into BTreeMap<EdgeKey, ...>
                   let mut new_children = BTreeMap::new();
-                  for ((pop, tokens), dm) in new_children_intermediate {
-                      if !tokens.is_empty() && !dm.is_empty() {
-                          new_children.insert(
-                              crate::trie3_opt::core::EdgeKey::new(pop, tokens),
-                              dm,
-                          );
+                  for (pop, groups) in by_pop {
+                      for (dest_vec, tokens) in groups {
+                          if tokens.is_empty() { continue; }
+                          let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
+                          if !dm.is_empty() {
+                              new_children.insert(
+                                  crate::trie3_opt::core::EdgeKey::new(pop, tokens),
+                                  dm,
+                              );
+                          }
                       }
                   }
-
                   node.children = new_children;
               }
           }
@@ -27767,32 +28364,35 @@ messages:
 
               let old_children = std::mem::take(w.children_mut());
 
-              // Group by (pop, destination)
-              let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+              // Group by (pop, canonical destination map) and union tokens. This is sound.
+              let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
                   BTreeMap::new();
 
               for ((pop, llm_bv), dm) in old_children.iter() {
-                  for (dest, sids) in dm.iter() {
-                      let key = (*pop, *dest);
-                      let entry = grouped_edges
-                          .entry(key)
-                          .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
-                      entry.0 |= llm_bv;
-                      entry.1 |= sids;
-                  }
+                  // Canonicalize dest_map into a sorted Vec for use as a key.
+                  let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+                  dest_vec.sort_unstable_by_key(|(d, _)| *d);
+
+                  let entry = by_pop.entry(*pop).or_default()
+                      .entry(dest_vec)
+                      .or_insert_with(LLMTokenBV::zeros);
+                  *entry |= llm_bv;
               }
 
               // Rebuild children from factored edges.
-              // Group again by (pop, tokens) to form valid edges.
               let mut new_children: BTreeMap<
                   (isize, LLMTokenBV),
                   OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
               > = BTreeMap::new();
 
-              for ((pop, dest), (tokens, sids)) in grouped_edges {
-                  if !tokens.is_empty() && !sids.is_empty() {
-                      let dm = new_children.entry((pop, tokens)).or_default();
-                      dm.insert(dest, sids);
+              for (pop, groups) in by_pop {
+                  for (dest_vec, tokens) in groups {
+                      if !tokens.is_empty() {
+                          let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
+                          if !dm.is_empty() {
+                              new_children.insert((pop, tokens), dm);
+                          }
+                      }
                   }
               }
 
@@ -30652,13 +31252,55 @@ messages:
     metadata:
       filename: src/trie3_opt/passes/prune_dead_paths.rs
   - user: |-
-      Convert all of the optimization passes in `src/trie3_opt/passes/full/` into normal optimization passes in `src/trie3_opt/passes/`, implementing `CompressEdgesPass`.
-      The ultimate goal is to replace the entire body of `optimize_trie3_size` with a call to the main optimization function, ie `optimize_trie3_size` becomes a legacy API.
+      ```
+      MiniTrie Metrics: {
+        "all_fanout": { count: 29240, sum: 516223.00, mean: 17.65, stdev: 116.72, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 46.00, max: 12221.00 },
+        "edge_overlap": { count: 743, sum: 16010.00, mean: 21.55, stdev: 34.80, min: 1.00, p25: 3.00, median: 5.00, p75: 27.00, p95: 78.00, max: 250.00 },
+        "non_root_edge_overlap": { count: 730, sum: 15414.00, mean: 21.12, stdev: 34.23, min: 1.00, p25: 3.00, median: 5.00, p75: 26.00, p95: 78.00, max: 250.00 },
+        "non_root_fanout": { count: 29086, sum: 404865.00, mean: 13.92, stdev: 39.98, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 46.00, max: 1200.00 },
+        "non_root_state_fanout": { count: 326116, sum: 717807.00, mean: 2.20, stdev: 6.38, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 10.00, max: 324.00 },
+        "num_edges": 516223,
+        "num_end_nodes": 1,
+        "num_nodes": 29240,
+        "num_productive_nodes": 29239,
+        "num_reachable_nodes": 29240,
+        "num_roots": 154,
+        "root_edge_overlap": { count: 13, sum: 596.00, mean: 45.85, stdev: 53.09, min: 2.00, p25: 2.00, median: 46.00, p75: 47.00, p95: 47.00, max: 216.00 },
+        "root_fanout": { count: 154, sum: 111358.00, mean: 723.10, stdev: 1335.92, min: 0.00, p25: 345.00, median: 514.00, p75: 598.00, p95: 1709.00, max: 12221.00 },
+        "root_state_fanout": { count: 50872, sum: 636551.00, mean: 12.51, stdev: 56.35, min: 1.00, p25: 1.00, median: 2.00, p75: 9.00, p95: 36.00, max: 1247.00 },
+        "state_fanout": { count: 376988, sum: 1354358.00, mean: 3.59, stdev: 21.82, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 11.00, max: 1247.00 }
+      }
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:200: Running optimization pass 90: Factoring state fanout...
+      [DEBUG] 2] src/trie3_opt/passes/full/factoring.rs:19: Factoring state fanout in Trie3...
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:200: Pass 90 ('Factoring state fanout') finished in 271.1955ms
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:200: Stats after pass 90:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
 
-      Let's do it in chunks, not all at once.
-      Convert a bunch of them. We need a helper that makes it easy to call a normal optimization pass inside `optimize_trie3_size`, to integrate it in there.
-      Then we call it in `optimize_trie3_size`.
-      This way, we can migrate incrementally.
+      ...
+
+      [DEBUG] 2] src/trie3_opt/passes/full/stats.rs:34:   Exporting to MiniTrie for extended metrics...
+      MiniTrie Metrics: {
+        "all_fanout": { count: 29240, sum: 505242.00, mean: 17.28, stdev: 114.68, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 46.00, max: 11873.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 29086, sum: 394752.00, mean: 13.57, stdev: 39.45, min: 0.00, p25: 1.00, median: 9.00, p75: 13.00, p95: 45.00, max: 1200.00 },
+        "non_root_state_fanout": { count: 326116, sum: 696679.00, mean: 2.14, stdev: 6.21, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 10.00, max: 324.00 },
+        "num_edges": 505242,
+        "num_end_nodes": 1,
+        "num_nodes": 29240,
+        "num_productive_nodes": 29239,
+        "num_reachable_nodes": 29240,
+        "num_roots": 154,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 154, sum: 110490.00, mean: 717.47, stdev: 1307.81, min: 0.00, p25: 345.00, median: 514.00, p75: 598.00, p95: 1709.00, max: 11873.00 },
+        "root_state_fanout": { count: 50872, sum: 628474.00, mean: 12.35, stdev: 54.20, min: 1.00, p25: 1.00, median: 2.00, p75: 9.00, p95: 36.00, max: 1166.00 },
+        "state_fanout": { count: 376988, sum: 1325153.00, mean: 3.52, stdev: 21.03, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 11.00, max: 1166.00 }
+      }
+      ```
+
+      Well this is dissappointing.
+      Make this optimization pass much more effective.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -30678,978 +31320,247 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      This is a great plan for incrementally migrating your optimization pipeline. By converting passes to operate on the `MiniTrie` and using a helper to integrate them back into the legacy `optimize_trie3_size` function, you can refactor your system piece by piece.
+      I understand your disappointment. The `FactorStateFanout` pass was not performing a distinct optimization, leading to minimal impact. I've rewritten it to be much more effective by implementing a new factoring strategy.
 
-      Here are the step-by-step instructions and corresponding git diffs to perform the first part of this migration.
+      The original pass was functionally identical to `CompressEdgesPass`, which merges edges that have exactly the same set of destinations. The new implementation is more powerful: for a given node, it looks at all outgoing edges and groups them by their individual destination node. It then merges edges going to the same destination if they share the same state information, by unioning their token sets. This is a sound optimization that directly targets state fanout and should produce a much better reduction in graph complexity.
+
+      Here are the step-by-step instructions to apply the fix, followed by the git diffs.
 
       ### Step-by-Step Instructions
 
-      1.  **Rename `PruneDeadPathsPass` for Clarity**
-          *   Rename the file `src/trie3_opt/passes/prune_dead_paths.rs` to `src/trie3_opt/passes/prune_unproductive_paths.rs`.
-          *   Inside this new file, change the struct name from `PruneDeadPathsPass` to `PruneUnproductivePathsPass` and update its `name()` method to return `"PruneUnproductivePaths"`. This pass prunes nodes that cannot reach an `end` node, so "unproductive" is a more accurate name.
+      1.  **Update the `factor_state_fanout_trie3` function:**
+          *   Open the file `src/trie3_opt/passes/full/factoring.rs`.
+          *   Navigate to the `factor_state_fanout_trie3` function.
+          *   Replace the entire body of this function with the new implementation below. This new logic deconstructs edges to group them by destination, merges edges with identical state sets by unioning their token sets, and then reconstructs the node's children.
 
-      2.  **Create New `MiniTrie` Passes**
-          *   Create a new file `src/trie3_opt/passes/prune_dead_paths.rs`. This file will contain the new `PruneDeadPathsPass`, which performs liveness-based pruning, equivalent to the old `prune_dead_paths_trie3`.
-          *   Create another new file `src/trie3_opt/passes/compress_chains.rs`. This will contain `CompressChainsPass` for compressing unary chains, equivalent to the old `compress_unary_chains_trie3`.
-
-      3.  **Update Module Declarations**
-          *   In `src/trie3_opt/passes/mod.rs`, update the module declarations to reflect the file rename and include the two new passes.
-          *   In `src/trie3_opt/passes/full/mod.rs`, remove the module declarations for `prune`, `prune_end_reach`, and `compress_chains`, as we will be deleting those files.
-
-      4.  **Delete Old Pass Implementations**
-          *   Delete the following files, as their logic has been migrated to new `MiniTrie`-based passes:
-              *   `src/trie3_opt/passes/full/prune.rs`
-              *   `src/trie3_opt/passes/full/prune_end_reach.rs`
-              *   `src/trie3_opt/passes/full/compress_chains.rs`
-
-      5.  **Update the Optimization Coordinator**
-          *   In `src/trie3_opt/coordinator.rs`, update the `use` statement and the `build_pipeline` function to use the renamed `PruneUnproductivePathsPass`.
-
-      6.  **Update the Main Optimizer (`optimizer.rs`)**
-          *   In `src/trie3_opt/optimizer.rs`, add the necessary `use` statements for the new passes and context objects.
-          *   Add a new helper function, `run_mini_pass`, which encapsulates the logic of exporting to `MiniTrie`, running a pass, and importing the results back.
-          *   In the `optimize_trie3_size` function:
-              *   Create an instance of `OptimizationContext` at the beginning.
-              *   Replace all calls to `prune_dead_paths_trie3` with `run_mini_pass(PruneDeadPathsPass, ...)`.
-              *   Replace all calls to `prune_nodes_not_reaching_end_trie3` with `run_mini_pass(PruneUnproductivePathsPass, ...)`.
-              *   Replace all calls to `compress_unary_chains_trie3` with `run_mini_pass(CompressChainsPass, ...)`.
+      2.  **Update the `FactorStateFanoutPass` for `MiniTrie`:**
+          *   Open the file `src/trie3_opt/passes/factor_state_fanout.rs`.
+          *   Find the `run` method within the `impl OptimizationPass for FactorStateFanoutPass` block.
+          *   Replace its entire body with an analogous implementation that operates on the `MiniTrie` data structure. This ensures the optimization is applied consistently in both the main pipeline and the `MiniTrie`-based one.
 
       ### Git Diffs
 
       Here are the git diffs to apply these changes.
 
       ```diff
-      diff --git a/src/trie3_opt/coordinator.rs b/src/trie3_opt/coordinator.rs
-      index 311118f..805118f 100644
-      --- a/src/trie3_opt/coordinator.rs
-      +++ b/src/trie3_opt/coordinator.rs
-      @@ -6,9 +6,9 @@
-       use crate::trie3_opt::context::OptimizationContext;
-       use crate::trie3_opt::metrics::run_all_metrics;
-       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-      -use crate::trie3_opt::passes::{FactorStateFanoutPass,
-      -    CanonicalizeEndNodesPass, CompressEdgesPass, EliminatePop0ExceptRootsPass, MergeStructuralPass,
-      -    OptimizationPass, PruneDeadPathsPass,
-      +use crate::trie3_opt::passes::{
-      +    CanonicalizeEndNodesPass, CompressEdgesPass, EliminatePop0ExceptRootsPass,
-      +    FactorStateFanoutPass, MergeStructuralPass, OptimizationPass, PruneUnproductivePathsPass,
-       };
-       
-       use crate::constraint::{
-      @@ -56,7 +56,7 @@
-           let mut pipeline: Vec<Box<dyn OptimizationPass>> = Vec::new();
-       
-           if config.enable_prune_dead_paths {
-      -        pipeline.push(Box::new(PruneDeadPathsPass));
-      +        pipeline.push(Box::new(PruneUnproductivePathsPass));
-           }
-           if config.enable_canonicalize_end_nodes {
-               pipeline.push(Box::new(CanonicalizeEndNodesPass));
-
-      ```
-      ```diff
-      diff --git a/src/trie3_opt/optimizer.rs b/src/trie3_opt/optimizer.rs
-      index 261118d..831118d 100644
-      --- a/src/trie3_opt/optimizer.rs
-      +++ b/src/trie3_opt/optimizer.rs
-      @@ -1,29 +1,31 @@
-       use std::collections::{BTreeMap, BTreeSet};
-       use std::time::Instant;
-       
-      +use crate::constraint::StageVocab;
-       use crate::constraint::{PrecomputeNode3Index, LLMTokenBV, StateIDBV, Trie3GodWrapper, PrecomputedNodeContents};
-       use crate::constraint_extra::{PrecomputeStats, calculate_final_stats3, print_precompute_stats3};
-       use crate::datastructures::EntryApi;
-       use crate::datastructures::trie::{PathComparison, Trie};
-       use crate::glr::parser::GLRParser;
-       use crate::tokenizer::TokenizerStateID;
-      +use crate::trie3_opt::context::OptimizationContext;
-      +use crate::trie3_opt::coordinator::{export_to_mini, import_from_mini};
-       use crate::trie3_opt::passes::full::config::Trie3Config;
-       use crate::trie3_opt::passes::full::{
-           atoms::{refine_edges_to_token_atoms_trie3, refine_edges_to_token_atoms_trie3_exact},
-           canonicalize::canonicalize_end_nodes_trie3,
-           compress::compress_trie3_edges,
-      -    compress_chains::compress_unary_chains_trie3,
-           constrain::constrain_bitvecs_trie3,
-           cycles::{
-               assert_pop0_paths_to_end_are_short, has_true_cycle_trie3, has_true_cycle_trie3_llm_only,
-           },
-           factoring::{factor_common_destinations_trie3, factor_state_fanout_trie3},
-           factor_root::factor_root_fanout_via_atoms,
-           global_atoms_merge::merge_nodes_trie3_global_atoms,
-           merges::{merge_nodes_trie3, merge_nodes_trie3_structural, merge_nodes_trie3_ultrafast},
-           normalize::normalize_live_tokens_trie3,
-           pop0::{assert_no_pop0_nonroot_edges_trie3, eliminate_pop0_edges_except_roots_trie3},
-      -    prune::prune_dead_paths_trie3,
-      -    prune_end_reach::prune_nodes_not_reaching_end_trie3,
-           reorder::reorder_llm_tokens_for_range_minimization_trie3,
-           simplify::simplify_llm_token_bvs_trie3,
-           generalize::propagate_and_generalize_sids_trie3,
-      @@ -31,8 +33,26 @@
-           tokens::merge_equivalent_llm_tokens_trie3,
-       };
-       use crate::trie3_opt::passes::full::config::Trie3MergeConfig;
-      -use crate::constraint::StageVocab;
-      +use crate::trie3_opt::passes::{
-      +    CompressChainsPass, OptimizationPass, PruneDeadPathsPass, PruneUnproductivePathsPass,
-      +};
-       use rand::prelude::*;
-      +
-      +/// Helper to run a single MiniTrie pass on the full Trie3 graph.
-      +fn run_mini_pass<P: OptimizationPass>(
-      +    pass: P,
-      +    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-      +    trie3_god: &Trie3GodWrapper,
-      +    ctx: &mut OptimizationContext,
-      +) {
-      +    let (mut mini, root_pairs, _old_mapping) =
-      +        export_to_mini(roots, trie3_god, ctx.max_llm_token_id, ctx.max_state_id);
-      +
-      +    pass.run(&mut mini, ctx);
-      +
-      +    import_from_mini(&mini, &root_pairs, trie3_god, roots, ctx);
-      +}
-       
-       /// High-level size optimizer for precompute3 tries, migrated from passes::constraint_precompute3_utils.
-       /// This function retains the exact signature and behavior, orchestrating the pipeline of heavy passes.
-      @@ -68,6 +88,8 @@
-       
-           crate::debug!(2, "Optimizing Trie 3 size...");
-       
-      +    let mut ctx = OptimizationContext::new(max_llm_token_id, max_state_id);
-      +
-           // First normalize any stale derived fields so they don't affect downstream reasoning.
-           crate::debug!(2, "Initial stats:");
-           compute_and_print_precompute_stats3(roots, trie3_god, max_llm_token_id, max_state_id);
-      @@ -111,13 +133,13 @@
-       
-               if config.prune_dead_paths {
-                   run_pass!("Pruning dead paths", {
-      -                prune_dead_paths_trie3(roots, &trie3_god);
-      +                run_mini_pass(PruneDeadPathsPass, roots, trie3_god, &mut ctx);
-                   });
-               }
-       
-               if config.prune_nodes_not_reaching_end {
-                   run_pass!("Pruning nodes that do not reach end", {
-      -                prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      +                run_mini_pass(PruneUnproductivePathsPass, roots, trie3_god, &mut ctx);
-                   });
-               }
-       
-      @@ -181,8 +203,7 @@
-               if config.compress_edges {
-                   run_pass!("Compressing edges + unary chains", {
-                       compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-      -                // Contract simple linear chains where (pop, tokens) are identical across the hop.
-      -                compress_unary_chains_trie3(roots, &trie3_god);
-      +                run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
-                   });
-               }
-       
-      @@ -212,7 +233,7 @@
-               // After compression, prune and GC before the expensive merge.
-               if config.prune_dead_paths {
-                   run_pass!("Pruning dead paths (post-compress)", {
-      -                prune_dead_paths_trie3(roots, &trie3_god);
-      +                run_mini_pass(PruneDeadPathsPass, roots, trie3_god, &mut ctx);
-                   });
-               }
-               if config.gc {
-      @@ -234,8 +255,7 @@
-                   if config.compress_edges {
-                       run_pass!("Compressing edges + unary chains (post-structural)", {
-                           compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-      -                    // Re-run chain contraction now that structure may have simplified.
-      -                    compress_unary_chains_trie3(roots, &trie3_god);
-      +                    run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
-                       });
+      --- a/src/trie3_opt/passes/factor_state_fanout.rs
+      +++ b/src/trie3_opt/passes/factor_state_fanout.rs
+      @@ -21,33 +21,43 @@
+                       continue;
                    }
-               }
-      @@ -253,15 +273,13 @@
        
-               if config.prune_nodes_not_reaching_end {
-                   run_pass!("Pruning nodes that do not reach end (post-merge)", {
-      -                prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      +                run_mini_pass(PruneUnproductivePathsPass, roots, trie3_god, &mut ctx);
-                   });
-               }
-       
-               if config.compress_edges {
-                   run_pass!("Compressing edges + unary chains (post-merge)", {
-                       compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-      -                // Final contraction pass to remove any last unary runs.
-      -                compress_unary_chains_trie3(roots, &trie3_god);
-      +                run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
-                   });
-               }
-               if config.refine_token_atoms {
-      @@ -287,7 +305,7 @@
-       
-               if config.prune_dead_paths {
-                   run_pass!("Pruning dead paths (final)", {
-      -                prune_dead_paths_trie3(roots, &trie3_god);
-      +                run_mini_pass(PruneDeadPathsPass, roots, trie3_god, &mut ctx);
-                   });
-               }
-       
-      @@ -321,8 +339,7 @@
-                   if config.compress_edges {
-                       run_pass!("Compressing edges + unary chains (post-pop0-elim)", {
-                           // Use current maxes as we have the latest vocab and state bounds
-      -                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-      -                    compress_unary_chains_trie3(roots, &trie3_god);
-      +                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id); run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
-                       });
-                   }
-                   if config.refine_token_atoms {
-      @@ -359,8 +376,7 @@
-                       });
-                       if config.compress_edges {
-                           run_pass!("Compressing edges + unary chains (post-pop0-struct-merge)", {
-      -                        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-      -                        compress_unary_chains_trie3(roots, &trie3_god);
-      +                        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id); run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
-                           });
-                       }
-                       // Defensive: immediately refine token atoms to allow reversing any local structure
-      @@ -388,14 +404,13 @@
-                   }
-                   if config.prune_nodes_not_reaching_end {
-                       run_pass!("Pruning nodes that do not reach end (post-pop0-elim)", {
-      -                    prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      +                    run_mini_pass(PruneUnproductivePathsPass, roots, trie3_god, &mut ctx);
-                       });
-                   }
-                   if config.compress_edges {
-                       run_pass!("Compressing edges + unary chains (post-pop0-elim-merge)", {
-      -                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-      -                    compress_unary_chains_trie3(roots, &trie3_god);
-      +                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id); run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
-                       });
-                   }
-                   if config.refine_token_atoms {
-      @@ -441,8 +456,7 @@
-               });
-               if config.compress_edges {
-                   run_pass!("Compressing edges (post-final-pop0-elim)", {
-      -                compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-      -                compress_unary_chains_trie3(roots, &trie3_god);
-      +                compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id); run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
-                   });
-               }
-               if config.merge_nodes_exact.enabled {
-
-      ```
-      ```diff
-      diff --git a/src/trie3_opt/passes/compress_chains.rs b/src/trie3_opt/passes/compress_chains.rs
-      new file mode 100644
-      index 0000000..115118d
-      --- /dev/null
-      +++ b/src/trie3_opt/passes/compress_chains.rs
-      @@ -0,0 +1,91 @@
-      +use std::collections::{BTreeMap, HashMap};
-      +
-      +use crate::trie3_opt::context::OptimizationContext;
-      +use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
-      +use crate::trie3_opt::passes::OptimizationPass;
-      +
-      +/// Compresses unary chains in the trie.
-      +/// A unary chain occurs when a node `u` has exactly one predecessor `p` and one
-      +/// successor `v`, and the edge keys `p->u` and `u->v` are identical.
-      +/// This pass rewires `p` to point directly to `v`, bypassing `u`.
-      +pub struct CompressChainsPass;
-      +
-      +impl OptimizationPass for CompressChainsPass {
-      +    fn name(&self) -> &'static str {
-      +        "CompressChains"
-      +    }
-      +
-      +    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-      +        if trie.nodes.is_empty() {
-      +            return;
-      +        }
-      +
-      +        for _ in 0..8 {
-      +            // Iterate a few times to handle chains of chains.
-      +            let mut indegree: HashMap<NodeId, usize> = HashMap::new();
-      +            let mut outdegree: HashMap<NodeId, usize> = HashMap::new();
-      +            let mut incoming_edges: HashMap<NodeId, Vec<(NodeId, EdgeKey, SortedSet)>> =
-      +                HashMap::new();
-      +
-      +            for node in &trie.nodes {
-      +                *outdegree.entry(node.id).or_default() += node.out_degree();
-      +                for (ek, dm) in &node.children {
-      +                    for (dst, sids) in dm {
-      +                        *indegree.entry(*dst).or_default() += 1;
-      +                        incoming_edges
-      +                            .entry(*dst)
-      +                            .or_default()
-      +                            .push((node.id, ek.clone(), sids.clone()));
-      +                    }
-      +                }
-      +            }
-      +
-      +            let mut rewrites: HashMap<NodeId, Vec<(NodeId, EdgeKey, SortedSet)>> = HashMap::new();
-      +            let mut edges_to_remove: HashMap<NodeId, Vec<EdgeKey>> = HashMap::new();
-      +            let mut changed = false;
-      +
-      +            for u_node in &trie.nodes {
-      +                let u = u_node.id;
-      +                if trie.root_ids.contains(&u) || u_node.end {
-      +                    continue;
-      +                }
-      +
-      +                if indegree.get(&u).cloned().unwrap_or(0) == 1
-      +                    && outdegree.get(&u).cloned().unwrap_or(0) == 1
-      +                {
-      +                    let (p, in_key, s_pu) = incoming_edges.get(&u).unwrap()[0].clone();
-      +
-      +                    let (out_key, out_dm) = u_node.children.iter().next().unwrap();
-      +                    let (v, s_uv) = out_dm.iter().next().unwrap();
-      +
-      +                    if in_key == *out_key {
-      +                        let s_pv = s_pu.intersect(s_uv);
-      +                        if !s_pv.is_empty() {
-      +                            rewrites.entry(p).or_default().push((*v, in_key.clone(), s_pv));
-      +                            edges_to_remove.entry(p).or_default().push(in_key);
-      +                            changed = true;
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +
-      +            if !changed {
-      +                break;
-      +            }
-      +
-      +            // Apply changes
-      +            for p_node in trie.nodes.iter_mut() {
-      +                if let Some(keys_to_remove) = edges_to_remove.get(&p_node.id) {
-      +                    p_node.children.retain(|k, _| !keys_to_remove.contains(k));
-      +                }
-      +                if let Some(new_edges) = rewrites.get(&p_node.id) {
-      +                    for (v, key, sids) in new_edges {
-      +                        p_node.children.entry(key.clone()).or_default().entry(*v).and_modify(
-      +                            |s| s.union_inplace(sids),
-      +                        ).or_insert_with(|| sids.clone());
-      +                    }
-      +                }
-      +            }
-      +        }
-      +    }
-      +}
-
-      ```
-      ```diff
-      diff --git a/src/trie3_opt/passes/full/compress_chains.rs b/src/trie3_opt/passes/full/compress_chains.rs
-      deleted file mode 100644
-      index 115118d..0000000
-      --- a/src/trie3_opt/passes/full/compress_chains.rs
-      +++ /dev/null
-      @@ -1,133 +0,0 @@
-      -use std::collections::{BTreeMap, HashMap, HashSet};
+      -            // Group by (pop, canonical destination map) and union tokens. This is sound.
+      -            let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
       -
-      -use ordered_hash_map::OrderedHashMap;
+      -            for (ek, dm) in node.children.iter() {
+      -                let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+      -                dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
       -
-      -use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
-      -use crate::datastructures::EntryApi;
-      -use crate::datastructures::trie::{Trie, Trie2Index};
-      -
-      -/// Contract unary chains where a node U has exactly one incoming edge and one outgoing edge,
-      -/// both under the same (pop, LLMTokenBV) key, U is not an end node or a root, and the outgoing
-      -/// edge maps to exactly one destination. The rewrite composes SIDs as intersection and rewires
-      -/// the predecessor P to the child V, deleting the P->U entry. This preserves semantics and is
-      -/// cycle-safe (may reduce multi-node cycles to a self-loop with intersected SIDs).
-      -pub fn compress_unary_chains_trie3(
-      -    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
-      -    trie3_god: &Trie3GodWrapper,
-      -) {
-      -    crate::debug!(2, "Contracting unary chains in Trie3...");
-      -
-      -    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      -    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-      -    if all_nodes.is_empty() {
-      -        return;
-      -    }
-      -
-      -    let roots_set: HashSet<PrecomputeNode3Index> = roots.values().cloned().collect();
-      -
-      -    // Iterate a few times until no more rewrites are possible.
-      -    let mut total_rewired = 0usize;
-      -    let max_outer_iters = 8usize;
-      -    for _iter in 0..max_outer_iters {
-      -        // Build indegree counts and track unique predecessor + edge-key for nodes with indegree == 1.
-      -        let mut indegree: HashMap<PrecomputeNode3Index, usize> = HashMap::new();
-      -        let mut unique_parent: HashMap<
-      -            PrecomputeNode3Index,
-      -            (PrecomputeNode3Index, (isize, LLMTokenBV)),
-      -        > = HashMap::new();
-      -
-      -        for src in &all_nodes {
-      -            if let Some(g) = src.read(trie3_god) {
-      -                for (ek, dm) in g.children() {
-      -                    for (dst, _sid) in dm {
-      -                        let cnt = indegree.entry(*dst).or_insert(0);
-      -                        *cnt += 1;
-      -                        if *cnt == 1 {
-      -                            unique_parent.insert(*dst, (*src, ek.clone()));
-      -                        } else {
-      -                            // More than one distinct incoming, not a unique-predecessor case.
-      -                            unique_parent.remove(dst);
-      -                        }
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        // For outdegree, record nodes that have exactly one outgoing destination overall
-      -        // (across all keys combined) and are not end nodes; also capture that single edge.
-      -        let mut out_info: HashMap<
-      -            PrecomputeNode3Index,
-      -            ((isize, LLMTokenBV), PrecomputeNode3Index, StateIDBV),
-      -        > = HashMap::new();
-      -
-      -        for u in &all_nodes {
-      -            if let Some(g) = u.read(trie3_god) {
-      -                if g.value.end {
-      -                    continue; // Don't contract through accept nodes.
-      -                }
-      -                let mut total_dests = 0usize;
-      -                let mut only_key: Option<(isize, LLMTokenBV)> = None;
-      -                let mut only_dst: Option<PrecomputeNode3Index> = None;
-      -                let mut only_sid: Option<StateIDBV> = None;
-      -
-      -                for (ek, dm) in g.children() {
-      -                    for (dst, sid) in dm {
-      -                        total_dests += 1;
-      -                        if total_dests == 1 {
-      -                            only_key = Some(ek.clone());
-      -                            only_dst = Some(*dst);
-      -                            only_sid = Some(sid.clone());
-      -                        }
-      -                    }
-      -                }
-      -                if total_dests == 1 {
-      -                    out_info.insert(*u, (only_key.unwrap(), only_dst.unwrap(), only_sid.unwrap()));
-      -                }
-      -            }
-      -        }
-      -
-      -        // Find candidates: nodes with indegree==1, outdegree==1, not roots, and matching keys on both sides.
-      -        let mut rewired_this_iter = 0usize;
-      -        for u in &all_nodes {
-      -            let u_idx = *u;
-      -            if roots_set.contains(&u_idx) {
-      -                continue; // Never rewire through a root.
-      -            }
-      -            let Some((out_key, v_idx, s_uv)) = out_info.get(&u_idx).cloned() else { continue };
-      -            let Some((p_idx, in_key)) = unique_parent.get(&u_idx).cloned() else { continue };
-      -            if p_idx == u_idx {
-      -                continue; // Avoid attempting to rewire a pure self-loop through itself.
-      -            }
-      -            // Only contract if the incoming and outgoing (pop, LLMTokenBV) keys match exactly.
-      -            if in_key != out_key {
-      -                continue;
-      -            }
-      -
-      -            // Perform the rewrite: in parent P, remove the U mapping under in_key,
-      -            // and add/union V mapping with SIDs intersection S(P->U) ∧ S(U->V).
-      -            if let Some(mut pw) = p_idx.write(trie3_god) {
-      -                let (pop, llm) = in_key.clone();
-      -                if let Some(dm) = pw.children_mut().get_mut(&(pop, llm.clone())) {
-      -                    if let Some(s_pu_actual) = dm.remove(&u_idx) {
-      -                        let s_comp = &s_pu_actual & &s_uv;
-      -                        if !s_comp.is_empty() {
-      -                            dm.entry(v_idx)
-      -                                .and_modify(|e| *e |= &s_comp)
-      -                                .or_insert(s_comp);
-      -                        }
-      -                        if dm.is_empty() {
-      -                            pw.children_mut().remove(&(pop, llm.clone()));
-      -                        }
-      -                        // Recompute live tokens as union of outgoing LLM masks for robustness.
-      -                        let mut new_live = LLMTokenBV::zeros();
-      -                        for ((_, llm_bv), _) in pw.children() {
-      -                            new_live |= llm_bv;
-      -                        }
-      -                        pw.value.live_tokens = new_live;
-      -                        rewired_this_iter += 1;
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        total_rewired += rewired_this_iter;
-      -        if rewired_this_iter == 0 {
-      -            break;
-      -        }
-      -    }
-      -
-      -    crate::debug!(2, "Unary-chain contraction rewired {} edges.", total_rewired);
-      -}
-
-      ```
-      ```diff
-      diff --git a/src/trie3_opt/passes/full/mod.rs b/src/trie3_opt/passes/full/mod.rs
-      index 115118d..115118d 100644
-      --- a/src/trie3_opt/passes/full/mod.rs
-      +++ b/src/trie3_opt/passes/full/mod.rs
-      @@ -10,16 +10,12 @@
-       pub mod reorder;
-       pub mod simplify;
-       pub mod prune_end_reach;
-      -pub mod prune;
-       pub mod factoring;
-       pub mod constrain;
-       pub mod compress;
-      -pub mod compress_chains;
-       pub mod canonicalize;
-       pub mod merges;
-       pub mod pop0;
-       pub mod cycles;
-       pub mod factor_root;
-       pub mod generalize;
-      -
-
-      ```
-      ```diff
-      diff --git a/src/trie3_opt/passes/full/prune.rs b/src/trie3_opt/passes/full/prune.rs
-      deleted file mode 100644
-      index 115118d..0000000
-      --- a/src/trie3_opt/passes/full/prune.rs
-      +++ /dev/null
-      @@ -1,110 +0,0 @@
-      -use std::collections::{BTreeMap, HashMap, VecDeque};
-      -
-      -use indicatif::{ProgressBar, ProgressStyle};
-      -use ordered_hash_map::OrderedHashMap;
-      -
-      -use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
-      -use crate::datastructures::EntryApi;
-      -use crate::datastructures::trie::{Trie, Trie2Index};
-      -use crate::profiler::PROGRESS_BAR_ENABLED;
-      -
-      -/// Backwards reachability pruning on token-liveness through edge masks.
-      -/// Removes edges that cannot lead to an end (w.r.t. tokens and states).
-      -pub fn prune_dead_paths_trie3(
-      -    roots: &mut BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
-      -    trie3_god: &Trie3GodWrapper,
-      -) {
-      -    crate::debug!(2, "Pruning dead paths from precomputed trie 3.");
-      -
-      -    let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-      -    if all_nodes.is_empty() {
-      -        return;
-      -    }
-      -
-      -    let mut predecessors: HashMap<
-      -        PrecomputeNode3Index,
-      -        Vec<(PrecomputeNode3Index, (isize, LLMTokenBV))>,
-      -    > = HashMap::new();
-      -    let mut worklist = VecDeque::new();
-      -    let mut live: HashMap<PrecomputeNode3Index, LLMTokenBV> = HashMap::new();
-      -
-      -    // 1. Initialize live sets and build predecessor map.
-      -    for node_arc in &all_nodes {
-      -        let node_ptr = *node_arc;
-      -        live.insert(node_ptr, LLMTokenBV::zeros());
-      -
-      -        let guard = node_arc.read(trie3_god).unwrap();
-      -        if guard.value.end {
-      -            // Seed end nodes with 'all tokens' to allow backward propagation through edge masks.
-      -            live.insert(node_ptr, LLMTokenBV::max_ones());
-      -            worklist.push_back(node_ptr);
-      -        }
-      -
-      -        for (edge_key, dest_map) in guard.children() {
-      -            for child_wrap in dest_map.keys() {
-      -                predecessors
-      -                    .entry(*child_wrap)
+      -                by_pop.entry(ek.pop).or_default()
+      -                    .entry(dest_vec)
       -                    .or_default()
-      -                    .push((node_ptr, edge_key.clone()));
-      -            }
-      -        }
-      -    }
-      -
-      -    #[cfg(not(rustrover))]
-      -    let pb = {
-      -        let pb = ProgressBar::new(all_nodes.len() as u64);
-      -        pb.set_style(
-      -            ProgressStyle::default_bar()
-      -                .template(
-      -                    "{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
-      -                )
-      -                .unwrap(),
-      -        );
-      -        if !PROGRESS_BAR_ENABLED {
-      -            pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-      -        }
-      -        pb.set_position(0);
-      -        pb
-      -    };
-      -    #[cfg(rustrover)]
-      -    let pb = ProgressBar::hidden();
-      -
-      -    // 2. Propagate liveness until a fixed point is reached.
-      -    while let Some(node_ptr) = worklist.pop_front() {
-      -        pb.inc(1);
-      -
-      -        let live_at_node = live.get(&node_ptr).unwrap().clone();
-      -        if let Some(preds) = predecessors.get(&node_ptr) {
-      -            for (pred_ptr, edge_key) in preds {
-      -                let live_from_edge = &live_at_node & &edge_key.1;
-      -                if live_from_edge.is_empty() {
-      -                    continue;
-      -                }
-      -
-      -                let pred_live = live.get_mut(pred_ptr).unwrap();
-      -                let old_len = pred_live.len();
-      -                *pred_live |= &live_from_edge;
-      -                if pred_live.len() > old_len {
-      -                    worklist.push_back(*pred_ptr);
-      -                }
-      -            }
-      -        }
-      -    }
-      -    pb.finish_and_clear();
-      -
-      -    // 3. Prune the graph based on the computed live sets.
-      -    for node_arc in &all_nodes {
-      -        let mut guard = node_arc.write(trie3_god).unwrap();
-      -        let mut new_children: BTreeMap<
-      -            (isize, LLMTokenBV),
-      -            OrderedHashMap<Trie2Index, StateIDBV>,
-      -        > = BTreeMap::new();
-      -
-      -        for (edge_key, dest_map) in guard.children() {
-      -            for (child_wrapper, edge_value_sids) in dest_map {
-      -                let live_from_child = live.get(child_wrapper).unwrap();
-      -
-      -                let live_on_edge = &edge_key.1 & live_from_child;
-      -
-      -                if !live_on_edge.is_empty() {
-      -                    let new_edge_key = (edge_key.0, live_on_edge);
-      -                    let new_dest_map_for_key = new_children.entry(new_edge_key).or_default();
-      -                    new_dest_map_for_key
-      -                        .entry(*child_wrapper)
-      -                        .and_modify(|v| *v |= edge_value_sids)
-      -                        .or_insert_with(|| edge_value_sids.clone());
-      -                }
-      -            }
-      -        }
-      -        *guard.children_mut() = new_children;
-      -
-      -        // Update the node's own live_tokens field with the final computed value.
-      -        let node_ptr = *node_arc;
-      -        guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
-      -    }
-      -    crate::debug!(2, "Finished pruning dead paths from trie 3.");
-      -}
-
-      ```
-      ```diff
-      diff --git a/src/trie3_opt/passes/full/prune_end_reach.rs b/src/trie3_opt/passes/full/prune_end_reach.rs
-      deleted file mode 100644
-      index 115118d..0000000
-      --- a/src/trie3_opt/passes/full/prune_end_reach.rs
-      +++ /dev/null
-      @@ -1,101 +0,0 @@
-      -use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, BTreeMap as OrderedBTreeMap};
-      -
-      -use ordered_hash_map::OrderedHashMap;
-      -
-      -use crate::constraint::{LLMTokenBV, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
-      -use crate::datastructures::EntryApi;
-      -use crate::datastructures::trie::{Trie, Trie2Index};
-      -
-      -/// Prune nodes that cannot reach any end node via reverse reachability.
-      -pub fn prune_nodes_not_reaching_end_trie3(
-      -    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
-      -    trie3_god: &Trie3GodWrapper,
-      -) {
-      -    crate::debug!(
-      -        2,
-      -        "Pruning Trie3 nodes that cannot reach any end node (reverse reachability)..."
-      -    );
-      -    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      -    if roots_vec.is_empty() {
-      -        return;
-      -    }
-      -
-      -    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-      -    if all_nodes.is_empty() {
-      -        return;
-      -    }
-      -
-      -    // Build reverse adjacency: dest -> sources
-      -    let mut incoming: HashMap<PrecomputeNode3Index, Vec<PrecomputeNode3Index>> = HashMap::new();
-      -    for src in &all_nodes {
-      -        let g = src.read(trie3_god).expect("read");
-      -        for (_ek, dm) in g.children() {
-      -            for (dst, _bv) in dm {
-      -                incoming.entry(*dst).or_default().push(*src);
-      -            }
-      -        }
-      -    }
-      -
-      -    // Initialize worklist with all end nodes
-      -    let mut productive: HashSet<PrecomputeNode3Index> = HashSet::new();
-      -    let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
-      -    let mut end_nodes_count = 0usize;
-      -    for n in &all_nodes {
-      -        let r = n.read(trie3_god).expect("read");
-      -        if r.value.end {
-      -            end_nodes_count += 1;
-      -            if productive.insert(*n) {
-      -                q.push_back(*n);
-      -            }
-      -        }
-      -    }
-      -    if end_nodes_count == 0 {
-      -        crate::debug!(
-      -            2,
-      -            "No end nodes found in Trie3; skipping end-reachability pruning."
-      -        );
-      -        return;
-      -    }
-      -
-      -    // Reverse BFS
-      -    while let Some(d) = q.pop_front() {
-      -        if let Some(srcs) = incoming.get(&d) {
-      -            for s in srcs {
-      -                if productive.insert(*s) {
-      -                    q.push_back(*s);
-      -                }
-      -            }
-      -        }
-      -    }
-      -
-      -    let total_nodes = all_nodes.len();
-      -    let productive_nodes = productive.len();
-      -    let prunable = total_nodes.saturating_sub(productive_nodes);
-      -    crate::debug!(
-      -        2,
-      -        "Trie3 end-reachability: total={}, productive={}, prunable={}",
-      -        total_nodes,
-      -        productive_nodes,
-      -        prunable
-      -    );
-      -    if prunable == 0 {
-      -        return;
-      -    }
-      -
-      -    // Remove any edge to a non-productive destination
-      -    for n in &all_nodes {
-      -        let mut w = n.write(trie3_god).expect("write");
-      -        let mut new_children: BTreeMap<
-      -            (isize, LLMTokenBV),
-      -            OrderedHashMap<Trie2Index, StateIDBV>,
-      -        > = BTreeMap::new();
-      -        for (ek, dm) in w.children().clone() {
-      -            let mut new_dm: OrderedHashMap<Trie2Index, StateIDBV> = OrderedHashMap::new();
-      -            for (dst, bv) in dm {
-      -                if productive.contains(&dst) {
-      -                    new_dm.insert(dst, bv);
-      -                }
-      -            }
-      -            if !new_dm.is_empty() {
-      -                new_children.insert(ek, new_dm);
-      -            }
-      -        }
-      -        *w.children_mut() = new_children;
-      -    }
-      -
-      -    // GC everything now unreachable from roots
-      -    let roots_vec2: Vec<_> = roots.values().cloned().collect();
-      -    Trie::gc(trie3_god, &roots_vec2);
-      -    Trie::recompute_all_max_depths(trie3_god, &roots_vec2);
-      -
-      -    crate::debug!(2, "Finished end-reachability pruning in Trie3.");
-      -}
-
-      ```
-      ```diff
-      diff --git a/src/trie3_opt/passes/mod.rs b/src/trie3_opt/passes/mod.rs
-      index 115118d..115118d 100644
-      --- a/src/trie3_opt/passes/mod.rs
-      +++ b/src/trie3_opt/passes/mod.rs
-      @@ -6,16 +6,18 @@
-           fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext);
-       }
-       
-      -pub mod prune_dead_paths;
-      +pub mod prune_unproductive_paths;
-       pub mod compress_edges;
-       pub mod merge_structural;
-       pub mod eliminate_pop0;
-       pub mod canonicalize_end_nodes;
-       pub mod factor_state_fanout;
-      +pub mod prune_dead_paths;
-      +pub mod compress_chains;
-       pub mod full;
-       
-      -pub use prune_dead_paths::PruneDeadPathsPass;
-      +pub use prune_unproductive_paths::PruneUnproductivePathsPass;
-       pub use compress_edges::CompressEdgesPass;
-       pub use merge_structural::MergeStructuralPass;
-       pub use eliminate_pop0::EliminatePop0ExceptRootsPass;
-       pub use canonicalize_end_nodes::CanonicalizeEndNodesPass;
-       pub use factor_state_fanout::FactorStateFanoutPass;
-      +pub use prune_dead_paths::PruneDeadPathsPass;
-      +pub use compress_chains::CompressChainsPass;
-
-      ```
-      ```diff
-      diff --git a/src/trie3_opt/passes/prune_dead_paths.rs b/src/trie3_opt/passes/prune_dead_paths.rs
-      new file mode 100644
-      index 0000000..115118d
-      --- /dev/null
-      +++ b/src/trie3_opt/passes/prune_dead_paths.rs
-      @@ -0,0 +1,86 @@
-      +use std::collections::{BTreeMap, HashMap, VecDeque};
-      +
-      +use crate::trie3_opt::context::OptimizationContext;
-      +use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-      +use crate::trie3_opt::passes::OptimizationPass;
-      +
-      +/// Prunes dead paths via backwards token liveness analysis.
-      +/// An edge is live if its token mask has a non-empty intersection with the
-      +/// live token set of its destination. A node's live token set is the union
-      +/// of live tokens propagated from its successors.
-      +pub struct PruneDeadPathsPass;
-      +
-      +impl OptimizationPass for PruneDeadPathsPass {
-      +    fn name(&self) -> &'static str {
-      +        "PruneDeadPaths"
-      +    }
-      +
-      +    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-      +        if trie.nodes.is_empty() {
-      +            return;
-      +        }
-      +
-      +        let mut predecessors: HashMap<NodeId, Vec<(NodeId, (isize, SortedSet))>> = HashMap::new();
-      +        let mut worklist = VecDeque::new();
-      +        let mut live: HashMap<NodeId, SortedSet> = HashMap::new();
-      +
-      +        // 1. Initialize live sets and build predecessor map.
-      +        for node in &trie.nodes {
-      +            live.insert(node.id, SortedSet::new());
-      +
-      +            if node.end {
-      +                // Seed end nodes with 'all tokens' to allow backward propagation.
-      +                let all_tokens = SortedSet::from_iter(0..=ctx.max_llm_token_id);
-      +                live.insert(node.id, all_tokens);
-      +                worklist.push_back(node.id);
-      +            }
-      +
-      +            for (edge_key, dest_map) in &node.children {
-      +                for child_id in dest_map.keys() {
-      +                    predecessors
-      +                        .entry(*child_id)
+      -                    .union_inplace(&ek.tokens);
+      +            // Step 1: Deconstruct children into a per-destination view.
+      +            // Map from (pop, dest) -> list of (tokens, states)
+      +            let mut per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+      +                BTreeMap::new();
+      +            for (ek, dm) in &node.children {
+      +                for (dest, states) in dm {
+      +                    per_dest
+      +                        .entry((ek.pop, *dest))
       +                        .or_default()
-      +                        .push((node.id, (edge_key.pop, edge_key.tokens.clone())));
+      +                        .push((ek.tokens.clone(), states.clone()));
       +                }
-      +            }
-      +        }
+                   }
+       
+      -            // Rebuild children from factored edges.
+      -            let mut new_children = BTreeMap::new();
+      -            for (pop, groups) in by_pop {
+      -                for (dest_vec, tokens) in groups {
+      -                    if tokens.is_empty() { continue; }
+      -                    let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
+      -                    if !dm.is_empty() {
+      -                        new_children.insert(
+      -                            crate::trie3_opt::core::EdgeKey::new(pop, tokens),
+      -                            dm,
+      -                        );
+      -                    }
+      +            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+      +            let mut merged_per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+      +                BTreeMap::new();
+      +            for ((pop, dest), edges) in per_dest {
+      +                // Group by state set
+      +                let mut by_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+      +                for (tokens, states) in edges {
+      +                    by_states
+      +                        .entry(states)
+      +                        .or_default()
+      +                        .union_inplace(&tokens);
+                       }
       +
-      +        // 2. Propagate liveness until a fixed point is reached.
-      +        while let Some(node_id) = worklist.pop_front() {
-      +            let live_at_node = live.get(&node_id).unwrap().clone();
-      +            if let Some(preds) = predecessors.get(&node_id) {
-      +                for (pred_id, edge_key) in preds {
-      +                    let live_from_edge = live_at_node.intersect(&edge_key.1);
-      +                    if live_from_edge.is_empty() {
+      +                let new_edges: Vec<(SortedSet, SortedSet)> =
+      +                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
+      +                merged_per_dest.insert((pop, dest), new_edges);
+      +            }
+      +
+      +            // Step 3: Reconstruct node.children from the per-destination merged edges.
+      +            let mut new_children = BTreeMap::new();
+      +            for ((pop, dest), edges) in merged_per_dest {
+      +                for (tokens, states) in edges {
+      +                    if tokens.is_empty() || states.is_empty() {
       +                        continue;
       +                    }
-      +
-      +                    let pred_live = live.get_mut(pred_id).unwrap();
-      +                    let old_len = pred_live.len();
-      +                    pred_live.union_inplace(&live_from_edge);
-      +                    if pred_live.len() > old_len {
-      +                        worklist.push_back(*pred_id);
-      +                    }
+      +                    let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+      +                    new_children.entry(key).or_default().insert(dest, states);
       +                }
-      +            }
-      +        }
-      +
-      +        // 3. Prune the graph based on the computed live sets.
-      +        for node in trie.nodes.iter_mut() {
-      +            let mut new_children: BTreeMap<_, _> = BTreeMap::new();
-      +
-      +            for (edge_key, dest_map) in &node.children {
-      +                for (child_id, edge_value_sids) in dest_map {
-      +                    let live_from_child = live.get(child_id).unwrap();
-      +                    let live_on_edge = edge_key.tokens.intersect(live_from_child);
-      +
-      +                    if !live_on_edge.is_empty() {
-      +                        let new_edge_key = super::super::core::EdgeKey::new(edge_key.pop, live_on_edge);
-      +                        let new_dest_map_for_key = new_children.entry(new_edge_key).or_default();
-      +                        new_dest_map_for_key.entry(*child_id).and_modify(|v: &mut SortedSet| v.union_inplace(edge_value_sids)).or_insert_with(|| edge_value_sids.clone());
-      +                    }
-      +                }
-      +            }
-      +            node.children = new_children;
-      +        }
-      +    }
-      +}
+                   }
+                   node.children = new_children;
+               }
 
       ```
+
       ```diff
-      diff --git a/src/trie3_opt/passes/prune_dead_paths.rs b/src/trie3_opt/passes/prune_unproductive_paths.rs
-      similarity index 91%
-      rename from src/trie3_opt/passes/prune_dead_paths.rs
-      rename to src/trie3_opt/passes/prune_unproductive_paths.rs
-      index 962414c..841515b 100644
-      --- a/src/trie3_opt/passes/prune_dead_paths.rs
-      +++ b/src/trie3_opt/passes/prune_unproductive_paths.rs
-      @@ -5,15 +5,15 @@
-       /// Remove edges that provably cannot lead to an end node by reverse reachability.
-       /// Nodes are not deleted in the mini-trie (to keep NodeId stability), but edges to
-       /// non-productive nodes are pruned.
-      -pub struct PruneDeadPathsPass;
-      +pub struct PruneUnproductivePathsPass;
-       
-      -impl OptimizationPass for PruneDeadPathsPass {
-      +impl OptimizationPass for PruneUnproductivePathsPass {
-           fn name(&self) -> &'static str {
-      -        "PruneDeadPaths"
-      +        "PruneUnproductivePaths"
+      --- a/src/trie3_opt/passes/full/factoring.rs
+      +++ b/src/trie3_opt/passes/full/factoring.rs
+      @@ -23,43 +23,55 @@
            }
        
-           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+           for node_idx in &all_nodes {
+      -        let mut w = if let Some(guard) = node_idx.write(trie3_god) {
+      -            guard
+      -        } else {
+      -            continue;
+      -        };
+      -        if w.children().is_empty() {
+      -            continue;
+      -        }
+      -
+      -        let old_children = std::mem::take(w.children_mut());
+      -
+      -        // Group by (pop, canonical destination map) and union tokens. This is sound.
+      -        let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
+      -            BTreeMap::new();
+      -
+      -        for ((pop, llm_bv), dm) in old_children.iter() {
+      -            // Canonicalize dest_map into a sorted Vec for use as a key.
+      -            let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+      -            dest_vec.sort_unstable_by_key(|(d, _)| *d);
+      -
+      -            let entry = by_pop.entry(*pop).or_default()
+      -                .entry(dest_vec)
+      -                .or_insert_with(LLMTokenBV::zeros);
+      -            *entry |= llm_bv;
+      -        }
+      -
+      -        // Rebuild children from factored edges.
+      -        let mut new_children: BTreeMap<
+      -            (isize, LLMTokenBV),
+      -            OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+      -        > = BTreeMap::new();
+      -
+      -        for (pop, groups) in by_pop {
+      -            for (dest_vec, tokens) in groups {
+      -                if !tokens.is_empty() {
+      -                    let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
+      -                    if !dm.is_empty() {
+      -                        new_children.insert((pop, tokens), dm);
+      -                    }
+      -                }
+      -            }
+      -        }
+      -
+      -        // Recompute live tokens and update children
+      -        let mut new_live = LLMTokenBV::zeros();
+      -        for ((_, llm_bv), _) in &new_children {
+      -            new_live |= llm_bv;
+      -        }
+      -        w.value.live_tokens = new_live;
+      -        *w.children_mut() = new_children;
+      +        if let Some(mut w) = node_idx.write(trie3_god) {
+      +            if w.children().is_empty() {
+      +                continue;
+      +            }
+      +
+      +            let old_children = std::mem::take(w.children_mut());
+      +
+      +            // Step 1: Deconstruct children into a per-destination view.
+      +            // Map from (pop, dest) -> list of (tokens, states)
+      +            let mut per_dest: BTreeMap<(isize, PrecomputeNode3Index), Vec<(LLMTokenBV, StateIDBV)>> =
+      +                BTreeMap::new();
+      +
+      +            for ((pop, tokens), dm) in &old_children {
+      +                for (dest, states) in dm {
+      +                    per_dest
+      +                        .entry((*pop, *dest))
+      +                        .or_default()
+      +                        .push((tokens.clone(), states.clone()));
+      +                }
+      +            }
+      +
+      +            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+      +            let mut merged_per_dest: BTreeMap<
+      +                (isize, PrecomputeNode3Index),
+      +                Vec<(LLMTokenBV, StateIDBV)>,
+      +            > = BTreeMap::new();
+      +            for ((pop, dest), edges) in per_dest {
+      +                // Group by state set
+      +                let mut by_states: BTreeMap<StateIDBV, LLMTokenBV> = BTreeMap::new();
+      +                for (tokens, states) in edges {
+      +                    let entry = by_states.entry(states).or_default();
+      +                    *entry |= &tokens;
+      +                }
+      +
+      +                let new_edges: Vec<(LLMTokenBV, StateIDBV)> =
+      +                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
+      +                merged_per_dest.insert((pop, dest), new_edges);
+      +            }
+      +
+      +            // Step 3: Reconstruct node.children from the per-destination merged edges.
+      +            let mut new_children: BTreeMap<
+      +                (isize, LLMTokenBV),
+      +                OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+      +            > = BTreeMap::new();
+      +            for ((pop, dest), edges) in merged_per_dest {
+      +                for (tokens, states) in edges {
+      +                    if tokens.is_empty() || states.is_empty() {
+      +                        continue;
+      +                    }
+      +                    new_children
+      +                        .entry((pop, tokens))
+      +                        .or_default()
+      +                        .insert(dest, states);
+      +                }
+      +            }
+      +
+      +            // Recompute live tokens and update children
+      +            let mut new_live = LLMTokenBV::zeros();
+      +            for ((_, llm_bv), _) in &new_children {
+      +                new_live |= llm_bv;
+      +            }
+      +            w.value.live_tokens = new_live;
+      +            *w.children_mut() = new_children;
+      +        }
+           }
+       }
+       
 
       ```
     metadata:
-  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
-      applied now.
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/trie3_opt/passes/factor_state_fanout.rs
+      Applying patch to 'src/trie3_opt/passes/factor_state_fanout.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/factor_state_fanout.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/trie3_opt/passes/full/factoring.rs
+      Applying patch to 'src/trie3_opt/passes/full/factoring.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/full/factoring.rs.
     metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/src/trie3_opt/passes/prune_dead_paths.rs b/src/trie3_opt/passes/prune_unproductive_paths.rs
-      similarity index 91%
-      rename from src/trie3_opt/passes/prune_dead_paths.rs
-      rename to src/trie3_opt/passes/prune_unproductive_paths.rs
-      index 962414c..841515b 100644
-      --- a/src/trie3_opt/passes/prune_dead_paths.rs
-      +++ b/src/trie3_opt/passes/prune_unproductive_paths.rs
-      @@ -5,15 +5,15 @@
-       /// Remove edges that provably cannot lead to an end node by reverse reachability.
-       /// Nodes are not deleted in the mini-trie (to keep NodeId stability), but edges to
-       /// non-productive nodes are pruned.
-      -pub struct PruneDeadPathsPass;
-      +pub struct PruneUnproductivePathsPass;
-       
-      -impl OptimizationPass for PruneDeadPathsPass {
-      +impl OptimizationPass for PruneUnproductivePathsPass {
-           fn name(&self) -> &'static str {
-      -        "PruneDeadPaths"
-      +        "PruneUnproductivePaths"
-           }
-       
-           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-      ```
+  - user: 'Changes committed with message: "Refactor: Implement correct state fanout
+      factoring in FactorStateFanout and full factoring passes"'
     metadata:
 ...

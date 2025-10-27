@@ -24,56 +24,70 @@ pub fn factor_state_fanout_trie3(
     }
 
     for node_idx in &all_nodes {
-        let mut w = if let Some(guard) = node_idx.write(trie3_god) {
-            guard
-        } else {
-            continue;
-        };
-        if w.children().is_empty() {
-            continue;
-        }
+        if let Some(mut w) = node_idx.write(trie3_god) {
+            if w.children().is_empty() {
+                continue;
+            }
 
-        let old_children = std::mem::take(w.children_mut());
+            let old_children = std::mem::take(w.children_mut());
 
-        // Group by (pop, canonical destination map) and union tokens. This is sound.
-        let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
-            BTreeMap::new();
+            // Step 1: Deconstruct children into a per-destination view.
+            // Map from (pop, dest) -> list of (tokens, states)
+            let mut per_dest: BTreeMap<(isize, PrecomputeNode3Index), Vec<(LLMTokenBV, StateIDBV)>> =
+                BTreeMap::new();
 
-        for ((pop, llm_bv), dm) in old_children.iter() {
-            // Canonicalize dest_map into a sorted Vec for use as a key.
-            let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
-            dest_vec.sort_unstable_by_key(|(d, _)| *d);
-
-            let entry = by_pop.entry(*pop).or_default()
-                .entry(dest_vec)
-                .or_insert_with(LLMTokenBV::zeros);
-            *entry |= llm_bv;
-        }
-
-        // Rebuild children from factored edges.
-        let mut new_children: BTreeMap<
-            (isize, LLMTokenBV),
-            OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
-        > = BTreeMap::new();
-
-        for (pop, groups) in by_pop {
-            for (dest_vec, tokens) in groups {
-                if !tokens.is_empty() {
-                    let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
-                    if !dm.is_empty() {
-                        new_children.insert((pop, tokens), dm);
-                    }
+            for ((pop, tokens), dm) in &old_children {
+                for (dest, states) in dm {
+                    per_dest
+                        .entry((*pop, *dest))
+                        .or_default()
+                        .push((tokens.clone(), states.clone()));
                 }
             }
-        }
 
-        // Recompute live tokens and update children
-        let mut new_live = LLMTokenBV::zeros();
-        for ((_, llm_bv), _) in &new_children {
-            new_live |= llm_bv;
+            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+            let mut merged_per_dest: BTreeMap<
+                (isize, PrecomputeNode3Index),
+                Vec<(LLMTokenBV, StateIDBV)>,
+            > = BTreeMap::new();
+            for ((pop, dest), edges) in per_dest {
+                // Group by state set
+                let mut by_states: BTreeMap<StateIDBV, LLMTokenBV> = BTreeMap::new();
+                for (tokens, states) in edges {
+                    let entry = by_states.entry(states).or_default();
+                    *entry |= &tokens;
+                }
+
+                let new_edges: Vec<(LLMTokenBV, StateIDBV)> =
+                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
+                merged_per_dest.insert((pop, dest), new_edges);
+            }
+
+            // Step 3: Reconstruct node.children from the per-destination merged edges.
+            let mut new_children: BTreeMap<
+                (isize, LLMTokenBV),
+                OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+            > = BTreeMap::new();
+            for ((pop, dest), edges) in merged_per_dest {
+                for (tokens, states) in edges {
+                    if tokens.is_empty() || states.is_empty() {
+                        continue;
+                    }
+                    new_children
+                        .entry((pop, tokens))
+                        .or_default()
+                        .insert(dest, states);
+                }
+            }
+
+            // Recompute live tokens and update children
+            let mut new_live = LLMTokenBV::zeros();
+            for ((_, llm_bv), _) in &new_children {
+                new_live |= llm_bv;
+            }
+            w.value.live_tokens = new_live;
+            *w.children_mut() = new_children;
         }
-        w.value.live_tokens = new_live;
-        *w.children_mut() = new_children;
     }
 }
 
