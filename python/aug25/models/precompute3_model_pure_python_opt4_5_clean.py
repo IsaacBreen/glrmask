@@ -792,6 +792,7 @@ class Model(GraphProvider):
         local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
 
         # 1. Pre-compute all pop() results and peeked states
+        stats.start('get_mask.traversal.gen.pop_cache_prep.time')
         pop_cache: Dict[int, Tuple[Any, Any, List[int], StateIDSet]] = {}
         peek0 = gss_node.peek()
         all_pops_in_node = {edge.pop for edge in a_node.children}
@@ -827,8 +828,10 @@ class Model(GraphProvider):
                 pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                 if global_pop_cache is not None:
                     global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
+        stats.stop('get_mask.traversal.gen.pop_cache_prep.time')
 
         # 2. Collect all applicable edge indices
+        stats.start('get_mask.traversal.gen.edge_index_collect.time')
         applicable_edge_indices = set()
         for pop, (popped, popped_acc, peeked, peek_rs) in pop_cache.items():
             if not popped_acc or popped.is_empty() or not peeked:
@@ -849,10 +852,14 @@ class Model(GraphProvider):
                 indices = pop_map.get(state_id)
                 if indices:
                     applicable_edge_indices.update(indices)
+        stats.stop('get_mask.traversal.gen.edge_index_collect.time')
 
         # 3. Process applicable edges in their pre-sorted priority order.
+        stats.start('get_mask.traversal.gen.edge_processing_sort.time')
         sorted_applicable_indices = sorted(list(applicable_edge_indices))
+        stats.stop('get_mask.traversal.gen.edge_processing_sort.time')
 
+        stats.start('get_mask.traversal.gen.edge_processing_loop.time')
         for i, edge_idx in enumerate(sorted_applicable_indices):
             edge = a_node.children[edge_idx]
 
@@ -872,6 +879,7 @@ class Model(GraphProvider):
             stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
 
             # Apply-and-prune
+            stats.start('get_mask.traversal.gen.apply_and_prune.time')
             source_after_apply = popped
             if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
                 key_apply = (id(popped), id(edge.llm_bv))
@@ -891,7 +899,10 @@ class Model(GraphProvider):
                     source_after_apply = tmp
                     local_apply_cache[key_apply] = tmp
 
+            stats.stop('get_mask.traversal.gen.apply_and_prune.time')
+
             # Group states by destination
+            stats.start('get_mask.traversal.gen.group_states.time')
             grouped: Dict[int, List[int]] = {}
             m = edge.state_to_dest
             for sid in peeked:
@@ -904,6 +915,7 @@ class Model(GraphProvider):
                     else:
                         lst.append(sid)
 
+            stats.stop('get_mask.traversal.gen.group_states.time')
             dest_keys = sorted(list(grouped.keys()))
 
             for dest_j in dest_keys:
@@ -921,6 +933,7 @@ class Model(GraphProvider):
                 dest = edge.dests[dest_j]
                 values_to_keep = grouped[dest_j]
 
+                stats.start('get_mask.traversal.gen.isolate_many.time')
                 if len(values_to_keep) == len(peeked):
                     child_gss = source_after_apply
                 else:
@@ -932,6 +945,7 @@ class Model(GraphProvider):
                         child_gss = source_after_apply.isolate_many(values_to_keep)
                         if isolate_cache is not None:
                             isolate_cache[key_isolate] = child_gss
+                stats.stop('get_mask.traversal.gen.isolate_many.time')
 
                 if child_gss.is_empty():
                     continue
@@ -962,6 +976,7 @@ class Model(GraphProvider):
                 if active_remaining_mask.is_empty():
                     return
                 edges_proc = 0
+        stats.stop('get_mask.traversal.gen.edge_processing_loop.time')
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
         stats = Stats.get()
