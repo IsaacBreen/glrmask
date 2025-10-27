@@ -53,7 +53,7 @@ impl OptimizationPass for ReorderLLMTokensPass {
 
         for node in &mut trie.nodes {
             let mut new_children = BTreeMap::new();
-            for (mut ek, dm) in node.children.drain() {
+            for (mut ek, dm) in std::mem::take(&mut node.children) {
                 ek.tokens = remap_sorted_set(&ek.tokens);
                 let entry = new_children.entry(ek).or_default();
                 for (dst, sids) in dm {

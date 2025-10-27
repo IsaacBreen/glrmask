@@ -57,15 +57,15 @@ impl OptimizationPass for PruneDeadPathsPass {
         for node in &mut trie.nodes {
             let mut new_children = BTreeMap::new();
             for (ek, dm) in &node.children {
-                let mut new_dm_for_key = BTreeMap::new();
                 for (dst, sids) in dm {
                     let live_from_child = live.get(dst).unwrap();
                     let live_on_edge = ek.tokens.intersect(live_from_child);
 
                     if !live_on_edge.is_empty() {
                         let new_ek = EdgeKey::new(ek.pop, live_on_edge);
-                        let entry: &mut BTreeMap<NodeId, SortedSet> = new_children.entry(new_ek).or_default();
-                        entry
+                        new_children
+                            .entry(new_ek)
+                            .or_default()
                             .entry(*dst)
                             .and_modify(|e: &mut SortedSet| e.union_inplace(sids))
                             .or_insert(sids.clone());

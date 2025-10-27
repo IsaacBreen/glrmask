@@ -18,10 +18,6 @@ pub fn optimize_trie3_size(
     stage_vocab: &mut StageVocab,
     parser: &GLRParser,
 ) {
-    if !config.enabled {
-        return;
-    }
-
     crate::debug!(2, "Optimizing Trie 3 size (using new pipeline)...");
     let start = Instant::now();
 
@@ -29,7 +25,7 @@ pub fn optimize_trie3_size(
     let coordinator_config = CoordinatorConfig {
         num_passes: config.num_passes,
         prune_dead_paths: config.prune_dead_paths,
-        prune_unproductive_paths: config.prune_nodes_not_reaching_end,
+        prune_unproductive_paths: config.prune_unproductive_paths,
         canonicalize_end_nodes: true, // Always good practice
         compress_edges: config.compress_edges,
         compress_unary_chains: config.compress_edges,
@@ -38,12 +34,12 @@ pub fn optimize_trie3_size(
         factor_common_destinations_min_incoming: config.factor_common_destinations_min_incoming,
         factor_root_fanout: config.factor_root_fanout,
         factor_root_fanout_max_atoms_per_pop: config.factor_root_fanout_max_atoms_per_pop,
-        merge_structural_max_iters: if config.merge_nodes_structural { 4 } else { 0 },
-        merge_bisimulation_max_iters: config.merge_nodes_exact.exact_max_iters,
-        merge_global_atoms: config.merge_nodes_global_atoms,
-        merge_global_atoms_max_iters: config.merge_nodes_global_atoms_max_iters,
-        merge_global_atoms_max_atoms_per_pop: config.merge_nodes_global_atoms_max_atoms_per_pop,
-        eliminate_pop0_except_roots: config.eliminate_pop0_edges,
+        merge_structural_max_iters: config.merge_structural_max_iters,
+        merge_bisimulation_max_iters: config.merge_bisimulation_max_iters,
+        merge_global_atoms: config.merge_global_atoms,
+        merge_global_atoms_max_iters: config.merge_global_atoms_max_iters,
+        merge_global_atoms_max_atoms_per_pop: config.merge_global_atoms_max_atoms_per_pop,
+        eliminate_pop0_except_roots: config.eliminate_pop0_except_roots,
         merge_equivalent_llm_tokens: config.merge_equivalent_llm_tokens,
         reorder_llm_tokens: config.reorder_llm_tokens,
         generalize_sids: config.generalize_sids,

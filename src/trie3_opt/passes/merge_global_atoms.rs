@@ -110,7 +110,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
         for node in &mut trie.nodes {
             let mut new_children = BTreeMap::new();
             for (ek, dm) in &node.children {
-                let mut new_dm: BTreeMap<_, V> = BTreeMap::new();
+                let mut new_dm: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
                 for (dst, sids) in dm {
                     let rep = node_to_rep.get(dst).unwrap();
                     new_dm.entry(*rep).or_default().union_inplace(sids);
