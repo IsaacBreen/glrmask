@@ -501,11 +501,15 @@ class Stats:
 
 
 def stats_generator(func):
-    """Decorator to ensure timers started in a generator are stopped.
+    """Decorator for timing generators.
 
-    Wraps the generator execution in a `Stats.scope()` to automatically
-    stop any timers that were started but not stopped by the time the
-    generator is exhausted or garbage collected.
+    Features:
+    1. Ensures any timers started within the generator are eventually stopped,
+       even if the generator is not fully exhausted (via `Stats.scope`).
+    2. Pauses any active timers during `yield`. This means that time spent
+       in the consumer, between generator iterations, is excluded from timer
+       durations. This applies to timers started both inside and outside
+       the generator.
     """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -514,8 +518,51 @@ def stats_generator(func):
             yield from func(*args, **kwargs)
             return
 
-        # The scope must wrap the *iteration* of the generator.
+        # The scope ensures cleanup if the generator is abandoned mid-iteration.
         with stats.scope():
-            yield from func(*args, **kwargs)
+            gen = func(*args, **kwargs)
+            yielded_value = None
+            try:
+                # Prime the generator to the first yield.
+                yielded_value = next(gen)
+
+                while True:
+                    # `gen` is now paused at a `yield`. We have the value.
+                    # Before we yield to the consumer, "pause" all active timers.
+                    active_keys_before_yield = set(stats.timers.keys())
+                    pause_start_time = time.perf_counter()
+
+                    try:
+                        # Yield to the consumer and get a value back from `send()`.
+                        sent_value = yield yielded_value
+                    except GeneratorExit:
+                        # Consumer called close(). Pass it on and exit.
+                        gen.close()
+                        raise
+                    except BaseException as e:
+                        # Consumer called throw(). Pass it on. The generator might
+                        # handle it and yield a new value, or it might raise.
+                        try:
+                            yielded_value = gen.throw(type(e), e, e.__traceback__)
+                            continue  # Loop to pause and yield the new value
+                        except StopIteration:
+                            return  # Generator finished
+                        except BaseException:
+                            raise  # Generator re-raised, propagate up
+
+                    # Resumed from consumer. Calculate pause duration.
+                    pause_duration = time.perf_counter() - pause_start_time
+
+                    # Adjust start times for all timers that were active before we yielded.
+                    for k in active_keys_before_yield:
+                        if k in stats.timers:  # Check if it wasn't stopped by consumer
+                            stats.timers[k] += pause_duration
+
+                    # Resume the generator by sending the value from the consumer.
+                    yielded_value = gen.send(sent_value)
+
+            except StopIteration:
+                # Generator finished, either during priming or in the loop.
+                return
 
     return wrapper
