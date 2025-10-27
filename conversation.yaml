@@ -3805,7 +3805,7 @@ local_system:
       /// - Old nodes become unreachable and are GC'd.
       /// - live_tokens are recomputed from outgoing edges.
       /// - end flags are set from the mini-trie.
-      fn import_from_mini(
+      pub(crate) fn import_from_mini(
           mini: &MiniTrie,
           root_pairs: &[(TokenizerStateID, NodeId)],
           trie3_god: &Trie3GodWrapper,
@@ -4698,21 +4698,26 @@ local_system:
 
       pub use CoordinatorConfig as Trie3Config;
     src/trie3_opt/optimizer.rs: |
+      use crate::trie3_opt::full::prune_end_reach::prune_nodes_not_reaching_end_trie3;
+      use crate::trie3_opt::full::prune::prune_dead_paths_trie3;
+      use crate::trie3_opt::full::compress_chains::compress_unary_chains_trie3;
       use std::collections::{BTreeMap, BTreeSet};
       use std::time::Instant;
 
+      use crate::constraint::StageVocab;
       use crate::constraint::{PrecomputeNode3Index, LLMTokenBV, StateIDBV, Trie3GodWrapper, PrecomputedNodeContents};
       use crate::constraint_extra::{PrecomputeStats, calculate_final_stats3, print_precompute_stats3};
       use crate::datastructures::EntryApi;
       use crate::datastructures::trie::{PathComparison, Trie};
       use crate::glr::parser::GLRParser;
       use crate::tokenizer::TokenizerStateID;
+      use crate::trie3_opt::context::OptimizationContext;
+      use crate::trie3_opt::coordinator::{export_to_mini, import_from_mini};
       use crate::trie3_opt::passes::full::config::Trie3Config;
       use crate::trie3_opt::passes::full::{
           atoms::{refine_edges_to_token_atoms_trie3, refine_edges_to_token_atoms_trie3_exact},
           canonicalize::canonicalize_end_nodes_trie3,
           compress::compress_trie3_edges,
-          compress_chains::compress_unary_chains_trie3,
           constrain::constrain_bitvecs_trie3,
           cycles::{
               assert_pop0_paths_to_end_are_short, has_true_cycle_trie3, has_true_cycle_trie3_llm_only,
@@ -4723,8 +4728,6 @@ local_system:
           merges::{merge_nodes_trie3, merge_nodes_trie3_structural, merge_nodes_trie3_ultrafast},
           normalize::normalize_live_tokens_trie3,
           pop0::{assert_no_pop0_nonroot_edges_trie3, eliminate_pop0_edges_except_roots_trie3},
-          prune::prune_dead_paths_trie3,
-          prune_end_reach::prune_nodes_not_reaching_end_trie3,
           reorder::reorder_llm_tokens_for_range_minimization_trie3,
           simplify::simplify_llm_token_bvs_trie3,
           generalize::propagate_and_generalize_sids_trie3,
@@ -4732,8 +4735,25 @@ local_system:
           tokens::merge_equivalent_llm_tokens_trie3,
       };
       use crate::trie3_opt::passes::full::config::Trie3MergeConfig;
-      use crate::constraint::StageVocab;
+      use crate::trie3_opt::passes::{
+          OptimizationPass, PruneDeadPathsPass,
+      };
       use rand::prelude::*;
+
+      /// Helper to run a single MiniTrie pass on the full Trie3 graph.
+      fn run_mini_pass<P: OptimizationPass>(
+          pass: P,
+          roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+          ctx: &mut OptimizationContext,
+      ) {
+          let (mut mini, root_pairs, _old_mapping) =
+              export_to_mini(roots, trie3_god, ctx.max_llm_token_id, ctx.max_state_id);
+
+          pass.run(&mut mini, ctx);
+
+          import_from_mini(&mini, &root_pairs, trie3_god, roots, ctx);
+      }
 
       /// High-level size optimizer for precompute3 tries, migrated from passes::constraint_precompute3_utils.
       /// This function retains the exact signature and behavior, orchestrating the pipeline of heavy passes.
@@ -4775,6 +4795,8 @@ local_system:
           };
 
           crate::debug!(2, "Optimizing Trie 3 size...");
+
+          let mut ctx = OptimizationContext::new(max_llm_token_id, max_state_id);
 
           // First normalize any stale derived fields so they don't affect downstream reasoning.
           crate::debug!(2, "Initial stats:");
@@ -5686,6 +5708,7 @@ local_system:
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
+      use crate::trie3_opt::EdgeKey;
       use crate::trie3_opt::passes::OptimizationPass;
 
       /// Reduces state fanout by factoring edges. For each node, it groups outgoing edges
@@ -5705,31 +5728,46 @@ local_system:
                       continue;
                   }
 
-                  // Group by (pop, canonical destination map) and union tokens. This is sound.
-                  let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
-
-                  for (ek, dm) in node.children.iter() {
-                      let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
-                      dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
-
-                      by_pop.entry(ek.pop).or_default()
-                          .entry(dest_vec)
-                          .or_default()
-                          .union_inplace(&ek.tokens);
+                  // Step 1: Deconstruct children into a per-destination view.
+                  // Map from (pop, dest) -> list of (tokens, states)
+                  let mut per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+                      BTreeMap::new();
+                  for (ek, dm) in &node.children {
+                      for (dest, states) in dm {
+                          per_dest
+                              .entry((ek.pop, *dest))
+                              .or_default()
+                              .push((ek.tokens.clone(), states.clone()));
+                      }
                   }
 
-                  // Rebuild children from factored edges.
-                  let mut new_children = BTreeMap::new();
-                  for (pop, groups) in by_pop {
-                      for (dest_vec, tokens) in groups {
-                          if tokens.is_empty() { continue; }
-                          let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
-                          if !dm.is_empty() {
-                              new_children.insert(
-                                  crate::trie3_opt::core::EdgeKey::new(pop, tokens),
-                                  dm,
-                              );
+                  // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+                  let mut merged_per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+                      BTreeMap::new();
+                  for ((pop, dest), edges) in per_dest {
+                      // Group by state set
+                      let mut by_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+                      for (tokens, states) in edges {
+                          by_states
+                              .entry(states)
+                              .or_default()
+                              .union_inplace(&tokens);
+                      }
+
+                      let new_edges: Vec<(SortedSet, SortedSet)> =
+                          by_states.into_iter().map(|(s, t)| (t, s)).collect();
+                      merged_per_dest.insert((pop, dest), new_edges);
+                  }
+
+                  // Step 3: Reconstruct node.children from the per-destination merged edges.
+                  let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+                  for ((pop, dest), edges) in merged_per_dest {
+                      for (tokens, states) in edges {
+                          if tokens.is_empty() || states.is_empty() {
+                              continue;
                           }
+                          let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+                          new_children.entry(key).or_default().insert(dest, states);
                       }
                   }
                   node.children = new_children;
@@ -7544,56 +7582,70 @@ local_system:
           }
 
           for node_idx in &all_nodes {
-              let mut w = if let Some(guard) = node_idx.write(trie3_god) {
-                  guard
-              } else {
-                  continue;
-              };
-              if w.children().is_empty() {
-                  continue;
-              }
+              if let Some(mut w) = node_idx.write(trie3_god) {
+                  if w.children().is_empty() {
+                      continue;
+                  }
 
-              let old_children = std::mem::take(w.children_mut());
+                  let old_children = std::mem::take(w.children_mut());
 
-              // Group by (pop, canonical destination map) and union tokens. This is sound.
-              let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
-                  BTreeMap::new();
+                  // Step 1: Deconstruct children into a per-destination view.
+                  // Map from (pop, dest) -> list of (tokens, states)
+                  let mut per_dest: BTreeMap<(isize, PrecomputeNode3Index), Vec<(LLMTokenBV, StateIDBV)>> =
+                      BTreeMap::new();
 
-              for ((pop, llm_bv), dm) in old_children.iter() {
-                  // Canonicalize dest_map into a sorted Vec for use as a key.
-                  let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
-                  dest_vec.sort_unstable_by_key(|(d, _)| *d);
-
-                  let entry = by_pop.entry(*pop).or_default()
-                      .entry(dest_vec)
-                      .or_insert_with(LLMTokenBV::zeros);
-                  *entry |= llm_bv;
-              }
-
-              // Rebuild children from factored edges.
-              let mut new_children: BTreeMap<
-                  (isize, LLMTokenBV),
-                  OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
-              > = BTreeMap::new();
-
-              for (pop, groups) in by_pop {
-                  for (dest_vec, tokens) in groups {
-                      if !tokens.is_empty() {
-                          let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
-                          if !dm.is_empty() {
-                              new_children.insert((pop, tokens), dm);
-                          }
+                  for ((pop, tokens), dm) in &old_children {
+                      for (dest, states) in dm {
+                          per_dest
+                              .entry((*pop, *dest))
+                              .or_default()
+                              .push((tokens.clone(), states.clone()));
                       }
                   }
-              }
 
-              // Recompute live tokens and update children
-              let mut new_live = LLMTokenBV::zeros();
-              for ((_, llm_bv), _) in &new_children {
-                  new_live |= llm_bv;
+                  // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+                  let mut merged_per_dest: BTreeMap<
+                      (isize, PrecomputeNode3Index),
+                      Vec<(LLMTokenBV, StateIDBV)>,
+                  > = BTreeMap::new();
+                  for ((pop, dest), edges) in per_dest {
+                      // Group by state set
+                      let mut by_states: BTreeMap<StateIDBV, LLMTokenBV> = BTreeMap::new();
+                      for (tokens, states) in edges {
+                          let entry = by_states.entry(states).or_default();
+                          *entry |= &tokens;
+                      }
+
+                      let new_edges: Vec<(LLMTokenBV, StateIDBV)> =
+                          by_states.into_iter().map(|(s, t)| (t, s)).collect();
+                      merged_per_dest.insert((pop, dest), new_edges);
+                  }
+
+                  // Step 3: Reconstruct node.children from the per-destination merged edges.
+                  let mut new_children: BTreeMap<
+                      (isize, LLMTokenBV),
+                      OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+                  > = BTreeMap::new();
+                  for ((pop, dest), edges) in merged_per_dest {
+                      for (tokens, states) in edges {
+                          if tokens.is_empty() || states.is_empty() {
+                              continue;
+                          }
+                          new_children
+                              .entry((pop, tokens))
+                              .or_default()
+                              .insert(dest, states);
+                      }
+                  }
+
+                  // Recompute live tokens and update children
+                  let mut new_live = LLMTokenBV::zeros();
+                  for ((_, llm_bv), _) in &new_children {
+                      new_live |= llm_bv;
+                  }
+                  w.value.live_tokens = new_live;
+                  *w.children_mut() = new_children;
               }
-              w.value.live_tokens = new_live;
-              *w.children_mut() = new_children;
           }
       }
 
@@ -14124,7 +14176,7 @@ local_system:
       /// - Old nodes become unreachable and are GC'd.
       /// - live_tokens are recomputed from outgoing edges.
       /// - end flags are set from the mini-trie.
-      fn import_from_mini(
+      pub(crate) fn import_from_mini(
           mini: &MiniTrie,
           root_pairs: &[(TokenizerStateID, NodeId)],
           trie3_god: &Trie3GodWrapper,
@@ -15017,21 +15069,26 @@ local_system:
 
       pub use CoordinatorConfig as Trie3Config;
     src/trie3_opt/optimizer.rs: |
+      use crate::trie3_opt::full::prune_end_reach::prune_nodes_not_reaching_end_trie3;
+      use crate::trie3_opt::full::prune::prune_dead_paths_trie3;
+      use crate::trie3_opt::full::compress_chains::compress_unary_chains_trie3;
       use std::collections::{BTreeMap, BTreeSet};
       use std::time::Instant;
 
+      use crate::constraint::StageVocab;
       use crate::constraint::{PrecomputeNode3Index, LLMTokenBV, StateIDBV, Trie3GodWrapper, PrecomputedNodeContents};
       use crate::constraint_extra::{PrecomputeStats, calculate_final_stats3, print_precompute_stats3};
       use crate::datastructures::EntryApi;
       use crate::datastructures::trie::{PathComparison, Trie};
       use crate::glr::parser::GLRParser;
       use crate::tokenizer::TokenizerStateID;
+      use crate::trie3_opt::context::OptimizationContext;
+      use crate::trie3_opt::coordinator::{export_to_mini, import_from_mini};
       use crate::trie3_opt::passes::full::config::Trie3Config;
       use crate::trie3_opt::passes::full::{
           atoms::{refine_edges_to_token_atoms_trie3, refine_edges_to_token_atoms_trie3_exact},
           canonicalize::canonicalize_end_nodes_trie3,
           compress::compress_trie3_edges,
-          compress_chains::compress_unary_chains_trie3,
           constrain::constrain_bitvecs_trie3,
           cycles::{
               assert_pop0_paths_to_end_are_short, has_true_cycle_trie3, has_true_cycle_trie3_llm_only,
@@ -15042,8 +15099,6 @@ local_system:
           merges::{merge_nodes_trie3, merge_nodes_trie3_structural, merge_nodes_trie3_ultrafast},
           normalize::normalize_live_tokens_trie3,
           pop0::{assert_no_pop0_nonroot_edges_trie3, eliminate_pop0_edges_except_roots_trie3},
-          prune::prune_dead_paths_trie3,
-          prune_end_reach::prune_nodes_not_reaching_end_trie3,
           reorder::reorder_llm_tokens_for_range_minimization_trie3,
           simplify::simplify_llm_token_bvs_trie3,
           generalize::propagate_and_generalize_sids_trie3,
@@ -15051,8 +15106,25 @@ local_system:
           tokens::merge_equivalent_llm_tokens_trie3,
       };
       use crate::trie3_opt::passes::full::config::Trie3MergeConfig;
-      use crate::constraint::StageVocab;
+      use crate::trie3_opt::passes::{
+          OptimizationPass, PruneDeadPathsPass,
+      };
       use rand::prelude::*;
+
+      /// Helper to run a single MiniTrie pass on the full Trie3 graph.
+      fn run_mini_pass<P: OptimizationPass>(
+          pass: P,
+          roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+          ctx: &mut OptimizationContext,
+      ) {
+          let (mut mini, root_pairs, _old_mapping) =
+              export_to_mini(roots, trie3_god, ctx.max_llm_token_id, ctx.max_state_id);
+
+          pass.run(&mut mini, ctx);
+
+          import_from_mini(&mini, &root_pairs, trie3_god, roots, ctx);
+      }
 
       /// High-level size optimizer for precompute3 tries, migrated from passes::constraint_precompute3_utils.
       /// This function retains the exact signature and behavior, orchestrating the pipeline of heavy passes.
@@ -15094,6 +15166,8 @@ local_system:
           };
 
           crate::debug!(2, "Optimizing Trie 3 size...");
+
+          let mut ctx = OptimizationContext::new(max_llm_token_id, max_state_id);
 
           // First normalize any stale derived fields so they don't affect downstream reasoning.
           crate::debug!(2, "Initial stats:");
@@ -16005,6 +16079,7 @@ local_system:
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
+      use crate::trie3_opt::EdgeKey;
       use crate::trie3_opt::passes::OptimizationPass;
 
       /// Reduces state fanout by factoring edges. For each node, it groups outgoing edges
@@ -16037,34 +16112,25 @@ local_system:
                       }
                   }
 
-                  // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
-                  let mut merged_per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
-                      BTreeMap::new();
+                  // Step 2: For each (pop, dest), merge all edges into one by unioning their token and state sets.
+                  let mut merged_per_dest: BTreeMap<(isize, NodeId), (SortedSet, SortedSet)> = BTreeMap::new();
                   for ((pop, dest), edges) in per_dest {
-                      // Group by state set
-                      let mut by_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+                      let mut merged_tokens = SortedSet::new();
+                      let mut merged_states = SortedSet::new();
                       for (tokens, states) in edges {
-                          by_states
-                              .entry(states)
-                              .or_default()
-                              .union_inplace(&tokens);
+                          merged_tokens.union_inplace(&tokens);
+                          merged_states.union_inplace(&states);
                       }
-
-                      let new_edges: Vec<(SortedSet, SortedSet)> =
-                          by_states.into_iter().map(|(s, t)| (t, s)).collect();
-                      merged_per_dest.insert((pop, dest), new_edges);
+                      if !merged_tokens.is_empty() && !merged_states.is_empty() {
+                          merged_per_dest.insert((pop, dest), (merged_tokens, merged_states));
+                      }
                   }
 
                   // Step 3: Reconstruct node.children from the per-destination merged edges.
-                  let mut new_children = BTreeMap::new();
-                  for ((pop, dest), edges) in merged_per_dest {
-                      for (tokens, states) in edges {
-                          if tokens.is_empty() || states.is_empty() {
-                              continue;
-                          }
-                          let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
-                          new_children.entry(key).or_default().insert(dest, states);
-                      }
+                  let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+                  for ((pop, dest), (tokens, states)) in merged_per_dest {
+                      let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+                      new_children.entry(key).or_default().insert(dest, states);
                   }
                   node.children = new_children;
               }
@@ -17899,22 +17965,19 @@ local_system:
                       }
                   }
 
-                  // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
-                  let mut merged_per_dest: BTreeMap<
-                      (isize, PrecomputeNode3Index),
-                      Vec<(LLMTokenBV, StateIDBV)>,
-                  > = BTreeMap::new();
+                  // Step 2: For each (pop, dest), merge all edges into one by unioning their token and state sets.
+                  let mut merged_per_dest: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+                      BTreeMap::new();
                   for ((pop, dest), edges) in per_dest {
-                      // Group by state set
-                      let mut by_states: BTreeMap<StateIDBV, LLMTokenBV> = BTreeMap::new();
+                      let mut merged_tokens = LLMTokenBV::zeros();
+                      let mut merged_states = StateIDBV::zeros();
                       for (tokens, states) in edges {
-                          let entry = by_states.entry(states).or_default();
-                          *entry |= &tokens;
+                          merged_tokens |= &tokens;
+                          merged_states |= &states;
                       }
-
-                      let new_edges: Vec<(LLMTokenBV, StateIDBV)> =
-                          by_states.into_iter().map(|(s, t)| (t, s)).collect();
-                      merged_per_dest.insert((pop, dest), new_edges);
+                      if !merged_tokens.is_empty() && !merged_states.is_empty() {
+                          merged_per_dest.insert((pop, dest), (merged_tokens, merged_states));
+                      }
                   }
 
                   // Step 3: Reconstruct node.children from the per-destination merged edges.
@@ -17922,16 +17985,11 @@ local_system:
                       (isize, LLMTokenBV),
                       OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
                   > = BTreeMap::new();
-                  for ((pop, dest), edges) in merged_per_dest {
-                      for (tokens, states) in edges {
-                          if tokens.is_empty() || states.is_empty() {
-                              continue;
-                          }
-                          new_children
-                              .entry((pop, tokens))
-                              .or_default()
-                              .insert(dest, states);
-                      }
+                  for ((pop, dest), (tokens, states)) in merged_per_dest {
+                      new_children
+                          .entry((pop, tokens))
+                          .or_default()
+                          .insert(dest, states);
                   }
 
                   // Recompute live tokens and update children
@@ -24524,7 +24582,7 @@ messages:
       /// - Old nodes become unreachable and are GC'd.
       /// - live_tokens are recomputed from outgoing edges.
       /// - end flags are set from the mini-trie.
-      fn import_from_mini(
+      pub(crate) fn import_from_mini(
           mini: &MiniTrie,
           root_pairs: &[(TokenizerStateID, NodeId)],
           trie3_god: &Trie3GodWrapper,
@@ -25437,21 +25495,26 @@ messages:
       filename: src/trie3_opt/mod.rs
   - user: |-
       ```rust "src/trie3_opt/optimizer.rs"
+      use crate::trie3_opt::full::prune_end_reach::prune_nodes_not_reaching_end_trie3;
+      use crate::trie3_opt::full::prune::prune_dead_paths_trie3;
+      use crate::trie3_opt::full::compress_chains::compress_unary_chains_trie3;
       use std::collections::{BTreeMap, BTreeSet};
       use std::time::Instant;
 
+      use crate::constraint::StageVocab;
       use crate::constraint::{PrecomputeNode3Index, LLMTokenBV, StateIDBV, Trie3GodWrapper, PrecomputedNodeContents};
       use crate::constraint_extra::{PrecomputeStats, calculate_final_stats3, print_precompute_stats3};
       use crate::datastructures::EntryApi;
       use crate::datastructures::trie::{PathComparison, Trie};
       use crate::glr::parser::GLRParser;
       use crate::tokenizer::TokenizerStateID;
+      use crate::trie3_opt::context::OptimizationContext;
+      use crate::trie3_opt::coordinator::{export_to_mini, import_from_mini};
       use crate::trie3_opt::passes::full::config::Trie3Config;
       use crate::trie3_opt::passes::full::{
           atoms::{refine_edges_to_token_atoms_trie3, refine_edges_to_token_atoms_trie3_exact},
           canonicalize::canonicalize_end_nodes_trie3,
           compress::compress_trie3_edges,
-          compress_chains::compress_unary_chains_trie3,
           constrain::constrain_bitvecs_trie3,
           cycles::{
               assert_pop0_paths_to_end_are_short, has_true_cycle_trie3, has_true_cycle_trie3_llm_only,
@@ -25462,8 +25525,6 @@ messages:
           merges::{merge_nodes_trie3, merge_nodes_trie3_structural, merge_nodes_trie3_ultrafast},
           normalize::normalize_live_tokens_trie3,
           pop0::{assert_no_pop0_nonroot_edges_trie3, eliminate_pop0_edges_except_roots_trie3},
-          prune::prune_dead_paths_trie3,
-          prune_end_reach::prune_nodes_not_reaching_end_trie3,
           reorder::reorder_llm_tokens_for_range_minimization_trie3,
           simplify::simplify_llm_token_bvs_trie3,
           generalize::propagate_and_generalize_sids_trie3,
@@ -25471,8 +25532,25 @@ messages:
           tokens::merge_equivalent_llm_tokens_trie3,
       };
       use crate::trie3_opt::passes::full::config::Trie3MergeConfig;
-      use crate::constraint::StageVocab;
+      use crate::trie3_opt::passes::{
+          OptimizationPass, PruneDeadPathsPass,
+      };
       use rand::prelude::*;
+
+      /// Helper to run a single MiniTrie pass on the full Trie3 graph.
+      fn run_mini_pass<P: OptimizationPass>(
+          pass: P,
+          roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+          ctx: &mut OptimizationContext,
+      ) {
+          let (mut mini, root_pairs, _old_mapping) =
+              export_to_mini(roots, trie3_god, ctx.max_llm_token_id, ctx.max_state_id);
+
+          pass.run(&mut mini, ctx);
+
+          import_from_mini(&mini, &root_pairs, trie3_god, roots, ctx);
+      }
 
       /// High-level size optimizer for precompute3 tries, migrated from passes::constraint_precompute3_utils.
       /// This function retains the exact signature and behavior, orchestrating the pipeline of heavy passes.
@@ -25514,6 +25592,8 @@ messages:
           };
 
           crate::debug!(2, "Optimizing Trie 3 size...");
+
+          let mut ctx = OptimizationContext::new(max_llm_token_id, max_state_id);
 
           // First normalize any stale derived fields so they don't affect downstream reasoning.
           crate::debug!(2, "Initial stats:");
@@ -26445,6 +26525,7 @@ messages:
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
+      use crate::trie3_opt::EdgeKey;
       use crate::trie3_opt::passes::OptimizationPass;
 
       /// Reduces state fanout by factoring edges. For each node, it groups outgoing edges
@@ -26464,31 +26545,46 @@ messages:
                       continue;
                   }
 
-                  // Group by (pop, canonical destination map) and union tokens. This is sound.
-                  let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
-
-                  for (ek, dm) in node.children.iter() {
-                      let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
-                      dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
-
-                      by_pop.entry(ek.pop).or_default()
-                          .entry(dest_vec)
-                          .or_default()
-                          .union_inplace(&ek.tokens);
+                  // Step 1: Deconstruct children into a per-destination view.
+                  // Map from (pop, dest) -> list of (tokens, states)
+                  let mut per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+                      BTreeMap::new();
+                  for (ek, dm) in &node.children {
+                      for (dest, states) in dm {
+                          per_dest
+                              .entry((ek.pop, *dest))
+                              .or_default()
+                              .push((ek.tokens.clone(), states.clone()));
+                      }
                   }
 
-                  // Rebuild children from factored edges.
-                  let mut new_children = BTreeMap::new();
-                  for (pop, groups) in by_pop {
-                      for (dest_vec, tokens) in groups {
-                          if tokens.is_empty() { continue; }
-                          let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
-                          if !dm.is_empty() {
-                              new_children.insert(
-                                  crate::trie3_opt::core::EdgeKey::new(pop, tokens),
-                                  dm,
-                              );
+                  // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+                  let mut merged_per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+                      BTreeMap::new();
+                  for ((pop, dest), edges) in per_dest {
+                      // Group by state set
+                      let mut by_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+                      for (tokens, states) in edges {
+                          by_states
+                              .entry(states)
+                              .or_default()
+                              .union_inplace(&tokens);
+                      }
+
+                      let new_edges: Vec<(SortedSet, SortedSet)> =
+                          by_states.into_iter().map(|(s, t)| (t, s)).collect();
+                      merged_per_dest.insert((pop, dest), new_edges);
+                  }
+
+                  // Step 3: Reconstruct node.children from the per-destination merged edges.
+                  let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+                  for ((pop, dest), edges) in merged_per_dest {
+                      for (tokens, states) in edges {
+                          if tokens.is_empty() || states.is_empty() {
+                              continue;
                           }
+                          let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+                          new_children.entry(key).or_default().insert(dest, states);
                       }
                   }
                   node.children = new_children;
@@ -28353,56 +28449,70 @@ messages:
           }
 
           for node_idx in &all_nodes {
-              let mut w = if let Some(guard) = node_idx.write(trie3_god) {
-                  guard
-              } else {
-                  continue;
-              };
-              if w.children().is_empty() {
-                  continue;
-              }
+              if let Some(mut w) = node_idx.write(trie3_god) {
+                  if w.children().is_empty() {
+                      continue;
+                  }
 
-              let old_children = std::mem::take(w.children_mut());
+                  let old_children = std::mem::take(w.children_mut());
 
-              // Group by (pop, canonical destination map) and union tokens. This is sound.
-              let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
-                  BTreeMap::new();
+                  // Step 1: Deconstruct children into a per-destination view.
+                  // Map from (pop, dest) -> list of (tokens, states)
+                  let mut per_dest: BTreeMap<(isize, PrecomputeNode3Index), Vec<(LLMTokenBV, StateIDBV)>> =
+                      BTreeMap::new();
 
-              for ((pop, llm_bv), dm) in old_children.iter() {
-                  // Canonicalize dest_map into a sorted Vec for use as a key.
-                  let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
-                  dest_vec.sort_unstable_by_key(|(d, _)| *d);
-
-                  let entry = by_pop.entry(*pop).or_default()
-                      .entry(dest_vec)
-                      .or_insert_with(LLMTokenBV::zeros);
-                  *entry |= llm_bv;
-              }
-
-              // Rebuild children from factored edges.
-              let mut new_children: BTreeMap<
-                  (isize, LLMTokenBV),
-                  OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
-              > = BTreeMap::new();
-
-              for (pop, groups) in by_pop {
-                  for (dest_vec, tokens) in groups {
-                      if !tokens.is_empty() {
-                          let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
-                          if !dm.is_empty() {
-                              new_children.insert((pop, tokens), dm);
-                          }
+                  for ((pop, tokens), dm) in &old_children {
+                      for (dest, states) in dm {
+                          per_dest
+                              .entry((*pop, *dest))
+                              .or_default()
+                              .push((tokens.clone(), states.clone()));
                       }
                   }
-              }
 
-              // Recompute live tokens and update children
-              let mut new_live = LLMTokenBV::zeros();
-              for ((_, llm_bv), _) in &new_children {
-                  new_live |= llm_bv;
+                  // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+                  let mut merged_per_dest: BTreeMap<
+                      (isize, PrecomputeNode3Index),
+                      Vec<(LLMTokenBV, StateIDBV)>,
+                  > = BTreeMap::new();
+                  for ((pop, dest), edges) in per_dest {
+                      // Group by state set
+                      let mut by_states: BTreeMap<StateIDBV, LLMTokenBV> = BTreeMap::new();
+                      for (tokens, states) in edges {
+                          let entry = by_states.entry(states).or_default();
+                          *entry |= &tokens;
+                      }
+
+                      let new_edges: Vec<(LLMTokenBV, StateIDBV)> =
+                          by_states.into_iter().map(|(s, t)| (t, s)).collect();
+                      merged_per_dest.insert((pop, dest), new_edges);
+                  }
+
+                  // Step 3: Reconstruct node.children from the per-destination merged edges.
+                  let mut new_children: BTreeMap<
+                      (isize, LLMTokenBV),
+                      OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+                  > = BTreeMap::new();
+                  for ((pop, dest), edges) in merged_per_dest {
+                      for (tokens, states) in edges {
+                          if tokens.is_empty() || states.is_empty() {
+                              continue;
+                          }
+                          new_children
+                              .entry((pop, tokens))
+                              .or_default()
+                              .insert(dest, states);
+                      }
+                  }
+
+                  // Recompute live tokens and update children
+                  let mut new_live = LLMTokenBV::zeros();
+                  for ((_, llm_bv), _) in &new_children {
+                      new_live |= llm_bv;
+                  }
+                  w.value.live_tokens = new_live;
+                  *w.children_mut() = new_children;
               }
-              w.value.live_tokens = new_live;
-              *w.children_mut() = new_children;
           }
       }
 
@@ -31299,7 +31409,7 @@ messages:
       }
       ```
 
-      Well this is dissappointing.
+      Well this is dissappointing. State fanout harlde changes.
       Make this optimization pass much more effective.
     metadata:
   - user: |-
@@ -31320,99 +31430,73 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I understand your disappointment. The `FactorStateFanout` pass was not performing a distinct optimization, leading to minimal impact. I've rewritten it to be much more effective by implementing a new factoring strategy.
+      Of course. The `FactorStateFanout` optimization pass is not performing as expected because its implementation is flawed. It's grouping edges by their state sets instead of unioning them, which doesn't effectively reduce state fanout. Here are the steps to correct this logic in both the `MiniTrie` pass and its equivalent for the full `Trie3` graph.
 
-      The original pass was functionally identical to `CompressEdgesPass`, which merges edges that have exactly the same set of destinations. The new implementation is more powerful: for a given node, it looks at all outgoing edges and groups them by their individual destination node. It then merges edges going to the same destination if they share the same state information, by unioning their token sets. This is a sound optimization that directly targets state fanout and should produce a much better reduction in graph complexity.
+      ### Step-by-step Instructions
 
-      Here are the step-by-step instructions to apply the fix, followed by the git diffs.
+      1.  **Correct the `FactorStateFanoutPass` for `MiniTrie`:**
+          -   Open the file `src/trie3_opt/passes/factor_state_fanout.rs`.
+          -   In the `run` method of the `FactorStateFanoutPass` implementation, locate "Step 2" and "Step 3".
+          -   Replace the logic in these steps. The new logic should iterate through the edges grouped by `(pop, destination)`, union all their `tokens` and `states` sets into a single pair, and then reconstruct the node's children from these new, merged edges.
 
-      ### Step-by-Step Instructions
+      2.  **Correct the `factor_state_fanout_trie3` function for the full graph:**
+          -   Open the file `src/trie3_opt/passes/full/factoring.rs`.
+          -   Find the function `factor_state_fanout_trie3`.
+          -   Just like in the previous step, replace the logic in "Step 2" and "Step 3" of this function. The logic is identical to the `MiniTrie` version but operates on `LLMTokenBV` and `StateIDBV` types. This change ensures that when you group edges by `(pop, destination)`, you correctly merge them by unioning both their token sets and state ID sets.
 
-      1.  **Update the `factor_state_fanout_trie3` function:**
-          *   Open the file `src/trie3_opt/passes/full/factoring.rs`.
-          *   Navigate to the `factor_state_fanout_trie3` function.
-          *   Replace the entire body of this function with the new implementation below. This new logic deconstructs edges to group them by destination, merges edges with identical state sets by unioning their token sets, and then reconstructs the node's children.
-
-      2.  **Update the `FactorStateFanoutPass` for `MiniTrie`:**
-          *   Open the file `src/trie3_opt/passes/factor_state_fanout.rs`.
-          *   Find the `run` method within the `impl OptimizationPass for FactorStateFanoutPass` block.
-          *   Replace its entire body with an analogous implementation that operates on the `MiniTrie` data structure. This ensures the optimization is applied consistently in both the main pipeline and the `MiniTrie`-based one.
+      These changes will make the pass correctly implement its intended purpose of reducing state fanout by aggressively merging edges that lead to the same destination.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes.
+      Here are the git diffs to apply these changes:
 
       ```diff
       --- a/src/trie3_opt/passes/factor_state_fanout.rs
       +++ b/src/trie3_opt/passes/factor_state_fanout.rs
-      @@ -21,33 +21,43 @@
-                       continue;
-                   }
-       
-      -            // Group by (pop, canonical destination map) and union tokens. This is sound.
-      -            let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
-      -
-      -            for (ek, dm) in node.children.iter() {
-      -                let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
-      -                dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
-      -
-      -                by_pop.entry(ek.pop).or_default()
-      -                    .entry(dest_vec)
-      -                    .or_default()
-      -                    .union_inplace(&ek.tokens);
-      +            // Step 1: Deconstruct children into a per-destination view.
-      +            // Map from (pop, dest) -> list of (tokens, states)
-      +            let mut per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
-      +                BTreeMap::new();
-      +            for (ek, dm) in &node.children {
-      +                for (dest, states) in dm {
-      +                    per_dest
-      +                        .entry((ek.pop, *dest))
-      +                        .or_default()
-      +                        .push((ek.tokens.clone(), states.clone()));
-      +                }
-                   }
-       
-      -            // Rebuild children from factored edges.
-      -            let mut new_children = BTreeMap::new();
-      -            for (pop, groups) in by_pop {
-      -                for (dest_vec, tokens) in groups {
-      -                    if tokens.is_empty() { continue; }
-      -                    let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
-      -                    if !dm.is_empty() {
-      -                        new_children.insert(
-      -                            crate::trie3_opt::core::EdgeKey::new(pop, tokens),
-      -                            dm,
-      -                        );
-      -                    }
-      +            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
-      +            let mut merged_per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
-      +                BTreeMap::new();
-      +            for ((pop, dest), edges) in per_dest {
-      +                // Group by state set
-      +                let mut by_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
-      +                for (tokens, states) in edges {
-      +                    by_states
-      +                        .entry(states)
-      +                        .or_default()
-      +                        .union_inplace(&tokens);
+      @@ -35,34 +35,22 @@
                        }
-      +
-      +                let new_edges: Vec<(SortedSet, SortedSet)> =
-      +                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
-      +                merged_per_dest.insert((pop, dest), new_edges);
-      +            }
-      +
-      +            // Step 3: Reconstruct node.children from the per-destination merged edges.
-      +            let mut new_children = BTreeMap::new();
-      +            for ((pop, dest), edges) in merged_per_dest {
-      +                for (tokens, states) in edges {
-      +                    if tokens.is_empty() || states.is_empty() {
-      +                        continue;
-      +                    }
-      +                    let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
-      +                    new_children.entry(key).or_default().insert(dest, states);
+                   }
+       
+      -            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+      -            let mut merged_per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
+      -                BTreeMap::new();
+      +            // Step 2: For each (pop, dest), merge all edges into one by unioning their token and state sets.
+      +            let mut merged_per_dest: BTreeMap<(isize, NodeId), (SortedSet, SortedSet)> = BTreeMap::new();
+                   for ((pop, dest), edges) in per_dest {
+      -                // Group by state set
+      -                let mut by_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+      +                let mut merged_tokens = SortedSet::new();
+      +                let mut merged_states = SortedSet::new();
+                       for (tokens, states) in edges {
+      -                    by_states
+      -                        .entry(states)
+      -                        .or_default()
+      -                        .union_inplace(&tokens);
+      +                    merged_tokens.union_inplace(&tokens);
+      +                    merged_states.union_inplace(&states);
+                       }
+      -
+      -                let new_edges: Vec<(SortedSet, SortedSet)> =
+      -                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
+      -                merged_per_dest.insert((pop, dest), new_edges);
+      +                if !merged_tokens.is_empty() && !merged_states.is_empty() {
+      +                    merged_per_dest.insert((pop, dest), (merged_tokens, merged_states));
       +                }
+                   }
+       
+                   // Step 3: Reconstruct node.children from the per-destination merged edges.
+                   let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+      -            for ((pop, dest), edges) in merged_per_dest {
+      -                for (tokens, states) in edges {
+      -                    if tokens.is_empty() || states.is_empty() {
+      -                        continue;
+      -                    }
+      -                    let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+      -                    new_children.entry(key).or_default().insert(dest, states);
+      -                }
+      +            for ((pop, dest), (tokens, states)) in merged_per_dest {
+      +                let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+      +                new_children.entry(key).or_default().insert(dest, states);
                    }
                    node.children = new_children;
                }
@@ -31422,127 +31506,61 @@ messages:
       ```diff
       --- a/src/trie3_opt/passes/full/factoring.rs
       +++ b/src/trie3_opt/passes/full/factoring.rs
-      @@ -23,43 +23,55 @@
-           }
+      @@ -43,38 +43,26 @@
+                       }
+                   }
        
-           for node_idx in &all_nodes {
-      -        let mut w = if let Some(guard) = node_idx.write(trie3_god) {
-      -            guard
-      -        } else {
-      -            continue;
-      -        };
-      -        if w.children().is_empty() {
-      -            continue;
-      -        }
-      -
-      -        let old_children = std::mem::take(w.children_mut());
-      -
-      -        // Group by (pop, canonical destination map) and union tokens. This is sound.
-      -        let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
-      -            BTreeMap::new();
-      -
-      -        for ((pop, llm_bv), dm) in old_children.iter() {
-      -            // Canonicalize dest_map into a sorted Vec for use as a key.
-      -            let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
-      -            dest_vec.sort_unstable_by_key(|(d, _)| *d);
-      -
-      -            let entry = by_pop.entry(*pop).or_default()
-      -                .entry(dest_vec)
-      -                .or_insert_with(LLMTokenBV::zeros);
-      -            *entry |= llm_bv;
-      -        }
-      -
-      -        // Rebuild children from factored edges.
-      -        let mut new_children: BTreeMap<
-      -            (isize, LLMTokenBV),
-      -            OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
-      -        > = BTreeMap::new();
-      -
-      -        for (pop, groups) in by_pop {
-      -            for (dest_vec, tokens) in groups {
-      -                if !tokens.is_empty() {
-      -                    let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
-      -                    if !dm.is_empty() {
-      -                        new_children.insert((pop, tokens), dm);
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        // Recompute live tokens and update children
-      -        let mut new_live = LLMTokenBV::zeros();
-      -        for ((_, llm_bv), _) in &new_children {
-      -            new_live |= llm_bv;
-      -        }
-      -        w.value.live_tokens = new_live;
-      -        *w.children_mut() = new_children;
-      +        if let Some(mut w) = node_idx.write(trie3_god) {
-      +            if w.children().is_empty() {
-      +                continue;
-      +            }
-      +
-      +            let old_children = std::mem::take(w.children_mut());
-      +
-      +            // Step 1: Deconstruct children into a per-destination view.
-      +            // Map from (pop, dest) -> list of (tokens, states)
-      +            let mut per_dest: BTreeMap<(isize, PrecomputeNode3Index), Vec<(LLMTokenBV, StateIDBV)>> =
+      -            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
+      -            let mut merged_per_dest: BTreeMap<
+      -                (isize, PrecomputeNode3Index),
+      -                Vec<(LLMTokenBV, StateIDBV)>,
+      -            > = BTreeMap::new();
+      +            // Step 2: For each (pop, dest), merge all edges into one by unioning their token and state sets.
+      +            let mut merged_per_dest: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
       +                BTreeMap::new();
-      +
-      +            for ((pop, tokens), dm) in &old_children {
-      +                for (dest, states) in dm {
-      +                    per_dest
-      +                        .entry((*pop, *dest))
-      +                        .or_default()
-      +                        .push((tokens.clone(), states.clone()));
+                   for ((pop, dest), edges) in per_dest {
+      -                // Group by state set
+      -                let mut by_states: BTreeMap<StateIDBV, LLMTokenBV> = BTreeMap::new();
+      +                let mut merged_tokens = LLMTokenBV::zeros();
+      +                let mut merged_states = StateIDBV::zeros();
+                       for (tokens, states) in edges {
+      -                    let entry = by_states.entry(states).or_default();
+      -                    *entry |= &tokens;
+      +                    merged_tokens |= &tokens;
+      +                    merged_states |= &states;
+                       }
+      -
+      -                let new_edges: Vec<(LLMTokenBV, StateIDBV)> =
+      -                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
+      -                merged_per_dest.insert((pop, dest), new_edges);
+      +                if !merged_tokens.is_empty() && !merged_states.is_empty() {
+      +                    merged_per_dest.insert((pop, dest), (merged_tokens, merged_states));
       +                }
-      +            }
-      +
-      +            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
-      +            let mut merged_per_dest: BTreeMap<
-      +                (isize, PrecomputeNode3Index),
-      +                Vec<(LLMTokenBV, StateIDBV)>,
-      +            > = BTreeMap::new();
-      +            for ((pop, dest), edges) in per_dest {
-      +                // Group by state set
-      +                let mut by_states: BTreeMap<StateIDBV, LLMTokenBV> = BTreeMap::new();
-      +                for (tokens, states) in edges {
-      +                    let entry = by_states.entry(states).or_default();
-      +                    *entry |= &tokens;
-      +                }
-      +
-      +                let new_edges: Vec<(LLMTokenBV, StateIDBV)> =
-      +                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
-      +                merged_per_dest.insert((pop, dest), new_edges);
-      +            }
-      +
-      +            // Step 3: Reconstruct node.children from the per-destination merged edges.
-      +            let mut new_children: BTreeMap<
-      +                (isize, LLMTokenBV),
-      +                OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
-      +            > = BTreeMap::new();
-      +            for ((pop, dest), edges) in merged_per_dest {
-      +                for (tokens, states) in edges {
-      +                    if tokens.is_empty() || states.is_empty() {
-      +                        continue;
-      +                    }
-      +                    new_children
-      +                        .entry((pop, tokens))
-      +                        .or_default()
-      +                        .insert(dest, states);
-      +                }
-      +            }
-      +
-      +            // Recompute live tokens and update children
-      +            let mut new_live = LLMTokenBV::zeros();
-      +            for ((_, llm_bv), _) in &new_children {
-      +                new_live |= llm_bv;
-      +            }
-      +            w.value.live_tokens = new_live;
-      +            *w.children_mut() = new_children;
-      +        }
-           }
-       }
+                   }
        
+                   // Step 3: Reconstruct node.children from the per-destination merged edges.
+                   let mut new_children: BTreeMap<
+                       (isize, LLMTokenBV),
+                       OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+                   > = BTreeMap::new();
+      -            for ((pop, dest), edges) in merged_per_dest {
+      -                for (tokens, states) in edges {
+      -                    if tokens.is_empty() || states.is_empty() {
+      -                        continue;
+      -                    }
+      -                    new_children
+      -                        .entry((pop, tokens))
+      -                        .or_default()
+      -                        .insert(dest, states);
+      -                }
+      +            for ((pop, dest), (tokens, states)) in merged_per_dest {
+      +                new_children
+      +                    .entry((pop, tokens))
+      +                    .or_default()
+      +                    .insert(dest, states);
+                   }
+       
+                   // Recompute live tokens and update children
 
       ```
     metadata:
@@ -31560,7 +31578,7 @@ messages:
       Applying patch to 'src/trie3_opt/passes/full/factoring.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/passes/full/factoring.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Implement correct state fanout
-      factoring in FactorStateFanout and full factoring passes"'
+  - user: 'Changes committed with message: "Fix: Correct FactorStateFanout pass logic
+      to merge edges by unioning token/state sets per destination."'
     metadata:
 ...

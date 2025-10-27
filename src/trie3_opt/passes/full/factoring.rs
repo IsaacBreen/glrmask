@@ -45,22 +45,19 @@ pub fn factor_state_fanout_trie3(
                 }
             }
 
-            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
-            let mut merged_per_dest: BTreeMap<
-                (isize, PrecomputeNode3Index),
-                Vec<(LLMTokenBV, StateIDBV)>,
-            > = BTreeMap::new();
+            // Step 2: For each (pop, dest), merge all edges into one by unioning their token and state sets.
+            let mut merged_per_dest: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+                BTreeMap::new();
             for ((pop, dest), edges) in per_dest {
-                // Group by state set
-                let mut by_states: BTreeMap<StateIDBV, LLMTokenBV> = BTreeMap::new();
+                let mut merged_tokens = LLMTokenBV::zeros();
+                let mut merged_states = StateIDBV::zeros();
                 for (tokens, states) in edges {
-                    let entry = by_states.entry(states).or_default();
-                    *entry |= &tokens;
+                    merged_tokens |= &tokens;
+                    merged_states |= &states;
                 }
-
-                let new_edges: Vec<(LLMTokenBV, StateIDBV)> =
-                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
-                merged_per_dest.insert((pop, dest), new_edges);
+                if !merged_tokens.is_empty() && !merged_states.is_empty() {
+                    merged_per_dest.insert((pop, dest), (merged_tokens, merged_states));
+                }
             }
 
             // Step 3: Reconstruct node.children from the per-destination merged edges.
@@ -68,16 +65,11 @@ pub fn factor_state_fanout_trie3(
                 (isize, LLMTokenBV),
                 OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
             > = BTreeMap::new();
-            for ((pop, dest), edges) in merged_per_dest {
-                for (tokens, states) in edges {
-                    if tokens.is_empty() || states.is_empty() {
-                        continue;
-                    }
-                    new_children
-                        .entry((pop, tokens))
-                        .or_default()
-                        .insert(dest, states);
-                }
+            for ((pop, dest), (tokens, states)) in merged_per_dest {
+                new_children
+                    .entry((pop, tokens))
+                    .or_default()
+                    .insert(dest, states);
             }
 
             // Recompute live tokens and update children

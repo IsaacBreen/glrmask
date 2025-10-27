@@ -35,34 +35,25 @@ impl OptimizationPass for FactorStateFanoutPass {
                 }
             }
 
-            // Step 2: For each (pop, dest), merge edges with identical state sets by unioning token sets.
-            let mut merged_per_dest: BTreeMap<(isize, NodeId), Vec<(SortedSet, SortedSet)>> =
-                BTreeMap::new();
+            // Step 2: For each (pop, dest), merge all edges into one by unioning their token and state sets.
+            let mut merged_per_dest: BTreeMap<(isize, NodeId), (SortedSet, SortedSet)> = BTreeMap::new();
             for ((pop, dest), edges) in per_dest {
-                // Group by state set
-                let mut by_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+                let mut merged_tokens = SortedSet::new();
+                let mut merged_states = SortedSet::new();
                 for (tokens, states) in edges {
-                    by_states
-                        .entry(states)
-                        .or_default()
-                        .union_inplace(&tokens);
+                    merged_tokens.union_inplace(&tokens);
+                    merged_states.union_inplace(&states);
                 }
-
-                let new_edges: Vec<(SortedSet, SortedSet)> =
-                    by_states.into_iter().map(|(s, t)| (t, s)).collect();
-                merged_per_dest.insert((pop, dest), new_edges);
+                if !merged_tokens.is_empty() && !merged_states.is_empty() {
+                    merged_per_dest.insert((pop, dest), (merged_tokens, merged_states));
+                }
             }
 
             // Step 3: Reconstruct node.children from the per-destination merged edges.
             let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-            for ((pop, dest), edges) in merged_per_dest {
-                for (tokens, states) in edges {
-                    if tokens.is_empty() || states.is_empty() {
-                        continue;
-                    }
-                    let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
-                    new_children.entry(key).or_default().insert(dest, states);
-                }
+            for ((pop, dest), (tokens, states)) in merged_per_dest {
+                let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+                new_children.entry(key).or_default().insert(dest, states);
             }
             node.children = new_children;
         }
