@@ -67,7 +67,7 @@ use std::io::{Read, Write};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
-use crate::trie3_opt::optimize_trie3_size;
+use crate::trie3_opt::{optimize_trie3_size, Trie3Config};
 
 #[derive(Default, Debug)]
 struct DfsStats {
@@ -2185,7 +2185,12 @@ impl GrammarConstraint {
                     Some(tid) => {
                         // Copy the terminal's template and hook it after merged
                         let (templ_start, templ_end) = terminal_templates.get(&tid).expect("template for terminal missing");
-                        let (copied_start, id_map) = clone_trie3_graph(templ_start, &intermediate_trie3_god);
+                        let (copied_roots, id_map) = IntermediatePrecomputeNode3::deep_copy_subtrees_into(
+                            &intermediate_trie3_god,
+                            &intermediate_trie3_god,
+                            &[*templ_start],
+                        );
+                        let copied_start = copied_roots.into_iter().next().unwrap();
                         let copied_end = id_map.get(templ_end).unwrap_or(&copied_start).clone();
 
                         // Connect merged -> copied_start unconditionally
