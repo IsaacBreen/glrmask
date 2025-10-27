@@ -729,9 +729,6 @@ class Model(GraphProvider):
 
         merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
         self.state = {sid: g for sid, g in merged.items() if not g.is_empty()}
-        print("state:")
-        for sid, gss in self.state.items():
-            print(f"{sid}:\n{gss.to_graph_string()}")
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         if self.ignore_terminal_id == terminal_id:
@@ -1037,6 +1034,10 @@ class Model(GraphProvider):
                 priority = (edge_priority, -self.max_depth.get(r, 0), 0, 0)
                 heapq.heappush(work_heap, HeapItem(priority, WorkItemNew(r, gss_init, 0, edge_priority)))
         stats.stop('get_mask.setup.seeding')
+
+        print("state:")
+        for sid, gss in self.state.items():
+            print(f"{sid}:\n{gss.to_graph_string()}")
 
         stats.start('get_mask.traversal')
         remaining_mask = all_ones
