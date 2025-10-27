@@ -151,13 +151,13 @@ pub fn optimize_trie3_size(
 
         if config.prune_dead_paths {
             run_pass!("Pruning dead paths", {
-                run_mini_pass(PruneDeadPathsPass, roots, trie3_god, &mut ctx);
+                prune_dead_paths_trie3(roots, &trie3_god);
             });
         }
 
         if config.prune_nodes_not_reaching_end {
             run_pass!("Pruning nodes that do not reach end", {
-                run_mini_pass(PruneUnproductivePathsPass, roots, trie3_god, &mut ctx);
+                prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
             });
         }
 
@@ -236,7 +236,8 @@ pub fn optimize_trie3_size(
         if config.compress_edges {
             run_pass!("Compressing edges + unary chains", {
                 compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
+                // Contract simple linear chains where (pop, tokens) are identical across the hop.
+                compress_unary_chains_trie3(roots, &trie3_god);
             });
         }
 
@@ -271,7 +272,7 @@ pub fn optimize_trie3_size(
         // After compression, prune and GC before the expensive merge.
         if config.prune_dead_paths {
             run_pass!("Pruning dead paths (post-compress)", {
-                run_mini_pass(PruneDeadPathsPass, roots, trie3_god, &mut ctx);
+                prune_dead_paths_trie3(roots, &trie3_god);
             });
         }
         if config.gc {
@@ -296,7 +297,8 @@ pub fn optimize_trie3_size(
             if config.compress_edges {
                 run_pass!("Compressing edges + unary chains (post-structural)", {
                     compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                    run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
+                    // Re-run chain contraction now that structure may have simplified.
+                    compress_unary_chains_trie3(roots, &trie3_god);
                 });
             }
         }
@@ -316,14 +318,15 @@ pub fn optimize_trie3_size(
 
         if config.prune_nodes_not_reaching_end {
             run_pass!("Pruning nodes that do not reach end (post-merge)", {
-                run_mini_pass(PruneUnproductivePathsPass, roots, trie3_god, &mut ctx);
+                prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
             });
         }
 
         if config.compress_edges {
             run_pass!("Compressing edges + unary chains (post-merge)", {
                 compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-                run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
+                // Final contraction pass to remove any last unary runs.
+                compress_unary_chains_trie3(roots, &trie3_god);
             });
         }
         if config.refine_token_atoms {
@@ -352,7 +355,7 @@ pub fn optimize_trie3_size(
 
         if config.prune_dead_paths {
             run_pass!("Pruning dead paths (final)", {
-                run_mini_pass(PruneDeadPathsPass, roots, trie3_god, &mut ctx);
+                prune_dead_paths_trie3(roots, &trie3_god);
             });
         }
 
@@ -392,7 +395,8 @@ pub fn optimize_trie3_size(
             if config.compress_edges {
                 run_pass!("Compressing edges + unary chains (post-pop0-elim)", {
                     // Use current maxes as we have the latest vocab and state bounds
-                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id); run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
+                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                    compress_unary_chains_trie3(roots, &trie3_god);
                 });
             }
             if config.refine_token_atoms {
@@ -440,7 +444,8 @@ pub fn optimize_trie3_size(
                 });
                 if config.compress_edges {
                     run_pass!("Compressing edges + unary chains (post-pop0-struct-merge)", {
-                        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id); run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
+                        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                        compress_unary_chains_trie3(roots, &trie3_god);
                     });
                 }
                 // Defensive: immediately refine token atoms to allow reversing any local structure
@@ -469,12 +474,13 @@ pub fn optimize_trie3_size(
             }
             if config.prune_nodes_not_reaching_end {
                 run_pass!("Pruning nodes that do not reach end (post-pop0-elim)", {
-                    run_mini_pass(PruneUnproductivePathsPass, roots, trie3_god, &mut ctx);
+                    prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
                 });
             }
             if config.compress_edges {
                 run_pass!("Compressing edges + unary chains (post-pop0-elim-merge)", {
-                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id); run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
+                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                    compress_unary_chains_trie3(roots, &trie3_god);
                 });
             }
             if config.refine_token_atoms {
@@ -533,7 +539,8 @@ pub fn optimize_trie3_size(
         });
         if config.compress_edges {
             run_pass!("Compressing edges (post-final-pop0-elim)", {
-                compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id); run_mini_pass(CompressChainsPass, roots, trie3_god, &mut ctx);
+                compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                compress_unary_chains_trie3(roots, &trie3_god);
             });
         }
         if config.merge_nodes_exact.enabled {
