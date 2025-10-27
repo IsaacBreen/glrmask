@@ -38,6 +38,7 @@ TerminalIdSet = RangeSet
 # Since the code was refactored to use a pure Python RangeSet, we track its methods instead.
 _original_rangeset_union = RangeSet.union
 _original_rangeset_intersection = RangeSet.intersection
+_original_rangeset_isdisjoint = RangeSet.isdisjoint
 
 def _patched_union(self, other: "RangeSet") -> "RangeSet":
     """Patched version of RangeSet.union that increments a stats counter."""
@@ -57,9 +58,32 @@ def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
     stats.stop('bitset.intersection.time')
     return result
 
+def _patched_isdisjoint(self, other: "RangeSet") -> bool:
+    """Patched version of RangeSet.isdisjoint that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset.isdisjoint.calls')
+    stats.start('bitset.isdisjoint.time')
+    result = _original_rangeset_isdisjoint(self, other)
+    stats.stop('bitset.isdisjoint.time')
+    return result
+
+# --- Monkey-patch RangeSetStates ---
+_original_rangesetstates_isdisjoint = RangeSetStates.isdisjoint
+
+def _patched_states_isdisjoint(self, other: "RangeSetStates") -> bool:
+    """Patched version of RangeSetStates.isdisjoint that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset_states.isdisjoint.calls')
+    stats.start('bitset_states.isdisjoint.time')
+    result = _original_rangesetstates_isdisjoint(self, other)
+    stats.stop('bitset_states.isdisjoint.time')
+    return result
+
 # Apply the patches
 RangeSet.union = _patched_union
 RangeSet.intersection = _patched_intersection
+RangeSet.isdisjoint = _patched_isdisjoint
+RangeSetStates.isdisjoint = _patched_states_isdisjoint
 # --- End of monkey-patch ---
 
 def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
@@ -931,8 +955,10 @@ class Model(GraphProvider):
         if not a_node:
             return
 
+        stats.start('get_mask.main_loop.initial_peek')
         peek0 = gss_node.peek()
         peek0_rs = RangeSetStates.from_indices(peek0) if peek0 else RangeSetStates.empty()
+        stats.stop('get_mask.main_loop.initial_peek')
 
         # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
         # Strengthen remaining-mask with node-specific allowance (oracle reward) when provided.
@@ -998,8 +1024,10 @@ class Model(GraphProvider):
                         if not popped_acc or popped_acc.llm_mask.is_empty():
                             pop_cache[pop_val] = (GSS.empty(), None, [], RangeSetStates.empty())
                             continue
+                        stats.start('get_mask.main_loop.post_pop_peek')
                         peeked = popped.peek()
                         peek_rs = RangeSetStates.from_indices(peeked)
+                        stats.stop('get_mask.main_loop.post_pop_peek')
                         pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                         if global_pop_cache is not None:
                             global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
@@ -1226,8 +1254,10 @@ class Model(GraphProvider):
                         if not popped_acc or popped_acc.llm_mask.is_empty():
                             pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
                             continue
+                        stats.start('get_mask.main_loop.post_pop_peek')
                         peeked = popped.peek()
                         peek_rs = RangeSetStates.from_indices(peeked)
+                        stats.stop('get_mask.main_loop.post_pop_peek')
                         pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
                         if global_pop_cache is not None:
                             global_pop_cache[(id(gss_node), edge.pop)] = (popped, popped_acc, peeked, peek_rs)
