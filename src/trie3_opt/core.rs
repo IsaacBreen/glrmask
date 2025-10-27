@@ -98,6 +98,24 @@ impl SortedSet {
         }
         SortedSet { elems: out }
     }
+    /// Returns true if self and other share at least one common element.
+    /// This is a fast, allocation-free check using a merged scan on the sorted vectors.
+    pub fn intersects(&self, other: &SortedSet) -> bool {
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < self.elems.len() && j < other.elems.len() {
+            let a = self.elems[i];
+            let b = other.elems[j];
+            if a < b {
+                i += 1;
+            } else if a > b {
+                j += 1;
+            } else {
+                return true;
+            }
+        }
+        false
+    }
     pub fn is_empty(&self) -> bool {
         self.elems.is_empty()
     }

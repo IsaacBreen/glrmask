@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::hash_map::Entry;
 
 use crate::trie3_opt::{
     context::OptimizationContext,
@@ -37,14 +38,37 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             }
         }
 
-        let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
+        // Build a per-pop union of all tokens that actually appear at that pop.
+        // This dramatically reduces the universe size versus 0..=max_llm_token_id.
+        let mut union_by_pop: BTreeMap<isize, SortedSet> = BTreeMap::new();
+        for (pop, masks) in &by_pop_masks {
+            let mut acc: HashSet<usize> = HashSet::new();
+            for m in masks {
+                for t in m.iter() {
+                    acc.insert(t);
+                }
+            }
+            union_by_pop.insert(*pop, SortedSet::from_iter(acc.into_iter()));
+        }
+
         let mut atoms_by_pop: BTreeMap<isize, Vec<SortedSet>> = BTreeMap::new();
         for (pop, masks) in &by_pop_masks {
-            let mut blocks = vec![universe.clone()];
+            let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
+            let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
             let mut aborted = false;
             for m in masks {
-                let mut next_blocks = Vec::new();
+                if blocks.is_empty() {
+                    break;
+                }
+                let mut next_blocks = Vec::with_capacity(blocks.len().saturating_mul(2));
+                let mut any_split = false;
                 for b in &blocks {
+                    // If no overlap, forward the block unchanged to avoid allocations.
+                    if !b.intersects(&m) {
+                        next_blocks.push(b.clone());
+                        continue;
+                    }
+                    // Split: intersection and difference
                     let inter = b.intersect(&m);
                     if !inter.is_empty() {
                         next_blocks.push(inter);
@@ -53,14 +77,26 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                     if !diff.is_empty() {
                         next_blocks.push(diff);
                     }
+                    any_split = true;
                 }
                 if self.max_atoms_per_pop > 0 && next_blocks.len() > self.max_atoms_per_pop {
                     aborted = true;
                     break;
                 }
+                if !any_split {
+                    // No change for this mask; keep current blocks.
+                    continue;
+                }
                 blocks = next_blocks;
             }
-            atoms_by_pop.insert(*pop, if aborted { vec![universe.clone()] } else { blocks });
+            atoms_by_pop.insert(
+                *pop,
+                if aborted {
+                    if universe.is_empty() { vec![] } else { vec![universe.clone()] }
+                } else {
+                    blocks
+                },
+            );
         }
 
         // Create dense IDs for all unique token sets for faster lookups.
@@ -68,9 +104,13 @@ impl OptimizationPass for MergeGlobalAtomsPass {
         let mut next_token_set_id = 0;
         for masks in by_pop_masks.values() {
             for mask in masks {
-                if &*unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id) == &next_token_set_id {
-                    next_token_set_id += 1;
-                }
+                match unique_token_sets.entry(mask.clone()) {
+                    Entry::Vacant(e) => {
+                        e.insert(next_token_set_id);
+                        next_token_set_id += 1;
+                    }
+                    Entry::Occupied(_) => {}
+                };
             }
         }
 
@@ -85,7 +125,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                     let token_set_id = *unique_token_sets.get(mask).unwrap();
                     let mut idxs = Vec::new();
                     for (i, atom) in atoms.iter().enumerate() {
-                        if !mask.intersect(atom).is_empty() {
+                        if mask.intersects(atom) {
                             idxs.push(i);
                         }
                     }
