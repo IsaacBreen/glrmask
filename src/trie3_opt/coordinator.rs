@@ -8,9 +8,9 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::metrics::run_all_metrics;
 use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-use crate::trie3_opt::passes::{
-    CanonicalizeEndNodesPass, CompressEdgesPass, EliminatePop0ExceptRootsPass,
-    FactorStateFanoutPass, MergeStructuralPass, OptimizationPass, PruneUnproductivePathsPass,
+use crate::trie3_opt::passes::{FactorStateFanoutPass,
+    CanonicalizeEndNodesPass, CompressEdgesPass, EliminatePop0ExceptRootsPass, MergeStructuralPass,
+    OptimizationPass, PruneDeadPathsPass,
 };
 
 use crate::constraint::{
@@ -65,7 +65,7 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
     let mut pipeline: Vec<Box<dyn OptimizationPass>> = Vec::new();
 
     if config.enable_prune_dead_paths {
-        pipeline.push(Box::new(PruneUnproductivePathsPass));
+        pipeline.push(Box::new(PruneDeadPathsPass));
     }
     if config.enable_canonicalize_end_nodes {
         pipeline.push(Box::new(CanonicalizeEndNodesPass));
