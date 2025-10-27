@@ -63,7 +63,7 @@ impl Default for CoordinatorConfig {
             merge_structural_max_iters: 0,
             merge_bisimulation_max_iters: 0,
             merge_global_atoms: true,
-            merge_global_atoms_max_iters: 2,
+            merge_global_atoms_max_iters: 0,
             merge_global_atoms_max_atoms_per_pop: 4096,
             eliminate_pop0_except_roots: true,
             merge_equivalent_llm_tokens: true,
