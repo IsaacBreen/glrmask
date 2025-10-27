@@ -857,6 +857,7 @@ class Model(GraphProvider):
             edge = a_node.children[edge_idx]
 
             if edge.llm_bv.isdisjoint(active_remaining_mask):
+                stats.inc('get_mask.traversal.skip')
                 continue
 
             popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
@@ -913,6 +914,7 @@ class Model(GraphProvider):
                     if new_mask is not None:
                         active_remaining_mask = new_mask
                     if edge.llm_bv.isdisjoint(active_remaining_mask):
+                        stats.inc('get_mask.traversal.dest_keys.skip')
                         break
                     dests_proc = 0
 
@@ -924,7 +926,7 @@ class Model(GraphProvider):
                 else:
                     key_isolate = (id(source_after_apply), tuple(values_to_keep))
                     if isolate_cache is not None and key_isolate in isolate_cache:
-                        stats.inc('get_mask.traversal.isolate_many_cache_hits')
+                        stats.inc('get_mask.traversal.dest_keys.isolate_many_cache_hits')
                         child_gss = isolate_cache[key_isolate]
                     else:
                         child_gss = source_after_apply.isolate_many(values_to_keep)
@@ -941,6 +943,7 @@ class Model(GraphProvider):
                 if new_mask is not None:
                     active_remaining_mask = new_mask
                 if edge.llm_bv.isdisjoint(active_remaining_mask):
+                    stats.inc('get_mask.traversal.dest_keys.skip2')
                     break
 
                 dests_proc += 1
