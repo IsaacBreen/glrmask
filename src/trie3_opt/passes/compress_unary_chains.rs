@@ -72,12 +72,16 @@ impl OptimizationPass for CompressUnaryChainsPass {
 
             for (p_id, u_id, v_id, key, s_uv) in rewrites {
                 let p_node = &mut trie.nodes[p_id as usize];
-                if let Some(dm) = p_node.children.get_mut(&key) {
+                if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
+                    let dm = entry.get_mut();
                     if let Some(s_pu) = dm.remove(&u_id) {
                         let s_comp = s_pu.intersect(&s_uv);
                         if !s_comp.is_empty() {
                             dm.entry(v_id).or_default().union_inplace(&s_comp);
                         }
+                    }
+                    if entry.get().is_empty() {
+                        entry.remove();
                     }
                 }
             }

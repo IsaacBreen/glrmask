@@ -49,9 +49,9 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                     if !inter.is_empty() {
                         next_blocks.push(inter);
                     }
-                    let diff_elems: Vec<_> = b.iter().filter(|t| !m.elems.binary_search(t).is_ok()).collect();
-                    if !diff_elems.is_empty() {
-                        next_blocks.push(SortedSet::from_iter(diff_elems));
+                    let diff = b.difference(&m);
+                    if !diff.is_empty() {
+                        next_blocks.push(diff);
                     }
                 }
                 if self.max_atoms_per_pop > 0 && next_blocks.len() > self.max_atoms_per_pop {

@@ -77,6 +77,27 @@ impl SortedSet {
         }
         SortedSet { elems: out }
     }
+    pub fn difference(&self, other: &SortedSet) -> SortedSet {
+        let mut out = Vec::new();
+        let mut i = 0;
+        let mut j = 0;
+        while i < self.elems.len() && j < other.elems.len() {
+            if self.elems[i] < other.elems[j] {
+                out.push(self.elems[i]);
+                i += 1;
+            } else if self.elems[i] > other.elems[j] {
+                j += 1;
+            } else {
+                i += 1;
+                j += 1;
+            }
+        }
+        while i < self.elems.len() {
+            out.push(self.elems[i]);
+            i += 1;
+        }
+        SortedSet { elems: out }
+    }
     pub fn is_empty(&self) -> bool {
         self.elems.is_empty()
     }
