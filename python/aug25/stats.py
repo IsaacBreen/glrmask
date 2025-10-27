@@ -5,6 +5,8 @@ from typing import Dict, Iterable, List, Tuple, Optional
 import statistics
 import math
 import os
+import contextlib
+import functools
 
 
 class Stats:
@@ -42,6 +44,9 @@ class Stats:
         # Active timers: key -> start_time
         self.timers: Dict[str, float] = {}
 
+        # Stack for tracking keys started within a generator scope.
+        self.scope_stack: List[set] = []
+
         # Enabled flag lets callers noop the collection if needed.
         self.enabled = os.environ.get("DISABLE_STATS") is None
 
@@ -64,6 +69,7 @@ class Stats:
         self.durations.clear()
         self.timers.clear()
         self.key_positions.clear()
+        self.scope_stack.clear()
         self.show_all_stats = False
 
     def inc(self, key: str, value: int = 1):
@@ -78,6 +84,8 @@ class Stats:
         if not self.enabled:
             return
         self._record_key_position(key)
+        if self.scope_stack:
+            self.scope_stack[-1].add(key)
         self.timers[key] = time.perf_counter()
 
     def stop(self, key: str):
@@ -88,6 +96,27 @@ class Stats:
             duration = time.perf_counter() - self.timers[key]
             self.durations[key].append(duration)
             del self.timers[key]
+
+    @contextlib.contextmanager
+    def scope(self):
+        """A context manager to ensure timers started within it are stopped.
+
+        Useful for generators that might not run to completion.
+        """
+        if not self.enabled:
+            yield
+            return
+
+        self.scope_stack.append(set())
+        try:
+            yield
+        finally:
+            if self.scope_stack:  # Check if not empty (e.g. after a reset)
+                my_scope_keys = self.scope_stack.pop()
+                active_keys = set(self.timers.keys())
+                keys_to_stop = my_scope_keys & active_keys
+                for key in keys_to_stop:
+                    self.stop(key)
 
     def _record_key_position(self, key: str):
         """If seeing a key for the first time, record its call site (file, line)."""
@@ -469,3 +498,24 @@ class Stats:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.report()
+
+
+def stats_generator(func):
+    """Decorator to ensure timers started in a generator are stopped.
+
+    Wraps the generator execution in a `Stats.scope()` to automatically
+    stop any timers that were started but not stopped by the time the
+    generator is exhausted or garbage collected.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        stats = Stats.get()
+        if not stats.enabled:
+            yield from func(*args, **kwargs)
+            return
+
+        # The scope must wrap the *iteration* of the generator.
+        with stats.scope():
+            yield from func(*args, **kwargs)
+
+    return wrapper
