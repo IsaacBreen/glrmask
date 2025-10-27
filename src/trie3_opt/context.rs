@@ -1,4 +1,3 @@
-use crate::json_serialization::JSONNode;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -10,8 +9,8 @@ pub struct OptimizationContext {
     pub max_state_id: usize,
     pub iteration_budget: usize,
     pub debug_level: u8,
-    pub metrics_before: BTreeMap<String, JSONNode>,
-    pub metrics_after: BTreeMap<String, JSONNode>,
+    pub metrics_before: BTreeMap<String, String>,
+    pub metrics_after: BTreeMap<String, String>,
 }
 
 impl OptimizationContext {

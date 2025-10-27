@@ -265,8 +265,8 @@ pub fn run_pipeline_on_precompute3(
     if ctx.debug_level > 0 {
         crate::debug!(
             1,
-            "[Trie3 Opt] Metrics before optimization: {:?}",
-            ctx.metrics_before
+            "[Trie3 Opt] Metrics before optimization: {}",
+            crate::trie3_opt::metrics::pretty_print_metrics_map(&ctx.metrics_before)
         );
     }
 
@@ -282,9 +282,9 @@ pub fn run_pipeline_on_precompute3(
             let metrics = run_all_metrics(&mini);
             crate::debug!(
                 1,
-                "[Trie3 Opt] Metrics after '{}': {:?}",
+                "[Trie3 Opt] Metrics after '{}': {}",
                 pass.name(),
-                metrics
+                crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics)
             );
         }
     }
@@ -292,7 +292,9 @@ pub fn run_pipeline_on_precompute3(
     // Run final metrics
     ctx.metrics_after = run_all_metrics(&mini);
     if ctx.debug_level > 0 {
-        crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {:?}", ctx.metrics_after);
+        crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {}",
+            crate::trie3_opt::metrics::pretty_print_metrics_map(&ctx.metrics_after)
+        );
     }
 
     // Import the result back and finalize

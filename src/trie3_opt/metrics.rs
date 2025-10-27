@@ -1,4 +1,3 @@
-use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::trie3_opt::core::MiniTrie;
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -24,11 +23,9 @@ impl NumericStats {
         self.values.push(value.into());
     }
 
-    pub fn to_json(&self) -> JSONNode {
+    pub fn to_pretty_string(&self) -> String {
         if self.values.is_empty() {
-            let mut obj = BTreeMap::new();
-            obj.insert("count".to_string(), 0.to_json());
-            return JSONNode::Object(obj);
+            return "{ count: 0 }".to_string();
         }
 
         let mut sorted_values = self.values.clone();
@@ -54,19 +51,10 @@ impl NumericStats {
         let variance = self.values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
         let stdev = variance.sqrt();
 
-        let mut obj = BTreeMap::new();
-        obj.insert("count".to_string(), count.to_json());
-        obj.insert("sum".to_string(), sum.to_json());
-        obj.insert("mean".to_string(), mean.to_json());
-        obj.insert("stdev".to_string(), stdev.to_json());
-        obj.insert("min".to_string(), min.to_json());
-        obj.insert("p25".to_string(), p25.to_json());
-        obj.insert("median".to_string(), median.to_json());
-        obj.insert("p75".to_string(), p75.to_json());
-        obj.insert("p95".to_string(), p95.to_json());
-        obj.insert("max".to_string(), max.to_json());
-
-        JSONNode::Object(obj)
+        format!(
+            "{{ count: {}, sum: {:.2}, mean: {:.2}, stdev: {:.2}, min: {:.2}, p25: {:.2}, median: {:.2}, p75: {:.2}, p95: {:.2}, max: {:.2} }}",
+            count, sum, mean, stdev, min, p25, median, p75, p95, max
+        )
     }
 }
 
@@ -74,8 +62,8 @@ impl NumericStats {
 pub trait Metric {
     /// The name of the metric.
     fn name(&self) -> &'static str;
-    /// Computes the metric and returns a serializable JSON value.
-    fn compute(&self, trie: &MiniTrie) -> JSONNode;
+    /// Computes the metric and returns a formatted string.
+    fn compute(&self, trie: &MiniTrie) -> String;
 }
 
 // --- Concrete Metric Implementations ---
@@ -83,75 +71,75 @@ pub trait Metric {
 pub struct NumNodesMetric;
 impl Metric for NumNodesMetric {
     fn name(&self) -> &'static str { "num_nodes" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.nodes.len().to_json() }
+    fn compute(&self, trie: &MiniTrie) -> String { trie.nodes.len().to_string() }
 }
 
 pub struct NumEdgesMetric;
 impl Metric for NumEdgesMetric {
     fn name(&self) -> &'static str { "num_edges" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode {
-        trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_json()
+    fn compute(&self, trie: &MiniTrie) -> String {
+        trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_string()
     }
 }
 
 pub struct NumRootsMetric;
 impl Metric for NumRootsMetric {
     fn name(&self) -> &'static str { "num_roots" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.root_ids.len().to_json() }
+    fn compute(&self, trie: &MiniTrie) -> String { trie.root_ids.len().to_string() }
 }
 
 pub struct NumEndNodesMetric;
 impl Metric for NumEndNodesMetric {
     fn name(&self) -> &'static str { "num_end_nodes" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode {
-        trie.nodes.iter().filter(|n| n.end).count().to_json()
+    fn compute(&self, trie: &MiniTrie) -> String {
+        trie.nodes.iter().filter(|n| n.end).count().to_string()
     }
 }
 
 pub struct NumReachableNodesMetric;
 impl Metric for NumReachableNodesMetric {
     fn name(&self) -> &'static str { "num_reachable_nodes" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.reachable_from_roots().len().to_json() }
+    fn compute(&self, trie: &MiniTrie) -> String { trie.reachable_from_roots().len().to_string() }
 }
 
 pub struct NumProductiveNodesMetric;
 impl Metric for NumProductiveNodesMetric {
     fn name(&self) -> &'static str { "num_productive_nodes" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode { trie.can_reach_end().len().to_json() }
+    fn compute(&self, trie: &MiniTrie) -> String { trie.can_reach_end().len().to_string() }
 }
 
 pub struct RootFanoutMetric;
 impl Metric for RootFanoutMetric {
     fn name(&self) -> &'static str { "root_fanout" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode {
+    fn compute(&self, trie: &MiniTrie) -> String {
         let fanouts: Vec<f64> = trie
             .nodes
             .iter()
             .filter(|n| trie.root_ids.contains(&n.id))
             .map(|n| n.out_degree() as f64)
             .collect();
-        NumericStats::from_samples(&fanouts).to_json()
+        NumericStats::from_samples(&fanouts).to_pretty_string()
     }
 }
 
 pub struct NonRootFanoutMetric;
 impl Metric for NonRootFanoutMetric {
     fn name(&self) -> &'static str { "non_root_fanout" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode {
+    fn compute(&self, trie: &MiniTrie) -> String {
         let fanouts: Vec<f64> = trie
             .nodes
             .iter()
             .filter(|n| !trie.root_ids.contains(&n.id))
             .map(|n| n.out_degree() as f64)
             .collect();
-        NumericStats::from_samples(&fanouts).to_json()
+        NumericStats::from_samples(&fanouts).to_pretty_string()
     }
 }
 
 pub struct EdgeOverlapMetric;
 impl Metric for EdgeOverlapMetric {
     fn name(&self) -> &'static str { "edge_overlap" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode {
+    fn compute(&self, trie: &MiniTrie) -> String {
         use crate::trie3_opt::core::{NodeId, SortedSet};
         use std::collections::BTreeMap;
 
@@ -190,14 +178,14 @@ impl Metric for EdgeOverlapMetric {
                 scores.push(node_score);
             }
         }
-        NumericStats::from_samples(&scores).to_json()
+        NumericStats::from_samples(&scores).to_pretty_string()
     }
 }
 
 pub struct StateFanoutMetric;
 impl Metric for StateFanoutMetric {
     fn name(&self) -> &'static str { "state_fanout" }
-    fn compute(&self, trie: &MiniTrie) -> JSONNode {
+    fn compute(&self, trie: &MiniTrie) -> String {
         use crate::trie3_opt::core::{NodeId, SortedSet};
         use std::collections::BTreeMap;
 
@@ -227,12 +215,12 @@ impl Metric for StateFanoutMetric {
             }
         }
 
-        stats.to_json()
+        stats.to_pretty_string()
     }
 }
 
 /// Instantiates and runs all standard metrics on a given trie.
-pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
+pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, String> {
     let metrics: Vec<Box<dyn Metric>> = vec![
         Box::new(NumNodesMetric),
         Box::new(NumEdgesMetric),
@@ -254,7 +242,7 @@ pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
 }
 
 /// Formats a map of metrics into a pretty, indented string.
-pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, JSONNode>) -> String {
+pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, String>) -> String {
     let mut buf = String::new();
     buf.push_str("{\n");
     let mut first = true;
@@ -263,39 +251,9 @@ pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, JSONNode>) -> String 
             buf.push_str(",\n");
         }
         first = false;
-        buf.push_str(&" ".repeat(2));
-        write!(buf, "\"{}\": ", k).unwrap();
-        format_json_node_recursive(v, &mut buf, 2);
+        write!(buf, "  \"{}\": {}", k, v).unwrap();
     }
     buf.push_str("\n}");
     buf
 }
 
-/// Recursive helper to format a JSONNode into a string buffer.
-fn format_json_node_recursive(node: &JSONNode, buf: &mut String, indent: usize) {
-    // This implementation relies on the `Debug` output of `JSONNode` as its internal
-    // structure is not available here. It parses the debug string to re-format it.
-    let debug_str = format!("{:?}", node);
-
-    if let Some(s) = debug_str.strip_prefix("Object(").and_then(|s| s.strip_suffix(')')) {
-        // It's an object. We can't deserialize it, but we can format it better.
-        // For simplicity, we'll just replace the verbose debug format with a cleaner one.
-        // A full recursive parse of the debug string is too brittle.
-        // Let's just make it a bit more compact and readable.
-        let inner = s.replace("\n", &format!("\n{}", " ".repeat(indent + 2)));
-        buf.push_str(&inner);
-    } else if let Some(s) = debug_str.strip_prefix("UInt(").and_then(|s| s.strip_suffix(')')) {
-        buf.push_str(s);
-    } else if let Some(s) = debug_str.strip_prefix("Int(").and_then(|s| s.strip_suffix(')')) {
-        buf.push_str(s);
-    } else if let Some(s) = debug_str.strip_prefix("Float(").and_then(|s| s.strip_suffix(')')) {
-        if let Ok(f) = s.parse::<f64>() {
-            write!(buf, "{:.4}", f).unwrap();
-        } else {
-            buf.push_str(s);
-        }
-    } else {
-        // Fallback for other types (Array, String, etc.)
-        buf.push_str(&debug_str);
-    }
-}
