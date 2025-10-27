@@ -501,13 +501,11 @@ class Stats:
 
 
 def stats_generator(func):
-    """Decorator to ensure timers started in a generator are stopped and paused correctly.
+    """Decorator to ensure timers started in a generator are stopped.
 
-    Wraps the generator execution to:
-    1. Pause any active timers when the generator yields a value.
-    2. Resume those timers when the generator is called again.
-    3. Use a `Stats.scope()` to automatically stop any timers that were started
-       but not stopped by the time the generator is exhausted or garbage collected.
+    Wraps the generator execution in a `Stats.scope()` to automatically
+    stop any timers that were started but not stopped by the time the
+    generator is exhausted or garbage collected.
     """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -516,45 +514,8 @@ def stats_generator(func):
             yield from func(*args, **kwargs)
             return
 
-        g = func(*args, **kwargs)
-        # key -> elapsed_duration when paused
-        paused_timers = {}
-
+        # The scope must wrap the *iteration* of the generator.
         with stats.scope():
-            try:
-                while True:
-                    # Resume timers that were paused on the previous yield.
-                    # The new start time is back-dated by the elapsed duration
-                    # so that the final duration calculation is correct.
-                    now = time.perf_counter()
-                    for key, elapsed in paused_timers.items():
-                        stats.timers[key] = now - elapsed
-                    paused_timers.clear()
-
-                    # Run the underlying generator to the next yield.
-                    item = next(g)
-
-                    # Pause any timers that are currently active.
-                    now = time.perf_counter()
-                    active_keys = list(stats.timers.keys())
-                    for key in active_keys:
-                        elapsed = now - stats.timers[key]
-                        paused_timers[key] = elapsed
-                        del stats.timers[key]
-
-                    yield item
-
-            except StopIteration:
-                # The generator is exhausted.
-                return
-            finally:
-                # This block runs on exhaustion or garbage collection.
-                # Restore any timers that were paused on the last yield. This makes
-                # them "active" again so that the `stats.scope()` context manager
-                # can find them and stop them correctly.
-                if paused_timers:
-                    now = time.perf_counter()
-                    for key, elapsed in paused_timers.items():
-                        stats.timers[key] = now - elapsed
+            yield from func(*args, **kwargs)
 
     return wrapper
