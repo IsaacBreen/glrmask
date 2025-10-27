@@ -1020,9 +1020,4 @@ class Model(GraphProvider):
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
 
-        # return {
-        #     "type": "timed_output",
-        #     "output": original_indices,
-        #     "time_sec": 0.0,
-        # }
         return original_indices
