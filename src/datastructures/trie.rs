@@ -1629,36 +1629,41 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             return new_idx;
         }
 
-        let old_node_guard = old_idx
-            .read(source_arena)
-            .expect("Source node not found during deep copy");
+        // 1. Read data from old node and drop the lock immediately.
+        let (value, max_depth, children_to_copy) = {
+            let old_node_guard = old_idx
+                .read(source_arena)
+                .expect("Source node not found during deep copy");
 
-        // Create a new node with copied value and max_depth, but no children yet.
-        let new_node = Trie {
-            value: old_node_guard.value.clone(),
+            // Now, collect children info to avoid holding the read guard during recursive calls.
+            let children_to_copy: Vec<(EK, OrderedHashMap<Trie2Index, EV>)> = old_node_guard
+                .children
+                .iter()
+                .map(|(ek, dest_map)| (ek.clone(), dest_map.clone()))
+                .collect();
+
+            (
+                old_node_guard.value.clone(),
+                old_node_guard.max_depth,
+                children_to_copy,
+            )
+        }; // old_node_guard is dropped here, releasing the read lock on source_arena.inner
+
+        // 2. Create the new node and insert it into the new arena.
+        let new_node_skeleton = Trie {
+            value,
             children: BTreeMap::new(), // Children will be added after recursive calls.
-            max_depth: old_node_guard.max_depth,
+            max_depth,
         };
-        let new_idx = Trie2Index::from(new_arena.insert(new_node));
+        let new_idx = Trie2Index::from(new_arena.insert(new_node_skeleton));
 
-        // Insert the mapping *before* recursing to handle cycles correctly.
+        // 3. Insert the mapping *before* recursing to handle cycles correctly.
         old_to_new_map.insert(old_idx, new_idx);
 
-        // Now, collect children info to avoid holding the read guard during recursive calls.
-        let children_to_copy: Vec<(EK, OrderedHashMap<Trie2Index, EV>)> = old_node_guard
-            .children
-            .iter()
-            .map(|(ek, dest_map)| (ek.clone(), dest_map.clone()))
-            .collect();
-
-        // Drop the read guard on the old node.
-        drop(old_node_guard);
-
-        // Recurse for all children and build up the new children map.
+        // 4. Recurse for all children and build up the new children map.
         let mut new_children = BTreeMap::new();
         for (ek, dest_map) in children_to_copy {
             let mut new_dest_map = OrderedHashMap::with_capacity(dest_map.len());
-            for (old_child_idx, ev) in dest_map {
                 let new_child_idx =
                     Self::deep_copy_recursive(old_child_idx, source_arena, new_arena, old_to_new_map);
                 new_dest_map.insert(new_child_idx, ev.clone());
@@ -1666,7 +1671,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             new_children.insert(ek, new_dest_map);
         }
 
-        // Now, get a write lock on the new node to insert the copied children.
+        // 5. Update the new node with the children map.
         let mut new_node_guard = new_idx
             .write(new_arena)
             .expect("Newly created node not found during deep copy");
