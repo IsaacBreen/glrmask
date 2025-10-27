@@ -417,8 +417,8 @@ class Model(GraphProvider):
     all_internal_llm_tokens_bitset: LLMTokenSet
     ignore_terminal_id: Optional[int]
     state: Dict[int, GSS]
-    gm_max_edges: int = 1
-    gm_max_dests: int = 1
+    gm_max_edges: int = 1024
+    gm_max_dests: int = 16
     suppress_stats_report: bool = False
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
