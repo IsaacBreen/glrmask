@@ -4320,6 +4320,52 @@ local_system:
           }
       }
 
+      pub struct EdgeOverlapMetric;
+      impl Metric for EdgeOverlapMetric {
+          fn name(&self) -> &'static str { "edge_overlap" }
+          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+              use crate::trie3_opt::core::{NodeId, SortedSet};
+              use std::collections::BTreeMap;
+
+              let mut scores: Vec<f64> = Vec::new();
+              for node in &trie.nodes {
+                  let mut node_score = 0.0;
+
+                  // Group destination maps by pop
+                  let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
+                  for (ek, dm) in &node.children {
+                      by_pop.entry(ek.pop).or_default().push(dm);
+                  }
+
+                  for (_pop, dms) in by_pop {
+                      if dms.len() < 2 {
+                          continue;
+                      }
+                      for i in 0..dms.len() {
+                          for j in (i + 1)..dms.len() {
+                              let dm1 = dms[i];
+                              let dm2 = dms[j];
+
+                              let mut common_dests_with_overlap = 0;
+                              for (d, sids1) in dm1 {
+                                  if let Some(sids2) = dm2.get(d) {
+                                      if !sids1.intersect(sids2).is_empty() {
+                                          common_dests_with_overlap += 1;
+                                      }
+                                  }
+                              }
+                              node_score += common_dests_with_overlap as f64;
+                          }
+                      }
+                  }
+                  if node_score > 0.0 {
+                      scores.push(node_score);
+                  }
+              }
+              NumericStats::from_samples(&scores).to_json()
+          }
+      }
+
       /// Instantiates and runs all standard metrics on a given trie.
       pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
           let metrics: Vec<Box<dyn Metric>> = vec![
@@ -4331,6 +4377,7 @@ local_system:
               Box::new(NumProductiveNodesMetric),
               Box::new(RootFanoutMetric),
               Box::new(NonRootFanoutMetric),
+              Box::new(EdgeOverlapMetric),
           ];
 
           let mut results = BTreeMap::new();
@@ -13707,19 +13754,14 @@ local_system:
 
           // Run passes
           for pass in pipeline.iter() {
-              if ctx.debug_level > 0 {
-                  crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
+              // Simple progress trace
+              #[allow(unused)]
+              {
+                  if ctx.debug_level > 0 {
+                      // eprintln!("[Trie3 Opt] Running pass: {}", pass.name());
+                  }
               }
               pass.run(&mut mini, &mut ctx);
-              if ctx.debug_level > 0 {
-                  let metrics = run_all_metrics(&mini);
-                  crate::debug!(
-                      1,
-                      "[Trie3 Opt] Metrics after '{}': {:?}",
-                      pass.name(),
-                      metrics
-                  );
-              }
           }
 
           // Run final metrics
@@ -14156,6 +14198,89 @@ local_system:
           }
       }
 
+      pub struct EdgeOverlapMetric;
+      impl Metric for EdgeOverlapMetric {
+          fn name(&self) -> &'static str { "edge_overlap" }
+          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+              use crate::trie3_opt::core::{NodeId, SortedSet};
+              use std::collections::BTreeMap;
+
+              let mut scores: Vec<f64> = Vec::new();
+              for node in &trie.nodes {
+                  let mut node_score = 0.0;
+
+                  // Group destination maps by pop
+                  let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
+                  for (ek, dm) in &node.children {
+                      by_pop.entry(ek.pop).or_default().push(dm);
+                  }
+
+                  for (_pop, dms) in by_pop {
+                      if dms.len() < 2 {
+                          continue;
+                      }
+                      for i in 0..dms.len() {
+                          for j in (i + 1)..dms.len() {
+                              let dm1 = dms[i];
+                              let dm2 = dms[j];
+
+                              let mut common_dests_with_overlap = 0;
+                              for (d, sids1) in dm1 {
+                                  if let Some(sids2) = dm2.get(d) {
+                                      if !sids1.intersect(sids2).is_empty() {
+                                          common_dests_with_overlap += 1;
+                                      }
+                                  }
+                              }
+                              node_score += common_dests_with_overlap as f64;
+                          }
+                      }
+                  }
+                  if node_score > 0.0 {
+                      scores.push(node_score);
+                  }
+              }
+              NumericStats::from_samples(&scores).to_json()
+          }
+      }
+
+      pub struct StateFanoutMetric;
+      impl Metric for StateFanoutMetric {
+          fn name(&self) -> &'static str { "state_fanout" }
+          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+              use crate::trie3_opt::core::{NodeId, SortedSet};
+              use std::collections::BTreeMap;
+
+              let mut stats = NumericStats::new();
+
+              for node in &trie.nodes {
+                  // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
+                  let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
+
+                  for (edge_key, dest_map) in &node.children {
+                      let pop = edge_key.pop;
+                      let tokens = &edge_key.tokens;
+
+                      for (dest, state_set) in dest_map {
+                          for state_id in state_set.iter() {
+                              fanout_map
+                                  .entry((pop, state_id))
+                                  .or_default()
+                                  .push((*dest, tokens.clone()));
+                          }
+                      }
+                  }
+
+                  // Collect fanout values for this node
+                  for fanout_vec in fanout_map.values() {
+                      stats.push(fanout_vec.len());
+                  }
+              }
+
+              stats.to_json()
+          }
+      }
+
       /// Instantiates and runs all standard metrics on a given trie.
       pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
           let metrics: Vec<Box<dyn Metric>> = vec![
@@ -14167,6 +14292,8 @@ local_system:
               Box::new(NumProductiveNodesMetric),
               Box::new(RootFanoutMetric),
               Box::new(NonRootFanoutMetric),
+              Box::new(EdgeOverlapMetric),
+              Box::new(StateFanoutMetric),
           ];
 
           let mut results = BTreeMap::new();
@@ -24049,6 +24176,52 @@ messages:
           }
       }
 
+      pub struct EdgeOverlapMetric;
+      impl Metric for EdgeOverlapMetric {
+          fn name(&self) -> &'static str { "edge_overlap" }
+          fn compute(&self, trie: &MiniTrie) -> JSONNode {
+              use crate::trie3_opt::core::{NodeId, SortedSet};
+              use std::collections::BTreeMap;
+
+              let mut scores: Vec<f64> = Vec::new();
+              for node in &trie.nodes {
+                  let mut node_score = 0.0;
+
+                  // Group destination maps by pop
+                  let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
+                  for (ek, dm) in &node.children {
+                      by_pop.entry(ek.pop).or_default().push(dm);
+                  }
+
+                  for (_pop, dms) in by_pop {
+                      if dms.len() < 2 {
+                          continue;
+                      }
+                      for i in 0..dms.len() {
+                          for j in (i + 1)..dms.len() {
+                              let dm1 = dms[i];
+                              let dm2 = dms[j];
+
+                              let mut common_dests_with_overlap = 0;
+                              for (d, sids1) in dm1 {
+                                  if let Some(sids2) = dm2.get(d) {
+                                      if !sids1.intersect(sids2).is_empty() {
+                                          common_dests_with_overlap += 1;
+                                      }
+                                  }
+                              }
+                              node_score += common_dests_with_overlap as f64;
+                          }
+                      }
+                  }
+                  if node_score > 0.0 {
+                      scores.push(node_score);
+                  }
+              }
+              NumericStats::from_samples(&scores).to_json()
+          }
+      }
+
       /// Instantiates and runs all standard metrics on a given trie.
       pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
           let metrics: Vec<Box<dyn Metric>> = vec![
@@ -24060,6 +24233,7 @@ messages:
               Box::new(NumProductiveNodesMetric),
               Box::new(RootFanoutMetric),
               Box::new(NonRootFanoutMetric),
+              Box::new(EdgeOverlapMetric),
           ];
 
           let mut results = BTreeMap::new();
@@ -29757,7 +29931,20 @@ messages:
       ```
     metadata:
       filename: src/trie3_opt/passes/prune_dead_paths.rs
-  - user: Ensure metrics are printed between optimization passes.
+  - user: |-
+      Ok, let's add a metric.
+      Imagine we have a parse stack. It's just a vector of integers (state IDs).
+      We read the top one.
+      Imagine we're at a node in the precompute3 tree. We want to traverse it.
+      We look at an edge. Pop n: pop that number of nodes from the stack. Then check whether the new top state is in the edge's state bitvec. Yes? Traverse the edge, but only for the edge's LLM tokens.
+
+      Imagine instead of `(pop n, state bv, LLM bv -> [dests])`, we have a map `pop n -> state ID -> [(dest, LLM bv)]`.
+      My notion of 'efficiency' is this.
+      Say we know the 'pop n'.
+      It is efficient if we only have one `(dest, LLM bv)` for each `(pop n, state ID)` lookup.
+      The more items there are in `[(dest, LLM bv)]`, the less efficient.
+
+      I'd like a metric that reflects this intuitive notion of efficiency. Add one.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -29777,91 +29964,130 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to print metrics between optimization passes, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add the new metric, followed by the corresponding git diff.
 
-      ### Instructions
+      ### Step-by-step Instructions
 
-      I will modify the optimization pipeline coordinator to compute and print metrics after each optimization pass completes. This will give you a detailed view of how each pass affects the graph's characteristics.
+      1.  **Open the file `src/trie3_opt/metrics.rs`**.
 
-      1.  **Open `src/trie3_opt/coordinator.rs`**.
-      2.  Navigate to the `run_pipeline_on_precompute3` function.
-      3.  Locate the loop that runs the optimization passes, which looks like this:
+      2.  **Add the new metric implementation.** Find the `run_all_metrics` function. Just before this function, insert the following code block to define the `StateFanoutMetric`:
 
           ```rust
-              // Run passes
-              for pass in pipeline.iter() {
-                  // Simple progress trace
-                  #[allow(unused)]
-                  {
-                      if ctx.debug_level > 0 {
-                          // eprintln!("[Trie3 Opt] Running pass: {}", pass.name());
+          pub struct StateFanoutMetric;
+          impl Metric for StateFanoutMetric {
+              fn name(&self) -> &'static str { "state_fanout" }
+              fn compute(&self, trie: &MiniTrie) -> JSONNode {
+                  use crate::trie3_opt::core::{NodeId, SortedSet};
+                  use std::collections::BTreeMap;
+
+                  let mut stats = NumericStats::new();
+
+                  for node in &trie.nodes {
+                      // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
+                      let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
+
+                      for (edge_key, dest_map) in &node.children {
+                          let pop = edge_key.pop;
+                          let tokens = &edge_key.tokens;
+
+                          for (dest, state_set) in dest_map {
+                              for state_id in state_set.iter() {
+                                  fanout_map
+                                      .entry((pop, state_id))
+                                      .or_default()
+                                      .push((*dest, tokens.clone()));
+                              }
+                          }
+                      }
+
+                      // Collect fanout values for this node
+                      for fanout_vec in fanout_map.values() {
+                          stats.push(fanout_vec.len());
                       }
                   }
-                  pass.run(&mut mini, &mut ctx);
+
+                  stats.to_json()
               }
+          }
           ```
 
-      4.  Replace that entire loop with the following code. This new version will print the pass name before it runs and the full set of metrics after it finishes, conditioned on the debug level.
+      3.  **Register the new metric.** In the `run_all_metrics` function within the same file, add the new metric to the `metrics` vector. The updated vector initialization should look like this:
 
           ```rust
-              // Run passes
-              for pass in pipeline.iter() {
-                  if ctx.debug_level > 0 {
-                      crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
-                  }
-                  pass.run(&mut mini, &mut ctx);
-                  if ctx.debug_level > 0 {
-                      let metrics = run_all_metrics(&mini);
-                      crate::debug!(
-                          1,
-                          "[Trie3 Opt] Metrics after '{}': {:?}",
-                          pass.name(),
-                          metrics
-                      );
-                  }
-              }
+          let metrics: Vec<Box<dyn Metric>> = vec![
+              Box::new(NumNodesMetric),
+              Box::new(NumEdgesMetric),
+              Box::new(NumRootsMetric),
+              Box::new(NumEndNodesMetric),
+              Box::new(NumReachableNodesMetric),
+              Box::new(NumProductiveNodesMetric),
+              Box::new(RootFanoutMetric),
+              Box::new(NonRootFanoutMetric),
+              Box::new(EdgeOverlapMetric),
+              Box::new(StateFanoutMetric),
+          ];
           ```
 
-      ### Git Diff
+      ### Git Diffs
 
-      Here is the git diff for the change:
+      Here is the git patch that applies the changes described above.
 
       ```diff
-      --- a/src/trie3_opt/coordinator.rs
-      +++ b/src/trie3_opt/coordinator.rs
-      @@ -266,16 +266,20 @@
+      diff --git a/src/trie3_opt/metrics.rs b/src/trie3_opt/metrics.rs
+      --- a/src/trie3_opt/metrics.rs
+      +++ b/src/trie3_opt/metrics.rs
+      @@ -168,6 +168,41 @@
+           }
+       }
        
-           let pipeline = build_pipeline(&config);
-       
-      -    // Run passes
-      -    for pass in pipeline.iter() {
-      -        // Simple progress trace
-      -        #[allow(unused)]
-      -        {
-      -            if ctx.debug_level > 0 {
-      -                // eprintln!("[Trie3 Opt] Running pass: {}", pass.name());
-      -            }
-      -        }
-      +    // Run passes
-      +    for pass in pipeline.iter() {
-      +        if ctx.debug_level > 0 {
-      +            crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
+      +pub struct StateFanoutMetric;
+      +impl Metric for StateFanoutMetric {
+      +    fn name(&self) -> &'static str { "state_fanout" }
+      +    fn compute(&self, trie: &MiniTrie) -> JSONNode {
+      +        use crate::trie3_opt::core::{NodeId, SortedSet};
+      +        use std::collections::BTreeMap;
+      +
+      +        let mut stats = NumericStats::new();
+      +
+      +        for node in &trie.nodes {
+      +            // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
+      +            let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
+      +
+      +            for (edge_key, dest_map) in &node.children {
+      +                let pop = edge_key.pop;
+      +                let tokens = &edge_key.tokens;
+      +
+      +                for (dest, state_set) in dest_map {
+      +                    for state_id in state_set.iter() {
+      +                        fanout_map
+      +                            .entry((pop, state_id))
+      +                            .or_default()
+      +                            .push((*dest, tokens.clone()));
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Collect fanout values for this node
+      +            for fanout_vec in fanout_map.values() {
+      +                stats.push(fanout_vec.len());
+      +            }
       +        }
-               pass.run(&mut mini, &mut ctx);
-      -    }
-      +        if ctx.debug_level > 0 {
-      +            let metrics = run_all_metrics(&mini);
-      +            crate::debug!(
-      +                1,
-      +                "[Trie3 Opt] Metrics after '{}': {:?}",
-      +                pass.name(),
-      +                metrics
-      +            );
-      +        }
+      +
+      +        stats.to_json()
       +    }
+      +}
+      +
+       /// Instantiates and runs all standard metrics on a given trie.
+       pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
+           let metrics: Vec<Box<dyn Metric>> = vec![
+      @@ -180,6 +215,7 @@
+               Box::new(RootFanoutMetric),
+               Box::new(NonRootFanoutMetric),
+               Box::new(EdgeOverlapMetric),
+      +        Box::new(StateFanoutMetric),
+           ];
        
-           // Run final metrics
-           ctx.metrics_after = run_all_metrics(&mini);
+           let mut results = BTreeMap::new();
 
       ```
     metadata:
@@ -29870,11 +30096,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/coordinator.rs
-      Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
+      Identified target file: src/trie3_opt/metrics.rs
+      Applying patch to 'src/trie3_opt/metrics.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/metrics.rs.
     metadata:
-  - user: 'Changes committed with message: "Add per-pass metric reporting in coordinator
-      and introduce EdgeOverlapMetric"'
+  - user: 'Changes committed with message: "Add StateFanoutMetric and print metrics
+      after each optimization pass in coordinator"'
     metadata:
 ...

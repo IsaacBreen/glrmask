@@ -193,6 +193,43 @@ impl Metric for EdgeOverlapMetric {
     }
 }
 
+pub struct StateFanoutMetric;
+impl Metric for StateFanoutMetric {
+    fn name(&self) -> &'static str { "state_fanout" }
+    fn compute(&self, trie: &MiniTrie) -> JSONNode {
+        use crate::trie3_opt::core::{NodeId, SortedSet};
+        use std::collections::BTreeMap;
+
+        let mut stats = NumericStats::new();
+
+        for node in &trie.nodes {
+            // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
+            let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
+
+            for (edge_key, dest_map) in &node.children {
+                let pop = edge_key.pop;
+                let tokens = &edge_key.tokens;
+
+                for (dest, state_set) in dest_map {
+                    for state_id in state_set.iter() {
+                        fanout_map
+                            .entry((pop, state_id))
+                            .or_default()
+                            .push((*dest, tokens.clone()));
+                    }
+                }
+            }
+
+            // Collect fanout values for this node
+            for fanout_vec in fanout_map.values() {
+                stats.push(fanout_vec.len());
+            }
+        }
+
+        stats.to_json()
+    }
+}
+
 /// Instantiates and runs all standard metrics on a given trie.
 pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
     let metrics: Vec<Box<dyn Metric>> = vec![
@@ -205,6 +242,7 @@ pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
         Box::new(RootFanoutMetric),
         Box::new(NonRootFanoutMetric),
         Box::new(EdgeOverlapMetric),
+        Box::new(StateFanoutMetric),
     ];
 
     let mut results = BTreeMap::new();
