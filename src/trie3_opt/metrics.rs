@@ -147,6 +147,52 @@ impl Metric for NonRootFanoutMetric {
     }
 }
 
+pub struct EdgeOverlapMetric;
+impl Metric for EdgeOverlapMetric {
+    fn name(&self) -> &'static str { "edge_overlap" }
+    fn compute(&self, trie: &MiniTrie) -> JSONNode {
+        use crate::trie3_opt::core::{NodeId, SortedSet};
+        use std::collections::BTreeMap;
+
+        let mut scores: Vec<f64> = Vec::new();
+        for node in &trie.nodes {
+            let mut node_score = 0.0;
+
+            // Group destination maps by pop
+            let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
+            for (ek, dm) in &node.children {
+                by_pop.entry(ek.pop).or_default().push(dm);
+            }
+
+            for (_pop, dms) in by_pop {
+                if dms.len() < 2 {
+                    continue;
+                }
+                for i in 0..dms.len() {
+                    for j in (i + 1)..dms.len() {
+                        let dm1 = dms[i];
+                        let dm2 = dms[j];
+
+                        let mut common_dests_with_overlap = 0;
+                        for (d, sids1) in dm1 {
+                            if let Some(sids2) = dm2.get(d) {
+                                if !sids1.intersect(sids2).is_empty() {
+                                    common_dests_with_overlap += 1;
+                                }
+                            }
+                        }
+                        node_score += common_dests_with_overlap as f64;
+                    }
+                }
+            }
+            if node_score > 0.0 {
+                scores.push(node_score);
+            }
+        }
+        NumericStats::from_samples(&scores).to_json()
+    }
+}
+
 /// Instantiates and runs all standard metrics on a given trie.
 pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
     let metrics: Vec<Box<dyn Metric>> = vec![
@@ -158,6 +204,7 @@ pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
         Box::new(NumProductiveNodesMetric),
         Box::new(RootFanoutMetric),
         Box::new(NonRootFanoutMetric),
+        Box::new(EdgeOverlapMetric),
     ];
 
     let mut results = BTreeMap::new();
