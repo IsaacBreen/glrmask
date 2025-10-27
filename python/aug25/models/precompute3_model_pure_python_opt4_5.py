@@ -1155,17 +1155,20 @@ class Model(GraphProvider):
                         local_ctr["edges"] = local_ctr.get("edges", 0) + 1
 
                     # Isolate only the contributing heads if necessary
+                    child_gss = None
                     stats.start('get_mask.main_loop.fast_path.isolate_many')
-                    stats.start('get_mask.main_loop.fast_path.isolate_check')
                     if len(states_to_keep) == len(peeked):
                         child_gss = source_after_apply
                     else:
                         key_isolate = (id(source_after_apply), tuple(states_to_keep))
-                        if isolate_cache is not None and key_isolate in isolate_cache:
+                        stats.start('get_mask.main_loop.fast_path.isolate_check')
+                        cached_iso = isolate_cache.get(key_isolate) if isolate_cache is not None else None
+                        stats.stop('get_mask.main_loop.fast_path.isolate_check')
+
+                        if cached_iso is not None:
                             stats.inc('get_mask.isolate_many.cache_hits')
-                            child_gss = isolate_cache[key_isolate]
+                            child_gss = cached_iso
                         else:
-                            stats.stop('get_mask.main_loop.fast_path.isolate_check')
                             stats.start('get_mask.main_loop.edge.isolate_many')
                             _t0 = _perf_now()
                             child_gss = source_after_apply.isolate_many(states_to_keep)
@@ -1177,17 +1180,20 @@ class Model(GraphProvider):
                                 local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                             if isolate_cache is not None:
                                 isolate_cache[key_isolate] = child_gss
-                        continue
-                    stats.stop('get_mask.main_loop.fast_path.isolate_check')
                     stats.stop('get_mask.main_loop.fast_path.isolate_many')
 
-                    if child_gss.is_empty():
+                    stats.start('get_mask.main_loop.fast_path.child_gss_empty_check')
+                    is_empty = child_gss.is_empty()
+                    stats.stop('get_mask.main_loop.fast_path.child_gss_empty_check')
+                    if is_empty:
                         continue
 
                     d: NodeID = int(dest_id)
                     new_mask = yield Enqueue(d, child_gss, depth + 1)
+                    stats.start('get_mask.main_loop.fast_path.update_active_mask')
                     if new_mask is not None:
                         active_remaining_mask = new_mask
+                    stats.stop('get_mask.main_loop.fast_path.update_active_mask')
                     if active_remaining_mask.is_empty():
                         return
 
@@ -1195,14 +1201,16 @@ class Model(GraphProvider):
                     if oracle_counters is not None and local_ctr is not None:
                         local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
+                    stats.start('get_mask.main_loop.fast_path.check_suspend')
                     if dests_proc >= max_dests:
                         priority = (-self.max_depth.get(node_id, 0), group_index, 0)
                         new_mask = yield Suspend(node_id, priority, depth)
-                        if new_mask is not None:
+                        if isolate_cache is not None and key_isolate in isolate_cache:
                             active_remaining_mask = new_mask
                         if active_remaining_mask.is_empty():
                             return
                         dests_proc = 0
+                    stats.stop('get_mask.main_loop.fast_path.check_suspend')
 
                     group_index += 1
 
@@ -1398,18 +1406,20 @@ class Model(GraphProvider):
                     dest = edge.dests[dest_j]
                     values_to_keep = grouped[dest_j]
                     # If all heads survive, reuse popped directly
+                    child_gss = None
                     stats.start('get_mask.main_loop.slow_path.isolate_many')
-                    stats.start('get_mask.main_loop.slow_path.isolate_check')
                     if len(values_to_keep) == len(peeked):
                         child_gss = source_after_apply
                     else:
                         # Global/local cache for isolate_many
                         key_isolate = (id(source_after_apply), tuple(values_to_keep))
-                        if isolate_cache is not None and key_isolate in isolate_cache:
+                        stats.start('get_mask.main_loop.slow_path.isolate_check')
+                        cached_iso = isolate_cache.get(key_isolate) if isolate_cache is not None else None
+                        stats.stop('get_mask.main_loop.slow_path.isolate_check')
+                        if cached_iso is not None:
                             stats.inc('get_mask.isolate_many.cache_hits')
-                            child_gss = isolate_cache[key_isolate]
+                            child_gss = cached_iso
                         else:
-                            stats.stop('get_mask.main_loop.slow_path.isolate_check')
                             stats.start('get_mask.main_loop.edge.isolate_many')
                             _t0 = _perf_now()
                             child_gss = source_after_apply.isolate_many(values_to_keep)
@@ -1421,20 +1431,37 @@ class Model(GraphProvider):
                                 local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                             if isolate_cache is not None:
                                 isolate_cache[key_isolate] = child_gss
-                        continue
                     stats.stop('get_mask.main_loop.slow_path.isolate_many')
-                    stats.stop('get_mask.main_loop.slow_path.isolate_check')
-                    if child_gss.is_empty(): continue
+
+                    stats.start('get_mask.main_loop.slow_path.child_gss_empty_check')
+                    is_empty = child_gss.is_empty()
+                    stats.stop('get_mask.main_loop.slow_path.child_gss_empty_check')
+                    if is_empty:
+                        continue
+
                     d: NodeID = int(dest.dest_idx)
                     new_mask = yield Enqueue(d, child_gss, depth + 1)
+                    stats.start('get_mask.main_loop.slow_path.update_active_mask')
                     if new_mask is not None:
                         active_remaining_mask = new_mask
+                    stats.stop('get_mask.main_loop.slow_path.update_active_mask')
                     if active_remaining_mask.is_empty():
                         return
 
                     dests_proc += 1
                     if oracle_counters is not None and local_ctr is not None:
                         local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+
+                    stats.start('get_mask.main_loop.slow_path.check_suspend')
+                    if dests_proc >= max_dests:
+                        priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+                        new_mask = yield Suspend(node_id, priority, depth)
+                        if isolate_cache is not None and key_isolate in isolate_cache:
+                            active_remaining_mask = new_mask
+                        if active_remaining_mask.is_empty():
+                            return
+                        dests_proc = 0
+                    stats.stop('get_mask.main_loop.slow_path.check_suspend')
 
                 if active_remaining_mask.is_empty():
                     return
@@ -2713,7 +2740,9 @@ class Model(GraphProvider):
                 if isinstance(yielded, Enqueue):
                     stats.start('get_mask.main_loop.gen_drive.process_enqueue')
                     new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                    stats.start('get_mask.main_loop.enqueue.get_base_pri')
                     base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                    stats.stop('get_mask.main_loop.enqueue.get_base_pri')
                     if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
                         stats.start('get_mask.main_loop.priority_for_node')
                         child_priority = self._priority_for_node(
@@ -2727,11 +2756,14 @@ class Model(GraphProvider):
                         child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
                     else:
                         child_priority = base_child_pri
+                    stats.start('get_mask.main_loop.enqueue.heap_push_new')
                     stats.start('get_mask.main_loop.heap_push')
                     heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
                     stats.stop('get_mask.main_loop.heap_push')
+                    stats.stop('get_mask.main_loop.enqueue.heap_push_new')
                     # The parent generator is implicitly suspended; put it back on the heap to be resumed later.
                     # Use its original priority to allow children to be processed first if they have higher priority.
+                    stats.start('get_mask.main_loop.enqueue.heap_push_suspend')
                     stats.start('get_mask.main_loop.heap_push')
                     heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, depth)))
                     stats.stop('get_mask.main_loop.heap_push')
@@ -2748,9 +2780,11 @@ class Model(GraphProvider):
                         stats.stop('get_mask.main_loop.priority_for_node')
                     else:
                         susp_pri = yielded.priority
+                    stats.start('get_mask.main_loop.suspend.heap_push')
                     stats.start('get_mask.main_loop.heap_push')
                     heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
                     stats.stop('get_mask.main_loop.heap_push')
+                    stats.stop('get_mask.main_loop.suspend.heap_push')
                     stats.stop('get_mask.main_loop.gen_drive.process_suspend')
             except StopIteration:
                 pass # Generator is done.

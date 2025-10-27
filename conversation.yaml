@@ -4089,17 +4089,20 @@ local_system:
                               local_ctr["edges"] = local_ctr.get("edges", 0) + 1
 
                           # Isolate only the contributing heads if necessary
+                          child_gss = None
                           stats.start('get_mask.main_loop.fast_path.isolate_many')
-                          stats.start('get_mask.main_loop.fast_path.isolate_check')
                           if len(states_to_keep) == len(peeked):
                               child_gss = source_after_apply
                           else:
                               key_isolate = (id(source_after_apply), tuple(states_to_keep))
-                              if isolate_cache is not None and key_isolate in isolate_cache:
+                              stats.start('get_mask.main_loop.fast_path.isolate_check')
+                              cached_iso = isolate_cache.get(key_isolate) if isolate_cache is not None else None
+                              stats.stop('get_mask.main_loop.fast_path.isolate_check')
+
+                              if cached_iso is not None:
                                   stats.inc('get_mask.isolate_many.cache_hits')
-                                  child_gss = isolate_cache[key_isolate]
+                                  child_gss = cached_iso
                               else:
-                                  stats.stop('get_mask.main_loop.fast_path.isolate_check')
                                   stats.start('get_mask.main_loop.edge.isolate_many')
                                   _t0 = _perf_now()
                                   child_gss = source_after_apply.isolate_many(states_to_keep)
@@ -4111,17 +4114,20 @@ local_system:
                                       local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                                   if isolate_cache is not None:
                                       isolate_cache[key_isolate] = child_gss
-                              continue
-                          stats.stop('get_mask.main_loop.fast_path.isolate_check')
                           stats.stop('get_mask.main_loop.fast_path.isolate_many')
 
-                          if child_gss.is_empty():
+                          stats.start('get_mask.main_loop.fast_path.child_gss_empty_check')
+                          is_empty = child_gss.is_empty()
+                          stats.stop('get_mask.main_loop.fast_path.child_gss_empty_check')
+                          if is_empty:
                               continue
 
                           d: NodeID = int(dest_id)
                           new_mask = yield Enqueue(d, child_gss, depth + 1)
+                          stats.start('get_mask.main_loop.fast_path.update_active_mask')
                           if new_mask is not None:
                               active_remaining_mask = new_mask
+                          stats.stop('get_mask.main_loop.fast_path.update_active_mask')
                           if active_remaining_mask.is_empty():
                               return
 
@@ -4129,14 +4135,16 @@ local_system:
                           if oracle_counters is not None and local_ctr is not None:
                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
+                          stats.start('get_mask.main_loop.fast_path.check_suspend')
                           if dests_proc >= max_dests:
                               priority = (-self.max_depth.get(node_id, 0), group_index, 0)
                               new_mask = yield Suspend(node_id, priority, depth)
-                              if new_mask is not None:
+                              if isolate_cache is not None and key_isolate in isolate_cache:
                                   active_remaining_mask = new_mask
                               if active_remaining_mask.is_empty():
                                   return
                               dests_proc = 0
+                          stats.stop('get_mask.main_loop.fast_path.check_suspend')
 
                           group_index += 1
 
@@ -4332,18 +4340,20 @@ local_system:
                           dest = edge.dests[dest_j]
                           values_to_keep = grouped[dest_j]
                           # If all heads survive, reuse popped directly
+                          child_gss = None
                           stats.start('get_mask.main_loop.slow_path.isolate_many')
-                          stats.start('get_mask.main_loop.slow_path.isolate_check')
                           if len(values_to_keep) == len(peeked):
                               child_gss = source_after_apply
                           else:
                               # Global/local cache for isolate_many
                               key_isolate = (id(source_after_apply), tuple(values_to_keep))
-                              if isolate_cache is not None and key_isolate in isolate_cache:
+                              stats.start('get_mask.main_loop.slow_path.isolate_check')
+                              cached_iso = isolate_cache.get(key_isolate) if isolate_cache is not None else None
+                              stats.stop('get_mask.main_loop.slow_path.isolate_check')
+                              if cached_iso is not None:
                                   stats.inc('get_mask.isolate_many.cache_hits')
-                                  child_gss = isolate_cache[key_isolate]
+                                  child_gss = cached_iso
                               else:
-                                  stats.stop('get_mask.main_loop.slow_path.isolate_check')
                                   stats.start('get_mask.main_loop.edge.isolate_many')
                                   _t0 = _perf_now()
                                   child_gss = source_after_apply.isolate_many(values_to_keep)
@@ -4356,19 +4366,36 @@ local_system:
                                   if isolate_cache is not None:
                                       isolate_cache[key_isolate] = child_gss
                           stats.stop('get_mask.main_loop.slow_path.isolate_many')
+
+                          stats.start('get_mask.main_loop.slow_path.child_gss_empty_check')
+                          is_empty = child_gss.is_empty()
+                          stats.stop('get_mask.main_loop.slow_path.child_gss_empty_check')
+                          if is_empty:
                               continue
-                          stats.stop('get_mask.main_loop.slow_path.isolate_check')
-                          if child_gss.is_empty(): continue
+
                           d: NodeID = int(dest.dest_idx)
                           new_mask = yield Enqueue(d, child_gss, depth + 1)
+                          stats.start('get_mask.main_loop.slow_path.update_active_mask')
                           if new_mask is not None:
                               active_remaining_mask = new_mask
+                          stats.stop('get_mask.main_loop.slow_path.update_active_mask')
                           if active_remaining_mask.is_empty():
                               return
 
                           dests_proc += 1
                           if oracle_counters is not None and local_ctr is not None:
                               local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+
+                          stats.start('get_mask.main_loop.slow_path.check_suspend')
+                          if dests_proc >= max_dests:
+                              priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+                              new_mask = yield Suspend(node_id, priority, depth)
+                              if isolate_cache is not None and key_isolate in isolate_cache:
+                                  active_remaining_mask = new_mask
+                              if active_remaining_mask.is_empty():
+                                  return
+                              dests_proc = 0
+                          stats.stop('get_mask.main_loop.slow_path.check_suspend')
 
                       if active_remaining_mask.is_empty():
                           return
@@ -5647,7 +5674,9 @@ local_system:
                       if isinstance(yielded, Enqueue):
                           stats.start('get_mask.main_loop.gen_drive.process_enqueue')
                           new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                          stats.start('get_mask.main_loop.enqueue.get_base_pri')
                           base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                          stats.stop('get_mask.main_loop.enqueue.get_base_pri')
                           if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
                               stats.start('get_mask.main_loop.priority_for_node')
                               child_priority = self._priority_for_node(
@@ -5661,11 +5690,14 @@ local_system:
                               child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
                           else:
                               child_priority = base_child_pri
+                          stats.start('get_mask.main_loop.enqueue.heap_push_new')
                           stats.start('get_mask.main_loop.heap_push')
                           heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
                           stats.stop('get_mask.main_loop.heap_push')
+                          stats.stop('get_mask.main_loop.enqueue.heap_push_new')
                           # The parent generator is implicitly suspended; put it back on the heap to be resumed later.
                           # Use its original priority to allow children to be processed first if they have higher priority.
+                          stats.start('get_mask.main_loop.enqueue.heap_push_suspend')
                           stats.start('get_mask.main_loop.heap_push')
                           heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, depth)))
                           stats.stop('get_mask.main_loop.heap_push')
@@ -5682,9 +5714,11 @@ local_system:
                               stats.stop('get_mask.main_loop.priority_for_node')
                           else:
                               susp_pri = yielded.priority
+                          stats.start('get_mask.main_loop.suspend.heap_push')
                           stats.start('get_mask.main_loop.heap_push')
                           heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
                           stats.stop('get_mask.main_loop.heap_push')
+                          stats.stop('get_mask.main_loop.suspend.heap_push')
                           stats.stop('get_mask.main_loop.gen_drive.process_suspend')
                   except StopIteration:
                       pass # Generator is done.
@@ -10065,6 +10099,569 @@ messages:
        
                        a_node = self.arena.get(node_id)
                        # For planning runs, compute the exact GSS-aware frontier.
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
+    metadata:
+  - user: 'Changes committed with message: "Add comprehensive timing instrumentation
+      to get_mask.main_loop, covering RangeSet ops, pop/peek, pruning, group processing,
+      priority calculation, and generator control flow"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5.py since previous turn:
+      ```diff
+      --- original version of python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      +++ current version of python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      @@ -1421,8 +1421,8 @@
+                                       local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+                                   if isolate_cache is not None:
+                                       isolate_cache[key_isolate] = child_gss
+      +                        continue
+                           stats.stop('get_mask.main_loop.slow_path.isolate_many')
+      -                        continue
+                           stats.stop('get_mask.main_loop.slow_path.isolate_check')
+                           if child_gss.is_empty(): continue
+                           d: NodeID = int(dest.dest_idx)
+
+      ```
+    metadata:
+  - user: Add more. I'm looking in the loop `for (dest_id, llm_bv_id) in dest_keys:`,
+      particularly in the second part there around and below the yield statements.
+      There's very few stats there.
+    metadata:
+  - assistant: |-
+      Of course. Based on the latest stats, it's clear we need to dissect the generator's execution (`gen_drive.resume`) and the priority calculations to understand the full cost distribution. I will add a comprehensive set of timers to instrument every remaining logical block.
+
+      Here are the step-by-step instructions for the changes:
+
+      ### File to Edit: `python/aug25/models/precompute3_model_pure_python_opt4_5.py`
+
+      I will add timers to the `_priority_for_node` method, the generator function `_process_internal_node_gen`, and the generator's consumer loop in `_get_mask_run`. I will also fix a bug in the GSS isolation logic that was preventing cached results from being used correctly.
+
+      #### 1. Instrument `_priority_for_node`
+      -   I will add two new timers to this method to break down its cost:
+          -   `get_mask.priority.get_desc_mask`: To time the retrieval of the descendant mask.
+          -   `get_mask.priority.intersect_and_len`: To time the expensive intersection and length calculation which determines the "gain".
+
+      #### 2. Instrument `_process_internal_node_gen` (Fast and Slow Paths)
+      -   In the main processing loop within both the "fast path" and "slow path", I will add timers for the logic that executes after the GSS has been prepared for a child node:
+          -   `child_gss_empty_check`: To time the `child_gss.is_empty()` check.
+          -   `update_active_mask`: To time the logic that updates `active_remaining_mask` after a `yield`.
+          -   `check_suspend`: To time the logic that checks if the generator should suspend due to reaching `max_dests`.
+      -   I will also fix a bug where a `continue` statement was incorrectly placed, preventing cached GSS isolation results from being used. The logic will be restructured to correctly time the cache lookup (`isolate_check`) separately from the full isolation operation (`isolate_many`).
+
+      #### 3. Instrument `_get_mask_run` (Generator Consumer)
+      -   The `process_enqueue` block, which handles `Enqueue` yields, will be broken down with three new timers:
+          -   `get_mask.main_loop.enqueue.get_base_pri`: To time the `max_depth` lookup for the base priority.
+          -   `get_mask.main_loop.enqueue.heap_push_new`: To time pushing the new work item to the heap.
+          -   `get_mask.main_loop.enqueue.heap_push_suspend`: To time pushing the suspended generator back to the heap.
+      -   The `process_suspend` block will get a new timer:
+          -   `get_mask.main_loop.suspend.heap_push`: To time pushing the suspended generator back to the heap.
+
+      This will add more than 10 new timers, providing a complete performance profile of the traversal loop.
+
+      ---
+
+      ### Git Patch
+
+      Here is the git diff to apply these changes:
+
+      ```diff
+      --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      @@ -1260,26 +1260,32 @@
+                               local_ctr["edges"] = local_ctr.get("edges", 0) + 1
+       
+                           # Isolate only the contributing heads if necessary
+      +                    child_gss = None
+                           stats.start('get_mask.main_loop.fast_path.isolate_many')
+      -                    stats.start('get_mask.main_loop.fast_path.isolate_check')
+                           if len(states_to_keep) == len(peeked):
+                               child_gss = source_after_apply
+                           else:
+                               key_isolate = (id(source_after_apply), tuple(states_to_keep))
+      +                        stats.start('get_mask.main_loop.fast_path.isolate_check')
+      +                        cached_iso = isolate_cache.get(key_isolate) if isolate_cache is not None else None
+      +                        stats.stop('get_mask.main_loop.fast_path.isolate_check')
+      +
+      +                        if cached_iso is not None:
+      +                            stats.inc('get_mask.isolate_many.cache_hits')
+      +                            child_gss = cached_iso
+      +                        else:
+      +                            stats.start('get_mask.main_loop.edge.isolate_many')
+      +                            _t0 = _perf_now()
+      +                            child_gss = source_after_apply.isolate_many(states_to_keep)
+      +                            _t1 = _perf_now()
+      +                            stats.stop('get_mask.main_loop.edge.isolate_many')
+      +                            if oracle_counters is not None and local_ctr is not None:
+      +                                local_ctr["isolate"] = local_ctr.get("isolate", 0) + 1
+      +                                local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+      +                                local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+      +                            if isolate_cache is not None:
+      +                                isolate_cache[key_isolate] = child_gss
+      +                    stats.stop('get_mask.main_loop.fast_path.isolate_many')
+      +
+      +                    stats.start('get_mask.main_loop.fast_path.child_gss_empty_check')
+      +                    is_empty = child_gss.is_empty()
+      +                    stats.stop('get_mask.main_loop.fast_path.child_gss_empty_check')
+      +                    if is_empty:
+      +                        continue
+      +
+      +                    d: NodeID = int(dest_id)
+      +                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      +                    stats.start('get_mask.main_loop.fast_path.update_active_mask')
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask
+      +                    stats.stop('get_mask.main_loop.fast_path.update_active_mask')
+      +                    if active_remaining_mask.is_empty():
+      +                        return
+      +
+      +                    dests_proc += 1
+      +                    if oracle_counters is not None and local_ctr is not None:
+      +                        local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+      +
+      +                    stats.start('get_mask.main_loop.fast_path.check_suspend')
+      +                    if dests_proc >= max_dests:
+      +                        priority = (-self.max_depth.get(node_id, 0), group_index, 0)
+      +                        new_mask = yield Suspend(node_id, priority, depth)
+                               if isolate_cache is not None and key_isolate in isolate_cache:
+      -                            stats.inc('get_mask.isolate_many.cache_hits')
+      -                            child_gss = isolate_cache[key_isolate]
+      -                        else:
+      -                            stats.stop('get_mask.main_loop.fast_path.isolate_check')
+      -                            stats.start('get_mask.main_loop.edge.isolate_many')
+      -                            _t0 = _perf_now()
+      -                            child_gss = source_after_apply.isolate_many(states_to_keep)
+      -                            _t1 = _perf_now()
+      -                            stats.stop('get_mask.main_loop.edge.isolate_many')
+      -                            if oracle_counters is not None and local_ctr is not None:
+      -                                local_ctr["isolate"] = local_ctr.get("isolate", 0) + 1
+      -                                local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+      -                                local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+      -                            if isolate_cache is not None:
+      -                                isolate_cache[key_isolate] = child_gss
+      -                        continue
+      -                    stats.stop('get_mask.main_loop.fast_path.isolate_check')
+      -                    stats.stop('get_mask.main_loop.fast_path.isolate_many')
+      -
+      -                    if child_gss.is_empty():
+      -                        continue
+      -
+      -                    d: NodeID = int(dest_id)
+      -                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      -                    if new_mask is not None:
+      -                        active_remaining_mask = new_mask
+      -                    if active_remaining_mask.is_empty():
+      -                        return
+      -
+      -                    dests_proc += 1
+      -                    if oracle_counters is not None and local_ctr is not None:
+      -                        local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+      -
+      -                    if dests_proc >= max_dests:
+      -                        priority = (-self.max_depth.get(node_id, 0), group_index, 0)
+      -                        new_mask = yield Suspend(node_id, priority, depth)
+      -                        if new_mask is not None:
+      -                            active_remaining_mask = new_mask
+      -                        if active_remaining_mask.is_empty():
+      -                            return
+      -                        dests_proc = 0
+      +                            active_remaining_mask = new_mask
+      +                        if active_remaining_mask.is_empty():
+      +                            return
+      +                        dests_proc = 0
+      +                    stats.stop('get_mask.main_loop.fast_path.check_suspend')
+       
+                           group_index += 1
+       
+      @@ -1465,26 +1497,32 @@
+                           dest = edge.dests[dest_j]
+                           values_to_keep = grouped[dest_j]
+                           # If all heads survive, reuse popped directly
+      +                    child_gss = None
+                           stats.start('get_mask.main_loop.slow_path.isolate_many')
+      -                    stats.start('get_mask.main_loop.slow_path.isolate_check')
+                           if len(values_to_keep) == len(peeked):
+                               child_gss = source_after_apply
+                           else:
+                               # Global/local cache for isolate_many
+                               key_isolate = (id(source_after_apply), tuple(values_to_keep))
+      +                        stats.start('get_mask.main_loop.slow_path.isolate_check')
+      +                        cached_iso = isolate_cache.get(key_isolate) if isolate_cache is not None else None
+      +                        stats.stop('get_mask.main_loop.slow_path.isolate_check')
+      +                        if cached_iso is not None:
+      +                            stats.inc('get_mask.isolate_many.cache_hits')
+      +                            child_gss = cached_iso
+      +                        else:
+      +                            stats.start('get_mask.main_loop.edge.isolate_many')
+      +                            _t0 = _perf_now()
+      +                            child_gss = source_after_apply.isolate_many(values_to_keep)
+      +                            _t1 = _perf_now()
+      +                            stats.stop('get_mask.main_loop.edge.isolate_many')
+      +                            if oracle_counters is not None and local_ctr is not None: local_ctr["isolate"] += 1
+      +                            if oracle_counters is not None and local_ctr is not None:
+      +                                local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+      +                                local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+      +                            if isolate_cache is not None:
+      +                                isolate_cache[key_isolate] = child_gss
+      +                    stats.stop('get_mask.main_loop.slow_path.isolate_many')
+      +
+      +                    stats.start('get_mask.main_loop.slow_path.child_gss_empty_check')
+      +                    is_empty = child_gss.is_empty()
+      +                    stats.stop('get_mask.main_loop.slow_path.child_gss_empty_check')
+      +                    if is_empty:
+      +                        continue
+      +
+      +                    d: NodeID = int(dest.dest_idx)
+      +                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      +                    stats.start('get_mask.main_loop.slow_path.update_active_mask')
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask
+      +                    stats.stop('get_mask.main_loop.slow_path.update_active_mask')
+      +                    if active_remaining_mask.is_empty():
+      +                        return
+      +
+      +                    dests_proc += 1
+      +                    if oracle_counters is not None and local_ctr is not None:
+      +                        local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+      +
+      +                    stats.start('get_mask.main_loop.slow_path.check_suspend')
+      +                    if dests_proc >= max_dests:
+      +                        priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+      +                        new_mask = yield Suspend(node_id, priority, depth)
+                               if isolate_cache is not None and key_isolate in isolate_cache:
+      -                            stats.inc('get_mask.isolate_many.cache_hits')
+      -                            child_gss = isolate_cache[key_isolate]
+      -                        else:
+      -                            stats.stop('get_mask.main_loop.slow_path.isolate_check')
+      -                            stats.start('get_mask.main_loop.edge.isolate_many')
+      -                            _t0 = _perf_now()
+      -                            child_gss = source_after_apply.isolate_many(values_to_keep)
+      -                            _t1 = _perf_now()
+      -                            stats.stop('get_mask.main_loop.edge.isolate_many')
+      -                            if oracle_counters is not None and local_ctr is not None: local_ctr["isolate"] += 1
+      -                            if oracle_counters is not None and local_ctr is not None:
+      -                                local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+      -                                local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+      -                            if isolate_cache is not None:
+      -                                isolate_cache[key_isolate] = child_gss
+      -                        continue
+      -                    stats.stop('get_mask.main_loop.slow_path.isolate_check')
+      -                    if child_gss.is_empty(): continue
+      -                    d: NodeID = int(dest.dest_idx)
+      -                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      -                    if new_mask is not None:
+      -                        active_remaining_mask = new_mask
+      -                    if active_remaining_mask.is_empty():
+      -                        return
+      -
+      -                    dests_proc += 1
+      -                    if oracle_counters is not None and local_ctr is not None:
+      -                        local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+      +                            active_remaining_mask = new_mask
+      +                        if active_remaining_mask.is_empty():
+      +                            return
+      +                        dests_proc = 0
+      +                    stats.stop('get_mask.main_loop.slow_path.check_suspend')
+       
+                       if active_remaining_mask.is_empty():
+                           return
+      @@ -1858,10 +1896,12 @@
+       
+                       # The generator yields one item, we process it, and then the main loop continues.
+                       if isinstance(yielded, Enqueue):
+                           stats.start('get_mask.main_loop.gen_drive.process_enqueue')
+                           new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+      +                    stats.start('get_mask.main_loop.enqueue.get_base_pri')
+                           base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+      +                    stats.stop('get_mask.main_loop.enqueue.get_base_pri')
+                           if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                               stats.start('get_mask.main_loop.priority_for_node')
+                               child_priority = self._priority_for_node(
+      @@ -1875,11 +1915,15 @@
+                               priority = (-int(guided_scores.get(r, 0)),) + base_pri
+                           else:
+                               child_priority = base_child_pri
+      +                    stats.start('get_mask.main_loop.enqueue.heap_push_new')
+                           stats.start('get_mask.main_loop.heap_push')
+                           heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
+                           stats.stop('get_mask.main_loop.heap_push')
+      +                    stats.stop('get_mask.main_loop.enqueue.heap_push_new')
+                           # The parent generator is implicitly suspended; put it back on the heap to be resumed later.
+                           # Use its original priority to allow children to be processed first if they have higher priority.
+      +                    stats.start('get_mask.main_loop.enqueue.heap_push_suspend')
+                           stats.start('get_mask.main_loop.heap_push')
+                           heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, depth)))
+                           stats.stop('get_mask.main_loop.heap_push')
+      @@ -1896,8 +1940,10 @@
+                               )
+                               stats.stop('get_mask.main_loop.priority_for_node')
+                           else:
+                               susp_pri = yielded.priority
+      +                    stats.start('get_mask.main_loop.suspend.heap_push')
+                           stats.start('get_mask.main_loop.heap_push')
+                           heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
+                           stats.stop('get_mask.main_loop.heap_push')
+      +                    stats.stop('get_mask.main_loop.suspend.heap_push')
+                           stats.stop('get_mask.main_loop.gen_drive.process_suspend')
+                   except StopIteration:
+                       pass # Generator is done.
+
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      @@ -1260,26 +1260,32 @@
+                               local_ctr["edges"] = local_ctr.get("edges", 0) + 1
+       
+                           # Isolate only the contributing heads if necessary
+      +                    child_gss = None
+                           stats.start('get_mask.main_loop.fast_path.isolate_many')
+      -                    stats.start('get_mask.main_loop.fast_path.isolate_check')
+                           if len(states_to_keep) == len(peeked):
+                               child_gss = source_after_apply
+                           else:
+                               key_isolate = (id(source_after_apply), tuple(states_to_keep))
+      +                        stats.start('get_mask.main_loop.fast_path.isolate_check')
+      +                        cached_iso = isolate_cache.get(key_isolate) if isolate_cache is not None else None
+      +                        stats.stop('get_mask.main_loop.fast_path.isolate_check')
+      +
+      +                        if cached_iso is not None:
+      +                            stats.inc('get_mask.isolate_many.cache_hits')
+      +                            child_gss = cached_iso
+      +                        else:
+      +                            stats.start('get_mask.main_loop.edge.isolate_many')
+      +                            _t0 = _perf_now()
+      +                            child_gss = source_after_apply.isolate_many(states_to_keep)
+      +                            _t1 = _perf_now()
+      +                            stats.stop('get_mask.main_loop.edge.isolate_many')
+      +                            if oracle_counters is not None and local_ctr is not None:
+      +                                local_ctr["isolate"] = local_ctr.get("isolate", 0) + 1
+      +                                local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+      +                                local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+      +                            if isolate_cache is not None:
+      +                                isolate_cache[key_isolate] = child_gss
+      +                    stats.stop('get_mask.main_loop.fast_path.isolate_many')
+      +
+      +                    stats.start('get_mask.main_loop.fast_path.child_gss_empty_check')
+      +                    is_empty = child_gss.is_empty()
+      +                    stats.stop('get_mask.main_loop.fast_path.child_gss_empty_check')
+      +                    if is_empty:
+      +                        continue
+      +
+      +                    d: NodeID = int(dest_id)
+      +                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      +                    stats.start('get_mask.main_loop.fast_path.update_active_mask')
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask
+      +                    stats.stop('get_mask.main_loop.fast_path.update_active_mask')
+      +                    if active_remaining_mask.is_empty():
+      +                        return
+      +
+      +                    dests_proc += 1
+      +                    if oracle_counters is not None and local_ctr is not None:
+      +                        local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+      +
+      +                    stats.start('get_mask.main_loop.fast_path.check_suspend')
+      +                    if dests_proc >= max_dests:
+      +                        priority = (-self.max_depth.get(node_id, 0), group_index, 0)
+      +                        new_mask = yield Suspend(node_id, priority, depth)
+                               if isolate_cache is not None and key_isolate in isolate_cache:
+      -                            stats.inc('get_mask.isolate_many.cache_hits')
+      -                            child_gss = isolate_cache[key_isolate]
+      -                        else:
+      -                            stats.stop('get_mask.main_loop.fast_path.isolate_check')
+      -                            stats.start('get_mask.main_loop.edge.isolate_many')
+      -                            _t0 = _perf_now()
+      -                            child_gss = source_after_apply.isolate_many(states_to_keep)
+      -                            _t1 = _perf_now()
+      -                            stats.stop('get_mask.main_loop.edge.isolate_many')
+      -                            if oracle_counters is not None and local_ctr is not None:
+      -                                local_ctr["isolate"] = local_ctr.get("isolate", 0) + 1
+      -                                local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+      -                                local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+      -                            if isolate_cache is not None:
+      -                                isolate_cache[key_isolate] = child_gss
+      -                        continue
+      -                    stats.stop('get_mask.main_loop.fast_path.isolate_check')
+      -                    stats.stop('get_mask.main_loop.fast_path.isolate_many')
+      -
+      -                    if child_gss.is_empty():
+      -                        continue
+      -
+      -                    d: NodeID = int(dest_id)
+      -                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      -                    if new_mask is not None:
+      -                        active_remaining_mask = new_mask
+      -                    if active_remaining_mask.is_empty():
+      -                        return
+      -
+      -                    dests_proc += 1
+      -                    if oracle_counters is not None and local_ctr is not None:
+      -                        local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+      -
+      -                    if dests_proc >= max_dests:
+      -                        priority = (-self.max_depth.get(node_id, 0), group_index, 0)
+      -                        new_mask = yield Suspend(node_id, priority, depth)
+      -                        if new_mask is not None:
+      -                            active_remaining_mask = new_mask
+      -                        if active_remaining_mask.is_empty():
+      -                            return
+      -                        dests_proc = 0
+      +                            active_remaining_mask = new_mask
+      +                        if active_remaining_mask.is_empty():
+      +                            return
+      +                        dests_proc = 0
+      +                    stats.stop('get_mask.main_loop.fast_path.check_suspend')
+       
+                           group_index += 1
+       
+      @@ -1465,26 +1497,32 @@
+                           dest = edge.dests[dest_j]
+                           values_to_keep = grouped[dest_j]
+                           # If all heads survive, reuse popped directly
+      +                    child_gss = None
+                           stats.start('get_mask.main_loop.slow_path.isolate_many')
+      -                    stats.start('get_mask.main_loop.slow_path.isolate_check')
+                           if len(values_to_keep) == len(peeked):
+                               child_gss = source_after_apply
+                           else:
+                               # Global/local cache for isolate_many
+                               key_isolate = (id(source_after_apply), tuple(values_to_keep))
+      +                        stats.start('get_mask.main_loop.slow_path.isolate_check')
+      +                        cached_iso = isolate_cache.get(key_isolate) if isolate_cache is not None else None
+      +                        stats.stop('get_mask.main_loop.slow_path.isolate_check')
+      +                        if cached_iso is not None:
+      +                            stats.inc('get_mask.isolate_many.cache_hits')
+      +                            child_gss = cached_iso
+      +                        else:
+      +                            stats.start('get_mask.main_loop.edge.isolate_many')
+      +                            _t0 = _perf_now()
+      +                            child_gss = source_after_apply.isolate_many(values_to_keep)
+      +                            _t1 = _perf_now()
+      +                            stats.stop('get_mask.main_loop.edge.isolate_many')
+      +                            if oracle_counters is not None and local_ctr is not None: local_ctr["isolate"] += 1
+      +                            if oracle_counters is not None and local_ctr is not None:
+      +                                local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+      +                                local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+      +                            if isolate_cache is not None:
+      +                                isolate_cache[key_isolate] = child_gss
+      +                    stats.stop('get_mask.main_loop.slow_path.isolate_many')
+      +
+      +                    stats.start('get_mask.main_loop.slow_path.child_gss_empty_check')
+      +                    is_empty = child_gss.is_empty()
+      +                    stats.stop('get_mask.main_loop.slow_path.child_gss_empty_check')
+      +                    if is_empty:
+      +                        continue
+      +
+      +                    d: NodeID = int(dest.dest_idx)
+      +                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      +                    stats.start('get_mask.main_loop.slow_path.update_active_mask')
+      +                    if new_mask is not None:
+      +                        active_remaining_mask = new_mask
+      +                    stats.stop('get_mask.main_loop.slow_path.update_active_mask')
+      +                    if active_remaining_mask.is_empty():
+      +                        return
+      +
+      +                    dests_proc += 1
+      +                    if oracle_counters is not None and local_ctr is not None:
+      +                        local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+      +
+      +                    stats.start('get_mask.main_loop.slow_path.check_suspend')
+      +                    if dests_proc >= max_dests:
+      +                        priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+      +                        new_mask = yield Suspend(node_id, priority, depth)
+                               if isolate_cache is not None and key_isolate in isolate_cache:
+      -                            stats.inc('get_mask.isolate_many.cache_hits')
+      -                            child_gss = isolate_cache[key_isolate]
+      -                        else:
+      -                            stats.stop('get_mask.main_loop.slow_path.isolate_check')
+      -                            stats.start('get_mask.main_loop.edge.isolate_many')
+      -                            _t0 = _perf_now()
+      -                            child_gss = source_after_apply.isolate_many(values_to_keep)
+      -                            _t1 = _perf_now()
+      -                            stats.stop('get_mask.main_loop.edge.isolate_many')
+      -                            if oracle_counters is not None and local_ctr is not None: local_ctr["isolate"] += 1
+      -                            if oracle_counters is not None and local_ctr is not None:
+      -                                local_ctr["isolate_calls"] = local_ctr.get("isolate_calls", 0) + 1
+      -                                local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+      -                            if isolate_cache is not None:
+      -                                isolate_cache[key_isolate] = child_gss
+      -                        continue
+      -                    stats.stop('get_mask.main_loop.slow_path.isolate_check')
+      -                    if child_gss.is_empty(): continue
+      -                    d: NodeID = int(dest.dest_idx)
+      -                    new_mask = yield Enqueue(d, child_gss, depth + 1)
+      -                    if new_mask is not None:
+      -                        active_remaining_mask = new_mask
+      -                    if active_remaining_mask.is_empty():
+      -                        return
+      -
+      -                    dests_proc += 1
+      -                    if oracle_counters is not None and local_ctr is not None:
+      -                        local_ctr["dests"] = local_ctr.get("dests", 0) + 1
+      +                            active_remaining_mask = new_mask
+      +                        if active_remaining_mask.is_empty():
+      +                            return
+      +                        dests_proc = 0
+      +                    stats.stop('get_mask.main_loop.slow_path.check_suspend')
+       
+                       if active_remaining_mask.is_empty():
+                           return
+      @@ -1858,10 +1896,12 @@
+       
+                       # The generator yields one item, we process it, and then the main loop continues.
+                       if isinstance(yielded, Enqueue):
+                           stats.start('get_mask.main_loop.gen_drive.process_enqueue')
+                           new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+      +                    stats.start('get_mask.main_loop.enqueue.get_base_pri')
+                           base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+      +                    stats.stop('get_mask.main_loop.enqueue.get_base_pri')
+                           if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                               stats.start('get_mask.main_loop.priority_for_node')
+                               child_priority = self._priority_for_node(
+      @@ -2757,11 +2757,15 @@
+                           elif guided_scores is not None:
+                               child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
+                           else:
+                               child_priority = base_child_pri
+      +                    stats.start('get_mask.main_loop.enqueue.heap_push_new')
+                           stats.start('get_mask.main_loop.heap_push')
+                           heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth)))
+                           stats.stop('get_mask.main_loop.heap_push')
+      +                    stats.stop('get_mask.main_loop.enqueue.heap_push_new')
+                           # The parent generator is implicitly suspended; put it back on the heap to be resumed later.
+                           # Use its original priority to allow children to be processed first if they have higher priority.
+      +                    stats.start('get_mask.main_loop.enqueue.heap_push_suspend')
+                           stats.start('get_mask.main_loop.heap_push')
+                           heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, depth)))
+                           stats.stop('get_mask.main_loop.heap_push')
+      @@ -1896,8 +1940,10 @@
+                               )
+                               stats.stop('get_mask.main_loop.priority_for_node')
+                           else:
+                               susp_pri = yielded.priority
+      +                    stats.start('get_mask.main_loop.suspend.heap_push')
+                           stats.start('get_mask.main_loop.heap_push')
+                           heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
+                           stats.stop('get_mask.main_loop.heap_push')
+      +                    stats.stop('get_mask.main_loop.suspend.heap_push')
+                           stats.stop('get_mask.main_loop.gen_drive.process_suspend')
+                   except StopIteration:
+                       pass # Generator is done.
 
       ```
     metadata:
