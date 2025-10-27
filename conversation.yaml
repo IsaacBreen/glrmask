@@ -13707,14 +13707,19 @@ local_system:
 
           // Run passes
           for pass in pipeline.iter() {
-              // Simple progress trace
-              #[allow(unused)]
-              {
-                  if ctx.debug_level > 0 {
-                      // eprintln!("[Trie3 Opt] Running pass: {}", pass.name());
-                  }
+              if ctx.debug_level > 0 {
+                  crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
               }
               pass.run(&mut mini, &mut ctx);
+              if ctx.debug_level > 0 {
+                  let metrics = run_all_metrics(&mini);
+                  crate::debug!(
+                      1,
+                      "[Trie3 Opt] Metrics after '{}': {:?}",
+                      pass.name(),
+                      metrics
+                  );
+              }
           }
 
           // Run final metrics
@@ -14151,52 +14156,6 @@ local_system:
           }
       }
 
-      pub struct EdgeOverlapMetric;
-      impl Metric for EdgeOverlapMetric {
-          fn name(&self) -> &'static str { "edge_overlap" }
-          fn compute(&self, trie: &MiniTrie) -> JSONNode {
-              use crate::trie3_opt::core::{NodeId, SortedSet};
-              use std::collections::BTreeMap;
-
-              let mut scores: Vec<f64> = Vec::new();
-              for node in &trie.nodes {
-                  let mut node_score = 0.0;
-
-                  // Group destination maps by pop
-                  let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
-                  for (ek, dm) in &node.children {
-                      by_pop.entry(ek.pop).or_default().push(dm);
-                  }
-
-                  for (_pop, dms) in by_pop {
-                      if dms.len() < 2 {
-                          continue;
-                      }
-                      for i in 0..dms.len() {
-                          for j in (i + 1)..dms.len() {
-                              let dm1 = dms[i];
-                              let dm2 = dms[j];
-
-                              let mut common_dests_with_overlap = 0;
-                              for (d, sids1) in dm1 {
-                                  if let Some(sids2) = dm2.get(d) {
-                                      if !sids1.intersect(sids2).is_empty() {
-                                          common_dests_with_overlap += 1;
-                                      }
-                                  }
-                              }
-                              node_score += common_dests_with_overlap as f64;
-                          }
-                      }
-                  }
-                  if node_score > 0.0 {
-                      scores.push(node_score);
-                  }
-              }
-              NumericStats::from_samples(&scores).to_json()
-          }
-      }
-
       /// Instantiates and runs all standard metrics on a given trie.
       pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
           let metrics: Vec<Box<dyn Metric>> = vec![
@@ -14208,7 +14167,6 @@ local_system:
               Box::new(NumProductiveNodesMetric),
               Box::new(RootFanoutMetric),
               Box::new(NonRootFanoutMetric),
-              Box::new(EdgeOverlapMetric),
           ];
 
           let mut results = BTreeMap::new();
@@ -29799,13 +29757,7 @@ messages:
       ```
     metadata:
       filename: src/trie3_opt/passes/prune_dead_paths.rs
-  - user: |-
-      Add a metric for how many times a dest reappears on a different edge from the same origin node, where that other edge's state bv has any overlap and same pop n. This gives some notion of redundancy.
-
-      Another thing that's bad is when we have multiple edges from the same origin with the same pop n that have at least one state ID in common. Add a metric for this.
-      And in fact the more dests they have in common the worse it is. Add some metric for this too.
-
-      Are these the same thing?
+  - user: Ensure metrics are printed between optimization passes.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -29825,153 +29777,91 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested metrics, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to print metrics between optimization passes, followed by the corresponding git diff.
 
-      ### Step-by-step Instructions
+      ### Instructions
 
-      I will add a new metric, `EdgeOverlapMetric`, to measure redundancy in a node's outgoing edges. This metric captures scenarios where multiple edges with the same `pop` value from a single node lead to common destinations with overlapping state sets. The metric's score increases with the number of such overlapping destinations, addressing all aspects of your request.
+      I will modify the optimization pipeline coordinator to compute and print metrics after each optimization pass completes. This will give you a detailed view of how each pass affects the graph's characteristics.
 
-      The changes will be confined to `src/trie3_opt/metrics.rs`.
-
-      1.  **Open `src/trie3_opt/metrics.rs`**.
-      2.  **Add the new metric implementation**. After the `NonRootFanoutMetric` struct implementation, insert the following code for the new `EdgeOverlapMetric`:
+      1.  **Open `src/trie3_opt/coordinator.rs`**.
+      2.  Navigate to the `run_pipeline_on_precompute3` function.
+      3.  Locate the loop that runs the optimization passes, which looks like this:
 
           ```rust
-          pub struct EdgeOverlapMetric;
-          impl Metric for EdgeOverlapMetric {
-              fn name(&self) -> &'static str { "edge_overlap" }
-              fn compute(&self, trie: &MiniTrie) -> JSONNode {
-                  use crate::trie3_opt::core::{NodeId, SortedSet};
-                  use std::collections::BTreeMap;
-
-                  let mut scores: Vec<f64> = Vec::new();
-                  for node in &trie.nodes {
-                      let mut node_score = 0.0;
-
-                      // Group destination maps by pop
-                      let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
-                      for (ek, dm) in &node.children {
-                          by_pop.entry(ek.pop).or_default().push(dm);
-                      }
-
-                      for (_pop, dms) in by_pop {
-                          if dms.len() < 2 {
-                              continue;
-                          }
-                          for i in 0..dms.len() {
-                              for j in (i + 1)..dms.len() {
-                                  let dm1 = dms[i];
-                                  let dm2 = dms[j];
-
-                                  let mut common_dests_with_overlap = 0;
-                                  for (d, sids1) in dm1 {
-                                      if let Some(sids2) = dm2.get(d) {
-                                          if !sids1.intersect(sids2).is_empty() {
-                                              common_dests_with_overlap += 1;
-                                          }
-                                      }
-                                  }
-                                  node_score += common_dests_with_overlap as f64;
-                              }
-                          }
-                      }
-                      if node_score > 0.0 {
-                          scores.push(node_score);
+              // Run passes
+              for pass in pipeline.iter() {
+                  // Simple progress trace
+                  #[allow(unused)]
+                  {
+                      if ctx.debug_level > 0 {
+                          // eprintln!("[Trie3 Opt] Running pass: {}", pass.name());
                       }
                   }
-                  NumericStats::from_samples(&scores).to_json()
+                  pass.run(&mut mini, &mut ctx);
               }
-          }
           ```
 
-      3.  **Register the new metric**. In the `run_all_metrics` function, add the new metric to the `metrics` vector, like so:
+      4.  Replace that entire loop with the following code. This new version will print the pass name before it runs and the full set of metrics after it finishes, conditioned on the debug level.
 
           ```rust
-          // ... inside run_all_metrics ...
-          let metrics: Vec<Box<dyn Metric>> = vec![
-              Box::new(NumNodesMetric),
-              Box::new(NumEdgesMetric),
-              Box::new(NumRootsMetric),
-              Box::new(NumEndNodesMetric),
-              Box::new(NumReachableNodesMetric),
-              Box::new(NumProductiveNodesMetric),
-              Box::new(RootFanoutMetric),
-              Box::new(NonRootFanoutMetric),
-              Box::new(EdgeOverlapMetric), // Add this line
-          ];
-          // ...
+              // Run passes
+              for pass in pipeline.iter() {
+                  if ctx.debug_level > 0 {
+                      crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
+                  }
+                  pass.run(&mut mini, &mut ctx);
+                  if ctx.debug_level > 0 {
+                      let metrics = run_all_metrics(&mini);
+                      crate::debug!(
+                          1,
+                          "[Trie3 Opt] Metrics after '{}': {:?}",
+                          pass.name(),
+                          metrics
+                      );
+                  }
+              }
           ```
 
-      ### Git Diffs
+      ### Git Diff
 
-      Here is the git diff for the changes described above.
+      Here is the git diff for the change:
 
       ```diff
-      diff --git a/src/trie3_opt/metrics.rs b/src/trie3_opt/metrics.rs
-      index 2411141..131111c 100644
-      --- a/src/trie3_opt/metrics.rs
-      +++ b/src/trie3_opt/metrics.rs
-      @@ -158,6 +158,47 @@
-           }
-       }
+      --- a/src/trie3_opt/coordinator.rs
+      +++ b/src/trie3_opt/coordinator.rs
+      @@ -266,16 +266,20 @@
        
-      +pub struct EdgeOverlapMetric;
-      +impl Metric for EdgeOverlapMetric {
-      +    fn name(&self) -> &'static str { "edge_overlap" }
-      +    fn compute(&self, trie: &MiniTrie) -> JSONNode {
-      +        use crate::trie3_opt::core::{NodeId, SortedSet};
-      +        use std::collections::BTreeMap;
-      +
-      +        let mut scores: Vec<f64> = Vec::new();
-      +        for node in &trie.nodes {
-      +            let mut node_score = 0.0;
-      +
-      +            // Group destination maps by pop
-      +            let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
-      +            for (ek, dm) in &node.children {
-      +                by_pop.entry(ek.pop).or_default().push(dm);
-      +            }
-      +
-      +            for (_pop, dms) in by_pop {
-      +                if dms.len() < 2 {
-      +                    continue;
-      +                }
-      +                for i in 0..dms.len() {
-      +                    for j in (i + 1)..dms.len() {
-      +                        let dm1 = dms[i];
-      +                        let dm2 = dms[j];
-      +
-      +                        let mut common_dests_with_overlap = 0;
-      +                        for (d, sids1) in dm1 {
-      +                            if let Some(sids2) = dm2.get(d) {
-      +                                if !sids1.intersect(sids2).is_empty() {
-      +                                    common_dests_with_overlap += 1;
-      +                                }
-      +                            }
-      +                        }
-      +                        node_score += common_dests_with_overlap as f64;
-      +                    }
-      +                }
-      +            }
-      +            if node_score > 0.0 {
-      +                scores.push(node_score);
-      +            }
+           let pipeline = build_pipeline(&config);
+       
+      -    // Run passes
+      -    for pass in pipeline.iter() {
+      -        // Simple progress trace
+      -        #[allow(unused)]
+      -        {
+      -            if ctx.debug_level > 0 {
+      -                // eprintln!("[Trie3 Opt] Running pass: {}", pass.name());
+      -            }
+      -        }
+      +    // Run passes
+      +    for pass in pipeline.iter() {
+      +        if ctx.debug_level > 0 {
+      +            crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
       +        }
-      +        NumericStats::from_samples(&scores).to_json()
+               pass.run(&mut mini, &mut ctx);
+      -    }
+      +        if ctx.debug_level > 0 {
+      +            let metrics = run_all_metrics(&mini);
+      +            crate::debug!(
+      +                1,
+      +                "[Trie3 Opt] Metrics after '{}': {:?}",
+      +                pass.name(),
+      +                metrics
+      +            );
+      +        }
       +    }
-      +}
-      +
-       /// Instantiates and runs all standard metrics on a given trie.
-       pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
-           let metrics: Vec<Box<dyn Metric>> = vec![
-      @@ -169,6 +210,7 @@
-               Box::new(NumProductiveNodesMetric),
-               Box::new(RootFanoutMetric),
-               Box::new(NonRootFanoutMetric),
-      +        Box::new(EdgeOverlapMetric),
-           ];
        
-           let mut results = BTreeMap::new();
+           // Run final metrics
+           ctx.metrics_after = run_all_metrics(&mini);
 
       ```
     metadata:
@@ -29980,12 +29870,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/metrics.rs
-      Applying patch to 'src/trie3_opt/metrics.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/metrics.rs.
+      Identified target file: src/trie3_opt/coordinator.rs
+      Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
     metadata:
-  - user: 'Changes committed with message: "Add EdgeOverlapMetric to track redundancy
-      in node outgoing edges based on common destinations with overlapping states
-      across same-pop edges."'
+  - user: 'Changes committed with message: "Add per-pass metric reporting in coordinator
+      and introduce EdgeOverlapMetric"'
     metadata:
 ...

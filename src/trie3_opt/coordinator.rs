@@ -263,14 +263,19 @@ pub fn run_pipeline_on_precompute3(
 
     // Run passes
     for pass in pipeline.iter() {
-        // Simple progress trace
-        #[allow(unused)]
-        {
-            if ctx.debug_level > 0 {
-                // eprintln!("[Trie3 Opt] Running pass: {}", pass.name());
-            }
+        if ctx.debug_level > 0 {
+            crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
         }
         pass.run(&mut mini, &mut ctx);
+        if ctx.debug_level > 0 {
+            let metrics = run_all_metrics(&mini);
+            crate::debug!(
+                1,
+                "[Trie3 Opt] Metrics after '{}': {:?}",
+                pass.name(),
+                metrics
+            );
+        }
     }
 
     // Run final metrics
