@@ -138,7 +138,7 @@ impl OptimizationPass for MergeStructuralPass {
                 let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
                     BTreeMap::new();
                 for (ek, dm) in &exemplar_node.children {
-                    let mut new_dm = BTreeMap::new();
+                    let mut new_dm: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
                     for (dst, sids) in dm {
                         let rep = *rep_of_node.get(dst).unwrap();
                         new_dm.entry(rep).or_default().union_inplace(sids);
