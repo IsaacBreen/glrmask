@@ -778,7 +778,7 @@ class Model(GraphProvider):
         global_pop_cache: Optional[Dict] = None,
         apply_cache: Optional[Dict] = None,
         isolate_cache: Optional[Dict] = None,
-    ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+    ) -> Generator[Union[Enqueue, Suspend], Optional[Tuple[LLMTokenSet, Any]], None]:
         stats = Stats.get()
         a_node = self.arena.get(node_id)
         if not a_node or not a_node.children:
@@ -787,6 +787,7 @@ class Model(GraphProvider):
         if remaining_mask.is_empty():
             return
 
+        next_highest_priority = None
         active_remaining_mask = remaining_mask
         max_edges, max_dests = self.gm_max_edges, self.gm_max_dests
         edges_proc, dests_proc = 0, 0
@@ -864,6 +865,16 @@ class Model(GraphProvider):
         for i, edge_idx in enumerate(sorted_applicable_indices):
             edge = a_node.children[edge_idx]
 
+            current_edge_priority = edge.min_distance_to_end
+            current_work_priority = (current_edge_priority, -self.max_depth.get(node_id, 0), edge_idx, 0)
+            if next_highest_priority is not None and current_work_priority > next_highest_priority:
+                sent_val = yield Suspend(node_id, current_work_priority, depth)
+                if sent_val is not None:
+                    active_remaining_mask, next_highest_priority = sent_val
+                if active_remaining_mask.is_empty():
+                    return
+
+
             if edge.llm_bv.isdisjoint(active_remaining_mask):
                 stats.inc('get_mask.traversal.skip')
                 continue
@@ -923,9 +934,9 @@ class Model(GraphProvider):
                 if dests_proc >= max_dests:
                     next_priority = edge.min_distance_to_end
                     priority = (next_priority, -self.max_depth.get(node_id, 0), edge_idx, dest_j)
-                    new_mask = yield Suspend(node_id, priority, depth)
-                    if new_mask is not None:
-                        active_remaining_mask = new_mask
+                    sent_val = yield Suspend(node_id, priority, depth)
+                    if sent_val is not None:
+                        active_remaining_mask, next_highest_priority = sent_val
                     if edge.llm_bv.isdisjoint(active_remaining_mask):
                         stats.inc('get_mask.traversal.dest_keys.skip2')
                         break
@@ -954,9 +965,9 @@ class Model(GraphProvider):
                 d: NodeID = int(dest.dest_idx)
                 edge_priority = self.node_distance_to_end.get(d, 999999)
 
-                new_mask = yield Enqueue(d, child_gss, depth + 1, edge_priority)
-                if new_mask is not None:
-                    active_remaining_mask = new_mask
+                sent_val = yield Enqueue(d, child_gss, depth + 1, edge_priority)
+                if sent_val is not None:
+                    active_remaining_mask, next_highest_priority = sent_val
                 if edge.llm_bv.isdisjoint(active_remaining_mask):
                     stats.inc('get_mask.traversal.dest_keys.skip3')
                     break
@@ -971,9 +982,9 @@ class Model(GraphProvider):
                     next_priority = a_node.children[next_edge_idx].min_distance_to_end
 
                 priority = (next_priority, -self.max_depth.get(node_id, 0), edge_idx + 1, 0)
-                new_mask = yield Suspend(int(node_id), priority, depth)
-                if new_mask is not None:
-                    active_remaining_mask = new_mask
+                sent_val = yield Suspend(int(node_id), priority, depth)
+                if sent_val is not None:
+                    active_remaining_mask, next_highest_priority = sent_val
                 if active_remaining_mask.is_empty():
                     return
                 edges_proc = 0
@@ -1110,7 +1121,8 @@ class Model(GraphProvider):
                 if is_new_gen:
                     yielded = next(gen)
                 else:
-                    yielded = gen.send(remaining_mask)
+                    next_pri = work_heap[0].priority if work_heap else None
+                    yielded = gen.send((remaining_mask, next_pri))
                 stats.stop('get_mask.traversal.gen_drive.resume')
 
                 if isinstance(yielded, Enqueue):
