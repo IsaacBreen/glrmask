@@ -1008,6 +1008,7 @@ class Model(GraphProvider):
                     popped, popped_acc, peeked, peek_rs = pop_cache[pop_val]
                     stats.inc('get_mask.main_loop.edge.pop_cache_hits')
                 else:
+                    stats.start('get_mask.main_loop.fast_path.pop_op')
                     if pop_val == 0:
                         popped = gss_node
                         popped_acc = types.SimpleNamespace(llm_mask=gss_mask)  # reuse caller’s gss_mask
@@ -1015,7 +1016,6 @@ class Model(GraphProvider):
                         peek_rs = peek0_rs
                         pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                     else:
-                        stats.start('get_mask.main_loop.fast_path.pop_op')
                         popped = None
                         if global_pop_cache is not None:
                             key = (id(gss_node), pop_val)
@@ -1031,12 +1031,14 @@ class Model(GraphProvider):
                         if popped.is_empty():
                             stats.inc('get_mask.traversal.edge.popped_empty')
                             pop_cache[pop_val] = (popped, None, [], RangeSetStates.empty())
+                            stats.stop('get_mask.main_loop.fast_path.pop_op')
                             continue
                         stats.start('get_mask.main_loop.edge.popped.reduce_acc')
                         popped_acc = popped.reduce_acc()
                         stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
                         if not popped_acc or popped_acc.llm_mask.is_empty():
                             pop_cache[pop_val] = (GSS.empty(), None, [], RangeSetStates.empty())
+                            stats.stop('get_mask.main_loop.fast_path.pop_op')
                             continue
                         stats.start('get_mask.main_loop.post_pop_peek')
                         peeked = popped.peek()
@@ -1044,7 +1046,7 @@ class Model(GraphProvider):
                         pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                         if global_pop_cache is not None:
                             global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
-                        stats.stop('get_mask.main_loop.fast_path.pop_op')
+                    stats.stop('get_mask.main_loop.fast_path.pop_op')
 
                 # Per-pop bucket pruning
                 stats.start('get_mask.main_loop.fast_path.bucket_pruning')
@@ -1181,13 +1183,18 @@ class Model(GraphProvider):
                     stats.stop('get_mask.main_loop.fast_path.isolate_check')
                     stats.stop('get_mask.main_loop.fast_path.isolate_many')
 
-                    if child_gss.is_empty():
+                    stats.start('get_mask.main_loop.fast_path.child_gss_empty_check')
+                    is_empty = child_gss.is_empty()
+                    stats.stop('get_mask.main_loop.fast_path.child_gss_empty_check')
+                    if is_empty:
                         continue
 
                     d: NodeID = int(dest_id)
                     new_mask = yield Enqueue(d, child_gss, depth + 1)
+                    stats.start('get_mask.main_loop.fast_path.update_active_mask')
                     if new_mask is not None:
                         active_remaining_mask = new_mask
+                    stats.stop('get_mask.main_loop.fast_path.update_active_mask')
                     if active_remaining_mask.is_empty():
                         return
 
@@ -1195,28 +1202,36 @@ class Model(GraphProvider):
                     if oracle_counters is not None and local_ctr is not None:
                         local_ctr["dests"] = local_ctr.get("dests", 0) + 1
 
+                    stats.start('get_mask.main_loop.fast_path.check_suspend')
                     if dests_proc >= max_dests:
                         priority = (-self.max_depth.get(node_id, 0), group_index, 0)
                         new_mask = yield Suspend(node_id, priority, depth)
+                        stats.start('get_mask.main_loop.fast_path.update_active_mask_suspend')
                         if new_mask is not None:
                             active_remaining_mask = new_mask
+                        stats.stop('get_mask.main_loop.fast_path.update_active_mask_suspend')
                         if active_remaining_mask.is_empty():
                             return
                         dests_proc = 0
+                    stats.stop('get_mask.main_loop.fast_path.check_suspend')
 
                     group_index += 1
 
                 if active_remaining_mask.is_empty():
                     return
 
+                stats.start('get_mask.main_loop.fast_path.check_suspend_edges')
                 if edges_proc >= max_edges:
                     priority = (-self.max_depth.get(node_id, 0), group_index, 0)
                     new_mask = yield Suspend(int(node_id), priority, depth)
+                    stats.start('get_mask.main_loop.fast_path.update_active_mask_suspend_edges')
                     if new_mask is not None:
                         active_remaining_mask = new_mask
+                    stats.stop('get_mask.main_loop.fast_path.update_active_mask_suspend_edges')
                     if active_remaining_mask.is_empty():
                         return
                     edges_proc = 0
+                stats.stop('get_mask.main_loop.fast_path.check_suspend_edges')
                 edges_proc += 1
         else:
             stats.inc('get_mask.main_loop.slow_path')
@@ -1385,14 +1400,19 @@ class Model(GraphProvider):
                     dest_keys.sort()
                 stats.stop('get_mask.main_loop.slow_path.group_sorting')
                 for dest_j in dest_keys:
+                    stats.start('get_mask.main_loop.slow_path.check_suspend')
                     if dests_proc >= max_dests:
                         priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
                         new_mask = yield Suspend(node_id, priority, depth)
+                        stats.start('get_mask.main_loop.slow_path.update_active_mask_suspend')
                         if new_mask is not None:
                             active_remaining_mask = new_mask
+                        stats.stop('get_mask.main_loop.slow_path.update_active_mask_suspend')
                         if active_remaining_mask.is_empty():
                             return
                         dests_proc = 0
+                    stats.stop('get_mask.main_loop.slow_path.check_suspend')
+
                     if active_remaining_mask.is_empty():
                         break
                     dest = edge.dests[dest_j]
@@ -1424,11 +1444,16 @@ class Model(GraphProvider):
                         continue
                     stats.stop('get_mask.main_loop.slow_path.isolate_many')
                     stats.stop('get_mask.main_loop.slow_path.isolate_check')
-                    if child_gss.is_empty(): continue
+                    stats.start('get_mask.main_loop.slow_path.child_gss_empty_check')
+                    is_empty = child_gss.is_empty()
+                    stats.stop('get_mask.main_loop.slow_path.child_gss_empty_check')
+                    if is_empty: continue
                     d: NodeID = int(dest.dest_idx)
                     new_mask = yield Enqueue(d, child_gss, depth + 1)
+                    stats.start('get_mask.main_loop.slow_path.update_active_mask')
                     if new_mask is not None:
                         active_remaining_mask = new_mask
+                    stats.stop('get_mask.main_loop.slow_path.update_active_mask')
                     if active_remaining_mask.is_empty():
                         return
 
@@ -1439,15 +1464,19 @@ class Model(GraphProvider):
                 if active_remaining_mask.is_empty():
                     return
 
+                stats.start('get_mask.main_loop.slow_path.check_suspend_edges')
                 if edges_proc >= max_edges:
                     # Suspend work after a batch to allow priority reordering at the heap level
                     priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
                     new_mask = yield Suspend(int(node_id), priority, depth)
+                    stats.start('get_mask.main_loop.slow_path.update_active_mask_suspend_edges')
                     if new_mask is not None:
                         active_remaining_mask = new_mask
+                    stats.stop('get_mask.main_loop.slow_path.update_active_mask_suspend_edges')
                     if active_remaining_mask.is_empty():
                         return
                     edges_proc = 0
+                stats.stop('get_mask.main_loop.slow_path.check_suspend_edges')
                 edges_proc += 1
         # When max_dests suspend triggers
         # (Handled inside the loop above with proper node_id propagation)
