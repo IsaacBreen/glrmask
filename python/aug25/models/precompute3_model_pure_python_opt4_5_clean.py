@@ -729,6 +729,9 @@ class Model(GraphProvider):
 
         merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
         self.state = {sid: g for sid, g in merged.items() if not g.is_empty()}
+        print("state:")
+        for sid, gss in self.state.items():
+            print(f"sid: {gss.to_graph_string()}")
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         if self.ignore_terminal_id == terminal_id:
