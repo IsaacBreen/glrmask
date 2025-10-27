@@ -1,3 +1,4 @@
+use crate::trie3_opt::full::prune_end_reach::prune_nodes_not_reaching_end_trie3;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
@@ -33,7 +34,7 @@ use crate::trie3_opt::passes::full::{
 };
 use crate::trie3_opt::passes::full::config::Trie3MergeConfig;
 use crate::trie3_opt::passes::{
-    CompressChainsPass, OptimizationPass, PruneDeadPathsPass, PruneUnproductivePathsPass,
+    OptimizationPass, PruneDeadPathsPass,
 };
 use rand::prelude::*;
 

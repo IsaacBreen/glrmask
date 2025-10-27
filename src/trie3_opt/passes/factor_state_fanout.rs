@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
+use crate::trie3_opt::EdgeKey;
 use crate::trie3_opt::passes::OptimizationPass;
 
 /// Reduces state fanout by factoring edges. For each node, it groups outgoing edges
@@ -53,7 +54,7 @@ impl OptimizationPass for FactorStateFanoutPass {
             }
 
             // Step 3: Reconstruct node.children from the per-destination merged edges.
-            let mut new_children = BTreeMap::new();
+            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
             for ((pop, dest), edges) in merged_per_dest {
                 for (tokens, states) in edges {
                     if tokens.is_empty() || states.is_empty() {
