@@ -753,315 +753,158 @@ class Model(GraphProvider):
         checked_pops: Set[int] = set()
         local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
 
-        if a_node.fast_children:
-            pops_in_node = sorted(a_node.fast_children.keys())
-            group_index = 0
+        pops_in_node = sorted(a_node.fast_children.keys())
+        group_index = 0
 
-            for pop_val in pops_in_node:
-                if pop_val in skip_pops:
-                    continue
+        for pop_val in pops_in_node:
+            if pop_val in skip_pops:
+                continue
 
-                if pop_val in pop_cache:
-                    popped, popped_acc, peeked, peek_rs = pop_cache[pop_val]
+            if pop_val in pop_cache:
+                popped, popped_acc, peeked, peek_rs = pop_cache[pop_val]
+            else:
+                if pop_val == 0:
+                    popped = gss_node
+                    import types
+                    popped_acc = types.SimpleNamespace(llm_mask=gss_mask)
+                    peeked = peek0
+                    peek_rs = peek0_rs
+                    pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                 else:
-                    if pop_val == 0:
-                        popped = gss_node
-                        import types
-                        popped_acc = types.SimpleNamespace(llm_mask=gss_mask)
-                        peeked = peek0
-                        peek_rs = peek0_rs
-                        pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
-                    else:
-                        popped = None
-                        if global_pop_cache is not None:
-                            key = (id(gss_node), pop_val)
-                            cached = global_pop_cache.get(key)
-                            if cached is not None:
-                                popped, popped_acc, peeked, peek_rs = cached
-                                pop_cache[pop_val] = cached
-                        if popped is None:
-                            popped = gss_node.popn(pop_val)
-                        if popped.is_empty():
-                            pop_cache[pop_val] = (popped, None, [], RangeSetStates.empty())
-                            continue
-                        popped_acc = popped.reduce_acc()
-                        if not popped_acc or popped_acc.llm_mask.is_empty():
-                            pop_cache[pop_val] = (GSS.empty(), None, [], RangeSetStates.empty())
-                            continue
-                        peeked = popped.peek()
-                        peek_rs = RangeSetStates.from_indices(peeked)
-                        pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
-                        if global_pop_cache is not None:
-                            global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
-
-                if pop_val not in checked_pops:
-                    checked_pops.add(pop_val)
-                    pop_states_union = a_node.pop_to_state_union.get(pop_val)
-                    if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
-                        skip_pops.add(pop_val)
+                    popped = None
+                    if global_pop_cache is not None:
+                        key = (id(gss_node), pop_val)
+                        cached = global_pop_cache.get(key)
+                        if cached is not None:
+                            popped, popped_acc, peeked, peek_rs = cached
+                            pop_cache[pop_val] = cached
+                    if popped is None:
+                        popped = gss_node.popn(pop_val)
+                    if popped.is_empty():
+                        pop_cache[pop_val] = (popped, None, [], RangeSetStates.empty())
                         continue
-                    pop_llm_union = a_node.pop_to_llm_union.get(pop_val)
-                    if pop_llm_union is not None and (
-                        (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)
-                    ):
-                        skip_pops.add(pop_val)
+                    popped_acc = popped.reduce_acc()
+                    if not popped_acc or popped_acc.llm_mask.is_empty():
+                        pop_cache[pop_val] = (GSS.empty(), None, [], RangeSetStates.empty())
                         continue
+                    peeked = popped.peek()
+                    peek_rs = RangeSetStates.from_indices(peeked)
+                    pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
+                    if global_pop_cache is not None:
+                        global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
 
-                groups: Dict[Tuple[int, int], Dict[str, Any]] = {}
-                mapping_for_pop = a_node.fast_children.get(pop_val, {})
-                for sid in peeked:
-                    per_state_map = mapping_for_pop.get(int(sid), {})
-                    if not per_state_map:
-                        continue
-                    for dest_id, triple in per_state_map.items():
-                        llm_bv, llm_bv_not, llm_bv_thru = triple
-                        if popped_acc.llm_mask.isdisjoint(llm_bv_thru):
-                            continue
-                        key = (int(dest_id), id(llm_bv_thru))
-                        entry = groups.get(key)
-                        if entry is None:
-                            groups[key] = {"llm_bv": llm_bv_thru, "states": [int(sid)]}
-                        else:
-                            entry["states"].append(int(sid))
-
-                if not groups:
+            if pop_val not in checked_pops:
+                checked_pops.add(pop_val)
+                pop_states_union = a_node.pop_to_state_union.get(pop_val)
+                if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
+                    skip_pops.add(pop_val)
+                    continue
+                pop_llm_union = a_node.pop_to_llm_union.get(pop_val)
+                if pop_llm_union is not None and (
+                    (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)
+                ):
+                    skip_pops.add(pop_val)
                     continue
 
-                # Sort by edge priority (lower distance = higher priority)
-                dest_keys = sorted(groups.keys(), key=lambda k: (
-                    self.arena[int(k[0])].children[0].min_distance_to_end if self.arena.get(int(k[0])) and self.arena[int(k[0])].children else 999999
-                ))
-
-                for (dest_id, llm_bv_id) in dest_keys:
-                    entry = groups[(dest_id, llm_bv_id)]
-                    llm_bv = entry["llm_bv"]
-                    states_to_keep: List[int] = entry["states"]
-
-                    if llm_bv.isdisjoint(active_remaining_mask):
+            groups: Dict[Tuple[int, int], Dict[str, Any]] = {}
+            mapping_for_pop = a_node.fast_children.get(pop_val, {})
+            for sid in peeked:
+                per_state_map = mapping_for_pop.get(int(sid), {})
+                if not per_state_map:
+                    continue
+                for dest_id, triple in per_state_map.items():
+                    llm_bv, llm_bv_not, llm_bv_thru = triple
+                    if popped_acc.llm_mask.isdisjoint(llm_bv_thru):
                         continue
-
-                    source_after_apply = popped
-                    key_apply = (id(popped), id(llm_bv))
-                    cached_apply = local_apply_cache.get(key_apply)
-                    if cached_apply is not None:
-                        source_after_apply = cached_apply
+                    key = (int(dest_id), id(llm_bv_thru))
+                    entry = groups.get(key)
+                    if entry is None:
+                        groups[key] = {"llm_bv": llm_bv_thru, "states": [int(sid)]}
                     else:
-                        @_acc_memoize(use_value_cache=False)
-                        def intersect(acc: PyAcc):
-                            new_mask = acc.llm_mask.intersection(llm_bv)
-                            return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                        tmp = popped.apply_and_prune(intersect)
-                        if tmp.is_empty():
-                            continue
-                        source_after_apply = tmp
-                        local_apply_cache[key_apply] = tmp
+                        entry["states"].append(int(sid))
 
-                    if len(states_to_keep) == len(peeked):
-                        child_gss = source_after_apply
-                    else:
-                        key_isolate = (id(source_after_apply), tuple(states_to_keep))
-                        if isolate_cache is not None and key_isolate in isolate_cache:
-                            child_gss = isolate_cache[key_isolate]
-                        else:
-                            child_gss = source_after_apply.isolate_many(states_to_keep)
-                            if isolate_cache is not None:
-                                isolate_cache[key_isolate] = child_gss
+            if not groups:
+                continue
 
-                    if child_gss.is_empty():
+            # Sort by edge priority (lower distance = higher priority)
+            dest_keys = sorted(groups.keys(), key=lambda k: (
+                self.arena[int(k[0])].children[0].min_distance_to_end if self.arena.get(int(k[0])) and self.arena[int(k[0])].children else 999999
+            ))
+
+            for (dest_id, llm_bv_id) in dest_keys:
+                entry = groups[(dest_id, llm_bv_id)]
+                llm_bv = entry["llm_bv"]
+                states_to_keep: List[int] = entry["states"]
+
+                if llm_bv.isdisjoint(active_remaining_mask):
+                    continue
+
+                source_after_apply = popped
+                key_apply = (id(popped), id(llm_bv))
+                cached_apply = local_apply_cache.get(key_apply)
+                if cached_apply is not None:
+                    source_after_apply = cached_apply
+                else:
+                    @_acc_memoize(use_value_cache=False)
+                    def intersect(acc: PyAcc):
+                        new_mask = acc.llm_mask.intersection(llm_bv)
+                        return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                    tmp = popped.apply_and_prune(intersect)
+                    if tmp.is_empty():
                         continue
+                    source_after_apply = tmp
+                    local_apply_cache[key_apply] = tmp
 
-                    d: NodeID = int(dest_id)
-                    dest_node = self.arena.get(d)
-                    edge_priority = dest_node.children[0].min_distance_to_end if dest_node and dest_node.children else 999999
+                if len(states_to_keep) == len(peeked):
+                    child_gss = source_after_apply
+                else:
+                    key_isolate = (id(source_after_apply), tuple(states_to_keep))
+                    if isolate_cache is not None and key_isolate in isolate_cache:
+                        child_gss = isolate_cache[key_isolate]
+                    else:
+                        child_gss = source_after_apply.isolate_many(states_to_keep)
+                        if isolate_cache is not None:
+                            isolate_cache[key_isolate] = child_gss
 
-                    new_mask = yield Enqueue(d, child_gss, depth + 1, edge_priority)
-                    if new_mask is not None:
-                        active_remaining_mask = new_mask
-                    if active_remaining_mask.is_empty():
-                        return
+                if child_gss.is_empty():
+                    continue
 
-                    dests_proc += 1
-                    if dests_proc >= max_dests:
-                        next_priority = min((e.min_distance_to_end for e in a_node.children[group_index:]), default=999999)
-                        priority = (next_priority, -self.max_depth.get(node_id, 0), group_index, 0)
-                        new_mask = yield Suspend(node_id, priority, depth)
-                        if new_mask is not None:
-                            active_remaining_mask = new_mask
-                        if active_remaining_mask.is_empty():
-                            return
-                        dests_proc = 0
+                d: NodeID = int(dest_id)
+                dest_node = self.arena.get(d)
+                edge_priority = dest_node.children[0].min_distance_to_end if dest_node and dest_node.children else 999999
 
-                    group_index += 1
-
+                new_mask = yield Enqueue(d, child_gss, depth + 1, edge_priority)
+                if new_mask is not None:
+                    active_remaining_mask = new_mask
                 if active_remaining_mask.is_empty():
                     return
 
-                if edges_proc >= max_edges:
+                dests_proc += 1
+                if dests_proc >= max_dests:
                     next_priority = min((e.min_distance_to_end for e in a_node.children[group_index:]), default=999999)
                     priority = (next_priority, -self.max_depth.get(node_id, 0), group_index, 0)
-                    new_mask = yield Suspend(int(node_id), priority, depth)
+                    new_mask = yield Suspend(node_id, priority, depth)
                     if new_mask is not None:
                         active_remaining_mask = new_mask
                     if active_remaining_mask.is_empty():
                         return
-                    edges_proc = 0
-                edges_proc += 1
-        else:
-            pops_in_node = sorted(a_node.pop_state_to_edges.keys())
+                    dests_proc = 0
 
-            for pop_val in pops_in_node:
-                if pop_val in skip_pops:
-                    continue
+                group_index += 1
 
-                if pop_val in pop_cache:
-                    popped, popped_acc, peeked, peek_rs = pop_cache[pop_val]
-                else:
-                    if pop_val == 0:
-                        popped = gss_node
-                        import types
-                        popped_acc = types.SimpleNamespace(llm_mask=gss_mask)
-                        peeked = peek0
-                        peek_rs = peek0_rs
-                        pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
-                    else:
-                        popped = None
-                        if global_pop_cache is not None:
-                            key = (id(gss_node), pop_val)
-                            cached = global_pop_cache.get(key)
-                            if cached is not None:
-                                popped, popped_acc, peeked, peek_rs = cached
-                                pop_cache[pop_val] = cached
-                        if popped is None:
-                            popped = gss_node.popn(pop_val)
-                        if popped.is_empty():
-                            pop_cache[pop_val] = (popped, None, [], RangeSetStates.empty())
-                            continue
-                        popped_acc = popped.reduce_acc()
-                        if not popped_acc or popped_acc.llm_mask.is_empty():
-                            pop_cache[pop_val] = (GSS.empty(), None, [], RangeSetStates.empty())
-                            continue
-                        peeked = popped.peek()
-                        peek_rs = RangeSetStates.from_indices(peeked)
-                        pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
-                        if global_pop_cache is not None:
-                            global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
+            if active_remaining_mask.is_empty():
+                return
 
-                if pop_val not in checked_pops:
-                    checked_pops.add(pop_val)
-                    pop_states_union = a_node.pop_to_state_union.get(pop_val)
-                    if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
-                        skip_pops.add(pop_val)
-                        continue
-                    pop_llm_union = a_node.pop_to_llm_union.get(pop_val)
-                    if pop_llm_union is not None and (
-                        (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)):
-                        skip_pops.add(pop_val)
-                        continue
-
-                if not popped_acc or not peeked:
-                    continue
-
-                edge_to_states: Dict[int, List[int]] = collections.defaultdict(list)
-                mapping_for_pop = a_node.pop_state_to_edges.get(pop_val, {})
-                for sid in peeked:
-                    edge_indices = mapping_for_pop.get(sid)
-                    if edge_indices:
-                        for edge_i in edge_indices:
-                            edge_to_states[edge_i].append(sid)
-
-                if not edge_to_states:
-                    continue
-
-                for edge_i in sorted(edge_to_states.keys()):
-                    edge = a_node.children[edge_i]
-
-                    if edge.llm_bv.isdisjoint(active_remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
-                        continue
-
-                    source_after_apply = popped
-                    if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                        if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
-                            continue
-                        key_apply = (id(popped), id(edge.llm_bv))
-                        cached_apply = local_apply_cache.get(key_apply)
-                        if cached_apply is not None:
-                            source_after_apply = cached_apply
-                        else:
-                            @_acc_memoize(use_value_cache=False)
-                            def intersect(acc: PyAcc):
-                                new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                                return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                            tmp = popped.apply_and_prune(intersect)
-                            if tmp.is_empty():
-                                continue
-                            source_after_apply = tmp
-                            local_apply_cache[key_apply] = tmp
-
-                    grouped: Dict[int, List[int]] = {}
-                    sids_for_this_edge = edge_to_states[edge_i]
-                    for sid in sids_for_this_edge:
-                        dest_list = edge.state_to_dest.get(sid)
-                        if not dest_list:
-                            continue
-                        for dest_j in dest_list:
-                            if dest_j not in grouped:
-                                grouped[dest_j] = [sid]
-                            else:
-                                grouped[dest_j].append(sid)
-
-                    for dest_j in sorted(grouped.keys()):
-                        if dests_proc >= max_dests:
-                            next_priority = min((e.min_distance_to_end for e in a_node.children[edge_i:]), default=999999)
-                            priority = (next_priority, -self.max_depth.get(node_id, 0), edge_i, dest_j)
-                            new_mask = yield Suspend(node_id, priority, depth)
-                            if new_mask is not None:
-                                active_remaining_mask = new_mask
-                            if active_remaining_mask.is_empty():
-                                return
-                            dests_proc = 0
-
-                        if active_remaining_mask.is_empty():
-                            break
-
-                        dest = edge.dests[dest_j]
-                        values_to_keep = grouped[dest_j]
-
-                        if len(values_to_keep) == len(peeked):
-                            child_gss = source_after_apply
-                        else:
-                            key_isolate = (id(source_after_apply), tuple(values_to_keep))
-                            if isolate_cache is not None and key_isolate in isolate_cache:
-                                child_gss = isolate_cache[key_isolate]
-                            else:
-                                child_gss = source_after_apply.isolate_many(values_to_keep)
-                                if isolate_cache is not None:
-                                    isolate_cache[key_isolate] = child_gss
-
-                        if child_gss.is_empty():
-                            continue
-
-                        d: NodeID = int(dest.dest_idx)
-                        new_mask = yield Enqueue(d, child_gss, depth + 1, edge.min_distance_to_end)
-                        if new_mask is not None:
-                            active_remaining_mask = new_mask
-                        if active_remaining_mask.is_empty():
-                            return
-
-                        dests_proc += 1
-
-                    if active_remaining_mask.is_empty():
-                        return
-
-                    if edges_proc >= max_edges:
-                        next_priority = min((e.min_distance_to_end for e in a_node.children[edge_i + 1:]), default=999999)
-                        priority = (next_priority, -self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                        new_mask = yield Suspend(int(node_id), priority, depth)
-                        if new_mask is not None:
-                            active_remaining_mask = new_mask
-                        if active_remaining_mask.is_empty():
-                            return
-                        edges_proc = 0
-                    edges_proc += 1
+            if edges_proc >= max_edges:
+                next_priority = min((e.min_distance_to_end for e in a_node.children[group_index:]), default=999999)
+                priority = (next_priority, -self.max_depth.get(node_id, 0), group_index, 0)
+                new_mask = yield Suspend(int(node_id), priority, depth)
+                if new_mask is not None:
+                    active_remaining_mask = new_mask
+                if active_remaining_mask.is_empty():
+                    return
+                edges_proc = 0
+            edges_proc += 1
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
         all_ones = self.all_internal_llm_tokens_bitset
