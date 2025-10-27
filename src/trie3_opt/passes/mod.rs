@@ -22,7 +22,6 @@ pub mod merge_structural;
 pub mod prune_dead_paths;
 pub mod prune_unproductive_paths;
 pub mod reorder_llm_tokens;
-pub mod full;
 
 pub use canonicalize_end_nodes::CanonicalizeEndNodesPass;
 pub use compress_edges::CompressEdgesPass;

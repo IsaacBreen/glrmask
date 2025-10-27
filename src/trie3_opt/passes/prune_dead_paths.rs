@@ -64,7 +64,7 @@ impl OptimizationPass for PruneDeadPathsPass {
 
                     if !live_on_edge.is_empty() {
                         let new_ek = EdgeKey::new(ek.pop, live_on_edge);
-                        let entry = new_children.entry(new_ek).or_default();
+                        let entry: &mut BTreeMap<NodeId, SortedSet> = new_children.entry(new_ek).or_default();
                         entry
                             .entry(*dst)
                             .and_modify(|e: &mut SortedSet| e.union_inplace(sids))

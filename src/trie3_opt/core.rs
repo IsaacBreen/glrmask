@@ -90,6 +90,7 @@ impl SortedSet {
 
 /// Edge key for the mini trie: pop delta and a token set.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
+#[derive(Hash)]
 pub struct EdgeKey {
     pub pop: isize,
     pub tokens: SortedSet,
