@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/stats.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/aug25/stats.py: |
@@ -12,8 +12,6 @@ local_system:
       import statistics
       import math
       import os
-      import contextlib
-      import functools
 
 
       class Stats:
@@ -51,9 +49,6 @@ local_system:
               # Active timers: key -> start_time
               self.timers: Dict[str, float] = {}
 
-              # Stack for tracking keys started within a generator scope.
-              self.scope_stack: List[set] = []
-
               # Enabled flag lets callers noop the collection if needed.
               self.enabled = os.environ.get("DISABLE_STATS") is None
 
@@ -76,7 +71,6 @@ local_system:
               self.durations.clear()
               self.timers.clear()
               self.key_positions.clear()
-              self.scope_stack.clear()
               self.show_all_stats = False
 
           def inc(self, key: str, value: int = 1):
@@ -91,8 +85,6 @@ local_system:
               if not self.enabled:
                   return
               self._record_key_position(key)
-              if self.scope_stack:
-                  self.scope_stack[-1].add(key)
               self.timers[key] = time.perf_counter()
 
           def stop(self, key: str):
@@ -103,27 +95,6 @@ local_system:
                   duration = time.perf_counter() - self.timers[key]
                   self.durations[key].append(duration)
                   del self.timers[key]
-
-          @contextlib.contextmanager
-          def scope(self):
-              """A context manager to ensure timers started within it are stopped.
-
-              Useful for generators that might not run to completion.
-              """
-              if not self.enabled:
-                  yield
-                  return
-
-              self.scope_stack.append(set())
-              try:
-                  yield
-              finally:
-                  if self.scope_stack:  # Check if not empty (e.g. after a reset)
-                      my_scope_keys = self.scope_stack.pop()
-                      active_keys = set(self.timers.keys())
-                      keys_to_stop = my_scope_keys & active_keys
-                      for key in keys_to_stop:
-                          self.stop(key)
 
           def _record_key_position(self, key: str):
               """If seeing a key for the first time, record its call site (file, line)."""
@@ -505,27 +476,6 @@ local_system:
 
           def __exit__(self, exc_type, exc_val, exc_tb):
               self.report()
-
-
-      def stats_generator(func):
-          """Decorator to ensure timers started in a generator are stopped.
-
-          Wraps the generator execution in a `Stats.scope()` to automatically
-          stop any timers that were started but not stopped by the time the
-          generator is exhausted or garbage collected.
-          """
-          @functools.wraps(func)
-          def wrapper(*args, **kwargs):
-              stats = Stats.get()
-              if not stats.enabled:
-                  yield from func(*args, **kwargs)
-                  return
-
-              # The scope must wrap the *iteration* of the generator.
-              with stats.scope():
-                  yield from func(*args, **kwargs)
-
-          return wrapper
   prev_file_contents:
     python/aug25/stats.py: |
       import time
@@ -1031,15 +981,11 @@ local_system:
 
 
       def stats_generator(func):
-          """Decorator for timing generators.
+          """Decorator to ensure timers started in a generator are stopped.
 
-          Features:
-          1. Ensures any timers started within the generator are eventually stopped,
-             even if the generator is not fully exhausted (via `Stats.scope`).
-          2. Pauses any active timers during `yield`. This means that time spent
-             in the consumer, between generator iterations, is excluded from timer
-             durations. This applies to timers started both inside and outside
-             the generator.
+          Wraps the generator execution in a `Stats.scope()` to automatically
+          stop any timers that were started but not stopped by the time the
+          generator is exhausted or garbage collected.
           """
           @functools.wraps(func)
           def wrapper(*args, **kwargs):
@@ -1048,58 +994,9 @@ local_system:
                   yield from func(*args, **kwargs)
                   return
 
-              # The scope ensures cleanup if the generator is abandoned mid-iteration.
+              # The scope must wrap the *iteration* of the generator.
               with stats.scope():
-                  gen = func(*args, **kwargs)
-                  yielded_value = None
-                  try:
-                      # Prime the generator to the first yield.
-                      yielded_value = next(gen)
-
-                      while True:
-                          # `gen` is now paused at a `yield`. We have the value.
-                          # Before we yield to the consumer, "pause" all active timers.
-                          active_timers_before_yield = dict(stats.timers)
-                          pause_start_time = time.perf_counter()
-
-                          try:
-                              # Yield to the consumer and get a value back from `send()`.
-                              sent_value = yield yielded_value
-                          except GeneratorExit:
-                              # Consumer called close(). Pass it on and exit.
-                              gen.close()
-                              raise
-                          except BaseException as e:
-                              # Consumer called throw(). Pass it on. The generator might
-                              # handle it and yield a new value, or it might raise.
-                              try:
-                                  yielded_value = gen.throw(type(e), e, e.__traceback__)
-                                  continue  # Loop to pause and yield the new value
-                              except StopIteration:
-                                  return  # Generator finished
-                              except BaseException:
-                                  raise  # Generator re-raised, propagate up
-
-                          # Resumed from consumer. Calculate pause duration.
-                          pause_duration = time.perf_counter() - pause_start_time
-
-                          # Adjust start times for all timers that were active before we yielded.
-                          # This logic correctly handles nested adjustments (e.g. from _record_key_position)
-                          # that may have occurred in the consumer while we were paused, preventing
-                          # double-counting of pause time which can lead to negative durations.
-                          for k, original_start_time in active_timers_before_yield.items():
-                              if k in stats.timers:  # Check if it wasn't stopped by the consumer
-                                  current_start_time = stats.timers[k]
-                                  adjustment_during_pause = current_start_time - original_start_time
-                                  needed_adjustment = pause_duration - adjustment_during_pause
-                                  stats.timers[k] += needed_adjustment
-
-                          # Resume the generator by sending the value from the consumer.
-                          yielded_value = gen.send(sent_value)
-
-                  except StopIteration:
-                      # Generator finished, either during priming or in the loop.
-                      return
+                  yield from func(*args, **kwargs)
 
           return wrapper
   diffs_applied_this_send: true
@@ -1153,8 +1050,6 @@ messages:
       import statistics
       import math
       import os
-      import contextlib
-      import functools
 
 
       class Stats:
@@ -1192,9 +1087,6 @@ messages:
               # Active timers: key -> start_time
               self.timers: Dict[str, float] = {}
 
-              # Stack for tracking keys started within a generator scope.
-              self.scope_stack: List[set] = []
-
               # Enabled flag lets callers noop the collection if needed.
               self.enabled = os.environ.get("DISABLE_STATS") is None
 
@@ -1217,7 +1109,6 @@ messages:
               self.durations.clear()
               self.timers.clear()
               self.key_positions.clear()
-              self.scope_stack.clear()
               self.show_all_stats = False
 
           def inc(self, key: str, value: int = 1):
@@ -1232,8 +1123,6 @@ messages:
               if not self.enabled:
                   return
               self._record_key_position(key)
-              if self.scope_stack:
-                  self.scope_stack[-1].add(key)
               self.timers[key] = time.perf_counter()
 
           def stop(self, key: str):
@@ -1244,27 +1133,6 @@ messages:
                   duration = time.perf_counter() - self.timers[key]
                   self.durations[key].append(duration)
                   del self.timers[key]
-
-          @contextlib.contextmanager
-          def scope(self):
-              """A context manager to ensure timers started within it are stopped.
-
-              Useful for generators that might not run to completion.
-              """
-              if not self.enabled:
-                  yield
-                  return
-
-              self.scope_stack.append(set())
-              try:
-                  yield
-              finally:
-                  if self.scope_stack:  # Check if not empty (e.g. after a reset)
-                      my_scope_keys = self.scope_stack.pop()
-                      active_keys = set(self.timers.keys())
-                      keys_to_stop = my_scope_keys & active_keys
-                      for key in keys_to_stop:
-                          self.stop(key)
 
           def _record_key_position(self, key: str):
               """If seeing a key for the first time, record its call site (file, line)."""
@@ -1647,31 +1515,12 @@ messages:
           def __exit__(self, exc_type, exc_val, exc_tb):
               self.report()
 
-
-      def stats_generator(func):
-          """Decorator to ensure timers started in a generator are stopped.
-
-          Wraps the generator execution in a `Stats.scope()` to automatically
-          stop any timers that were started but not stopped by the time the
-          generator is exhausted or garbage collected.
-          """
-          @functools.wraps(func)
-          def wrapper(*args, **kwargs):
-              stats = Stats.get()
-              if not stats.enabled:
-                  yield from func(*args, **kwargs)
-                  return
-
-              # The scope must wrap the *iteration* of the generator.
-              with stats.scope():
-                  yield from func(*args, **kwargs)
-
-          return wrapper
-
       ```
     metadata:
       filename: python/aug25/stats.py
-  - user: Does stats_generator also restart timers? It should.
+  - user: stats currently don't work properly inside generator functions. Think about
+      what happens when one yields but there are still timers active. Define a decorator
+      that fixes this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1691,25 +1540,113 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. You are correct, the `stats_generator` decorator should pause and restart timers around `yield` statements to exclude time spent in the consumer from the measurements. The current implementation only ensures timers are stopped at the end, but doesn't handle this pausing behavior.
+      Of course. Timers started within generator functions can be problematic if the generator isn't fully exhausted, as the `stop()` call might never be reached. A decorator that automatically manages the lifecycle of timers started within the generator is an excellent solution.
 
-      Here are the step-by-step instructions to update the decorator, followed by the corresponding git diff.
+      Here are the step-by-step instructions to implement this, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I will modify the `stats_generator` function in the file `python/aug25/stats.py` to correctly pause and resume timers when a generator yields.
+      Here are the edits for `python/aug25/stats.py`:
 
-      1.  **Navigate to `python/aug25/stats.py`**.
-      2.  **Locate the `stats_generator` function**, which starts around line 600.
-      3.  **Update the docstring** of `stats_generator` to describe the new functionality. The new docstring will explain that the decorator not only ensures timers are stopped but also pauses them during `yield` to exclude consumer-side time from measurements.
-      4.  **Replace the implementation of the `wrapper` function** inside `stats_generator`. The new implementation will:
-          *   Act as a proxy for the decorated generator, manually controlling its execution.
-          *   Before yielding a value to the consumer, it will record all currently active timers and a timestamp.
-          *   When control returns from the consumer, it will calculate the elapsed "pause time".
-          *   It will then adjust the start time of all previously recorded active timers by adding the pause duration, effectively removing the time spent outside the generator from their measurements.
-          *   This new implementation correctly handles `send()`, `throw()`, and `close()` calls to remain a transparent wrapper.
+      1.  **Add Imports**: At the top of the file, add imports for `contextlib` and `functools` which will be used for the new functionality.
 
-      The `Stats.scope()` context manager will be kept to ensure that any timers started within the generator are properly stopped if the generator is not fully consumed.
+          ```python
+          # python/aug25/stats.py
+
+          import statistics
+          import math
+          import os
+          import contextlib
+          import functools
+          ```
+
+      2.  **Update `Stats.__init__`**: In the `Stats` class constructor, add a `scope_stack` list to keep track of timers started within managed scopes.
+
+          ```python
+          # In Stats.__init__
+          # ...
+          # Active timers: key -> start_time
+          self.timers: Dict[str, float] = {}
+
+          # Stack for tracking keys started within a generator scope.
+          self.scope_stack: List[set] = []
+
+          # Enabled flag lets callers noop the collection if needed.
+          # ...
+          ```
+
+      3.  **Update `Stats.reset`**: In the `reset` method, add a line to clear the new `scope_stack`.
+
+          ```python
+          # In Stats.reset
+          # ...
+          self.timers.clear()
+          self.key_positions.clear()
+          self.scope_stack.clear()
+          self.show_all_stats = False
+          ```
+
+      4.  **Update `Stats.start`**: Modify the `start` method to check for an active scope and record the new timer key.
+
+          ```python
+          # In Stats.start
+          # ...
+          self._record_key_position(key)
+          if self.scope_stack:
+              self.scope_stack[-1].add(key)
+          self.timers[key] = time.perf_counter()
+          ```
+
+      5.  **Add `Stats.scope` Method**: Add a new context manager method named `scope` to the `Stats` class. This method will handle the creation of a scope and the automatic stopping of any timers that are still active when the scope exits. A good place for it is after the `stop` method.
+
+          ```python
+          # In Stats class, after the stop() method
+          @contextlib.contextmanager
+          def scope(self):
+              """A context manager to ensure timers started within it are stopped.
+
+              Useful for generators that might not run to completion.
+              """
+              if not self.enabled:
+                  yield
+                  return
+
+              self.scope_stack.append(set())
+              try:
+                  yield
+              finally:
+                  if self.scope_stack:  # Check if not empty (e.g. after a reset)
+                      my_scope_keys = self.scope_stack.pop()
+                      active_keys = set(self.timers.keys())
+                      keys_to_stop = my_scope_keys & active_keys
+                      for key in keys_to_stop:
+                          self.stop(key)
+          ```
+
+      6.  **Add `stats_generator` Decorator**: Finally, add the `stats_generator` decorator function to the end of the file, after the `Stats` class definition. This decorator will wrap a generator and use the new `scope` context manager to ensure timers are cleaned up.
+
+          ```python
+          # At the end of python/aug25/stats.py
+          def stats_generator(func):
+              """Decorator to ensure timers started in a generator are stopped.
+
+              Wraps the generator execution in a `Stats.scope()` to automatically
+              stop any timers that were started but not stopped by the time the
+              generator is exhausted or garbage collected.
+              """
+              @functools.wraps(func)
+              def wrapper(*args, **kwargs):
+                  stats = Stats.get()
+                  if not stats.enabled:
+                      yield from func(*args, **kwargs)
+                      return
+
+                  # The scope must wrap the *iteration* of the generator.
+                  with stats.scope():
+                      yield from func(*args, **kwargs)
+
+              return wrapper
+          ```
 
       ### Git Diff
 
@@ -1718,82 +1655,95 @@ messages:
       ```diff
       --- a/python/aug25/stats.py
       +++ b/python/aug25/stats.py
-      @@ -597,25 +597,59 @@
+      @@ -5,6 +5,8 @@
+       import statistics
+       import math
+       import os
+      +import contextlib
+      +import functools
        
        
-       def stats_generator(func):
-      -    """Decorator to ensure timers started in a generator are stopped.
-      -
-      -    Wraps the generator execution in a `Stats.scope()` to automatically
-      -    stop any timers that were started but not stopped by the time the
-      -    generator is exhausted or garbage collected.
-      +    """Decorator for timing generators.
+       class Stats:
+      @@ -43,6 +45,9 @@
+               # Active timers: key -> start_time
+               self.timers: Dict[str, float] = {}
+       
+      +        # Stack for tracking keys started within a generator scope.
+      +        self.scope_stack: List[set] = []
       +
-      +    Features:
-      +    1. Ensures any timers started within the generator are eventually stopped,
-      +       even if the generator is not fully exhausted (via `Stats.scope`).
-      +    2. Pauses any active timers during `yield`. This means that time spent
-      +       in the consumer, between generator iterations, is excluded from timer
-      +       durations. This applies to timers started both inside and outside
-      +       the generator.
-           """
-           @functools.wraps(func)
-           def wrapper(*args, **kwargs):
-               stats = Stats.get()
-               if not stats.enabled:
-                   yield from func(*args, **kwargs)
+               # Enabled flag lets callers noop the collection if needed.
+               self.enabled = os.environ.get("DISABLE_STATS") is None
+       
+      @@ -63,6 +68,7 @@
+               self.durations.clear()
+               self.timers.clear()
+               self.key_positions.clear()
+      +        self.scope_stack.clear()
+               self.show_all_stats = False
+       
+           def inc(self, key: str, value: int = 1):
+      @@ -77,6 +83,8 @@
+               if not self.enabled:
                    return
+               self._record_key_position(key)
+      +        if self.scope_stack:
+      +            self.scope_stack[-1].add(key)
+               self.timers[key] = time.perf_counter()
        
-      -        # The scope must wrap the *iteration* of the generator.
-      +        # The scope ensures cleanup if the generator is abandoned mid-iteration.
-               with stats.scope():
-      -            yield from func(*args, **kwargs)
-      +            gen = func(*args, **kwargs)
-      +            yielded_value = None
-      +            try:
-      +                # Prime the generator to the first yield.
-      +                yielded_value = next(gen)
+           def stop(self, key: str):
+      @@ -88,6 +96,27 @@
+                   duration = time.perf_counter() - self.timers[key]
+                   self.durations[key].append(duration)
+                   del self.timers[key]
       +
-      +                while True:
-      +                    # `gen` is now paused at a `yield`. We have the value.
-      +                    # Before we yield to the consumer, "pause" all active timers.
-      +                    active_keys_before_yield = set(stats.timers.keys())
-      +                    pause_start_time = time.perf_counter()
+      +    @contextlib.contextmanager
+      +    def scope(self):
+      +        """A context manager to ensure timers started within it are stopped.
       +
-      +                    try:
-      +                        # Yield to the consumer and get a value back from `send()`.
-      +                        sent_value = yield yielded_value
-      +                    except GeneratorExit:
-      +                        # Consumer called close(). Pass it on and exit.
-      +                        gen.close()
-      +                        raise
-      +                    except BaseException as e:
-      +                        # Consumer called throw(). Pass it on. The generator might
-      +                        # handle it and yield a new value, or it might raise.
-      +                        try:
-      +                            yielded_value = gen.throw(type(e), e, e.__traceback__)
-      +                            continue  # Loop to pause and yield the new value
-      +                        except StopIteration:
-      +                            return  # Generator finished
-      +                        except BaseException:
-      +                            raise  # Generator re-raised, propagate up
+      +        Useful for generators that might not run to completion.
+      +        """
+      +        if not self.enabled:
+      +            yield
+      +            return
       +
-      +                    # Resumed from consumer. Calculate pause duration.
-      +                    pause_duration = time.perf_counter() - pause_start_time
-      +
-      +                    # Adjust start times for all timers that were active before we yielded.
-      +                    for k in active_keys_before_yield:
-      +                        if k in stats.timers:  # Check if it wasn't stopped by consumer
-      +                            stats.timers[k] += pause_duration
-      +
-      +                    # Resume the generator by sending the value from the consumer.
-      +                    yielded_value = gen.send(sent_value)
-      +
-      +            except StopIteration:
-      +                # Generator finished, either during priming or in the loop.
-      +                return
+      +        self.scope_stack.append(set())
+      +        try:
+      +            yield
+      +        finally:
+      +            if self.scope_stack:  # Check if not empty (e.g. after a reset)
+      +                my_scope_keys = self.scope_stack.pop()
+      +                active_keys = set(self.timers.keys())
+      +                keys_to_stop = my_scope_keys & active_keys
+      +                for key in keys_to_stop:
+      +                    self.stop(key)
        
-           return wrapper
+           def _record_key_position(self, key: str):
+               """If seeing a key for the first time, record its call site (file, line)."""
+      @@ -458,3 +487,25 @@
+       
+           def __exit__(self, exc_type, exc_val, exc_tb):
+               self.report()
+      +
+      +
+      +def stats_generator(func):
+      +    """Decorator to ensure timers started in a generator are stopped.
+      +
+      +    Wraps the generator execution in a `Stats.scope()` to automatically
+      +    stop any timers that were started but not stopped by the time the
+      +    generator is exhausted or garbage collected.
+      +    """
+      +    @functools.wraps(func)
+      +    def wrapper(*args, **kwargs):
+      +        stats = Stats.get()
+      +        if not stats.enabled:
+      +            yield from func(*args, **kwargs)
+      +            return
+      +
+      +        # The scope must wrap the *iteration* of the generator.
+      +        with stats.scope():
+      +            yield from func(*args, **kwargs)
+      +
+      +    return wrapper
 
       ```
     metadata:
@@ -1806,119 +1756,7 @@ messages:
       Applying patch to 'python/aug25/stats.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/stats.py.
     metadata:
-  - user: 'Changes committed with message: "feat(stats): Enhance stats_generator to
-      pause timers during yield"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/stats.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |
-      Now we're ending up with negative times. That makes no sense.
-    metadata:
-  - assistant: |-
-      You've encountered a subtle but critical issue. The negative times are happening because of an interaction between two different mechanisms that adjust timer start times: the `stats_generator` decorator and the `_record_key_position` method.
-
-      When the generator yields, `stats_generator` pauses its timers. If the consumer code then calls `stats.start()` on a *new* key for the first time, `_record_key_position` runs. It adjusts the start times of *all* active timers, including those that were merely paused by the generator. When control returns to the generator, it adjusts the timers *again* for the entire yield duration. This double-counts the inspection pause, over-adjusts the start time, and can lead to negative final durations.
-
-      The fix is to make the `stats_generator`'s adjustment logic smarter. It needs to account for any changes to a timer's start time that happened while it was paused.
-
-      Here are the step-by-step instructions to fix this, followed by the git diff.
-
-      ### Step-by-step Instructions
-
-      I will modify the `stats_generator` decorator in `python/aug25/stats.py` to correct the timer adjustment logic.
-
-      1.  **Open the file `python/aug25/stats.py`**.
-
-      2.  **Navigate to the `stats_generator` function** (around line 600) and find the `wrapper` function inside it.
-
-      3.  **Modify the pre-yield logic**: Inside the `while True:` loop, we need to save not just the keys of the active timers, but their start times as well.
-          *   Find this line:
-              ```python
-              active_keys_before_yield = set(stats.timers.keys())
-              ```
-          *   Replace it with this line to make a copy of the entire timers dictionary:
-              ```python
-              active_timers_before_yield = dict(stats.timers)
-              ```
-
-      4.  **Modify the post-yield logic**: After the `yield` completes and `pause_duration` is calculated, we need to replace the simple adjustment with the more robust calculation.
-          *   Find this block of code:
-              ```python
-              # Adjust start times for all timers that were active before we yielded.
-              for k in active_keys_before_yield:
-                  if k in stats.timers:  # Check if it wasn't stopped by consumer
-                      stats.timers[k] += pause_duration
-              ```
-          *   Replace it with the following block, which correctly calculates the necessary adjustment:
-              ```python
-              # Adjust start times for all timers that were active before we yielded.
-              # This logic correctly handles nested adjustments (e.g. from _record_key_position)
-              # that may have occurred in the consumer while we were paused, preventing
-              # double-counting of pause time which can lead to negative durations.
-              for k, original_start_time in active_timers_before_yield.items():
-                  if k in stats.timers:  # Check if it wasn't stopped by the consumer
-                      current_start_time = stats.timers[k]
-                      adjustment_during_pause = current_start_time - original_start_time
-                      needed_adjustment = pause_duration - adjustment_during_pause
-                      stats.timers[k] += needed_adjustment
-              ```
-
-      This change ensures that we only compensate for the total pause duration exactly once, preventing the over-correction that was causing negative times.
-
-      ### Git Diff
-
-      Here is the git diff to apply the changes.
-
-      ```diff
-      --- a/python/aug25/stats.py
-      +++ b/python/aug25/stats.py
-      @@ -628,8 +628,8 @@
-                       while True:
-                           # `gen` is now paused at a `yield`. We have the value.
-                           # Before we yield to the consumer, "pause" all active timers.
-      -                    active_keys_before_yield = set(stats.timers.keys())
-      +                    active_timers_before_yield = dict(stats.timers)
-                           pause_start_time = time.perf_counter()
-       
-                           try:
-      @@ -653,11 +653,16 @@
-                           # Resumed from consumer. Calculate pause duration.
-                           pause_duration = time.perf_counter() - pause_start_time
-       
-      -                    # Adjust start times for all timers that were active before we yielded.
-      -                    for k in active_keys_before_yield:
-      -                        if k in stats.timers:  # Check if it wasn't stopped by consumer
-      -                            stats.timers[k] += pause_duration
-      +                    # Adjust start times for all timers that were active before we yielded.
-      +                    # This logic correctly handles nested adjustments (e.g. from _record_key_position)
-      +                    # that may have occurred in the consumer while we were paused, preventing
-      +                    # double-counting of pause time which can lead to negative durations.
-      +                    for k, original_start_time in active_timers_before_yield.items():
-      +                        if k in stats.timers:  # Check if it wasn't stopped by the consumer
-      +                            current_start_time = stats.timers[k]
-      +                            adjustment_during_pause = current_start_time - original_start_time
-      +                            needed_adjustment = pause_duration - adjustment_during_pause
-      +                            stats.timers[k] += needed_adjustment
-       
-                           # Resume the generator by sending the value from the consumer.
-                           yielded_value = gen.send(sent_value)
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/stats.py
-      Applying patch to 'python/aug25/stats.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/stats.py.
-    metadata:
-  - user: 'Changes committed with message: "fix(stats): Correct timer adjustment in
-      stats_generator to prevent negative durations"'
+  - user: 'Changes committed with message: "Add `stats_generator` decorator and `Stats.scope`
+      context manager to ensure timers are stopped in generators"'
     metadata:
 ...
