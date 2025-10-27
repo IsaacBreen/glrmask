@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
@@ -21,39 +21,33 @@ impl OptimizationPass for FactorStateFanoutPass {
                 continue;
             }
 
-            // Group by (pop, destination)
-            let mut grouped_edges: BTreeMap<(isize, NodeId), (SortedSet, SortedSet)> = BTreeMap::new();
+            // Group by (pop, canonical destination map) and union tokens. This is sound.
+            let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
 
             for (ek, dm) in node.children.iter() {
-                for (dest, sids) in dm.iter() {
-                    let key = (ek.pop, *dest);
-                    let entry = grouped_edges.entry(key).or_insert_with(|| (SortedSet::new(), SortedSet::new()));
-                    entry.0.union_inplace(&ek.tokens); // union tokens
-                    entry.1.union_inplace(sids);      // union sids
-                }
+                let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+                dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
+
+                by_pop.entry(ek.pop).or_default()
+                    .entry(dest_vec)
+                    .or_default()
+                    .union_inplace(&ek.tokens);
             }
 
             // Rebuild children from factored edges.
-            // We need to group again by (pop, tokens) to form valid edges.
-            let mut new_children_intermediate: BTreeMap<(isize, SortedSet), BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-
-            for ((pop, dest), (tokens, sids)) in grouped_edges {
-                let key = (pop, tokens);
-                let dm = new_children_intermediate.entry(key).or_insert_with(BTreeMap::new);
-                dm.insert(dest, sids);
-            }
-
-            // Finalize into BTreeMap<EdgeKey, ...>
             let mut new_children = BTreeMap::new();
-            for ((pop, tokens), dm) in new_children_intermediate {
-                if !tokens.is_empty() && !dm.is_empty() {
-                    new_children.insert(
-                        crate::trie3_opt::core::EdgeKey::new(pop, tokens),
-                        dm,
-                    );
+            for (pop, groups) in by_pop {
+                for (dest_vec, tokens) in groups {
+                    if tokens.is_empty() { continue; }
+                    let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
+                    if !dm.is_empty() {
+                        new_children.insert(
+                            crate::trie3_opt::core::EdgeKey::new(pop, tokens),
+                            dm,
+                        );
+                    }
                 }
             }
-
             node.children = new_children;
         }
     }

@@ -4717,7 +4717,7 @@ local_system:
           cycles::{
               assert_pop0_paths_to_end_are_short, has_true_cycle_trie3, has_true_cycle_trie3_llm_only,
           },
-          factoring::factor_common_destinations_trie3,
+          factoring::{factor_common_destinations_trie3, factor_state_fanout_trie3},
           factor_root::factor_root_fanout_via_atoms,
           global_atoms_merge::merge_nodes_trie3_global_atoms,
           merges::{merge_nodes_trie3, merge_nodes_trie3_structural, merge_nodes_trie3_ultrafast},
@@ -4893,6 +4893,12 @@ local_system:
               if config.simplify_llm_token_bvs {
                   run_pass!("Simplifying LLM token bitsets", {
                       simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+                  });
+              }
+
+              if config.factor_state_fanout {
+                  run_pass!("Factoring state fanout", {
+                      factor_state_fanout_trie3(roots, trie3_god);
                   });
               }
 
@@ -6804,6 +6810,7 @@ local_system:
           pub refine_token_atoms_exact: bool,
           pub refine_token_atoms_max_blocks: usize,
           pub factor_common_destinations: bool,
+          pub factor_state_fanout: bool,
           // NEW: root fanout factoring via token atoms (p>0 only)
           pub factor_root_fanout: bool,
           // NEW: global-atoms bisimulation merge
@@ -6845,6 +6852,7 @@ local_system:
                   merge_nodes_global_atoms: true,
                   merge_nodes_global_atoms_max_iters: 2,
                   merge_nodes_global_atoms_max_atoms_per_pop: 4096,
+                  factor_state_fanout: true,
                   factor_common_destinations: true,
                   factor_common_destinations_min_incoming: 12,
                   stochastic_equivalence_check: false,
@@ -6874,6 +6882,7 @@ local_system:
                   generalize_sids: false,
                   refine_token_atoms: false,
                   refine_token_atoms_exact: false,
+                  factor_state_fanout: false,
                   factor_root_fanout: false,
                   factor_root_fanout_max_atoms_per_pop: 0,
                   refine_token_atoms_max_blocks: 0,
@@ -7524,6 +7533,72 @@ local_system:
       };
       use crate::datastructures::EntryApi;
       use crate::datastructures::trie::Trie;
+
+      /// Reduces state fanout by factoring edges. For each node, it groups outgoing edges
+      /// by (pop, destination). For each group, it merges the edges by unioning their
+      /// token sets and state ID sets. This can reduce the number of distinct edges
+      /// a single (pop, state_id) transition can take, thus lowering state fanout.
+      pub fn factor_state_fanout_trie3(
+          roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+      ) {
+          crate::debug!(2, "Factoring state fanout in Trie3...");
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+          if all_nodes.is_empty() {
+              return;
+          }
+
+          for node_idx in &all_nodes {
+              let mut w = if let Some(guard) = node_idx.write(trie3_god) {
+                  guard
+              } else {
+                  continue;
+              };
+              if w.children().is_empty() {
+                  continue;
+              }
+
+              let old_children = std::mem::take(w.children_mut());
+
+              // Group by (pop, destination)
+              let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+                  BTreeMap::new();
+
+              for ((pop, llm_bv), dm) in old_children.iter() {
+                  for (dest, sids) in dm.iter() {
+                      let key = (*pop, *dest);
+                      let entry = grouped_edges
+                          .entry(key)
+                          .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
+                      entry.0 |= llm_bv;
+                      entry.1 |= sids;
+                  }
+              }
+
+              // Rebuild children from factored edges.
+              // Group again by (pop, tokens) to form valid edges.
+              let mut new_children: BTreeMap<
+                  (isize, LLMTokenBV),
+                  OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+              > = BTreeMap::new();
+
+              for ((pop, dest), (tokens, sids)) in grouped_edges {
+                  if !tokens.is_empty() && !sids.is_empty() {
+                      let dm = new_children.entry((pop, tokens)).or_default();
+                      dm.insert(dest, sids);
+                  }
+              }
+
+              // Recompute live tokens and update children
+              let mut new_live = LLMTokenBV::zeros();
+              for ((_, llm_bv), _) in &new_children {
+                  new_live |= llm_bv;
+              }
+              w.value.live_tokens = new_live;
+              *w.children_mut() = new_children;
+          }
+      }
 
       /// Factor out common destinations: create intermediates when many sources share the same dest map.
       pub fn factor_common_destinations_trie3(
@@ -15929,7 +16004,7 @@ local_system:
           }
       }
     src/trie3_opt/passes/factor_state_fanout.rs: |
-      use std::collections::BTreeMap;
+      use std::collections::{BTreeMap, HashMap};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
@@ -15952,39 +16027,33 @@ local_system:
                       continue;
                   }
 
-                  // Group by (pop, destination)
-                  let mut grouped_edges: BTreeMap<(isize, NodeId), (SortedSet, SortedSet)> = BTreeMap::new();
+                  // Group by (pop, canonical destination map) and union tokens. This is sound.
+                  let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
 
                   for (ek, dm) in node.children.iter() {
-                      for (dest, sids) in dm.iter() {
-                          let key = (ek.pop, *dest);
-                          let entry = grouped_edges.entry(key).or_insert_with(|| (SortedSet::new(), SortedSet::new()));
-                          entry.0.union_inplace(&ek.tokens); // union tokens
-                          entry.1.union_inplace(sids);      // union sids
-                      }
+                      let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+                      dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
+
+                      by_pop.entry(ek.pop).or_default()
+                          .entry(dest_vec)
+                          .or_default()
+                          .union_inplace(&ek.tokens);
                   }
 
                   // Rebuild children from factored edges.
-                  // We need to group again by (pop, tokens) to form valid edges.
-                  let mut new_children_intermediate: BTreeMap<(isize, SortedSet), BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-
-                  for ((pop, dest), (tokens, sids)) in grouped_edges {
-                      let key = (pop, tokens);
-                      let dm = new_children_intermediate.entry(key).or_insert_with(BTreeMap::new);
-                      dm.insert(dest, sids);
-                  }
-
-                  // Finalize into BTreeMap<EdgeKey, ...>
                   let mut new_children = BTreeMap::new();
-                  for ((pop, tokens), dm) in new_children_intermediate {
-                      if !tokens.is_empty() && !dm.is_empty() {
-                          new_children.insert(
-                              crate::trie3_opt::core::EdgeKey::new(pop, tokens),
-                              dm,
-                          );
+                  for (pop, groups) in by_pop {
+                      for (dest_vec, tokens) in groups {
+                          if tokens.is_empty() { continue; }
+                          let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
+                          if !dm.is_empty() {
+                              new_children.insert(
+                                  crate::trie3_opt::core::EdgeKey::new(pop, tokens),
+                                  dm,
+                              );
+                          }
                       }
                   }
-
                   node.children = new_children;
               }
           }
@@ -17808,32 +17877,35 @@ local_system:
 
               let old_children = std::mem::take(w.children_mut());
 
-              // Group by (pop, destination)
-              let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+              // Group by (pop, canonical destination map) and union tokens. This is sound.
+              let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
                   BTreeMap::new();
 
               for ((pop, llm_bv), dm) in old_children.iter() {
-                  for (dest, sids) in dm.iter() {
-                      let key = (*pop, *dest);
-                      let entry = grouped_edges
-                          .entry(key)
-                          .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
-                      entry.0 |= llm_bv;
-                      entry.1 |= sids;
-                  }
+                  // Canonicalize dest_map into a sorted Vec for use as a key.
+                  let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+                  dest_vec.sort_unstable_by_key(|(d, _)| *d);
+
+                  let entry = by_pop.entry(*pop).or_default()
+                      .entry(dest_vec)
+                      .or_insert_with(LLMTokenBV::zeros);
+                  *entry |= llm_bv;
               }
 
               // Rebuild children from factored edges.
-              // Group again by (pop, tokens) to form valid edges.
               let mut new_children: BTreeMap<
                   (isize, LLMTokenBV),
                   OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
               > = BTreeMap::new();
 
-              for ((pop, dest), (tokens, sids)) in grouped_edges {
-                  if !tokens.is_empty() && !sids.is_empty() {
-                      let dm = new_children.entry((pop, tokens)).or_default();
-                      dm.insert(dest, sids);
+              for (pop, groups) in by_pop {
+                  for (dest_vec, tokens) in groups {
+                      if !tokens.is_empty() {
+                          let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
+                          if !dm.is_empty() {
+                              new_children.insert((pop, tokens), dm);
+                          }
+                      }
                   }
               }
 
@@ -25358,7 +25430,7 @@ messages:
           cycles::{
               assert_pop0_paths_to_end_are_short, has_true_cycle_trie3, has_true_cycle_trie3_llm_only,
           },
-          factoring::factor_common_destinations_trie3,
+          factoring::{factor_common_destinations_trie3, factor_state_fanout_trie3},
           factor_root::factor_root_fanout_via_atoms,
           global_atoms_merge::merge_nodes_trie3_global_atoms,
           merges::{merge_nodes_trie3, merge_nodes_trie3_structural, merge_nodes_trie3_ultrafast},
@@ -25534,6 +25606,12 @@ messages:
               if config.simplify_llm_token_bvs {
                   run_pass!("Simplifying LLM token bitsets", {
                       simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+                  });
+              }
+
+              if config.factor_state_fanout {
+                  run_pass!("Factoring state fanout", {
+                      factor_state_fanout_trie3(roots, trie3_god);
                   });
               }
 
@@ -27495,6 +27573,7 @@ messages:
           pub refine_token_atoms_exact: bool,
           pub refine_token_atoms_max_blocks: usize,
           pub factor_common_destinations: bool,
+          pub factor_state_fanout: bool,
           // NEW: root fanout factoring via token atoms (p>0 only)
           pub factor_root_fanout: bool,
           // NEW: global-atoms bisimulation merge
@@ -27536,6 +27615,7 @@ messages:
                   merge_nodes_global_atoms: true,
                   merge_nodes_global_atoms_max_iters: 2,
                   merge_nodes_global_atoms_max_atoms_per_pop: 4096,
+                  factor_state_fanout: true,
                   factor_common_destinations: true,
                   factor_common_destinations_min_incoming: 12,
                   stochastic_equivalence_check: false,
@@ -27565,6 +27645,7 @@ messages:
                   generalize_sids: false,
                   refine_token_atoms: false,
                   refine_token_atoms_exact: false,
+                  factor_state_fanout: false,
                   factor_root_fanout: false,
                   factor_root_fanout_max_atoms_per_pop: 0,
                   refine_token_atoms_max_blocks: 0,
@@ -28235,6 +28316,72 @@ messages:
       };
       use crate::datastructures::EntryApi;
       use crate::datastructures::trie::Trie;
+
+      /// Reduces state fanout by factoring edges. For each node, it groups outgoing edges
+      /// by (pop, destination). For each group, it merges the edges by unioning their
+      /// token sets and state ID sets. This can reduce the number of distinct edges
+      /// a single (pop, state_id) transition can take, thus lowering state fanout.
+      pub fn factor_state_fanout_trie3(
+          roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
+          trie3_god: &Trie3GodWrapper,
+      ) {
+          crate::debug!(2, "Factoring state fanout in Trie3...");
+          let roots_vec: Vec<_> = roots.values().cloned().collect();
+          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+          if all_nodes.is_empty() {
+              return;
+          }
+
+          for node_idx in &all_nodes {
+              let mut w = if let Some(guard) = node_idx.write(trie3_god) {
+                  guard
+              } else {
+                  continue;
+              };
+              if w.children().is_empty() {
+                  continue;
+              }
+
+              let old_children = std::mem::take(w.children_mut());
+
+              // Group by (pop, destination)
+              let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+                  BTreeMap::new();
+
+              for ((pop, llm_bv), dm) in old_children.iter() {
+                  for (dest, sids) in dm.iter() {
+                      let key = (*pop, *dest);
+                      let entry = grouped_edges
+                          .entry(key)
+                          .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
+                      entry.0 |= llm_bv;
+                      entry.1 |= sids;
+                  }
+              }
+
+              // Rebuild children from factored edges.
+              // Group again by (pop, tokens) to form valid edges.
+              let mut new_children: BTreeMap<
+                  (isize, LLMTokenBV),
+                  OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+              > = BTreeMap::new();
+
+              for ((pop, dest), (tokens, sids)) in grouped_edges {
+                  if !tokens.is_empty() && !sids.is_empty() {
+                      let dm = new_children.entry((pop, tokens)).or_default();
+                      dm.insert(dest, sids);
+                  }
+              }
+
+              // Recompute live tokens and update children
+              let mut new_live = LLMTokenBV::zeros();
+              for ((_, llm_bv), _) in &new_children {
+                  new_live |= llm_bv;
+              }
+              w.value.live_tokens = new_live;
+              *w.children_mut() = new_children;
+          }
+      }
 
       /// Factor out common destinations: create intermediates when many sources share the same dest map.
       pub fn factor_common_destinations_trie3(
@@ -31081,8 +31228,55 @@ messages:
       ```
     metadata:
       filename: src/trie3_opt/passes/prune_dead_paths.rs
-  - user: Ensure all optimization passes are covered by `optimize_trie3_size`. Some
-      aren't, e.g. `enable_factor_state_fanout`.
+  - user: |-
+      ```
+      MiniTrie Metrics: {
+        "all_fanout": { count: 29240, sum: 516223.00, mean: 17.65, stdev: 116.72, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 46.00, max: 12221.00 },
+        "edge_overlap": { count: 743, sum: 16010.00, mean: 21.55, stdev: 34.80, min: 1.00, p25: 3.00, median: 5.00, p75: 27.00, p95: 78.00, max: 250.00 },
+        "non_root_edge_overlap": { count: 730, sum: 15414.00, mean: 21.12, stdev: 34.23, min: 1.00, p25: 3.00, median: 5.00, p75: 26.00, p95: 78.00, max: 250.00 },
+        "non_root_fanout": { count: 29086, sum: 404865.00, mean: 13.92, stdev: 39.98, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 46.00, max: 1200.00 },
+        "non_root_state_fanout": { count: 326116, sum: 717807.00, mean: 2.20, stdev: 6.38, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 10.00, max: 324.00 },
+        "num_edges": 516223,
+        "num_end_nodes": 1,
+        "num_nodes": 29240,
+        "num_productive_nodes": 29239,
+        "num_reachable_nodes": 29240,
+        "num_roots": 154,
+        "root_edge_overlap": { count: 13, sum: 596.00, mean: 45.85, stdev: 53.09, min: 2.00, p25: 2.00, median: 46.00, p75: 47.00, p95: 47.00, max: 216.00 },
+        "root_fanout": { count: 154, sum: 111358.00, mean: 723.10, stdev: 1335.92, min: 0.00, p25: 345.00, median: 514.00, p75: 598.00, p95: 1709.00, max: 12221.00 },
+        "root_state_fanout": { count: 50872, sum: 636551.00, mean: 12.51, stdev: 56.35, min: 1.00, p25: 1.00, median: 2.00, p75: 9.00, p95: 36.00, max: 1247.00 },
+        "state_fanout": { count: 376988, sum: 1354358.00, mean: 3.59, stdev: 21.82, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 11.00, max: 1247.00 }
+      }
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:200: Running optimization pass 90: Factoring state fanout...
+      [DEBUG] 2] src/trie3_opt/passes/full/factoring.rs:19: Factoring state fanout in Trie3...
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:200: Pass 90 ('Factoring state fanout') finished in 271.1955ms
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:200: Stats after pass 90:
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+
+      ...
+
+      [DEBUG] 2] src/trie3_opt/passes/full/stats.rs:34:   Exporting to MiniTrie for extended metrics...
+      MiniTrie Metrics: {
+        "all_fanout": { count: 29240, sum: 505242.00, mean: 17.28, stdev: 114.68, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 46.00, max: 11873.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 29086, sum: 394752.00, mean: 13.57, stdev: 39.45, min: 0.00, p25: 1.00, median: 9.00, p75: 13.00, p95: 45.00, max: 1200.00 },
+        "non_root_state_fanout": { count: 326116, sum: 696679.00, mean: 2.14, stdev: 6.21, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 10.00, max: 324.00 },
+        "num_edges": 505242,
+        "num_end_nodes": 1,
+        "num_nodes": 29240,
+        "num_productive_nodes": 29239,
+        "num_reachable_nodes": 29240,
+        "num_roots": 154,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 154, sum: 110490.00, mean: 717.47, stdev: 1307.81, min: 0.00, p25: 345.00, median: 514.00, p75: 598.00, p95: 1709.00, max: 11873.00 },
+        "root_state_fanout": { count: 50872, sum: 628474.00, mean: 12.35, stdev: 54.20, min: 1.00, p25: 1.00, median: 2.00, p75: 9.00, p95: 36.00, max: 1166.00 },
+        "state_fanout": { count: 376988, sum: 1325153.00, mean: 3.52, stdev: 21.03, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 11.00, max: 1166.00 }
+      }
+      ```
+
+      Well this is dissappointing.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -31102,197 +31296,176 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the `factor_state_fanout` optimization pass, followed by the corresponding git diffs.
+      I see that the results from the `FactorStateFanout` pass were underwhelming. Upon review, I've found that the implementation was not only producing minimal improvements but was also unsound, potentially making incorrect generalizations about token transitions. This likely explains the small and unpredictable changes in metrics.
+
+      I'm going to fix this by replacing the logic in both the `MiniTrie` pass (`FactorStateFanoutPass`) and its equivalent in the main pipeline (`factor_state_fanout_trie3`) with a sound and well-understood edge compression algorithm. The corrected pass will group edges that have identical destination maps and merge them by unioning their token sets. This is a correct optimization that should provide more reliable, albeit potentially still modest, size reductions. This change prioritizes correctness and lays a better foundation for future optimizations.
+
+      Here are the steps to apply the fix:
 
       ### Step-by-step Instructions
 
-      1.  **Modify `src/trie3_opt/passes/full/config.rs`:**
-          *   Open the file `src/trie3_opt/passes/full/config.rs`.
-          *   In the `Trie3Config` struct definition, add a new public boolean field `pub factor_state_fanout: bool;` after the `factor_common_destinations` field.
-          *   In the `impl Default for Trie3Config`, initialize the new field with `factor_state_fanout: true,`.
-          *   In the `off()` method within `impl Trie3Config`, set `factor_state_fanout: false,`.
+      1.  **Update `src/trie3_opt/passes/full/factoring.rs`:**
+          -   Open the file `src/trie3_opt/passes/full/factoring.rs`.
+          -   In the function `factor_state_fanout_trie3`, replace the entire function body with the new, corrected implementation. The new logic will group edges by `(pop, canonical_destination_map)` and union their token sets, which is a sound operation.
 
-      2.  **Modify `src/trie3_opt/passes/full/factoring.rs`:**
-          *   Open the file `src/trie3_opt/passes/full/factoring.rs`.
-          *   Add a new public function `factor_state_fanout_trie3` to this file. This function will iterate through all nodes in the trie. For each node, it will:
-              1.  Group outgoing edges by `(pop, destination)`.
-              2.  For each group, union the `LLMTokenBV`s and `StateIDBV`s.
-              3.  Rebuild the node's children by creating new edges grouped by the new `(pop, LLMTokenBV)` keys.
-              4.  Update the node's `live_tokens` field.
-          *   You can place this new function before the existing `factor_common_destinations_trie3` function.
-
-      3.  **Modify `src/trie3_opt/optimizer.rs`:**
-          *   Open the file `src/trie3_opt/optimizer.rs`.
-          *   In the `use` statements at the top of the file, find the line importing from `...::factoring::...` and add `factor_state_fanout_trie3` to the import list.
-          *   In the `optimize_trie3_size` function, locate the main optimization loop. Inside this loop, add a new `run_pass!` block to call `factor_state_fanout_trie3(roots, trie3_god)`. This call should be guarded by an `if config.factor_state_fanout` check. A suitable location is just before the `run_pass!` block for `"Factoring common destinations"`.
+      2.  **Update `src/trie3_opt/passes/factor_state_fanout.rs`:**
+          -   Open the file `src/trie3_opt/passes/factor_state_fanout.rs`.
+          -   Add `use std::collections::HashMap;` at the top.
+          -   In the `impl OptimizationPass for FactorStateFanoutPass`, replace the entire body of the `run` method with the corrected logic, which mirrors the fix in the "full" pass but is adapted for the `MiniTrie` structure.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes:
+      Here are the corresponding git diffs to apply these changes.
 
       ```diff
-      diff --git a/src/trie3_opt/optimizer.rs b/src/trie3_opt/optimizer.rs
-      index 2411111..1111111 100644
-      --- a/src/trie3_opt/optimizer.rs
-      +++ b/src/trie3_opt/optimizer.rs
-      @@ -10,7 +10,7 @@
-           cycles::{
-               assert_pop0_paths_to_end_are_short, has_true_cycle_trie3, has_true_cycle_trie3_llm_only,
-           },
-      -    factoring::factor_common_destinations_trie3,
-      +    factoring::{factor_common_destinations_trie3, factor_state_fanout_trie3},
-           factor_root::factor_root_fanout_via_atoms,
-           global_atoms_merge::merge_nodes_trie3_global_atoms,
-           merges::{merge_nodes_trie3, merge_nodes_trie3_structural, merge_nodes_trie3_ultrafast},
-      @@ -161,6 +161,12 @@
-                   });
-               }
+      --- a/src/trie3_opt/passes/factor_state_fanout.rs
+      +++ b/src/trie3_opt/passes/factor_state_fanout.rs
+      @@ -1,4 +1,4 @@
+      -use std::collections::BTreeMap;
+      +use std::collections::{BTreeMap, HashMap};
        
-      +        if config.factor_state_fanout {
-      +            run_pass!("Factoring state fanout", {
-      +                factor_state_fanout_trie3(roots, trie3_god);
-      +            });
-      +        }
+       use crate::trie3_opt::context::OptimizationContext;
+       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
+      @@ -17,41 +17,36 @@
+           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+               for node in trie.nodes.iter_mut() {
+                   if node.children.is_empty() {
+                       continue;
+                   }
+       
+      -            // Group by (pop, destination)
+      -            let mut grouped_edges: BTreeMap<(isize, NodeId), (SortedSet, SortedSet)> = BTreeMap::new();
+      +            // Group by (pop, canonical destination map) and union tokens. This is sound.
+      +            let mut by_pop: BTreeMap<isize, HashMap<Vec<(NodeId, SortedSet)>, SortedSet>> = BTreeMap::new();
+       
+                   for (ek, dm) in node.children.iter() {
+      -                for (dest, sids) in dm.iter() {
+      -                    let key = (ek.pop, *dest);
+      -                    let entry = grouped_edges.entry(key).or_insert_with(|| (SortedSet::new(), SortedSet::new()));
+      -                    entry.0.union_inplace(&ek.tokens); // union tokens
+      -                    entry.1.union_inplace(sids);      // union sids
+      -                }
+      +                let mut dest_vec: Vec<(NodeId, SortedSet)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+      +                dest_vec.sort_unstable(); // NodeId and SortedSet are Ord
       +
-               if config.factor_common_destinations {
-                   run_pass!("Factoring common destinations", {
-                       factor_common_destinations_trie3(
+      +                by_pop.entry(ek.pop).or_default()
+      +                    .entry(dest_vec)
+      +                    .or_default()
+      +                    .union_inplace(&ek.tokens);
+                   }
+       
+                   // Rebuild children from factored edges.
+      -            // We need to group again by (pop, tokens) to form valid edges.
+      -            let mut new_children_intermediate: BTreeMap<(isize, SortedSet), BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+      -
+      -            for ((pop, dest), (tokens, sids)) in grouped_edges {
+      -                let key = (pop, tokens);
+      -                let dm = new_children_intermediate.entry(key).or_insert_with(BTreeMap::new);
+      -                dm.insert(dest, sids);
+      -            }
+      -
+      -            // Finalize into BTreeMap<EdgeKey, ...>
+                   let mut new_children = BTreeMap::new();
+      -            for ((pop, tokens), dm) in new_children_intermediate {
+      -                if !tokens.is_empty() && !dm.is_empty() {
+      -                    new_children.insert(
+      -                        crate::trie3_opt::core::EdgeKey::new(pop, tokens),
+      -                        dm,
+      -                    );
+      +            for (pop, groups) in by_pop {
+      +                for (dest_vec, tokens) in groups {
+      +                    if tokens.is_empty() { continue; }
+      +                    let dm: BTreeMap<_, _> = dest_vec.into_iter().collect();
+      +                    if !dm.is_empty() {
+      +                        new_children.insert(
+      +                            crate::trie3_opt::core::EdgeKey::new(pop, tokens),
+      +                            dm,
+      +                        );
+      +                    }
+                       }
+                   }
+      -
+                   node.children = new_children;
+               }
+           }
 
       ```
 
       ```diff
-      diff --git a/src/trie3_opt/passes/full/config.rs b/src/trie3_opt/passes/full/config.rs
-      index 1111111..1111111 100644
-      --- a/src/trie3_opt/passes/full/config.rs
-      +++ b/src/trie3_opt/passes/full/config.rs
-      @@ -27,6 +27,7 @@
-           pub refine_token_atoms_exact: bool,
-           pub refine_token_atoms_max_blocks: usize,
-           pub factor_common_destinations: bool,
-      +    pub factor_state_fanout: bool,
-           // NEW: root fanout factoring via token atoms (p>0 only)
-           pub factor_root_fanout: bool,
-           // NEW: global-atoms bisimulation merge
-      @@ -63,6 +64,7 @@
-                   merge_nodes_global_atoms: true,
-                   merge_nodes_global_atoms_max_iters: 2,
-                   merge_nodes_global_atoms_max_atoms_per_pop: 4096,
-      +            factor_state_fanout: true,
-                   factor_common_destinations: true,
-                   factor_common_destinations_min_incoming: 12,
-                   stochastic_equivalence_check: false,
-      @@ -89,6 +91,7 @@
-                   generalize_sids: false,
-                   refine_token_atoms: false,
-                   refine_token_atoms_exact: false,
-      +            factor_state_fanout: false,
-                   factor_root_fanout: false,
-                   factor_root_fanout_max_atoms_per_pop: 0,
-                   refine_token_atoms_max_blocks: 0,
-
-      ```
-
-      ```diff
-      diff --git a/src/trie3_opt/passes/full/factoring.rs b/src/trie3_opt/passes/full/factoring.rs
-      index 1111111..1111111 100644
       --- a/src/trie3_opt/passes/full/factoring.rs
       +++ b/src/trie3_opt/passes/full/factoring.rs
-      @@ -8,6 +8,71 @@
-       };
-       use crate::datastructures::EntryApi;
-       use crate::datastructures::trie::Trie;
-      +
-      +/// Reduces state fanout by factoring edges. For each node, it groups outgoing edges
-      +/// by (pop, destination). For each group, it merges the edges by unioning their
-      +/// token sets and state ID sets. This can reduce the number of distinct edges
-      +/// a single (pop, state_id) transition can take, thus lowering state fanout.
-      +pub fn factor_state_fanout_trie3(
-      +    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
-      +    trie3_god: &Trie3GodWrapper,
-      +) {
-      +    crate::debug!(2, "Factoring state fanout in Trie3...");
-      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      +    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-      +    if all_nodes.is_empty() {
-      +        return;
-      +    }
-      +
-      +    for node_idx in &all_nodes {
-      +        let mut w = if let Some(guard) = node_idx.write(trie3_god) {
-      +            guard
-      +        } else {
-      +            continue;
-      +        };
-      +        if w.children().is_empty() {
-      +            continue;
-      +        }
-      +
-      +        let old_children = std::mem::take(w.children_mut());
-      +
-      +        // Group by (pop, destination)
-      +        let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
-      +            BTreeMap::new();
-      +
-      +        for ((pop, llm_bv), dm) in old_children.iter() {
-      +            for (dest, sids) in dm.iter() {
-      +                let key = (*pop, *dest);
-      +                let entry = grouped_edges
-      +                    .entry(key)
-      +                    .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
-      +                entry.0 |= llm_bv;
-      +                entry.1 |= sids;
-      +            }
-      +        }
-      +
-      +        // Rebuild children from factored edges.
-      +        // Group again by (pop, tokens) to form valid edges.
-      +        let mut new_children: BTreeMap<
-      +            (isize, LLMTokenBV),
-      +            OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
-      +        > = BTreeMap::new();
-      +
-      +        for ((pop, dest), (tokens, sids)) in grouped_edges {
-      +            if !tokens.is_empty() && !sids.is_empty() {
-      +                let dm = new_children.entry((pop, tokens)).or_default();
-      +                dm.insert(dest, sids);
-      +            }
-      +        }
-      +
-      +        // Recompute live tokens and update children
-      +        let mut new_live = LLMTokenBV::zeros();
-      +        for ((_, llm_bv), _) in &new_children {
-      +            new_live |= llm_bv;
-      +        }
-      +        w.value.live_tokens = new_live;
-      +        *w.children_mut() = new_children;
-      +    }
-      +}
+      @@ -28,38 +28,40 @@
        
-       /// Factor out common destinations: create intermediates when many sources share the same dest map.
-       pub fn factor_common_destinations_trie3(
+               let old_children = std::mem::take(w.children_mut());
+       
+      -        // Group by (pop, destination)
+      -        let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+      +        // Group by (pop, canonical destination map) and union tokens. This is sound.
+      +        let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
+                   BTreeMap::new();
+       
+               for ((pop, llm_bv), dm) in old_children.iter() {
+      -            for (dest, sids) in dm.iter() {
+      -                let key = (*pop, *dest);
+      -                let entry = grouped_edges
+      -                    .entry(key)
+      -                    .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
+      -                entry.0 |= llm_bv;
+      -                entry.1 |= sids;
+      -            }
+      +            // Canonicalize dest_map into a sorted Vec for use as a key.
+      +            let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+      +            dest_vec.sort_unstable_by_key(|(d, _)| *d);
+      +
+      +            let entry = by_pop.entry(*pop).or_default()
+      +                .entry(dest_vec)
+      +                .or_insert_with(LLMTokenBV::zeros);
+      +            *entry |= llm_bv;
+               }
+       
+               // Rebuild children from factored edges.
+      -        // Group again by (pop, tokens) to form valid edges.
+               let mut new_children: BTreeMap<
+                   (isize, LLMTokenBV),
+                   OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
+               > = BTreeMap::new();
+       
+      -        for ((pop, dest), (tokens, sids)) in grouped_edges {
+      -            if !tokens.is_empty() && !sids.is_empty() {
+      -                let dm = new_children.entry((pop, tokens)).or_default();
+      -                dm.insert(dest, sids);
+      +        for (pop, groups) in by_pop {
+      +            for (dest_vec, tokens) in groups {
+      +                if !tokens.is_empty() {
+      +                    let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
+      +                    if !dm.is_empty() {
+      +                        new_children.insert((pop, tokens), dm);
+      +                    }
+      +                }
+                   }
+               }
+       
+               // Recompute live tokens and update children
+               let mut new_live = LLMTokenBV::zeros();
+               for ((_, llm_bv), _) in &new_children {
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/optimizer.rs
-      Applying patch to 'src/trie3_opt/optimizer.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/optimizer.rs.
+      Identified target file: src/trie3_opt/passes/factor_state_fanout.rs
+      Applying patch to 'src/trie3_opt/passes/factor_state_fanout.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/factor_state_fanout.rs.
 
       --- Processing Diff Block 2 ---
-      Identified target file: src/trie3_opt/passes/full/config.rs
-      Applying patch to 'src/trie3_opt/passes/full/config.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/full/config.rs.
-
-      --- Processing Diff Block 3 ---
       Identified target file: src/trie3_opt/passes/full/factoring.rs
       Applying patch to 'src/trie3_opt/passes/full/factoring.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/passes/full/factoring.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Implement and enable Trie3 state
-      fanout factoring optimization pass"'
+  - user: 'Changes committed with message: "Fix: Replace unsound FactorStateFanout
+      logic with sound edge compression by grouping on destination map."'
     metadata:
 ...

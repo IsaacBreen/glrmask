@@ -35,32 +35,35 @@ pub fn factor_state_fanout_trie3(
 
         let old_children = std::mem::take(w.children_mut());
 
-        // Group by (pop, destination)
-        let mut grouped_edges: BTreeMap<(isize, PrecomputeNode3Index), (LLMTokenBV, StateIDBV)> =
+        // Group by (pop, canonical destination map) and union tokens. This is sound.
+        let mut by_pop: BTreeMap<isize, HashMap<Vec<(PrecomputeNode3Index, StateIDBV)>, LLMTokenBV>> =
             BTreeMap::new();
 
         for ((pop, llm_bv), dm) in old_children.iter() {
-            for (dest, sids) in dm.iter() {
-                let key = (*pop, *dest);
-                let entry = grouped_edges
-                    .entry(key)
-                    .or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
-                entry.0 |= llm_bv;
-                entry.1 |= sids;
-            }
+            // Canonicalize dest_map into a sorted Vec for use as a key.
+            let mut dest_vec: Vec<(PrecomputeNode3Index, StateIDBV)> = dm.iter().map(|(d, s)| (*d, s.clone())).collect();
+            dest_vec.sort_unstable_by_key(|(d, _)| *d);
+
+            let entry = by_pop.entry(*pop).or_default()
+                .entry(dest_vec)
+                .or_insert_with(LLMTokenBV::zeros);
+            *entry |= llm_bv;
         }
 
         // Rebuild children from factored edges.
-        // Group again by (pop, tokens) to form valid edges.
         let mut new_children: BTreeMap<
             (isize, LLMTokenBV),
             OrderedHashMap<PrecomputeNode3Index, StateIDBV>,
         > = BTreeMap::new();
 
-        for ((pop, dest), (tokens, sids)) in grouped_edges {
-            if !tokens.is_empty() && !sids.is_empty() {
-                let dm = new_children.entry((pop, tokens)).or_default();
-                dm.insert(dest, sids);
+        for (pop, groups) in by_pop {
+            for (dest_vec, tokens) in groups {
+                if !tokens.is_empty() {
+                    let dm: OrderedHashMap<_, _> = dest_vec.into_iter().collect();
+                    if !dm.is_empty() {
+                        new_children.insert((pop, tokens), dm);
+                    }
+                }
             }
         }
 
