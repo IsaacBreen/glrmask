@@ -1420,7 +1420,8 @@ class Model(GraphProvider):
                     else:
                         # Global/local cache for isolate_many
                         key_isolate = (id(source_after_apply), tuple(values_to_keep))
-                        if isolate_cache is not None and key_isolate in isolate_cache:; stats.inc('get_mask.traversal.isolate_many_cache_hits')
+                        if isolate_cache is not None and key_isolate in isolate_cache:
+                            stats.inc('get_mask.traversal.isolate_many_cache_hits')
                             child_gss = isolate_cache[key_isolate]
                         else:
                             stats.stop('get_mask.traversal.node.slow_path.isolate_check')
