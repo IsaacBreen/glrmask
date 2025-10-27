@@ -39,6 +39,7 @@ TerminalIdSet = RangeSet
 _original_rangeset_union = RangeSet.union
 _original_rangeset_intersection = RangeSet.intersection
 _original_rangeset_isdisjoint = RangeSet.isdisjoint
+_original_rangeset_len = RangeSet.__len__
 
 def _patched_union(self, other: "RangeSet") -> "RangeSet":
     """Patched version of RangeSet.union that increments a stats counter."""
@@ -67,6 +68,15 @@ def _patched_isdisjoint(self, other: "RangeSet") -> bool:
     stats.stop('bitset.isdisjoint.time')
     return result
 
+def _patched_len(self) -> int:
+    """Patched version of RangeSet.__len__ that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset.len.calls')
+    stats.start('bitset.len.time')
+    result = _original_rangeset_len(self)
+    stats.stop('bitset.len.time')
+    return result
+
 # --- Monkey-patch RangeSetStates ---
 _original_rangesetstates_isdisjoint = RangeSetStates.isdisjoint
 
@@ -83,6 +93,7 @@ def _patched_states_isdisjoint(self, other: "RangeSetStates") -> bool:
 RangeSet.union = _patched_union
 RangeSet.intersection = _patched_intersection
 RangeSet.isdisjoint = _patched_isdisjoint
+RangeSet.__len__ = _patched_len
 RangeSetStates.isdisjoint = _patched_states_isdisjoint
 # --- End of monkey-patch ---
 
@@ -2644,12 +2655,14 @@ class Model(GraphProvider):
                     new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
                     base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
                     if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                        stats.start('get_mask.main_loop.priority_for_node')
                         child_priority = self._priority_for_node(
                             new_node_id, new_depth, remaining_mask,
                             guided_scores=guided_scores,
                             oracle_reward_mask=oracle_reward_mask,
                             analysis_node_costs=oracle_node_costs,
                         )
+                        stats.stop('get_mask.main_loop.priority_for_node')
                     elif guided_scores is not None:
                         child_priority = (-int(guided_scores.get(new_node_id, 0)),) + base_child_pri
                     else:
@@ -2664,12 +2677,14 @@ class Model(GraphProvider):
                     stats.stop('get_mask.main_loop.heap_push')
                 elif isinstance(yielded, Suspend):
                     if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                        stats.start('get_mask.main_loop.priority_for_node')
                         susp_pri = self._priority_for_node(
                             yielded.node_id, yielded.depth, remaining_mask,
                             guided_scores=guided_scores,
                             oracle_reward_mask=oracle_reward_mask,
                             analysis_node_costs=oracle_node_costs,
                         )
+                        stats.stop('get_mask.main_loop.priority_for_node')
                     else:
                         susp_pri = yielded.priority
                     stats.start('get_mask.main_loop.heap_push')
