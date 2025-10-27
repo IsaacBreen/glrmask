@@ -1,10 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::trie3_opt::{
-    context::OptimizationContext,
-    core::{MiniTrie, SortedSet},
-    passes::OptimizationPass,
-};
+use crate::trie3_opt::{context::OptimizationContext, core::{MiniTrie, SortedSet}, passes::OptimizationPass, NodeId};
 
 pub struct MergeEquivalentLLMTokensPass;
 
@@ -91,7 +87,7 @@ impl OptimizationPass for MergeEquivalentLLMTokensPass {
             let mut new_children = BTreeMap::new();
             for (mut ek, dm) in std::mem::take(&mut node.children) {
                 ek.tokens = remap_sorted_set(&ek.tokens);
-                let entry = new_children.entry(ek).or_default();
+                let entry: &mut BTreeMap<NodeId, SortedSet> = new_children.entry(ek).or_default();
                 for (dst, sids) in dm {
                     entry.entry(dst).or_default().union_inplace(&sids);
                 }

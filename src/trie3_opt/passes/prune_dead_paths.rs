@@ -55,7 +55,7 @@ impl OptimizationPass for PruneDeadPathsPass {
         }
 
         for node in &mut trie.nodes {
-            let mut new_children = BTreeMap::new();
+            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
             for (ek, dm) in &node.children {
                 for (dst, sids) in dm {
                     let live_from_child = live.get(dst).unwrap();
