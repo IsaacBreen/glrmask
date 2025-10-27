@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/stats.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/aug25/stats.py: |
@@ -1059,7 +1059,7 @@ local_system:
                       while True:
                           # `gen` is now paused at a `yield`. We have the value.
                           # Before we yield to the consumer, "pause" all active timers.
-                          active_keys_before_yield = set(stats.timers.keys())
+                          active_timers_before_yield = dict(stats.timers)
                           pause_start_time = time.perf_counter()
 
                           try:
@@ -1084,9 +1084,15 @@ local_system:
                           pause_duration = time.perf_counter() - pause_start_time
 
                           # Adjust start times for all timers that were active before we yielded.
-                          for k in active_keys_before_yield:
-                              if k in stats.timers:  # Check if it wasn't stopped by consumer
-                                  stats.timers[k] += pause_duration
+                          # This logic correctly handles nested adjustments (e.g. from _record_key_position)
+                          # that may have occurred in the consumer while we were paused, preventing
+                          # double-counting of pause time which can lead to negative durations.
+                          for k, original_start_time in active_timers_before_yield.items():
+                              if k in stats.timers:  # Check if it wasn't stopped by the consumer
+                                  current_start_time = stats.timers[k]
+                                  adjustment_during_pause = current_start_time - original_start_time
+                                  needed_adjustment = pause_duration - adjustment_during_pause
+                                  stats.timers[k] += needed_adjustment
 
                           # Resume the generator by sending the value from the consumer.
                           yielded_value = gen.send(sent_value)
@@ -1802,5 +1808,117 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat(stats): Enhance stats_generator to
       pause timers during yield"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      Now we're ending up with negative times. That makes no sense.
+    metadata:
+  - assistant: |-
+      You've encountered a subtle but critical issue. The negative times are happening because of an interaction between two different mechanisms that adjust timer start times: the `stats_generator` decorator and the `_record_key_position` method.
+
+      When the generator yields, `stats_generator` pauses its timers. If the consumer code then calls `stats.start()` on a *new* key for the first time, `_record_key_position` runs. It adjusts the start times of *all* active timers, including those that were merely paused by the generator. When control returns to the generator, it adjusts the timers *again* for the entire yield duration. This double-counts the inspection pause, over-adjusts the start time, and can lead to negative final durations.
+
+      The fix is to make the `stats_generator`'s adjustment logic smarter. It needs to account for any changes to a timer's start time that happened while it was paused.
+
+      Here are the step-by-step instructions to fix this, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      I will modify the `stats_generator` decorator in `python/aug25/stats.py` to correct the timer adjustment logic.
+
+      1.  **Open the file `python/aug25/stats.py`**.
+
+      2.  **Navigate to the `stats_generator` function** (around line 600) and find the `wrapper` function inside it.
+
+      3.  **Modify the pre-yield logic**: Inside the `while True:` loop, we need to save not just the keys of the active timers, but their start times as well.
+          *   Find this line:
+              ```python
+              active_keys_before_yield = set(stats.timers.keys())
+              ```
+          *   Replace it with this line to make a copy of the entire timers dictionary:
+              ```python
+              active_timers_before_yield = dict(stats.timers)
+              ```
+
+      4.  **Modify the post-yield logic**: After the `yield` completes and `pause_duration` is calculated, we need to replace the simple adjustment with the more robust calculation.
+          *   Find this block of code:
+              ```python
+              # Adjust start times for all timers that were active before we yielded.
+              for k in active_keys_before_yield:
+                  if k in stats.timers:  # Check if it wasn't stopped by consumer
+                      stats.timers[k] += pause_duration
+              ```
+          *   Replace it with the following block, which correctly calculates the necessary adjustment:
+              ```python
+              # Adjust start times for all timers that were active before we yielded.
+              # This logic correctly handles nested adjustments (e.g. from _record_key_position)
+              # that may have occurred in the consumer while we were paused, preventing
+              # double-counting of pause time which can lead to negative durations.
+              for k, original_start_time in active_timers_before_yield.items():
+                  if k in stats.timers:  # Check if it wasn't stopped by the consumer
+                      current_start_time = stats.timers[k]
+                      adjustment_during_pause = current_start_time - original_start_time
+                      needed_adjustment = pause_duration - adjustment_during_pause
+                      stats.timers[k] += needed_adjustment
+              ```
+
+      This change ensures that we only compensate for the total pause duration exactly once, preventing the over-correction that was causing negative times.
+
+      ### Git Diff
+
+      Here is the git diff to apply the changes.
+
+      ```diff
+      --- a/python/aug25/stats.py
+      +++ b/python/aug25/stats.py
+      @@ -628,8 +628,8 @@
+                       while True:
+                           # `gen` is now paused at a `yield`. We have the value.
+                           # Before we yield to the consumer, "pause" all active timers.
+      -                    active_keys_before_yield = set(stats.timers.keys())
+      +                    active_timers_before_yield = dict(stats.timers)
+                           pause_start_time = time.perf_counter()
+       
+                           try:
+      @@ -653,11 +653,16 @@
+                           # Resumed from consumer. Calculate pause duration.
+                           pause_duration = time.perf_counter() - pause_start_time
+       
+      -                    # Adjust start times for all timers that were active before we yielded.
+      -                    for k in active_keys_before_yield:
+      -                        if k in stats.timers:  # Check if it wasn't stopped by consumer
+      -                            stats.timers[k] += pause_duration
+      +                    # Adjust start times for all timers that were active before we yielded.
+      +                    # This logic correctly handles nested adjustments (e.g. from _record_key_position)
+      +                    # that may have occurred in the consumer while we were paused, preventing
+      +                    # double-counting of pause time which can lead to negative durations.
+      +                    for k, original_start_time in active_timers_before_yield.items():
+      +                        if k in stats.timers:  # Check if it wasn't stopped by the consumer
+      +                            current_start_time = stats.timers[k]
+      +                            adjustment_during_pause = current_start_time - original_start_time
+      +                            needed_adjustment = pause_duration - adjustment_during_pause
+      +                            stats.timers[k] += needed_adjustment
+       
+                           # Resume the generator by sending the value from the consumer.
+                           yielded_value = gen.send(sent_value)
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/stats.py
+      Applying patch to 'python/aug25/stats.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/stats.py.
+    metadata:
+  - user: 'Changes committed with message: "fix(stats): Correct timer adjustment in
+      stats_generator to prevent negative durations"'
     metadata:
 ...

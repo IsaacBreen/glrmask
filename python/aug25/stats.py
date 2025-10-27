@@ -529,7 +529,7 @@ def stats_generator(func):
                 while True:
                     # `gen` is now paused at a `yield`. We have the value.
                     # Before we yield to the consumer, "pause" all active timers.
-                    active_keys_before_yield = set(stats.timers.keys())
+                    active_timers_before_yield = dict(stats.timers)
                     pause_start_time = time.perf_counter()
 
                     try:
@@ -554,9 +554,15 @@ def stats_generator(func):
                     pause_duration = time.perf_counter() - pause_start_time
 
                     # Adjust start times for all timers that were active before we yielded.
-                    for k in active_keys_before_yield:
-                        if k in stats.timers:  # Check if it wasn't stopped by consumer
-                            stats.timers[k] += pause_duration
+                    # This logic correctly handles nested adjustments (e.g. from _record_key_position)
+                    # that may have occurred in the consumer while we were paused, preventing
+                    # double-counting of pause time which can lead to negative durations.
+                    for k, original_start_time in active_timers_before_yield.items():
+                        if k in stats.timers:  # Check if it wasn't stopped by the consumer
+                            current_start_time = stats.timers[k]
+                            adjustment_during_pause = current_start_time - original_start_time
+                            needed_adjustment = pause_duration - adjustment_during_pause
+                            stats.timers[k] += needed_adjustment
 
                     # Resume the generator by sending the value from the consumer.
                     yielded_value = gen.send(sent_value)
