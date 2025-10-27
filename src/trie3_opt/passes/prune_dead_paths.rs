@@ -76,7 +76,7 @@ impl OptimizationPass for PruneDeadPathsPass {
 
                     if !live_on_edge.is_empty() {
                         let new_edge_key = super::super::core::EdgeKey::new(edge_key.pop, live_on_edge);
-                        let new_dest_map_for_key = new_children.entry(new_edge_key).or_default();
+                        let new_dest_map_for_key: &mut BTreeMap<NodeId, SortedSet> = new_children.entry(new_edge_key).or_default();
                         new_dest_map_for_key.entry(*child_id).and_modify(|v: &mut SortedSet| v.union_inplace(edge_value_sids)).or_insert_with(|| edge_value_sids.clone());
                     }
                 }

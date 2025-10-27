@@ -8,7 +8,6 @@ pub mod global_atoms_merge;
 pub mod tokens;
 pub mod reorder;
 pub mod simplify;
-pub mod prune_end_reach;
 pub mod factoring;
 pub mod constrain;
 pub mod compress;

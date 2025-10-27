@@ -192,7 +192,7 @@ pub(crate) fn export_to_mini(
 /// - Old nodes become unreachable and are GC'd.
 /// - live_tokens are recomputed from outgoing edges.
 /// - end flags are set from the mini-trie.
-fn import_from_mini(
+pub(crate) fn import_from_mini(
     mini: &MiniTrie,
     root_pairs: &[(TokenizerStateID, NodeId)],
     trie3_god: &Trie3GodWrapper,
