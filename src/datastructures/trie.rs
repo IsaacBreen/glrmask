@@ -1664,8 +1664,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         let mut new_children = BTreeMap::new();
         for (ek, dest_map) in children_to_copy {
             let mut new_dest_map = OrderedHashMap::with_capacity(dest_map.len());
+            for (old_child_idx, ev) in dest_map.iter() {
                 let new_child_idx =
-                    Self::deep_copy_recursive(old_child_idx, source_arena, new_arena, old_to_new_map);
+                    Self::deep_copy_recursive(*old_child_idx, source_arena, new_arena, old_to_new_map);
                 new_dest_map.insert(new_child_idx, ev.clone());
             }
             new_children.insert(ek, new_dest_map);
