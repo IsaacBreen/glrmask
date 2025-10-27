@@ -975,7 +975,9 @@ class Model(GraphProvider):
         # Strengthen remaining-mask with node-specific allowance (oracle reward) when provided.
         if remaining_mask.is_empty():
             return
+        stats.start('get_mask.main_loop.gen.active_mask_intersect')
         active_remaining_mask = remaining_mask if node_allowed_mask is None else remaining_mask.intersection(node_allowed_mask)
+        stats.stop('get_mask.main_loop.gen.active_mask_intersect')
 
         max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
         edges_proc, dests_proc = 0, 0
@@ -1013,6 +1015,7 @@ class Model(GraphProvider):
                         peek_rs = peek0_rs
                         pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                     else:
+                        stats.start('get_mask.main_loop.fast_path.pop_op')
                         popped = None
                         if global_pop_cache is not None:
                             key = (id(gss_node), pop_val)
@@ -1038,10 +1041,10 @@ class Model(GraphProvider):
                         stats.start('get_mask.main_loop.post_pop_peek')
                         peeked = popped.peek()
                         peek_rs = RangeSetStates.from_indices(peeked)
-                        stats.stop('get_mask.main_loop.post_pop_peek')
                         pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                         if global_pop_cache is not None:
                             global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
+                        stats.stop('get_mask.main_loop.fast_path.pop_op')
 
                 # Per-pop bucket pruning
                 stats.start('get_mask.main_loop.fast_path.bucket_pruning')
@@ -1104,15 +1107,20 @@ class Model(GraphProvider):
                     states_to_keep: List[int] = entry["states"]
 
                     # JIT Pruning: Re-check against the latest remaining_mask before doing work.
+                    stats.start('get_mask.main_loop.fast_path.jit_prune')
                     if llm_bv.isdisjoint(active_remaining_mask):
                         stats.inc('get_mask.main_loop.edge.jit_pruned')
+                        stats.stop('get_mask.main_loop.fast_path.jit_prune')
                         continue
+                    stats.stop('get_mask.main_loop.fast_path.jit_prune')
 
                     # Apply-and-prune cache per (popped, llm_bv)
                     source_after_apply = popped
                     # The check against popped_acc.llm_mask is now done during group building.
                     key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
+                    stats.start('get_mask.main_loop.fast_path.apply_cache_check')
                     cached_apply = local_apply_cache.get(key_apply)
+                    stats.stop('get_mask.main_loop.fast_path.apply_cache_check')
                     if cached_apply is not None:
                         source_after_apply = cached_apply
                         stats.inc('get_mask.apply.cache_hits')
@@ -1142,6 +1150,7 @@ class Model(GraphProvider):
                         local_ctr["edges"] = local_ctr.get("edges", 0) + 1
 
                     # Isolate only the contributing heads if necessary
+                    stats.start('get_mask.main_loop.fast_path.isolate_check')
                     if len(states_to_keep) == len(peeked):
                         child_gss = source_after_apply
                     else:
@@ -1150,6 +1159,7 @@ class Model(GraphProvider):
                             stats.inc('get_mask.isolate_many.cache_hits')
                             child_gss = isolate_cache[key_isolate]
                         else:
+                            stats.stop('get_mask.main_loop.fast_path.isolate_check')
                             stats.start('get_mask.main_loop.edge.isolate_many')
                             _t0 = _perf_now()
                             child_gss = source_after_apply.isolate_many(states_to_keep)
@@ -1161,6 +1171,8 @@ class Model(GraphProvider):
                                 local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                             if isolate_cache is not None:
                                 isolate_cache[key_isolate] = child_gss
+                        continue
+                    stats.stop('get_mask.main_loop.fast_path.isolate_check')
 
                     if child_gss.is_empty():
                         continue
@@ -1214,13 +1226,17 @@ class Model(GraphProvider):
             for edge_i, edge in edge_iterator:
                 if edge.pop in skip_pops:
                     continue
+                stats.start('get_mask.main_loop.slow_path.initial_prune')
                 if edge.llm_bv.isdisjoint(active_remaining_mask):
                     stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+                    stats.stop('get_mask.main_loop.slow_path.initial_prune')
                     continue
 
                 if edge.llm_bv.isdisjoint(gss_mask):
                     stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
+                    stats.stop('get_mask.main_loop.slow_path.initial_prune')
                     continue
+                stats.stop('get_mask.main_loop.slow_path.initial_prune')
 
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
@@ -1237,6 +1253,7 @@ class Model(GraphProvider):
                         peek_rs = peek0_rs
                         pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
                     else:
+                        stats.start('get_mask.main_loop.slow_path.pop_op')
                         # Try global cache first
                         popped = None
                         if global_pop_cache is not None:
@@ -1268,10 +1285,10 @@ class Model(GraphProvider):
                         stats.start('get_mask.main_loop.post_pop_peek')
                         peeked = popped.peek()
                         peek_rs = RangeSetStates.from_indices(peeked)
-                        stats.stop('get_mask.main_loop.post_pop_peek')
                         pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
                         if global_pop_cache is not None:
                             global_pop_cache[(id(gss_node), edge.pop)] = (popped, popped_acc, peeked, peek_rs)
+                        stats.stop('get_mask.main_loop.slow_path.pop_op')
 
                 # One-time per-pop bucket pruning: states and llm masks
                 stats.start('get_mask.main_loop.slow_path.bucket_pruning')
@@ -1294,14 +1311,19 @@ class Model(GraphProvider):
                         continue
                 stats.stop('get_mask.main_loop.slow_path.bucket_pruning')
 
+                stats.start('get_mask.main_loop.slow_path.dest_union_prune')
                 if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
                     if popped_acc: stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
+                    stats.stop('get_mask.main_loop.slow_path.dest_union_prune')
                     continue
+                stats.stop('get_mask.main_loop.slow_path.dest_union_prune')
 
                 # Apply-and-prune caching across edges sharing the same llm_bv
                 source_after_apply = popped
+                stats.start('get_mask.main_loop.slow_path.apply_check')
                 if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
                     if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+                        stats.stop('get_mask.main_loop.slow_path.apply_check')
                         continue
                     key_apply = (id(popped), id(edge.llm_bv))
                     cached_apply = local_apply_cache.get(key_apply)
@@ -1322,9 +1344,12 @@ class Model(GraphProvider):
                         if oracle_counters is not None and local_ctr is not None:
                             local_ctr["apply_time_ms"] = local_ctr.get("apply_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                         if tmp.is_empty():
+                            stats.stop('get_mask.main_loop.slow_path.apply_check')
                             continue
                         source_after_apply = tmp
                         local_apply_cache[key_apply] = tmp
+                stats.stop('get_mask.main_loop.slow_path.apply_check')
+
                 if not peeked: continue
 
                 stats.start('get_mask.main_loop.slow_path.group_building')
@@ -1362,6 +1387,7 @@ class Model(GraphProvider):
                     dest = edge.dests[dest_j]
                     values_to_keep = grouped[dest_j]
                     # If all heads survive, reuse popped directly
+                    stats.start('get_mask.main_loop.slow_path.isolate_check')
                     if len(values_to_keep) == len(peeked):
                         child_gss = source_after_apply
                     else:
@@ -1371,6 +1397,7 @@ class Model(GraphProvider):
                             stats.inc('get_mask.isolate_many.cache_hits')
                             child_gss = isolate_cache[key_isolate]
                         else:
+                            stats.stop('get_mask.main_loop.slow_path.isolate_check')
                             stats.start('get_mask.main_loop.edge.isolate_many')
                             _t0 = _perf_now()
                             child_gss = source_after_apply.isolate_many(values_to_keep)
@@ -1382,6 +1409,8 @@ class Model(GraphProvider):
                                 local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                             if isolate_cache is not None:
                                 isolate_cache[key_isolate] = child_gss
+                        continue
+                    stats.stop('get_mask.main_loop.slow_path.isolate_check')
                     if child_gss.is_empty(): continue
                     d: NodeID = int(dest.dest_idx)
                     new_mask = yield Enqueue(d, child_gss, depth + 1)
@@ -2561,10 +2590,12 @@ class Model(GraphProvider):
                     if record_end_unions and analysis_end_masks is not None:
                         prev_mask = analysis_end_masks.get(int(node_id))
                         analysis_end_masks[int(node_id)] = gss_acc.llm_mask if prev_mask is None else prev_mask.union(gss_acc.llm_mask)
+                    stats.start('get_mask.main_loop.end_node.update_masks')
                     stats.start('get_mask.main_loop.end_node.final_mask_union')
                     final_mask |= gss_acc.llm_mask
                     stats.stop('get_mask.main_loop.end_node.final_mask_union')
                     remaining_mask = all_ones.difference(final_mask)
+                    stats.stop('get_mask.main_loop.end_node.update_masks')
                     if remaining_mask.is_empty():
                         stats.inc('get_mask.early_exit_full_mask')
                         break
@@ -2645,13 +2676,16 @@ class Model(GraphProvider):
             # Coroutine driving loop
             stats.start('get_mask.main_loop.gen_drive')
             try:
+                stats.start('get_mask.main_loop.gen_drive.resume')
                 if is_new_gen:
                     yielded = next(gen)
                 else:
                     yielded = gen.send(remaining_mask)
+                stats.stop('get_mask.main_loop.gen_drive.resume')
 
                 # The generator yields one item, we process it, and then the main loop continues.
                 if isinstance(yielded, Enqueue):
+                    stats.start('get_mask.main_loop.gen_drive.process_enqueue')
                     new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
                     base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
                     if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
@@ -2675,6 +2709,7 @@ class Model(GraphProvider):
                     stats.start('get_mask.main_loop.heap_push')
                     heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, depth)))
                     stats.stop('get_mask.main_loop.heap_push')
+                    stats.stop('get_mask.main_loop.gen_drive.process_enqueue')
                 elif isinstance(yielded, Suspend):
                     if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
                         stats.start('get_mask.main_loop.priority_for_node')
@@ -2690,6 +2725,7 @@ class Model(GraphProvider):
                     stats.start('get_mask.main_loop.heap_push')
                     heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
                     stats.stop('get_mask.main_loop.heap_push')
+                    stats.stop('get_mask.main_loop.gen_drive.process_suspend')
             except StopIteration:
                 pass # Generator is done.
             stats.stop('get_mask.main_loop.gen_drive')

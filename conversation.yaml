@@ -3909,7 +3909,9 @@ local_system:
               # Strengthen remaining-mask with node-specific allowance (oracle reward) when provided.
               if remaining_mask.is_empty():
                   return
+              stats.start('get_mask.main_loop.gen.active_mask_intersect')
               active_remaining_mask = remaining_mask if node_allowed_mask is None else remaining_mask.intersection(node_allowed_mask)
+              stats.stop('get_mask.main_loop.gen.active_mask_intersect')
 
               max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
               edges_proc, dests_proc = 0, 0
@@ -3947,6 +3949,7 @@ local_system:
                               peek_rs = peek0_rs
                               pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                           else:
+                              stats.start('get_mask.main_loop.fast_path.pop_op')
                               popped = None
                               if global_pop_cache is not None:
                                   key = (id(gss_node), pop_val)
@@ -3972,10 +3975,10 @@ local_system:
                               stats.start('get_mask.main_loop.post_pop_peek')
                               peeked = popped.peek()
                               peek_rs = RangeSetStates.from_indices(peeked)
-                              stats.stop('get_mask.main_loop.post_pop_peek')
                               pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                               if global_pop_cache is not None:
                                   global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
+                              stats.stop('get_mask.main_loop.fast_path.pop_op')
 
                       # Per-pop bucket pruning
                       stats.start('get_mask.main_loop.fast_path.bucket_pruning')
@@ -4038,15 +4041,20 @@ local_system:
                           states_to_keep: List[int] = entry["states"]
 
                           # JIT Pruning: Re-check against the latest remaining_mask before doing work.
+                          stats.start('get_mask.main_loop.fast_path.jit_prune')
                           if llm_bv.isdisjoint(active_remaining_mask):
                               stats.inc('get_mask.main_loop.edge.jit_pruned')
+                              stats.stop('get_mask.main_loop.fast_path.jit_prune')
                               continue
+                          stats.stop('get_mask.main_loop.fast_path.jit_prune')
 
                           # Apply-and-prune cache per (popped, llm_bv)
                           source_after_apply = popped
                           # The check against popped_acc.llm_mask is now done during group building.
                           key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
+                          stats.start('get_mask.main_loop.fast_path.apply_cache_check')
                           cached_apply = local_apply_cache.get(key_apply)
+                          stats.stop('get_mask.main_loop.fast_path.apply_cache_check')
                           if cached_apply is not None:
                               source_after_apply = cached_apply
                               stats.inc('get_mask.apply.cache_hits')
@@ -4076,6 +4084,7 @@ local_system:
                               local_ctr["edges"] = local_ctr.get("edges", 0) + 1
 
                           # Isolate only the contributing heads if necessary
+                          stats.start('get_mask.main_loop.fast_path.isolate_check')
                           if len(states_to_keep) == len(peeked):
                               child_gss = source_after_apply
                           else:
@@ -4084,6 +4093,7 @@ local_system:
                                   stats.inc('get_mask.isolate_many.cache_hits')
                                   child_gss = isolate_cache[key_isolate]
                               else:
+                                  stats.stop('get_mask.main_loop.fast_path.isolate_check')
                                   stats.start('get_mask.main_loop.edge.isolate_many')
                                   _t0 = _perf_now()
                                   child_gss = source_after_apply.isolate_many(states_to_keep)
@@ -4095,6 +4105,8 @@ local_system:
                                       local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                                   if isolate_cache is not None:
                                       isolate_cache[key_isolate] = child_gss
+                              continue
+                          stats.stop('get_mask.main_loop.fast_path.isolate_check')
 
                           if child_gss.is_empty():
                               continue
@@ -4148,13 +4160,17 @@ local_system:
                   for edge_i, edge in edge_iterator:
                       if edge.pop in skip_pops:
                           continue
+                      stats.start('get_mask.main_loop.slow_path.initial_prune')
                       if edge.llm_bv.isdisjoint(active_remaining_mask):
                           stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+                          stats.stop('get_mask.main_loop.slow_path.initial_prune')
                           continue
 
                       if edge.llm_bv.isdisjoint(gss_mask):
                           stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
+                          stats.stop('get_mask.main_loop.slow_path.initial_prune')
                           continue
+                      stats.stop('get_mask.main_loop.slow_path.initial_prune')
 
                       stats.inc('get_mask.traversal.edges_traversed')
                       stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
@@ -4171,6 +4187,7 @@ local_system:
                               peek_rs = peek0_rs
                               pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
                           else:
+                              stats.start('get_mask.main_loop.slow_path.pop_op')
                               # Try global cache first
                               popped = None
                               if global_pop_cache is not None:
@@ -4202,10 +4219,10 @@ local_system:
                               stats.start('get_mask.main_loop.post_pop_peek')
                               peeked = popped.peek()
                               peek_rs = RangeSetStates.from_indices(peeked)
-                              stats.stop('get_mask.main_loop.post_pop_peek')
                               pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
                               if global_pop_cache is not None:
                                   global_pop_cache[(id(gss_node), edge.pop)] = (popped, popped_acc, peeked, peek_rs)
+                              stats.stop('get_mask.main_loop.slow_path.pop_op')
 
                       # One-time per-pop bucket pruning: states and llm masks
                       stats.start('get_mask.main_loop.slow_path.bucket_pruning')
@@ -4228,14 +4245,19 @@ local_system:
                               continue
                       stats.stop('get_mask.main_loop.slow_path.bucket_pruning')
 
+                      stats.start('get_mask.main_loop.slow_path.dest_union_prune')
                       if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
                           if popped_acc: stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
+                          stats.stop('get_mask.main_loop.slow_path.dest_union_prune')
                           continue
+                      stats.stop('get_mask.main_loop.slow_path.dest_union_prune')
 
                       # Apply-and-prune caching across edges sharing the same llm_bv
                       source_after_apply = popped
+                      stats.start('get_mask.main_loop.slow_path.apply_check')
                       if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
                           if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+                              stats.stop('get_mask.main_loop.slow_path.apply_check')
                               continue
                           key_apply = (id(popped), id(edge.llm_bv))
                           cached_apply = local_apply_cache.get(key_apply)
@@ -4256,9 +4278,12 @@ local_system:
                               if oracle_counters is not None and local_ctr is not None:
                                   local_ctr["apply_time_ms"] = local_ctr.get("apply_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                               if tmp.is_empty():
+                                  stats.stop('get_mask.main_loop.slow_path.apply_check')
                                   continue
                               source_after_apply = tmp
                               local_apply_cache[key_apply] = tmp
+                      stats.stop('get_mask.main_loop.slow_path.apply_check')
+
                       if not peeked: continue
 
                       stats.start('get_mask.main_loop.slow_path.group_building')
@@ -4296,6 +4321,7 @@ local_system:
                           dest = edge.dests[dest_j]
                           values_to_keep = grouped[dest_j]
                           # If all heads survive, reuse popped directly
+                          stats.start('get_mask.main_loop.slow_path.isolate_check')
                           if len(values_to_keep) == len(peeked):
                               child_gss = source_after_apply
                           else:
@@ -4305,6 +4331,7 @@ local_system:
                                   stats.inc('get_mask.isolate_many.cache_hits')
                                   child_gss = isolate_cache[key_isolate]
                               else:
+                                  stats.stop('get_mask.main_loop.slow_path.isolate_check')
                                   stats.start('get_mask.main_loop.edge.isolate_many')
                                   _t0 = _perf_now()
                                   child_gss = source_after_apply.isolate_many(values_to_keep)
@@ -4316,6 +4343,8 @@ local_system:
                                       local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
                                   if isolate_cache is not None:
                                       isolate_cache[key_isolate] = child_gss
+                              continue
+                          stats.stop('get_mask.main_loop.slow_path.isolate_check')
                           if child_gss.is_empty(): continue
                           d: NodeID = int(dest.dest_idx)
                           new_mask = yield Enqueue(d, child_gss, depth + 1)
@@ -5495,10 +5524,12 @@ local_system:
                           if record_end_unions and analysis_end_masks is not None:
                               prev_mask = analysis_end_masks.get(int(node_id))
                               analysis_end_masks[int(node_id)] = gss_acc.llm_mask if prev_mask is None else prev_mask.union(gss_acc.llm_mask)
+                          stats.start('get_mask.main_loop.end_node.update_masks')
                           stats.start('get_mask.main_loop.end_node.final_mask_union')
                           final_mask |= gss_acc.llm_mask
                           stats.stop('get_mask.main_loop.end_node.final_mask_union')
                           remaining_mask = all_ones.difference(final_mask)
+                          stats.stop('get_mask.main_loop.end_node.update_masks')
                           if remaining_mask.is_empty():
                               stats.inc('get_mask.early_exit_full_mask')
                               break
@@ -5579,13 +5610,16 @@ local_system:
                   # Coroutine driving loop
                   stats.start('get_mask.main_loop.gen_drive')
                   try:
+                      stats.start('get_mask.main_loop.gen_drive.resume')
                       if is_new_gen:
                           yielded = next(gen)
                       else:
                           yielded = gen.send(remaining_mask)
+                      stats.stop('get_mask.main_loop.gen_drive.resume')
 
                       # The generator yields one item, we process it, and then the main loop continues.
                       if isinstance(yielded, Enqueue):
+                          stats.start('get_mask.main_loop.gen_drive.process_enqueue')
                           new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
                           base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
                           if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
@@ -5609,6 +5643,7 @@ local_system:
                           stats.start('get_mask.main_loop.heap_push')
                           heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, depth)))
                           stats.stop('get_mask.main_loop.heap_push')
+                          stats.stop('get_mask.main_loop.gen_drive.process_enqueue')
                       elif isinstance(yielded, Suspend):
                           if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
                               stats.start('get_mask.main_loop.priority_for_node')
@@ -5624,6 +5659,7 @@ local_system:
                           stats.start('get_mask.main_loop.heap_push')
                           heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
                           stats.stop('get_mask.main_loop.heap_push')
+                          stats.stop('get_mask.main_loop.gen_drive.process_suspend')
                   except StopIteration:
                       pass # Generator is done.
                   stats.stop('get_mask.main_loop.gen_drive')
@@ -9477,5 +9513,293 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Add detailed timing for RangeSet ops,
       initial/post-pop GSS peeks, and priority calculation in get_mask.main_loop"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Add more stats. Add at least 10 additional sections. Try to cover everything
+      in `get_mask.main_loop.gen_drive` - every possible chunk of code - and in `_process_internal_node_gen`,
+      being careful of the yield statements.
+    metadata:
+  - assistant: |-
+      Of course. The previous stats were insufficient. To get to the bottom of the performance characteristics, I will add a comprehensive set of timers to instrument every significant logical block within the main traversal loop and its generator function.
+
+      Here are the step-by-step instructions for the changes:
+
+      ### File to Edit: `python/aug25/models/precompute3_model_pure_python_opt4_5.py`
+
+      I will add timers to both the `_get_mask_run` method (the generator's consumer) and the `_process_internal_node_gen` method (the generator itself).
+
+      #### Changes in `_process_internal_node_gen`
+
+      1.  **Active Mask Calculation:** I'll add a timer `get_mask.main_loop.gen.active_mask_intersect` around the initial intersection that computes `active_remaining_mask`.
+      2.  **Fast Path Pop Operation:** For a cache miss on the `pop_cache`, the entire block performing the `popn`, `reduce_acc`, and `peek` operations will be timed under `get_mask.main_loop.fast_path.pop_op`.
+      3.  **Fast Path JIT Pruning:** The `isdisjoint` check just before processing a group of states will be timed as `get_mask.main_loop.fast_path.jit_prune`.
+      4.  **Fast Path Cache Checks:** The lookups in `local_apply_cache` and `isolate_cache` will be timed as `get_mask.main_loop.fast_path.apply_cache_check` and `get_mask.main_loop.fast_path.isolate_check` respectively.
+      5.  **Slow Path Initial Pruning:** The first two `isdisjoint` checks at the start of the edge loop will be timed under `get_mask.main_loop.slow_path.initial_prune`.
+      6.  **Slow Path Pop Operation:** Similar to the fast path, a `pop_cache` miss will be timed as `get_mask.main_loop.slow_path.pop_op`.
+      7.  **Slow Path Pruning Checks:** The `dest_states_union.isdisjoint` check will be timed as `get_mask.main_loop.slow_path.dest_union_prune`. The subsequent checks related to the edge's `llm_bv` and the apply cache lookup will be timed as `get_mask.main_loop.slow_path.apply_check`.
+      8.  **Slow Path Isolate Check:** The `isolate_cache` lookup will be timed as `get_mask.main_loop.slow_path.isolate_check`.
+
+      #### Changes in `_get_mask_run`
+
+      1.  **End Node Mask Update:** In the `if self.is_end(node_id):` block, the modification of `final_mask` and `remaining_mask` will be timed as `get_mask.main_loop.end_node.update_masks`.
+      2.  **Generator Driving:** The `gen_drive` block will be broken down. The `next(gen)` or `gen.send(...)` call will be timed as `get_mask.main_loop.gen_drive.resume`.
+      3.  **Yielded Item Processing:** The entire `if isinstance(yielded, Enqueue):` block will be timed as `get_mask.main_loop.gen_drive.process_enqueue`, and the `elif isinstance(yielded, Suspend):` block will be timed as `get_mask.main_loop.gen_drive.process_suspend`.
+
+      These 10+ timers will provide a complete, granular view of where time is spent.
+
+      ---
+
+      ### Git Patch
+
+      Here is the git diff to apply these changes:
+
+      ```diff
+      --- a/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      @@ -1105,7 +1105,9 @@
+               # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
+               # Strengthen remaining-mask with node-specific allowance (oracle reward) when provided.
+               if remaining_mask.is_empty():
+                   return
+      +        stats.start('get_mask.main_loop.gen.active_mask_intersect')
+               active_remaining_mask = remaining_mask if node_allowed_mask is None else remaining_mask.intersection(node_allowed_mask)
+      +        stats.stop('get_mask.main_loop.gen.active_mask_intersect')
+       
+               max_edges, max_dests = (self.gm_max_edges, self.gm_max_dests)
+               edges_proc, dests_proc = 0, 0
+      @@ -1129,6 +1131,7 @@
+                               peeked = peek0
+                               peek_rs = peek0_rs
+                               pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
+                           else:
+      +                        stats.start('get_mask.main_loop.fast_path.pop_op')
+                               popped = None
+                               if global_pop_cache is not None:
+                                   key = (id(gss_node), pop_val)
+      @@ -1153,6 +1156,7 @@
+                               peek_rs = RangeSetStates.from_indices(peeked)
+                               pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
+                               if global_pop_cache is not None:
+                                   global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
+      +                        stats.stop('get_mask.main_loop.fast_path.pop_op')
+       
+                       # Per-pop bucket pruning
+                       stats.start('get_mask.main_loop.fast_path.bucket_pruning')
+      @@ -1210,18 +1214,22 @@
+                           states_to_keep: List[int] = entry["states"]
+       
+                           # JIT Pruning: Re-check against the latest remaining_mask before doing work.
+      +                    stats.start('get_mask.main_loop.fast_path.jit_prune')
+                           if llm_bv.isdisjoint(active_remaining_mask):
+                               stats.inc('get_mask.main_loop.edge.jit_pruned')
+      +                        stats.stop('get_mask.main_loop.fast_path.jit_prune')
+                               continue
+      +                    stats.stop('get_mask.main_loop.fast_path.jit_prune')
+       
+                           # Apply-and-prune cache per (popped, llm_bv)
+                           source_after_apply = popped
+                           # The check against popped_acc.llm_mask is now done during group building.
+                           key_apply = (id(popped), id(llm_bv))  # llm_bv is llm_bv_thru
+      +                    stats.start('get_mask.main_loop.fast_path.apply_cache_check')
+                           cached_apply = local_apply_cache.get(key_apply)
+      +                    stats.stop('get_mask.main_loop.fast_path.apply_cache_check')
+                           if cached_apply is not None:
+                               source_after_apply = cached_apply
+                               stats.inc('get_mask.apply.cache_hits')
+                           else:
+      @@ -1248,12 +1256,15 @@
+                               local_ctr["edges"] = local_ctr.get("edges", 0) + 1
+       
+                           # Isolate only the contributing heads if necessary
+      +                    stats.start('get_mask.main_loop.fast_path.isolate_check')
+                           if len(states_to_keep) == len(peeked):
+                               child_gss = source_after_apply
+                           else:
+                               key_isolate = (id(source_after_apply), tuple(states_to_keep))
+                               if isolate_cache is not None and key_isolate in isolate_cache:
+                                   stats.inc('get_mask.isolate_many.cache_hits')
+                                   child_gss = isolate_cache[key_isolate]
+                               else:
+      +                            stats.stop('get_mask.main_loop.fast_path.isolate_check')
+                                   stats.start('get_mask.main_loop.edge.isolate_many')
+                                   _t0 = _perf_now()
+                                   child_gss = source_after_apply.isolate_many(states_to_keep)
+      @@ -1264,6 +1275,8 @@
+                                       local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+                                   if isolate_cache is not None:
+                                       isolate_cache[key_isolate] = child_gss
+      +                        continue
+      +                    stats.stop('get_mask.main_loop.fast_path.isolate_check')
+       
+                           if child_gss.is_empty():
+                               continue
+      @@ -1308,14 +1321,18 @@
+                       edge_iterator = enumerate(a_node.children)
+                   for edge_i, edge in edge_iterator:
+                       if edge.pop in skip_pops:
+                           continue
+      +                stats.start('get_mask.main_loop.slow_path.initial_prune')
+                       if edge.llm_bv.isdisjoint(active_remaining_mask):
+                           stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+      +                    stats.stop('get_mask.main_loop.slow_path.initial_prune')
+                           continue
+       
+                       if edge.llm_bv.isdisjoint(gss_mask):
+                           stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
+      +                    stats.stop('get_mask.main_loop.slow_path.initial_prune')
+                           continue
+      +                stats.stop('get_mask.main_loop.slow_path.initial_prune')
+       
+                       stats.inc('get_mask.traversal.edges_traversed')
+                       stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
+      @@ -1332,6 +1349,7 @@
+                               peek_rs = peek0_rs
+                               pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                           else:
+      +                        stats.start('get_mask.main_loop.slow_path.pop_op')
+                               # Try global cache first
+                               popped = None
+                               if global_pop_cache is not None:
+      @@ -1359,6 +1377,7 @@
+                               peek_rs = RangeSetStates.from_indices(peeked)
+                               pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                               if global_pop_cache is not None:
+                                   global_pop_cache[(id(gss_node), edge.pop)] = (popped, popped_acc, peeked, peek_rs)
+      +                        stats.stop('get_mask.main_loop.slow_path.pop_op')
+       
+                       # One-time per-pop bucket pruning: states and llm masks
+                       stats.start('get_mask.main_loop.slow_path.bucket_pruning')
+      @@ -1378,16 +1397,22 @@
+                               continue
+                       stats.stop('get_mask.main_loop.slow_path.bucket_pruning')
+       
+      +                stats.start('get_mask.main_loop.slow_path.dest_union_prune')
+                       if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
+                           if popped_acc: stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
+      +                    stats.stop('get_mask.main_loop.slow_path.dest_union_prune')
+                           continue
+      +                stats.stop('get_mask.main_loop.slow_path.dest_union_prune')
+       
+                       # Apply-and-prune caching across edges sharing the same llm_bv
+                       source_after_apply = popped
+      +                stats.start('get_mask.main_loop.slow_path.apply_check')
+                       if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
+                           if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+      +                        stats.stop('get_mask.main_loop.slow_path.apply_check')
+                               continue
+                           key_apply = (id(popped), id(edge.llm_bv))
+                           cached_apply = local_apply_cache.get(key_apply)
+                           if cached_apply is not None:
+                               source_after_apply = cached_apply
+                               stats.inc('get_mask.apply.cache_hits')
+      @@ -1405,8 +1430,11 @@
+                               if oracle_counters is not None and local_ctr is not None:
+                                   local_ctr["apply_time_ms"] = local_ctr.get("apply_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+                               if tmp.is_empty():
+      +                            stats.stop('get_mask.main_loop.slow_path.apply_check')
+                                   continue
+                               source_after_apply = tmp
+                               local_apply_cache[key_apply] = tmp
+      +                stats.stop('get_mask.main_loop.slow_path.apply_check')
+      +
+                       if not peeked: continue
+       
+                       stats.start('get_mask.main_loop.slow_path.group_building')
+      @@ -1440,12 +1468,15 @@
+                           dest = edge.dests[dest_j]
+                           values_to_keep = grouped[dest_j]
+                           # If all heads survive, reuse popped directly
+      +                    stats.start('get_mask.main_loop.slow_path.isolate_check')
+                           if len(values_to_keep) == len(peeked):
+                               child_gss = source_after_apply
+                           else:
+                               # Global/local cache for isolate_many
+                               key_isolate = (id(source_after_apply), tuple(values_to_keep))
+                               if isolate_cache is not None and key_isolate in isolate_cache:
+                                   stats.inc('get_mask.isolate_many.cache_hits')
+                                   child_gss = isolate_cache[key_isolate]
+                               else:
+      +                            stats.stop('get_mask.main_loop.slow_path.isolate_check')
+                                   stats.start('get_mask.main_loop.edge.isolate_many')
+                                   _t0 = _perf_now()
+                                   child_gss = source_after_apply.isolate_many(values_to_keep)
+      @@ -1456,6 +1487,8 @@
+                                       local_ctr["isolate_time_ms"] = local_ctr.get("isolate_time_ms", 0.0) + ((_t1 - _t0) * 1000.0)
+                                   if isolate_cache is not None:
+                                       isolate_cache[key_isolate] = child_gss
+      +                        continue
+      +                    stats.stop('get_mask.main_loop.slow_path.isolate_check')
+                           if child_gss.is_empty(): continue
+                           d: NodeID = int(dest.dest_idx)
+                           new_mask = yield Enqueue(d, child_gss, depth + 1)
+      @@ -1748,12 +1781,14 @@
+                               if record_end_unions and not delta.is_empty():
+                                   end_union_events.append((int(node_id), delta))
+                           # Record exact end mask (union across visits), independent of delta
+                           if record_end_unions and analysis_end_masks is not None:
+                               prev_mask = analysis_end_masks.get(int(node_id))
+                               analysis_end_masks[int(node_id)] = gss_acc.llm_mask if prev_mask is None else prev_mask.union(gss_acc.llm_mask)
+      +                    stats.start('get_mask.main_loop.end_node.update_masks')
+                           stats.start('get_mask.main_loop.end_node.final_mask_union')
+                           final_mask |= gss_acc.llm_mask
+                           stats.stop('get_mask.main_loop.end_node.final_mask_union')
+                           remaining_mask = all_ones.difference(final_mask)
+      +                    stats.stop('get_mask.main_loop.end_node.update_masks')
+                           if remaining_mask.is_empty():
+                               stats.inc('get_mask.early_exit_full_mask')
+                               break
+      @@ -1821,13 +1856,18 @@
+                   # Coroutine driving loop
+                   stats.start('get_mask.main_loop.gen_drive')
+                   try:
+      +                stats.start('get_mask.main_loop.gen_drive.resume')
+                       if is_new_gen:
+                           yielded = next(gen)
+                       else:
+                           yielded = gen.send(remaining_mask)
+      +                stats.stop('get_mask.main_loop.gen_drive.resume')
+       
+                       # The generator yields one item, we process it, and then the main loop continues.
+                       if isinstance(yielded, Enqueue):
+      +                    stats.start('get_mask.main_loop.gen_drive.process_enqueue')
+                           new_node_id, new_gss, new_depth = yielded.node_id, yielded.gss, yielded.depth
+                           base_child_pri = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                           if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+      @@ -1850,6 +1890,7 @@
+                           stats.start('get_mask.main_loop.heap_push')
+                           heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, depth)))
+                           stats.stop('get_mask.main_loop.heap_push')
+      +                    stats.stop('get_mask.main_loop.gen_drive.process_enqueue')
+                       elif isinstance(yielded, Suspend):
+                           if oracle_reward_mask is not None and self.oracle_dynamic_prioritization:
+                               stats.start('get_mask.main_loop.priority_for_node')
+      @@ -1864,6 +1905,7 @@
+                           stats.start('get_mask.main_loop.heap_push')
+                           heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth)))
+                           stats.stop('get_mask.main_loop.heap_push')
+      +                    stats.stop('get_mask.main_loop.gen_drive.process_suspend')
+                   except StopIteration:
+                       pass # Generator is done.
+                   stats.stop('get_mask.main_loop.gen_drive')
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_opt4_5.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4_5.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4_5.py.
+    metadata:
+  - user: 'Changes committed with message: "Add comprehensive timing instrumentation
+      to get_mask.main_loop, covering RangeSet ops, pop/peek, pruning, group processing,
+      priority calculation, and generator control flow."'
     metadata:
 ...
