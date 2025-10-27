@@ -222,7 +222,7 @@ impl Metric for StateFanoutMetric {
 
             // Collect fanout values for this node
             for fanout_vec in fanout_map.values() {
-                stats.push(fanout_vec.len());
+                stats.push(fanout_vec.len() as f64);
             }
         }
 
