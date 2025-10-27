@@ -1005,12 +1005,14 @@ class Model(GraphProvider):
                             global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
 
                 # Per-pop bucket pruning
+                stats.start('get_mask.main_loop.fast_path.bucket_pruning')
                 if pop_val not in checked_pops:
                     checked_pops.add(pop_val)
                     pop_states_union = a_node.pop_to_state_union.get(pop_val)
                     if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
                         stats.inc('get_mask.main_loop.bucket_pruned_state')
                         skip_pops.add(pop_val)
+                        stats.stop('get_mask.main_loop.fast_path.bucket_pruning')
                         continue
                     pop_llm_union = a_node.pop_to_llm_union.get(pop_val)
                     if pop_llm_union is not None and (
@@ -1018,9 +1020,12 @@ class Model(GraphProvider):
                     ):
                         stats.inc('get_mask.main_loop.bucket_pruned_llm')
                         skip_pops.add(pop_val)
+                        stats.stop('get_mask.main_loop.fast_path.bucket_pruning')
                         continue
+                stats.stop('get_mask.main_loop.fast_path.bucket_pruning')
 
                 # Build groups: (dest_id, llm_bv_id) -> {llm_bv, llm_bv_not, states}
+                stats.start('get_mask.main_loop.fast_path.group_building')
                 groups: Dict[Tuple[int, int], Dict[str, Any]] = {}
                 mapping_for_pop = a_node.fast_children.get(pop_val, {})
                 for sid in peeked:
@@ -1039,16 +1044,19 @@ class Model(GraphProvider):
                             groups[key] = {"llm_bv": llm_bv_thru, "llm_bv_not": None, "states": [int(sid)]}
                         else:
                             entry["states"].append(int(sid))
+                stats.stop('get_mask.main_loop.fast_path.group_building')
 
                 if not groups:
                     continue
 
                 # Order groups by child destination score (oracle guidance) if available
+                stats.start('get_mask.main_loop.fast_path.group_sorting')
                 dest_keys = list(groups.keys())
                 if dest_scores:
                     dest_keys.sort(key=lambda k: (-dest_scores.get(int(k[0]), 0), k))
                 else:
                     dest_keys.sort(key=lambda k: (k[0], k[1]))
+                stats.stop('get_mask.main_loop.fast_path.group_sorting')
 
                 for (dest_id, llm_bv_id) in dest_keys:
                     entry = groups[(dest_id, llm_bv_id)]
@@ -1225,12 +1233,14 @@ class Model(GraphProvider):
                             global_pop_cache[(id(gss_node), edge.pop)] = (popped, popped_acc, peeked, peek_rs)
 
                 # One-time per-pop bucket pruning: states and llm masks
+                stats.start('get_mask.main_loop.slow_path.bucket_pruning')
                 if edge.pop not in checked_pops:
                     checked_pops.add(edge.pop)
                     pop_states_union = a_node.pop_to_state_union.get(edge.pop)
                     if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
                         stats.inc('get_mask.main_loop.bucket_pruned_state')
                         skip_pops.add(edge.pop)
+                        stats.stop('get_mask.main_loop.slow_path.bucket_pruning')
                         continue
                     pop_llm_union = a_node.pop_to_llm_union.get(edge.pop)
                     # Extra prune when node_allowed_mask present: if the bucket's llm union has no overlap with
@@ -1239,7 +1249,9 @@ class Model(GraphProvider):
                         (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)):
                         stats.inc('get_mask.main_loop.bucket_pruned_llm')
                         skip_pops.add(edge.pop)
+                        stats.stop('get_mask.main_loop.slow_path.bucket_pruning')
                         continue
+                stats.stop('get_mask.main_loop.slow_path.bucket_pruning')
 
                 if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
                     if popped_acc: stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
@@ -1274,6 +1286,7 @@ class Model(GraphProvider):
                         local_apply_cache[key_apply] = tmp
                 if not peeked: continue
 
+                stats.start('get_mask.main_loop.slow_path.group_building')
                 grouped: Dict[int, List[int]] = {}
                 m = edge.state_to_dest
                 for sid in peeked:
@@ -1283,7 +1296,9 @@ class Model(GraphProvider):
                         lst = grouped.get(dest_j)
                         if lst is None: grouped[dest_j] = [sid]
                         else: lst.append(sid)
+                stats.stop('get_mask.main_loop.slow_path.group_building')
 
+                stats.start('get_mask.main_loop.slow_path.group_sorting')
                 dest_keys = list(grouped.keys())
                 if dest_scores:
                     # Sort by destination node score (desc), then by original index (asc) for stability
@@ -1291,6 +1306,7 @@ class Model(GraphProvider):
                 else:
                     # Iterate grouped dests in ascending order for locality
                     dest_keys.sort()
+                stats.stop('get_mask.main_loop.slow_path.group_sorting')
                 for dest_j in dest_keys:
                     if dests_proc >= max_dests:
                         priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
