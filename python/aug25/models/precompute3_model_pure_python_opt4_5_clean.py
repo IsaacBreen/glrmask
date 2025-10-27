@@ -912,8 +912,8 @@ class Model(GraphProvider):
                     new_mask = yield Suspend(node_id, priority, depth)
                     if new_mask is not None:
                         active_remaining_mask = new_mask
-                    if active_remaining_mask.is_empty():
-                        return
+                    if edge.llm_bv.isdisjoint(active_remaining_mask):
+                        break
                     dests_proc = 0
 
                 dest = edge.dests[dest_j]
@@ -940,8 +940,8 @@ class Model(GraphProvider):
                 new_mask = yield Enqueue(d, child_gss, depth + 1, edge_priority)
                 if new_mask is not None:
                     active_remaining_mask = new_mask
-                if active_remaining_mask.is_empty():
-                    return
+                if edge.llm_bv.isdisjoint(active_remaining_mask):
+                    break
 
                 dests_proc += 1
 
