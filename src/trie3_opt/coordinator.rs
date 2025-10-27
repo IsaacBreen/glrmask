@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use ordered_hash_map::OrderedHashMap;
 
 use crate::trie3_opt::context::OptimizationContext;
+use crate::trie3_opt::metrics::run_all_metrics;
 use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
 use crate::trie3_opt::passes::{
     CanonicalizeEndNodesPass, CompressEdgesPass, EliminatePop0ExceptRootsPass, MergeStructuralPass,
@@ -245,12 +246,19 @@ pub fn run_pipeline_on_precompute3(
     let (mut mini, root_pairs, _old_mapping) = export_to_mini(roots, trie3_god);
 
     // Build a fresh pass pipeline and context
-    let mut ctx = OptimizationContext {
-        max_llm_token_id,
-        max_state_id,
-        iteration_budget: 1_000_000,
-        debug_level: 1,
-    };
+    let mut ctx = OptimizationContext::new(max_llm_token_id, max_state_id);
+    ctx.debug_level = 1;
+
+    // Run initial metrics
+    ctx.metrics_before = run_all_metrics(&mini);
+    if ctx.debug_level > 0 {
+        crate::debug!(
+            1,
+            "[Trie3 Opt] Metrics before optimization: {:?}",
+            ctx.metrics_before
+        );
+    }
+
     let pipeline = build_pipeline(&config);
 
     // Run passes
@@ -263,6 +271,12 @@ pub fn run_pipeline_on_precompute3(
             }
         }
         pass.run(&mut mini, &mut ctx);
+    }
+
+    // Run final metrics
+    ctx.metrics_after = run_all_metrics(&mini);
+    if ctx.debug_level > 0 {
+        crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {:?}", ctx.metrics_after);
     }
 
     // Import the result back and finalize
