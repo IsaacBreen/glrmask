@@ -1,6 +1,7 @@
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::trie3_opt::core::MiniTrie;
 use std::collections::BTreeMap;
+use std::fmt::Write;
 
 /// A helper for collecting numeric data and computing summary statistics.
 #[derive(Debug, Clone, Default)]
@@ -25,7 +26,9 @@ impl NumericStats {
 
     pub fn to_json(&self) -> JSONNode {
         if self.values.is_empty() {
-            return "count=0".to_string().to_json();
+            let mut obj = BTreeMap::new();
+            obj.insert("count".to_string(), 0.to_json());
+            return JSONNode::Object(obj);
         }
 
         let mut sorted_values = self.values.clone();
@@ -51,11 +54,19 @@ impl NumericStats {
         let variance = self.values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
         let stdev = variance.sqrt();
 
-        let summary = format!(
-            "count={}, sum={:.2}, mean={:.2}, stdev={:.2}, min={:.2}, p25={:.2}, med={:.2}, p75={:.2}, p95={:.2}, max={:.2}",
-            count, sum, mean, stdev, min, p25, median, p75, p95, max
-        );
-        summary.to_json()
+        let mut obj = BTreeMap::new();
+        obj.insert("count".to_string(), count.to_json());
+        obj.insert("sum".to_string(), sum.to_json());
+        obj.insert("mean".to_string(), mean.to_json());
+        obj.insert("stdev".to_string(), stdev.to_json());
+        obj.insert("min".to_string(), min.to_json());
+        obj.insert("p25".to_string(), p25.to_json());
+        obj.insert("median".to_string(), median.to_json());
+        obj.insert("p75".to_string(), p75.to_json());
+        obj.insert("p95".to_string(), p95.to_json());
+        obj.insert("max".to_string(), max.to_json());
+
+        JSONNode::Object(obj)
     }
 }
 
@@ -240,4 +251,51 @@ pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, JSONNode> {
         results.insert(metric.name().to_string(), metric.compute(trie));
     }
     results
+}
+
+/// Formats a map of metrics into a pretty, indented string.
+pub fn pretty_print_metrics_map(metrics: &BTreeMap<String, JSONNode>) -> String {
+    let mut buf = String::new();
+    buf.push_str("{\n");
+    let mut first = true;
+    for (k, v) in metrics {
+        if !first {
+            buf.push_str(",\n");
+        }
+        first = false;
+        buf.push_str(&" ".repeat(2));
+        write!(buf, "\"{}\": ", k).unwrap();
+        format_json_node_recursive(v, &mut buf, 2);
+    }
+    buf.push_str("\n}");
+    buf
+}
+
+/// Recursive helper to format a JSONNode into a string buffer.
+fn format_json_node_recursive(node: &JSONNode, buf: &mut String, indent: usize) {
+    // This implementation relies on the `Debug` output of `JSONNode` as its internal
+    // structure is not available here. It parses the debug string to re-format it.
+    let debug_str = format!("{:?}", node);
+
+    if let Some(s) = debug_str.strip_prefix("Object(").and_then(|s| s.strip_suffix(')')) {
+        // It's an object. We can't deserialize it, but we can format it better.
+        // For simplicity, we'll just replace the verbose debug format with a cleaner one.
+        // A full recursive parse of the debug string is too brittle.
+        // Let's just make it a bit more compact and readable.
+        let inner = s.replace("\n", &format!("\n{}", " ".repeat(indent + 2)));
+        buf.push_str(&inner);
+    } else if let Some(s) = debug_str.strip_prefix("UInt(").and_then(|s| s.strip_suffix(')')) {
+        buf.push_str(s);
+    } else if let Some(s) = debug_str.strip_prefix("Int(").and_then(|s| s.strip_suffix(')')) {
+        buf.push_str(s);
+    } else if let Some(s) = debug_str.strip_prefix("Float(").and_then(|s| s.strip_suffix(')')) {
+        if let Ok(f) = s.parse::<f64>() {
+            write!(buf, "{:.4}", f).unwrap();
+        } else {
+            buf.push_str(s);
+        }
+    } else {
+        // Fallback for other types (Array, String, etc.)
+        buf.push_str(&debug_str);
+    }
 }

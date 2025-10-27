@@ -39,7 +39,7 @@ pub fn compute_and_print_precompute_stats3(
         max_state_id,
     );
     let metrics = crate::trie3_opt::metrics::run_all_metrics(&mini);
-    println!("  MiniTrie Metrics: {:#?}", metrics);
+    println!("  MiniTrie Metrics: {}", crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics));
 }
 
 /// Debug utility to remove all edges with pop>0, preserving pop<=0 edges.
