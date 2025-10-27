@@ -668,6 +668,27 @@ local_system:
               }
               SortedSet { elems: out }
           }
+          pub fn difference(&self, other: &SortedSet) -> SortedSet {
+              let mut out = Vec::new();
+              let mut i = 0;
+              let mut j = 0;
+              while i < self.elems.len() && j < other.elems.len() {
+                  if self.elems[i] < other.elems[j] {
+                      out.push(self.elems[i]);
+                      i += 1;
+                  } else if self.elems[i] > other.elems[j] {
+                      j += 1;
+                  } else {
+                      i += 1;
+                      j += 1;
+                  }
+              }
+              while i < self.elems.len() {
+                  out.push(self.elems[i]);
+                  i += 1;
+              }
+              SortedSet { elems: out }
+          }
           pub fn is_empty(&self) -> bool {
               self.elems.is_empty()
           }
@@ -1562,12 +1583,16 @@ local_system:
 
                   for (p_id, u_id, v_id, key, s_uv) in rewrites {
                       let p_node = &mut trie.nodes[p_id as usize];
-                      if let Some(dm) = p_node.children.get_mut(&key) {
+                      if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
+                          let dm = entry.get_mut();
                           if let Some(s_pu) = dm.remove(&u_id) {
                               let s_comp = s_pu.intersect(&s_uv);
                               if !s_comp.is_empty() {
                                   dm.entry(v_id).or_default().union_inplace(&s_comp);
                               }
+                          }
+                          if entry.get().is_empty() {
+                              entry.remove();
                           }
                       }
                   }
@@ -6786,9 +6811,9 @@ local_system:
                           if !inter.is_empty() {
                               next_blocks.push(inter);
                           }
-                          let diff_elems: Vec<_> = b.iter().filter(|t| !m.elems.binary_search(t).is_ok()).collect();
-                          if !diff_elems.is_empty() {
-                              next_blocks.push(SortedSet::from_iter(diff_elems));
+                          let diff = b.difference(&m);
+                          if !diff.is_empty() {
+                              next_blocks.push(diff);
                           }
                       }
                       if self.max_atoms_per_pop > 0 && next_blocks.len() > self.max_atoms_per_pop {
@@ -14158,24 +14183,36 @@ local_system:
                   atoms_by_pop.insert(*pop, if aborted { vec![universe.clone()] } else { blocks });
               }
 
-              // Precompute atom overlaps for each unique token set.
-              let mut atom_idxs_by_pop_mask: BTreeMap<isize, HashMap<SortedSet, Vec<usize>>> =
-                  BTreeMap::new();
+              // Create dense IDs for all unique token sets for faster lookups.
+              let mut unique_token_sets: HashMap<SortedSet, usize> = HashMap::new();
+              let mut next_token_set_id = 0;
+              for masks in by_pop_masks.values() {
+                  for mask in masks {
+                      if unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id).eq(&next_token_set_id) {
+                          next_token_set_id += 1;
+                      }
+                  }
+              }
+
+              // Precompute atom overlaps for each unique token set ID.
+              // Map: pop -> Vec<Vec<usize>> where outer vec is indexed by token_set_id
+              let mut atom_idxs_by_pop_token_set_id: BTreeMap<isize, Vec<Vec<usize>>> = BTreeMap::new();
               for (pop, atoms) in &atoms_by_pop {
-                  let pop_map = atom_idxs_by_pop_mask.entry(*pop).or_default();
                   if let Some(masks) = by_pop_masks.get(pop) {
+                      let pop_map = atom_idxs_by_pop_token_set_id.entry(*pop).or_insert_with(Vec::new);
+                      pop_map.resize(next_token_set_id, Vec::new());
                       for mask in masks {
+                          let token_set_id = *unique_token_sets.get(mask).unwrap();
                           let mut idxs = Vec::new();
                           for (i, atom) in atoms.iter().enumerate() {
                               if !mask.intersect(atom).is_empty() {
                                   idxs.push(i);
                               }
                           }
-                          pop_map.insert(mask.clone(), idxs);
+                          pop_map[token_set_id] = idxs;
                       }
                   }
               }
-
               // Compute pop=0 distance for initial partitioning.
               let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
               let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
@@ -14254,16 +14291,15 @@ local_system:
                   for (u_idx, u_node) in trie.nodes.iter().enumerate() {
                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in &u_node.children {
-                          if let Some(pop_map) = atom_idxs_by_pop_mask.get(&ek.pop) {
-                              if let Some(atom_idxs) = pop_map.get(&ek.tokens) {
+                          if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                              if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+                                  let atom_idxs = &pop_map[*token_set_id];
                                   for &atom_idx in atom_idxs {
                                       let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
                                       for (v_id, sids) in dm {
                                           let dest_class = prev_class[*v_id as usize];
                                           entry.entry(dest_class).or_default().union_inplace(sids);
                                       }
-                                  }
-                              }
                           }
                       }
                       let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
@@ -15411,6 +15447,27 @@ messages:
               }
               SortedSet { elems: out }
           }
+          pub fn difference(&self, other: &SortedSet) -> SortedSet {
+              let mut out = Vec::new();
+              let mut i = 0;
+              let mut j = 0;
+              while i < self.elems.len() && j < other.elems.len() {
+                  if self.elems[i] < other.elems[j] {
+                      out.push(self.elems[i]);
+                      i += 1;
+                  } else if self.elems[i] > other.elems[j] {
+                      j += 1;
+                  } else {
+                      i += 1;
+                      j += 1;
+                  }
+              }
+              while i < self.elems.len() {
+                  out.push(self.elems[i]);
+                  i += 1;
+              }
+              SortedSet { elems: out }
+          }
           pub fn is_empty(&self) -> bool {
               self.elems.is_empty()
           }
@@ -16335,12 +16392,16 @@ messages:
 
                   for (p_id, u_id, v_id, key, s_uv) in rewrites {
                       let p_node = &mut trie.nodes[p_id as usize];
-                      if let Some(dm) = p_node.children.get_mut(&key) {
+                      if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
+                          let dm = entry.get_mut();
                           if let Some(s_pu) = dm.remove(&u_id) {
                               let s_comp = s_pu.intersect(&s_uv);
                               if !s_comp.is_empty() {
                                   dm.entry(v_id).or_default().union_inplace(&s_comp);
                               }
+                          }
+                          if entry.get().is_empty() {
+                              entry.remove();
                           }
                       }
                   }
@@ -21714,9 +21775,9 @@ messages:
                           if !inter.is_empty() {
                               next_blocks.push(inter);
                           }
-                          let diff_elems: Vec<_> = b.iter().filter(|t| !m.elems.binary_search(t).is_ok()).collect();
-                          if !diff_elems.is_empty() {
-                              next_blocks.push(SortedSet::from_iter(diff_elems));
+                          let diff = b.difference(&m);
+                          if !diff.is_empty() {
+                              next_blocks.push(diff);
                           }
                       }
                       if self.max_atoms_per_pop > 0 && next_blocks.len() > self.max_atoms_per_pop {
@@ -22337,8 +22398,11 @@ messages:
       ```
     metadata:
       filename: src/trie3_opt/passes/reorder_llm_tokens.rs
-  - user: Do the passes in `src/trie3_opt/passes/` match their full versions (if applicable)
-      in `src/trie3_opt/passes/full/`? Are they going to be just as effective?
+  - user: |-
+      Do the passes in `src/trie3_opt/passes/` match their full versions (if applicable) in `src/trie3_opt/passes/full/`? Are they going to be just as effective?
+      Note: we get stuck here
+      `[DEBUG] 1] src/trie3_opt/coordinator.rs:397: [Trie3 Opt] Running pass: MergeGlobalAtoms`
+      and it consumes all memory.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -22358,222 +22422,203 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here is an analysis of the `MiniTrie`-based optimization passes and a set of improvements to enhance their effectiveness and performance, bringing them fully in line with their more mature counterparts.
+      Of course. The `MergeGlobalAtoms` pass is indeed memory-intensive, and its `MiniTrie`-based implementation has a performance issue that can lead to extreme memory consumption and effectively getting "stuck". The problem lies in repeatedly using large `SortedSet` objects as keys in a `HashMap` within the main refinement loop, which is very slow.
 
-      The passes in `src/trie3_opt/passes/` are largely faithful and effective ports of the logic from `src/trie3_opt/passes/full/`. The `MiniTrie` abstraction simplifies the implementation by isolating passes from the complexities of the arena-based `Trie3GodWrapper`. In most cases, the logic is equivalent. For example, passes like `PruneDeadPathsPass`, `FactorStateFanoutPass`, and `MergeBisimulationPass` are direct translations of the concepts from their `full/` counterparts.
+      The fix is to pre-compute dense integer IDs for each unique token set and use these cheap integer IDs for lookups inside the loop. This avoids the expensive hashing and comparison of large vector-backed sets on every edge of every node in every iteration.
 
-      However, a detailed comparison reveals a few areas where the new passes can be improved to match or exceed the originals in correctness and efficiency. The following steps will address these minor discrepancies and enhance performance.
+      Regarding the other passes, they are generally faithful and effective translations of their counterparts in `passes/full/`. In some cases, like `GeneralizeSidsPass`, the `MiniTrie` version is actually more complete because it applies the results of its analysis, whereas the "full" version only performs the analysis. With the following fix, the `MergeGlobalAtoms` pass will also be much more efficient.
+
+      Here are the step-by-step instructions to resolve the issue, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      Here are the edits to apply to your files:
-
-      **1. File: `src/trie3_opt/core.rs`**
-
-      To improve the performance of the `MergeGlobalAtomsPass`, we'll first add an efficient `difference` method to `SortedSet`.
-
-      -   In the `impl SortedSet` block, add the following method after the `intersect` method:
+      1.  **Open the file `src/trie3_opt/passes/merge_global_atoms.rs`**.
+      2.  Navigate to the `run` function inside the `impl OptimizationPass for MergeGlobalAtomsPass` block.
+      3.  We will replace the section that precomputes atom overlaps and modify the main refinement loop to use a more efficient lookup strategy.
+      4.  **Delete** the existing `atom_idxs_by_pop_mask` precomputation block, which starts around line 63:
 
           ```rust
-          pub fn difference(&self, other: &SortedSet) -> SortedSet {
-              let mut out = Vec::new();
-              let mut i = 0;
-              let mut j = 0;
-              while i < self.elems.len() && j < other.elems.len() {
-                  if self.elems[i] < other.elems[j] {
-                      out.push(self.elems[i]);
-                      i += 1;
-                  } else if self.elems[i] > other.elems[j] {
-                      j += 1;
-                  } else {
-                      i += 1;
-                      j += 1;
+          // Precompute atom overlaps for each unique token set.
+          let mut atom_idxs_by_pop_mask: BTreeMap<isize, HashMap<SortedSet, Vec<usize>>> =
+              BTreeMap::new();
+          for (pop, atoms) in &atoms_by_pop {
+              let pop_map = atom_idxs_by_pop_mask.entry(*pop).or_default();
+              if let Some(masks) = by_pop_masks.get(pop) {
+                  for mask in masks {
+                      let mut idxs = Vec::new();
+                      for (i, atom) in atoms.iter().enumerate() {
+                          if !mask.intersect(atom).is_empty() {
+                              idxs.push(i);
+                          }
+                      }
+                      pop_map.insert(mask.clone(), idxs);
                   }
               }
-              while i < self.elems.len() {
-                  out.push(self.elems[i]);
-                  i += 1;
-              }
-              SortedSet { elems: out }
           }
           ```
 
-      **2. File: `src/trie3_opt/passes/merge_global_atoms.rs`**
+      5.  **Insert** the following new code in its place. This new block creates dense IDs for unique token sets and builds a lookup table that can be indexed by these cheap integer IDs.
 
-      Now, let's use the new `difference` method to speed up the token atom generation.
-
-      -   In the `run` method, find the loop where atoms are generated (`for m in masks`).
-      -   Replace the existing set difference logic with a call to `b.difference(&m)`.
-
-          -   **Delete** the following lines:
-              ```rust
-              let diff_elems: Vec<_> = b.iter().filter(|t| !m.elems.binary_search(t).is_ok()).collect();
-              if !diff_elems.is_empty() {
-                  next_blocks.push(SortedSet::from_iter(diff_elems));
+          ```rust
+          // Create dense IDs for all unique token sets for faster lookups.
+          let mut unique_token_sets: HashMap<SortedSet, usize> = HashMap::new();
+          let mut next_token_set_id = 0;
+          for masks in by_pop_masks.values() {
+              for mask in masks {
+                  if unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id).eq(&next_token_set_id) {
+                      next_token_set_id += 1;
+                  }
               }
-              ```
-          -   **Add** these lines in their place:
-              ```rust
-              let diff = b.difference(&m);
-              if !diff.is_empty() {
-                  next_blocks.push(diff);
+          }
+
+          // Precompute atom overlaps for each unique token set ID.
+          // Map: pop -> Vec<Vec<usize>> where outer vec is indexed by token_set_id
+          let mut atom_idxs_by_pop_token_set_id: BTreeMap<isize, Vec<Vec<usize>>> = BTreeMap::new();
+          for (pop, atoms) in &atoms_by_pop {
+              if let Some(masks) = by_pop_masks.get(pop) {
+                  let pop_map = atom_idxs_by_pop_token_set_id.entry(*pop).or_insert_with(Vec::new);
+                  pop_map.resize(next_token_set_id, Vec::new());
+                  for mask in masks {
+                      let token_set_id = *unique_token_sets.get(mask).unwrap();
+                      let mut idxs = Vec::new();
+                      for (i, atom) in atoms.iter().enumerate() {
+                          if !mask.intersect(atom).is_empty() {
+                              idxs.push(i);
+                          }
+                      }
+                      pop_map[token_set_id] = idxs;
+                  }
               }
-              ```
+          }
+          ```
 
-      **3. File: `src/trie3_opt/passes/compress_unary_chains.rs`**
+      6.  Next, find the main partition refinement loop (`for _ in 0..self.max_iters`). Inside it, locate the loop over nodes (`for (u_idx, u_node) in trie.nodes.iter().enumerate()`).
+      7.  **Replace** the inner block that calculates `per_atom_aggr` with the updated version that uses the new lookup table.
 
-      Finally, we'll fix a subtle bug in the chain compression pass to ensure that edge keys are removed when their destination maps become empty.
-
-      -   In the `run` method, locate the final loop where rewrites are applied (`for (p_id, u_id, v_id, key, s_uv) in rewrites`).
-      -   Replace the logic inside this loop to correctly handle the case where a destination map becomes empty.
-
-          -   **Delete** this block:
-              ```rust
-              let p_node = &mut trie.nodes[p_id as usize];
-              if let Some(dm) = p_node.children.get_mut(&key) {
-                  if let Some(s_pu) = dm.remove(&u_id) {
-                      let s_comp = s_pu.intersect(&s_uv);
-                      if !s_comp.is_empty() {
-                          dm.entry(v_id).or_default().union_inplace(&s_comp);
+          **This is the old block to be replaced:**
+          ```rust
+          let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
+          for (ek, dm) in &u_node.children {
+              if let Some(pop_map) = atom_idxs_by_pop_mask.get(&ek.pop) {
+                  if let Some(atom_idxs) = pop_map.get(&ek.tokens) {
+                      for &atom_idx in atom_idxs {
+                          let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+                          for (v_id, sids) in dm {
+                              let dest_class = prev_class[*v_id as usize];
+                              entry.entry(dest_class).or_default().union_inplace(sids);
+                          }
                       }
                   }
               }
-              ```
-          -   **Add** this more robust implementation using the `entry` API:
-              ```rust
-              let p_node = &mut trie.nodes[p_id as usize];
-              if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
-                  let dm = entry.get_mut();
-                  if let Some(s_pu) = dm.remove(&u_id) {
-                      let s_comp = s_pu.intersect(&s_uv);
-                      if !s_comp.is_empty() {
-                          dm.entry(v_id).or_default().union_inplace(&s_comp);
+          }
+          ```
+
+          **This is the new block to insert:**
+          ```rust
+          let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
+          for (ek, dm) in &u_node.children {
+              if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                  if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+                      let atom_idxs = &pop_map[*token_set_id];
+                      for &atom_idx in atom_idxs {
+                          let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+                          for (v_id, sids) in dm {
+                              let dest_class = prev_class[*v_id as usize];
+                              entry.entry(dest_class).or_default().union_inplace(sids);
+                          }
                       }
                   }
-                  if entry.get().is_empty() {
-                      entry.remove();
-                  }
               }
-              ```
-
-      With these changes, the `MiniTrie`-based passes will be fully as effective and, in some cases, more performant than their original counterparts.
+          }
+          ```
 
       ### Git Diffs
 
-      Here are the corresponding git diffs for the changes described above.
+      Here is the git diff to apply the changes automatically.
 
       ```diff
-      diff --git a/src/trie3_opt/core.rs b/src/trie3_opt/core.rs
-      index 9411111..1111111 100644
-      --- a/src/trie3_opt/core.rs
-      +++ b/src/trie3_opt/core.rs
-      @@ -88,6 +88,29 @@
-               }
-               SortedSet { elems: out }
-           }
-      +    pub fn difference(&self, other: &SortedSet) -> SortedSet {
-      +        let mut out = Vec::new();
-      +        let mut i = 0;
-      +        let mut j = 0;
-      +        while i < self.elems.len() && j < other.elems.len() {
-      +            if self.elems[i] < other.elems[j] {
-      +                out.push(self.elems[i]);
-      +                i += 1;
-      +            } else if self.elems[i] > other.elems[j] {
-      +                j += 1;
-      +            } else {
-      +                i += 1;
-      +                j += 1;
-      +            }
-      +        }
-      +        while i < self.elems.len() {
-      +            out.push(self.elems[i]);
-      +            i += 1;
-      +        }
-      +        SortedSet { elems: out }
-      +    }
-           pub fn is_empty(&self) -> bool {
-               self.elems.is_empty()
-           }
-
-      ```
-
-      ```diff
-      diff --git a/src/trie3_opt/passes/compress_unary_chains.rs b/src/trie3_opt/passes/compress_unary_chains.rs
-      index 1111111..2222222 100644
-      --- a/src/trie3_opt/passes/compress_unary_chains.rs
-      +++ b/src/trie3_opt/passes/compress_unary_chains.rs
-      @@ -71,16 +71,18 @@
-                       break;
-                   }
-       
-      -            for (p_id, u_id, v_id, key, s_uv) in rewrites {
-      -                let p_node = &mut trie.nodes[p_id as usize];
-      -                if let Some(dm) = p_node.children.get_mut(&key) {
-      -                    if let Some(s_pu) = dm.remove(&u_id) {
-      -                        let s_comp = s_pu.intersect(&s_uv);
-      -                        if !s_comp.is_empty() {
-      -                            dm.entry(v_id).or_default().union_inplace(&s_comp);
-      +            for (p_id, u_id, v_id, key, s_uv) in rewrites {
-      +                let p_node = &mut trie.nodes[p_id as usize];
-      +                if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
-      +                    let dm = entry.get_mut();
-      +                    if let Some(s_pu) = dm.remove(&u_id) {
-      +                        let s_comp = s_pu.intersect(&s_uv);
-      +                        if !s_comp.is_empty() {
-      +                            dm.entry(v_id).or_default().union_inplace(&s_comp);
-                               }
-                           }
-      +                    if entry.get().is_empty() {
-      +                        entry.remove();
-      +                    }
-                       }
-                   }
-               }
-
-      ```
-
-      ```diff
-      diff --git a/src/trie3_opt/passes/merge_global_atoms.rs b/src/trie3_opt/passes/merge_global_atoms.rs
-      index 1111111..2222222 100644
       --- a/src/trie3_opt/passes/merge_global_atoms.rs
       +++ b/src/trie3_opt/passes/merge_global_atoms.rs
-      @@ -50,10 +50,9 @@
-                           if !inter.is_empty() {
-                               next_blocks.push(inter);
+      @@ -59,26 +59,36 @@
+                   atoms_by_pop.insert(*pop, if aborted { vec![universe.clone()] } else { blocks });
+               }
+       
+      -        // Precompute atom overlaps for each unique token set.
+      -        let mut atom_idxs_by_pop_mask: BTreeMap<isize, HashMap<SortedSet, Vec<usize>>> =
+      -            BTreeMap::new();
+      +        // Create dense IDs for all unique token sets for faster lookups.
+      +        let mut unique_token_sets: HashMap<SortedSet, usize> = HashMap::new();
+      +        let mut next_token_set_id = 0;
+      +        for masks in by_pop_masks.values() {
+      +            for mask in masks {
+      +                if unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id).eq(&next_token_set_id) {
+      +                    next_token_set_id += 1;
+      +                }
+      +            }
+      +        }
+      +
+      +        // Precompute atom overlaps for each unique token set ID.
+      +        // Map: pop -> Vec<Vec<usize>> where outer vec is indexed by token_set_id
+      +        let mut atom_idxs_by_pop_token_set_id: BTreeMap<isize, Vec<Vec<usize>>> = BTreeMap::new();
+               for (pop, atoms) in &atoms_by_pop {
+      -            let pop_map = atom_idxs_by_pop_mask.entry(*pop).or_default();
+                   if let Some(masks) = by_pop_masks.get(pop) {
+      +                let pop_map = atom_idxs_by_pop_token_set_id.entry(*pop).or_insert_with(Vec::new);
+      +                pop_map.resize(next_token_set_id, Vec::new());
+                       for mask in masks {
+      +                    let token_set_id = *unique_token_sets.get(mask).unwrap();
+                           let mut idxs = Vec::new();
+                           for (i, atom) in atoms.iter().enumerate() {
+                               if !mask.intersect(atom).is_empty() {
+                                   idxs.push(i);
+                               }
                            }
-      -                    let diff_elems: Vec<_> = b.iter().filter(|t| !m.elems.binary_search(t).is_ok()).collect();
-      -                    if !diff_elems.is_empty() {
-      -                        next_blocks.push(SortedSet::from_iter(diff_elems));
-      +                    let diff = b.difference(&m);
-      +                    if !diff.is_empty() {
-      +                        next_blocks.push(diff);
+      -                    pop_map.insert(mask.clone(), idxs);
+      -                }
+      -            }
+      -        }
+      -
+      +                    pop_map[token_set_id] = idxs;
+      +                }
+      +            }
+      +        }
+               // Compute pop=0 distance for initial partitioning.
+               let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
+               let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
+      @@ -151,16 +161,15 @@
+                   for (u_idx, u_node) in trie.nodes.iter().enumerate() {
+                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
+                       for (ek, dm) in &u_node.children {
+      -                    if let Some(pop_map) = atom_idxs_by_pop_mask.get(&ek.pop) {
+      -                        if let Some(atom_idxs) = pop_map.get(&ek.tokens) {
+      +                    if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+      +                        if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+      +                            let atom_idxs = &pop_map[*token_set_id];
+                                   for &atom_idx in atom_idxs {
+                                       let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+                                       for (v_id, sids) in dm {
+                                           let dest_class = prev_class[*v_id as usize];
+                                           entry.entry(dest_class).or_default().union_inplace(sids);
+                                       }
+      -                            }
+      -                        }
                            }
                        }
-                       if self.max_atoms_per_pop > 0 && next_blocks.len() > self.max_atoms_per_pop {
+                       let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/core.rs
-      Applying patch to 'src/trie3_opt/core.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/core.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/trie3_opt/passes/compress_unary_chains.rs
-      Applying patch to 'src/trie3_opt/passes/compress_unary_chains.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/compress_unary_chains.rs.
-
-      --- Processing Diff Block 3 ---
       Identified target file: src/trie3_opt/passes/merge_global_atoms.rs
       Applying patch to 'src/trie3_opt/passes/merge_global_atoms.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/passes/merge_global_atoms.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Implement SortedSet::difference
-      and use it in MergeGlobalAtoms; clean up CompressUnaryChains edge removal"'
+  - user: 'Changes committed with message: "trie3_opt: Optimize MergeGlobalAtomsPass
+      by using dense IDs for token sets to avoid expensive SortedSet hashing/comparison
+      in the main loop"'
     metadata:
 ...

@@ -63,24 +63,36 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             atoms_by_pop.insert(*pop, if aborted { vec![universe.clone()] } else { blocks });
         }
 
-        // Precompute atom overlaps for each unique token set.
-        let mut atom_idxs_by_pop_mask: BTreeMap<isize, HashMap<SortedSet, Vec<usize>>> =
-            BTreeMap::new();
+        // Create dense IDs for all unique token sets for faster lookups.
+        let mut unique_token_sets: HashMap<SortedSet, usize> = HashMap::new();
+        let mut next_token_set_id = 0;
+        for masks in by_pop_masks.values() {
+            for mask in masks {
+                if unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id).eq(&next_token_set_id) {
+                    next_token_set_id += 1;
+                }
+            }
+        }
+
+        // Precompute atom overlaps for each unique token set ID.
+        // Map: pop -> Vec<Vec<usize>> where outer vec is indexed by token_set_id
+        let mut atom_idxs_by_pop_token_set_id: BTreeMap<isize, Vec<Vec<usize>>> = BTreeMap::new();
         for (pop, atoms) in &atoms_by_pop {
-            let pop_map = atom_idxs_by_pop_mask.entry(*pop).or_default();
             if let Some(masks) = by_pop_masks.get(pop) {
+                let pop_map = atom_idxs_by_pop_token_set_id.entry(*pop).or_insert_with(Vec::new);
+                pop_map.resize(next_token_set_id, Vec::new());
                 for mask in masks {
+                    let token_set_id = *unique_token_sets.get(mask).unwrap();
                     let mut idxs = Vec::new();
                     for (i, atom) in atoms.iter().enumerate() {
                         if !mask.intersect(atom).is_empty() {
                             idxs.push(i);
                         }
                     }
-                    pop_map.insert(mask.clone(), idxs);
+                    pop_map[token_set_id] = idxs;
                 }
             }
         }
-
         // Compute pop=0 distance for initial partitioning.
         let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
         let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
@@ -159,16 +171,15 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             for (u_idx, u_node) in trie.nodes.iter().enumerate() {
                 let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                 for (ek, dm) in &u_node.children {
-                    if let Some(pop_map) = atom_idxs_by_pop_mask.get(&ek.pop) {
-                        if let Some(atom_idxs) = pop_map.get(&ek.tokens) {
+                    if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                        if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+                            let atom_idxs = &pop_map[*token_set_id];
                             for &atom_idx in atom_idxs {
                                 let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
                                 for (v_id, sids) in dm {
                                     let dest_class = prev_class[*v_id as usize];
                                     entry.entry(dest_class).or_default().union_inplace(sids);
                                 }
-                            }
-                        }
                     }
                 }
                 let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
