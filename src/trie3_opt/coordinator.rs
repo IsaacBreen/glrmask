@@ -1,47 +1,74 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use ordered_hash_map::OrderedHashMap;
-use kdam::{tqdm, BarExt};
+use kdam::BarExt;
 
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::metrics::run_all_metrics;
 use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-use crate::trie3_opt::passes::{FactorStateFanoutPass,
-    CanonicalizeEndNodesPass, CompressEdgesPass, EliminatePop0ExceptRootsPass, MergeStructuralPass,
-    OptimizationPass, PruneDeadPathsPass,
-};
+use crate::trie3_opt::passes::*;
 
 use crate::constraint::{
     PrecomputeNode3Index, PrecomputedNodeContents, Trie3GodWrapper, LLMTokenBV, StateIDBV,
 };
 use crate::datastructures::EntryApi;
 use crate::datastructures::trie::Trie;
+use crate::glr::parser::GLRParser;
 use crate::tokenizer::TokenizerStateID;
+use crate::constraint::StageVocab;
 
 /// Configuration for the coordinator: which passes to run and their key parameters.
 #[derive(Clone, Debug)]
 pub struct CoordinatorConfig {
-    pub enable_prune_dead_paths: bool,
-    pub enable_compress_edges: bool,
-    pub enable_merge_structural: bool,
+    pub num_passes: usize,
+    pub prune_dead_paths: bool,
+    pub prune_unproductive_paths: bool,
+    pub canonicalize_end_nodes: bool,
+    pub compress_edges: bool,
+    pub compress_unary_chains: bool,
+    pub factor_state_fanout: bool,
+    pub factor_common_destinations: bool,
+    pub factor_common_destinations_min_incoming: usize,
+    pub factor_root_fanout: bool,
+    pub factor_root_fanout_max_atoms_per_pop: usize,
     pub merge_structural_max_iters: usize,
-    pub enable_eliminate_pop0_except_roots: bool,
-    pub enable_canonicalize_end_nodes: bool,
-    pub enable_factor_state_fanout: bool,
+    pub merge_bisimulation_max_iters: usize,
+    pub merge_global_atoms: bool,
+    pub merge_global_atoms_max_iters: usize,
+    pub merge_global_atoms_max_atoms_per_pop: usize,
+    pub eliminate_pop0_except_roots: bool,
+    pub merge_equivalent_llm_tokens: bool,
+    pub reorder_llm_tokens: bool,
+    pub generalize_sids: bool,
 }
 
 impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
-            enable_prune_dead_paths: true,
-            enable_compress_edges: true,
-            enable_merge_structural: true,
+            num_passes: 3,
+            prune_dead_paths: true,
+            prune_unproductive_paths: true,
+            canonicalize_end_nodes: true,
+            compress_edges: true,
+            compress_unary_chains: true,
+            factor_state_fanout: true,
+            factor_common_destinations: true,
+            factor_common_destinations_min_incoming: 12,
+            factor_root_fanout: true,
+            factor_root_fanout_max_atoms_per_pop: 512,
             merge_structural_max_iters: 4,
-            enable_eliminate_pop0_except_roots: true,
-            enable_canonicalize_end_nodes: true,
-            enable_factor_state_fanout: true,
+            merge_bisimulation_max_iters: 1000,
+            merge_global_atoms: true,
+            merge_global_atoms_max_iters: 2,
+            merge_global_atoms_max_atoms_per_pop: 4096,
+            eliminate_pop0_except_roots: true,
+            merge_equivalent_llm_tokens: true,
+            reorder_llm_tokens: true,
+            generalize_sids: true,
         }
     }
 }
@@ -49,13 +76,26 @@ impl Default for CoordinatorConfig {
 impl CoordinatorConfig {
     pub fn off() -> Self {
         Self {
-            enable_prune_dead_paths: false,
-            enable_compress_edges: false,
-            enable_merge_structural: false,
+            num_passes: 0,
+            prune_dead_paths: false,
+            prune_unproductive_paths: false,
+            canonicalize_end_nodes: false,
+            compress_edges: false,
+            compress_unary_chains: false,
+            factor_state_fanout: false,
+            factor_common_destinations: false,
+            factor_common_destinations_min_incoming: 0,
+            factor_root_fanout: false,
+            factor_root_fanout_max_atoms_per_pop: 0,
             merge_structural_max_iters: 0,
-            enable_eliminate_pop0_except_roots: false,
-            enable_canonicalize_end_nodes: false,
-            enable_factor_state_fanout: false,
+            merge_bisimulation_max_iters: 0,
+            merge_global_atoms: false,
+            merge_global_atoms_max_iters: 0,
+            merge_global_atoms_max_atoms_per_pop: 0,
+            eliminate_pop0_except_roots: false,
+            merge_equivalent_llm_tokens: false,
+            reorder_llm_tokens: false,
+            generalize_sids: false,
         }
     }
 }
@@ -64,29 +104,75 @@ impl CoordinatorConfig {
 fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> {
     let mut pipeline: Vec<Box<dyn OptimizationPass>> = Vec::new();
 
-    if config.enable_prune_dead_paths {
-        pipeline.push(Box::new(PruneDeadPathsPass));
+    // The pipeline is structured to run in super-passes.
+    for pass_num in 0..config.num_passes {
+        // Phase 1: Pruning and initial cleanup
+        if config.prune_dead_paths {
+            pipeline.push(Box::new(PruneDeadPathsPass));
+        }
+        if config.prune_unproductive_paths {
+            pipeline.push(Box::new(PruneUnproductivePathsPass));
+        }
+        if config.canonicalize_end_nodes {
+            pipeline.push(Box::new(CanonicalizeEndNodesPass));
+        }
+
+        // Phase 2: Vocabulary and State ID optimization
+        if config.merge_equivalent_llm_tokens {
+            pipeline.push(Box::new(MergeEquivalentLLMTokensPass));
+        }
+        if config.reorder_llm_tokens {
+            pipeline.push(Box::new(ReorderLLMTokensPass));
+        }
+        if config.generalize_sids {
+            pipeline.push(Box::new(GeneralizeSidsPass));
+        }
+
+        // Phase 3: Factoring and structural simplification
+        if config.factor_root_fanout {
+            pipeline.push(Box::new(FactorRootFanoutPass::new(config.factor_root_fanout_max_atoms_per_pop)));
+        }
+        if config.factor_state_fanout {
+            pipeline.push(Box::new(FactorStateFanoutPass));
+        }
+        if config.factor_common_destinations {
+            pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
+        }
+
+        // Phase 4: Edge compression and chain contraction
+        if config.compress_edges {
+            pipeline.push(Box::new(CompressEdgesPass));
+        }
+        if config.compress_unary_chains {
+            pipeline.push(Box::new(CompressUnaryChainsPass));
+        }
+
+        // Phase 5: Heavy-duty merging passes
+        if config.merge_global_atoms && config.merge_global_atoms_max_iters > 0 {
+            pipeline.push(Box::new(MergeGlobalAtomsPass::new(
+                config.merge_global_atoms_max_iters,
+                config.merge_global_atoms_max_atoms_per_pop,
+            )));
+        }
+        if config.merge_structural_max_iters > 0 {
+            pipeline.push(Box::new(MergeStructuralPass::new(config.merge_structural_max_iters)));
+        }
+        if pass_num == config.num_passes - 1 && config.merge_bisimulation_max_iters > 0 {
+             pipeline.push(Box::new(MergeBisimulationPass::new(config.merge_bisimulation_max_iters)));
+        }
+
+        // Phase 6: Final cleanup within the loop
+        if config.eliminate_pop0_except_roots {
+            pipeline.push(Box::new(EliminatePop0ExceptRootsPass));
+        }
+        if config.compress_edges { // Re-compress after merges and pop0 elim
+            pipeline.push(Box::new(CompressEdgesPass));
+        }
     }
-    if config.enable_canonicalize_end_nodes {
+
+    // Final polish outside the main loop
+    if config.canonicalize_end_nodes {
         pipeline.push(Box::new(CanonicalizeEndNodesPass));
-    }
-    if config.enable_compress_edges {
-        pipeline.push(Box::new(CompressEdgesPass));
-    }
-    if config.enable_factor_state_fanout {
-        pipeline.push(Box::new(FactorStateFanoutPass));
-    }
-    if config.enable_merge_structural {
-        pipeline.push(Box::new(MergeStructuralPass::new(
-            config.merge_structural_max_iters,
-        )));
-    }
-    if config.enable_eliminate_pop0_except_roots {
-        pipeline.push(Box::new(EliminatePop0ExceptRootsPass));
-    }
-    // Final compression after potential rewires
-    if config.enable_compress_edges {
-        pipeline.push(Box::new(CompressEdgesPass));
     }
 
     pipeline
@@ -270,12 +356,14 @@ pub(crate) fn import_from_mini(
 /// High-level entry point: export -> run passes on mini -> import.
 /// The coordinator isolates optimization authors from the full system types: they only need
 /// to implement passes over MiniTrie and add them to the pipeline here.
-pub fn run_pipeline_on_precompute3(
+pub fn run_pipeline_on_precompute3<'a>(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
     max_llm_token_id: usize,
     max_state_id: usize,
     config: CoordinatorConfig,
+    stage_vocab: Option<&'a mut StageVocab>,
+    parser: Option<&'a GLRParser>,
 ) {
     // Export the current graph into a minimal structure
     let (mut mini, root_pairs, _old_mapping) =
@@ -283,6 +371,12 @@ pub fn run_pipeline_on_precompute3(
 
     // Build a fresh pass pipeline and context
     let mut ctx = OptimizationContext::new(max_llm_token_id, max_state_id);
+    if let Some(sv) = stage_vocab {
+        ctx.stage_vocab = Some(Rc::new(RefCell::new(sv)));
+    }
+    if let Some(p) = parser {
+        ctx.parser = Some(Rc::new(RefCell::new(p)));
+    }
     ctx.debug_level = 1;
 
     // Run initial metrics
@@ -382,6 +476,8 @@ mod tests {
             10, // max token id
             10, // max state id
             cfg,
+            None,
+            None,
         );
 
         // After running, ensure roots still exist and points to some node.

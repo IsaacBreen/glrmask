@@ -54,9 +54,8 @@ impl OptimizationPass for MergeStructuralPass {
 
         for _ in 0..self.max_iters.max(1) {
             // Build signature per node
-            #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
-            #[derive(Hash)]
-struct EdgeSig {
+            #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
+            struct EdgeSig {
                 pop: isize,
                 tokens: SortedSet,
                 dest: Vec<(usize, SortedSet)>, // dest_class, states
@@ -72,11 +71,11 @@ struct EdgeSig {
                 // Aggregate by (pop, tokens) -> dest_class -> union of states
                 let mut per_key: BTreeMap<(isize, SortedSet), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                 for (ek, dm) in &node.children {
-                    let mut inner = per_key.entry((ek.pop, ek.tokens.clone())).or_insert_with(BTreeMap::new);
+                    let inner = per_key.entry((ek.pop, ek.tokens.clone())).or_default();
                     for (dst, sids) in dm.iter() {
                         let d_dense = *dense_of.get(dst).unwrap();
                         let d_class = prev_class[d_dense];
-                        let entry = inner.entry(d_class).or_insert_with(SortedSet::new);
+                        let entry = inner.entry(d_class).or_default();
                         entry.union_inplace(sids);
                     }
                 }

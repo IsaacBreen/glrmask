@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::trie3_opt::context::OptimizationContext;
-use crate::trie3_opt::core::{MiniTrie, SortedSet};
+use crate::trie3_opt::core::{EdgeKey, MiniTrie, SortedSet};
 use crate::trie3_opt::passes::OptimizationPass;
 
 /// Group identical destination-maps under the same pop by unioning token masks.
@@ -16,32 +16,31 @@ impl OptimizationPass for CompressEdgesPass {
 
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
         for n in trie.nodes.iter_mut() {
-            // First group by pop and canonical destination map
-            let mut by_pop: BTreeMap<isize, HashMap<Vec<(u32, SortedSet)>, SortedSet>> = BTreeMap::new();
-            for (ek, dm) in n.children.iter() {
-                // Canonical dest vector sorted by node id with unioned states if multiple entries
-                let mut dest_vec: Vec<(u32, SortedSet)> = Vec::with_capacity(dm.len());
-                for (dst, sids) in dm.iter() {
-                    dest_vec.push((*dst, sids.clone()));
-                }
-                // Already in BTreeMap => sorted ordering by key, but ensure canonical anyway
-                // by sorting on (dst, lexicographic sids)
-                dest_vec.sort_unstable_by(|a, b| {
-                    let c = a.0.cmp(&b.0);
-                    if c != std::cmp::Ordering::Equal {
-                        return c;
-                    }
-                    a.1.cmp(&b.1)
-                });
-                let entry = by_pop.entry(ek.pop).or_default();
-                entry
-                    .entry(dest_vec)
-                    .and_modify(|tok| tok.union_inplace(&ek.tokens))
-                    .or_insert(ek.tokens.clone());
+            if n.children.is_empty() {
+                continue;
             }
 
-            // Rebuild children
-            let mut new_children: BTreeMap<_, _> = BTreeMap::new();
+            let old_children = n.children.clone();
+            let old_cost: usize = old_children
+                .iter()
+                .map(|(ek, dm)| ek.tokens.len() + dm.len())
+                .sum();
+
+            let mut by_pop: BTreeMap<isize, HashMap<Vec<(u32, SortedSet)>, SortedSet>> =
+                BTreeMap::new();
+            for (ek, dm) in &old_children {
+                let mut dest_vec: Vec<(u32, SortedSet)> =
+                    dm.iter().map(|(&dst, sids)| (dst, sids.clone())).collect();
+                dest_vec.sort_unstable_by_key(|k| k.0);
+                by_pop
+                    .entry(ek.pop)
+                    .or_default()
+                    .entry(dest_vec)
+                    .or_default()
+                    .union_inplace(&ek.tokens);
+            }
+
+            let mut new_children: BTreeMap<EdgeKey, BTreeMap<u32, SortedSet>> = BTreeMap::new();
             for (pop, groups) in by_pop {
                 for (dest_vec, tokens) in groups {
                     if tokens.is_empty() {
@@ -54,11 +53,19 @@ impl OptimizationPass for CompressEdgesPass {
                         }
                     }
                     if !dm.is_empty() {
-                        new_children.insert(super::super::core::EdgeKey::new(pop, tokens), dm);
+                        new_children.insert(EdgeKey::new(pop, tokens), dm);
                     }
                 }
             }
-            n.children = new_children;
+
+            let new_cost: usize = new_children
+                .iter()
+                .map(|(ek, dm)| ek.tokens.len() + dm.len())
+                .sum();
+
+            if new_cost < old_cost {
+                n.children = new_children;
+            }
         }
     }
 }

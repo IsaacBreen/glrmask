@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::trie3_opt::context::OptimizationContext;
-use crate::trie3_opt::core::{MiniTrie, NodeId};
+use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
 use crate::trie3_opt::passes::OptimizationPass;
 
 /// Remove edges that provably cannot lead to an end node by reverse reachability.
@@ -14,25 +14,65 @@ impl OptimizationPass for PruneDeadPathsPass {
         "PruneDeadPaths"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-        let productive: BTreeSet<NodeId> = trie.can_reach_end();
-        if productive.is_empty() {
-            return;
-        }
-        for n in trie.nodes.iter_mut() {
-            let mut new_children: BTreeMap<_, _> = BTreeMap::new();
-            for (ek, dm) in n.children.clone() {
-                let mut dm2: BTreeMap<_, _> = BTreeMap::new();
-                for (dst, sids) in dm {
-                    if productive.contains(&dst) {
-                        dm2.insert(dst, sids);
-                    }
-                }
-                if !dm2.is_empty() {
-                    new_children.insert(ek, dm2);
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+        let mut predecessors: HashMap<NodeId, Vec<(NodeId, EdgeKey)>> = HashMap::new();
+        let mut worklist = VecDeque::new();
+        let mut live: HashMap<NodeId, SortedSet> = HashMap::new();
+        let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
+
+        for node in &trie.nodes {
+            live.insert(node.id, SortedSet::new());
+            if node.end {
+                live.insert(node.id, universe.clone());
+                worklist.push_back(node.id);
+            }
+            for (ek, dm) in &node.children {
+                for (dst, _) in dm {
+                    predecessors
+                        .entry(*dst)
+                        .or_default()
+                        .push((node.id, ek.clone()));
                 }
             }
-            n.children = new_children;
+        }
+
+        while let Some(node_id) = worklist.pop_front() {
+            let live_at_node = live.get(&node_id).unwrap().clone();
+            if let Some(preds) = predecessors.get(&node_id) {
+                for (pred_id, edge_key) in preds {
+                    let live_from_edge = live_at_node.intersect(&edge_key.tokens);
+                    if live_from_edge.is_empty() {
+                        continue;
+                    }
+                    let pred_live = live.get_mut(pred_id).unwrap();
+                    let old_len = pred_live.len();
+                    pred_live.union_inplace(&live_from_edge);
+                    if pred_live.len() > old_len {
+                        worklist.push_back(*pred_id);
+                    }
+                }
+            }
+        }
+
+        for node in &mut trie.nodes {
+            let mut new_children = BTreeMap::new();
+            for (ek, dm) in &node.children {
+                let mut new_dm_for_key = BTreeMap::new();
+                for (dst, sids) in dm {
+                    let live_from_child = live.get(dst).unwrap();
+                    let live_on_edge = ek.tokens.intersect(live_from_child);
+
+                    if !live_on_edge.is_empty() {
+                        let new_ek = EdgeKey::new(ek.pop, live_on_edge);
+                        let entry = new_children.entry(new_ek).or_default();
+                        entry
+                            .entry(*dst)
+                            .and_modify(|e: &mut SortedSet| e.union_inplace(sids))
+                            .or_insert(sids.clone());
+                    }
+                }
+            }
+            node.children = new_children;
         }
     }
 }
