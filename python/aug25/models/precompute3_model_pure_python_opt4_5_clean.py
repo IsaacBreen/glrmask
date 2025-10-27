@@ -258,6 +258,7 @@ class ArenaNode:
     llm_bv_descendant: LLMTokenSet = field(default_factory=RangeSet.empty)
     pop_to_state_union: Dict[int, StateIDSet] = field(default_factory=dict)
     pop_to_llm_union: Dict[int, LLMTokenSet] = field(default_factory=dict)
+    fast_children: Dict[int, Dict[int, Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet], LLMTokenSet]]]] = field(default_factory=dict)
     pop_state_to_edges: Dict[int, Dict[int, List[int]]] = field(default_factory=dict)
 
 
@@ -518,6 +519,7 @@ class Model(GraphProvider):
         model._shrink_edges_by_descendant()
         model._compute_edge_accelerators()
         model._compute_bucket_unions()
+        model._build_fast_children()
         model._compute_static_priorities()
         model.optimize_traversal()
         model._build_pop_state_to_edges_index()
@@ -588,6 +590,39 @@ class Model(GraphProvider):
                 llm_union |= shrunk
             node.children = new_children
             node.llm_bv_union = llm_union
+
+    def _build_fast_children(self) -> None:
+        all_ones = self.all_internal_llm_tokens_bitset
+        for node in self.arena.values():
+            if not node.children:
+                node.fast_children = {}
+                continue
+            mapping_by_pop: Dict[int, Dict[int, Dict[int, LLMTokenSet]]] = collections.defaultdict(lambda: collections.defaultdict(dict))
+
+            for edge in node.children:
+                for dest in edge.dests:
+                    for sid in dest.state_bv.iter_indices():
+                        state_map = mapping_by_pop[edge.pop][int(sid)]
+                        prev = state_map.get(int(dest.dest_idx))
+                        if prev is None:
+                            state_map[int(dest.dest_idx)] = edge.llm_bv
+                        else:
+                            state_map[int(dest.dest_idx)] = prev.union(edge.llm_bv)
+
+            final_children: Dict[int, Dict[int, Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet], LLMTokenSet]]]] = {}
+            for pop, smap in mapping_by_pop.items():
+                per_state: Dict[int, Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet], LLMTokenSet]]] = {}
+                for sid, dmap in smap.items():
+                    per_dest: Dict[int, Tuple[LLMTokenSet, Optional[LLMTokenSet], LLMTokenSet]] = {}
+                    for dest_id, llm_bv in dmap.items():
+                        child_desc = self.arena[int(dest_id)].llm_bv_descendant
+                        llm_thru = llm_bv.intersection(child_desc)
+                        if not llm_thru.is_empty():
+                            per_dest[int(dest_id)] = (llm_bv, all_ones.difference(llm_bv), llm_thru)
+                    per_state[int(sid)] = per_dest
+                final_children[int(pop)] = per_state
+
+            node.fast_children = final_children
 
     def _build_pop_state_to_edges_index(self) -> None:
         for node in self.arena.values():
@@ -795,32 +830,29 @@ class Model(GraphProvider):
         max_edges, max_dests = self.gm_max_edges, self.gm_max_dests
         edges_proc, dests_proc = 0, 0
         pop_cache: Dict[int, Tuple[Any, Any, List[int], StateIDSet]] = {}
+        skip_pops: Set[int] = set()
+        checked_pops: Set[int] = set()
         local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
 
-        stats.inc('get_mask.traversal.node.edge_prio_path')
+        stats.inc('get_mask.traversal.node.fast_path')
+        pops_in_node = sorted(a_node.fast_children.keys())
+        group_index = 0
 
-        for edge_idx, edge in enumerate(a_node.children):
-            if edges_proc >= max_edges:
-                priority = (edge.min_distance_to_end, -self.max_depth.get(node_id, 0), edge_idx, 0)
-                new_mask = yield Suspend(node_id, priority, depth)
-                if new_mask is not None:
-                    active_remaining_mask = new_mask
-                if active_remaining_mask.is_empty():
-                    return
-                edges_proc = 0
-
-            pop_val = edge.pop
+        for pop_val in pops_in_node:
+            if pop_val in skip_pops:
+                continue
 
             if pop_val in pop_cache:
                 popped, popped_acc, peeked, peek_rs = pop_cache[pop_val]
                 stats.inc('get_mask.traversal.pop_cache_hits')
             else:
-                stats.start('get_mask.traversal.node.pop_op')
+                stats.start('get_mask.traversal.node.fast_path.pop_op')
                 if pop_val == 0:
                     popped = gss_node
                     popped_acc = types.SimpleNamespace(llm_mask=gss_mask)
                     peeked = peek0
                     peek_rs = peek0_rs
+                    pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                 else:
                     popped = None
                     if global_pop_cache is not None:
@@ -828,136 +860,194 @@ class Model(GraphProvider):
                         cached = global_pop_cache.get(key)
                         if cached is not None:
                             popped, popped_acc, peeked, peek_rs = cached
+                            pop_cache[pop_val] = cached
                             stats.inc('get_mask.traversal.global_pop_cache_hits')
                     if popped is None:
-                        stats.start('get_mask.traversal.node.popn')
+                        stats.start('get_mask.traversal.node.fast_path.popn')
                         popped = gss_node.popn(pop_val)
-                        stats.stop('get_mask.traversal.node.popn')
-
+                        stats.stop('get_mask.traversal.node.fast_path.popn')
                     if popped.is_empty():
                         stats.inc('get_mask.traversal.node.popped_empty')
-                        entry = (popped, None, [], RangeSetStates.empty())
-                        pop_cache[pop_val] = entry
-                        if global_pop_cache is not None:
-                            global_pop_cache[(id(gss_node), pop_val)] = entry
-                        stats.stop('get_mask.traversal.node.pop_op')
+                        pop_cache[pop_val] = (popped, None, [], RangeSetStates.empty())
+                        stats.stop('get_mask.traversal.node.fast_path.pop_op')
                         continue
-
                     stats.start('get_mask.traversal.node.popped.reduce_acc')
                     popped_acc = popped.reduce_acc()
                     stats.stop('get_mask.traversal.node.popped.reduce_acc')
                     if not popped_acc or popped_acc.llm_mask.is_empty():
-                        entry = (GSS.empty(), None, [], RangeSetStates.empty())
-                        pop_cache[pop_val] = entry
-                        if global_pop_cache is not None:
-                            global_pop_cache[(id(gss_node), pop_val)] = entry
-                        stats.stop('get_mask.traversal.node.pop_op')
+                        pop_cache[pop_val] = (GSS.empty(), None, [], RangeSetStates.empty())
+                        stats.stop('get_mask.traversal.node.fast_path.pop_op')
                         continue
-
                     stats.start('get_mask.traversal.node.post_pop_peek')
                     peeked = popped.peek()
                     peek_rs = RangeSetStates.from_indices(peeked)
-                    stats.stop('get_mask.traversal.node.post_pop_peek')
+                    pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
+                    if global_pop_cache is not None:
+                        global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
+                stats.stop('get_mask.traversal.node.fast_path.pop_op')
 
-                entry = (popped, popped_acc, peeked, peek_rs)
-                pop_cache[pop_val] = entry
-                if global_pop_cache is not None and pop_val > 0:
-                    global_pop_cache[(id(gss_node), pop_val)] = entry
-                stats.stop('get_mask.traversal.node.pop_op')
+            stats.start('get_mask.traversal.node.fast_path.bucket_pruning')
+            if pop_val not in checked_pops:
+                checked_pops.add(pop_val)
+                pop_states_union = a_node.pop_to_state_union.get(pop_val)
+                if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
+                    stats.inc('get_mask.traversal.node.bucket_pruned_state')
+                    skip_pops.add(pop_val)
+                    stats.stop('get_mask.traversal.node.fast_path.bucket_pruning')
+                    continue
+                pop_llm_union = a_node.pop_to_llm_union.get(pop_val)
+                if pop_llm_union is not None and (
+                    (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)
+                ):
+                    stats.inc('get_mask.traversal.node.bucket_pruned_llm')
+                    skip_pops.add(pop_val)
+                    stats.stop('get_mask.traversal.node.fast_path.bucket_pruning')
+                    continue
+            stats.stop('get_mask.traversal.node.fast_path.bucket_pruning')
 
-            if popped.is_empty():
-                continue
-
-            effective_llm_mask = edge.llm_bv.intersection(active_remaining_mask)
-            if effective_llm_mask.is_empty():
-                stats.inc('get_mask.traversal.edge.pruned_remaining_mask')
-                continue
-
-            if popped_acc.llm_mask.isdisjoint(effective_llm_mask):
-                stats.inc('get_mask.traversal.edge.pruned_gss_mask')
-                continue
-
-            if peek_rs.isdisjoint(edge.dest_states_union):
-                stats.inc('get_mask.traversal.edge.pruned_state')
-                continue
-
-            dests_to_process: Dict[NodeID, List[int]] = collections.defaultdict(list)
+            stats.start('get_mask.traversal.node.fast_path.group_building')
+            groups: Dict[Tuple[int, int], Dict[str, Any]] = {}
+            mapping_for_pop = a_node.fast_children.get(pop_val, {})
             for sid in peeked:
-                dest_indices_in_edge = edge.state_to_dest.get(sid)
-                if dest_indices_in_edge:
-                    for dest_idx_in_edge in dest_indices_in_edge:
-                        dest_node_id = edge.dests[dest_idx_in_edge].dest_idx
-                        dests_to_process[dest_node_id].append(sid)
+                per_state_map = mapping_for_pop.get(int(sid), {})
+                if not per_state_map:
+                    continue
+                for dest_id, triple in per_state_map.items():
+                    llm_bv, llm_bv_not, llm_bv_thru = triple
+                    stats.start('get_mask.traversal.node.fast_path.group_building.isdisjoint')
+                    if popped_acc.llm_mask.isdisjoint(llm_bv_thru):
+                        stats.inc('get_mask.traversal.node.fast_path.descendant_pruned_gss')
+                        stats.stop('get_mask.traversal.node.fast_path.group_building.isdisjoint')
+                        continue
+                    stats.stop('get_mask.traversal.node.fast_path.group_building.isdisjoint')
+                    key = (int(dest_id), id(llm_bv_thru))
+                    entry = groups.get(key)
+                    if entry is None:
+                        groups[key] = {"llm_bv": llm_bv_thru, "states": [int(sid)]}
+                    else:
+                        entry["states"].append(int(sid))
 
-            if not dests_to_process:
+            stats.stop('get_mask.traversal.node.fast_path.group_building')
+
+            if not groups:
                 continue
 
-            sorted_dests = sorted(dests_to_process.items(), key=lambda item: self.node_distance_to_end.get(item[0], 999999))
+            # Sort by edge priority (lower distance = higher priority)
+            stats.start('get_mask.traversal.node.fast_path.group_sorting')
+            dest_keys = sorted(groups.keys(), key=lambda k: (
+                self.arena[int(k[0])].children[0].min_distance_to_end if self.arena.get(int(k[0])) and self.arena[int(k[0])].children else 999999
+            ))
+            stats.stop('get_mask.traversal.node.fast_path.group_sorting')
 
-            for dest_idx_in_sorted, (dest_id, states_for_dest) in enumerate(sorted_dests):
-                if dests_proc >= max_dests:
-                    priority = (edge.min_distance_to_end, -self.max_depth.get(node_id, 0), edge_idx, dest_idx_in_sorted)
-                    new_mask = yield Suspend(node_id, priority, depth)
-                    if new_mask is not None:
-                        active_remaining_mask = new_mask
-                    if active_remaining_mask.is_empty():
-                        return
-                    dests_proc = 0
+            for (dest_id, llm_bv_id) in dest_keys:
+                entry = groups[(dest_id, llm_bv_id)]
+                llm_bv = entry["llm_bv"]
+                states_to_keep: List[int] = entry["states"]
 
-                dest_desc_mask = self.arena[dest_id].llm_bv_descendant
-                llm_thru = effective_llm_mask.intersection(dest_desc_mask)
-
-                if llm_thru.is_empty():
-                    stats.inc('get_mask.traversal.dest.pruned_descendant_empty')
+                stats.start('get_mask.traversal.node.fast_path.jit_prune')
+                if llm_bv.isdisjoint(active_remaining_mask):
+                    stats.inc('get_mask.traversal.node.fast_path.jit_pruned')
+                    stats.stop('get_mask.traversal.node.fast_path.jit_prune')
                     continue
-                if popped_acc.llm_mask.isdisjoint(llm_thru):
-                    stats.inc('get_mask.traversal.dest.pruned_descendant_gss')
-                    continue
+                stats.stop('get_mask.traversal.node.fast_path.jit_prune')
 
-                key_apply = (id(popped), id(llm_thru))
-                source_after_apply = local_apply_cache.get(key_apply)
-                if source_after_apply is None:
+                source_after_apply = popped
+                key_apply = (id(popped), id(llm_bv))
+                stats.start('get_mask.traversal.node.fast_path.apply_cache_check')
+                cached_apply = local_apply_cache.get(key_apply)
+                stats.stop('get_mask.traversal.node.fast_path.apply_cache_check')
+                if cached_apply is not None:
+                    source_after_apply = cached_apply
+                    stats.inc('get_mask.traversal.apply_cache_hits')
+                else:
                     @_acc_memoize(use_value_cache=False)
                     def intersect(acc: PyAcc):
-                        new_mask = acc.llm_mask.intersection(llm_thru)
+                        stats.start('get_mask.traversal.apply.intersect')
+                        new_mask = acc.llm_mask.intersection(llm_bv)
+                        stats.stop('get_mask.traversal.apply.intersect')
                         return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                    source_after_apply = popped.apply_and_prune(intersect)
-                    local_apply_cache[key_apply] = source_after_apply
-                else:
-                    stats.inc('get_mask.traversal.apply_cache_hits')
-
-                if source_after_apply.is_empty():
-                    continue
-
-                unique_states = sorted(list(set(states_for_dest)))
-                if len(unique_states) == len(peeked):
-                    child_gss = source_after_apply
-                else:
-                    key_isolate = (id(source_after_apply), tuple(unique_states))
-                    child_gss = isolate_cache.get(key_isolate) if isolate_cache is not None else None
-                    if child_gss is None:
-                        child_gss = source_after_apply.isolate_many(unique_states)
-                        if isolate_cache is not None:
-                            isolate_cache[key_isolate] = child_gss
-                    else:
-                        stats.inc('get_mask.traversal.isolate_many_cache_hits')
-
-                if child_gss.is_empty():
-                    continue
+                    stats.start('get_mask.traversal.node.fast_path.apply_and_prune')
+                    tmp = popped.apply_and_prune(intersect)
+                    stats.stop('get_mask.traversal.node.fast_path.apply_and_prune')
+                    if tmp.is_empty():
+                        continue
+                    source_after_apply = tmp
+                    local_apply_cache[key_apply] = tmp
 
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop_val}')
 
-                dest_node = self.arena.get(dest_id)
+                stats.start('get_mask.traversal.node.fast_path.isolate_many')
+                stats.start('get_mask.traversal.node.fast_path.isolate_check')
+                if len(states_to_keep) == len(peeked):
+                    child_gss = source_after_apply
+                else:
+                    key_isolate = (id(source_after_apply), tuple(states_to_keep))
+                    if isolate_cache is not None and key_isolate in isolate_cache:
+                        stats.inc('get_mask.traversal.isolate_many_cache_hits')
+                        child_gss = isolate_cache[key_isolate]
+                    else:
+                        stats.stop('get_mask.traversal.node.fast_path.isolate_check')
+                        stats.start('get_mask.traversal.node.fast_path.isolate_many')
+                        child_gss = source_after_apply.isolate_many(states_to_keep)
+                        stats.stop('get_mask.traversal.node.fast_path.isolate_many')
+                        if isolate_cache is not None:
+                            isolate_cache[key_isolate] = child_gss
+                        continue
+                stats.stop('get_mask.traversal.node.fast_path.isolate_check')
+                stats.stop('get_mask.traversal.node.fast_path.isolate_many')
+
+                stats.start('get_mask.traversal.node.fast_path.child_gss_empty_check')
+                is_empty = child_gss.is_empty()
+                stats.stop('get_mask.traversal.node.fast_path.child_gss_empty_check')
+                if is_empty:
+                    continue
+
+                d: NodeID = int(dest_id)
+                dest_node = self.arena.get(d)
                 edge_priority = dest_node.children[0].min_distance_to_end if dest_node and dest_node.children else 999999
-                new_mask = yield Enqueue(dest_id, child_gss, depth + 1, edge_priority)
+
+                new_mask = yield Enqueue(d, child_gss, depth + 1, edge_priority)
+                stats.start('get_mask.traversal.node.fast_path.update_active_mask')
                 if new_mask is not None:
                     active_remaining_mask = new_mask
+                stats.stop('get_mask.traversal.node.fast_path.update_active_mask')
                 if active_remaining_mask.is_empty():
                     return
 
                 dests_proc += 1
+                stats.start('get_mask.traversal.node.fast_path.check_suspend')
+                if dests_proc >= max_dests:
+                    next_priority = min((e.min_distance_to_end for e in a_node.children[group_index:]), default=999999)
+                    priority = (next_priority, -self.max_depth.get(node_id, 0), group_index, 0)
+                    new_mask = yield Suspend(node_id, priority, depth)
+                    stats.start('get_mask.traversal.node.fast_path.update_active_mask_suspend')
+                    if new_mask is not None:
+                        active_remaining_mask = new_mask
+                    stats.stop('get_mask.traversal.node.fast_path.update_active_mask_suspend')
+                    if active_remaining_mask.is_empty():
+                        return
+                    dests_proc = 0
+                stats.stop('get_mask.traversal.node.fast_path.check_suspend')
 
+                group_index += 1
+
+            if active_remaining_mask.is_empty():
+                return
+
+            stats.start('get_mask.traversal.node.fast_path.check_suspend_edges')
+            if edges_proc >= max_edges:
+                next_priority = min((e.min_distance_to_end for e in a_node.children[group_index:]), default=999999)
+                priority = (next_priority, -self.max_depth.get(node_id, 0), group_index, 0)
+                new_mask = yield Suspend(int(node_id), priority, depth)
+                stats.start('get_mask.traversal.node.fast_path.update_active_mask_suspend_edges')
+                if new_mask is not None:
+                    active_remaining_mask = new_mask
+                stats.stop('get_mask.traversal.node.fast_path.update_active_mask_suspend_edges')
+                if active_remaining_mask.is_empty():
+                    return
+                edges_proc = 0
+            stats.stop('get_mask.traversal.node.fast_path.check_suspend_edges')
             edges_proc += 1
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
