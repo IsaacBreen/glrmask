@@ -138,13 +138,60 @@ impl Metric for NonRootFanoutMetric {
     }
 }
 
+pub struct AllFanoutMetric;
+impl Metric for AllFanoutMetric {
+    fn name(&self) -> &'static str { "all_fanout" }
+    fn compute(&self, trie: &MiniTrie) -> String {
+        let fanouts: Vec<f64> = trie
+            .nodes
+            .iter()
+            .map(|n| n.out_degree() as f64)
+            .collect();
+        NumericStats::from_samples(&fanouts).to_pretty_string()
+    }
+}
+
+/// Helper to compute edge overlap score for a single node.
+fn compute_edge_overlap_for_node(node: &crate::trie3_opt::core::Node) -> f64 {
+    use crate::trie3_opt::core::{NodeId, SortedSet};
+    use std::collections::BTreeMap;
+
+    let mut node_score = 0.0;
+
+    // Group destination maps by pop
+    let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
+    for (ek, dm) in &node.children {
+        by_pop.entry(ek.pop).or_default().push(dm);
+    }
+
+    for (_pop, dms) in by_pop {
+        if dms.len() < 2 {
+            continue;
+        }
+        for i in 0..dms.len() {
+            for j in (i + 1)..dms.len() {
+                let dm1 = dms[i];
+                let dm2 = dms[j];
+
+                let mut common_dests_with_overlap = 0;
+                for (d, sids1) in dm1 {
+                    if let Some(sids2) = dm2.get(d) {
+                        if !sids1.intersect(sids2).is_empty() {
+                            common_dests_with_overlap += 1;
+                        }
+                    }
+                }
+                node_score += common_dests_with_overlap as f64;
+            }
+        }
+    }
+    node_score
+}
+
 pub struct EdgeOverlapMetric;
 impl Metric for EdgeOverlapMetric {
     fn name(&self) -> &'static str { "edge_overlap" }
     fn compute(&self, trie: &MiniTrie) -> String {
-        use crate::trie3_opt::core::{NodeId, SortedSet};
-        use std::collections::BTreeMap;
-
         let mut scores: Vec<f64> = Vec::new();
         #[cfg(not(rustrover))]
         let it = tqdm!(
@@ -158,35 +205,7 @@ impl Metric for EdgeOverlapMetric {
         let it = trie.nodes.iter();
 
         for node in it {
-            let mut node_score = 0.0;
-
-            // Group destination maps by pop
-            let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
-            for (ek, dm) in &node.children {
-                by_pop.entry(ek.pop).or_default().push(dm);
-            }
-
-            for (_pop, dms) in by_pop {
-                if dms.len() < 2 {
-                    continue;
-                }
-                for i in 0..dms.len() {
-                    for j in (i + 1)..dms.len() {
-                        let dm1 = dms[i];
-                        let dm2 = dms[j];
-
-                        let mut common_dests_with_overlap = 0;
-                        for (d, sids1) in dm1 {
-                            if let Some(sids2) = dm2.get(d) {
-                                if !sids1.intersect(sids2).is_empty() {
-                                    common_dests_with_overlap += 1;
-                                }
-                            }
-                        }
-                        node_score += common_dests_with_overlap as f64;
-                    }
-                }
-            }
+            let node_score = compute_edge_overlap_for_node(node);
             if node_score > 0.0 {
                 scores.push(node_score);
             }
@@ -195,13 +214,100 @@ impl Metric for EdgeOverlapMetric {
     }
 }
 
+pub struct RootEdgeOverlapMetric;
+impl Metric for RootEdgeOverlapMetric {
+    fn name(&self) -> &'static str { "root_edge_overlap" }
+    fn compute(&self, trie: &MiniTrie) -> String {
+        let mut scores: Vec<f64> = Vec::new();
+        let root_nodes: Vec<_> = trie
+            .nodes
+            .iter()
+            .filter(|n| trie.root_ids.contains(&n.id))
+            .collect();
+
+        #[cfg(not(rustrover))]
+        let it = tqdm!(
+            root_nodes.iter(),
+            desc = "Metric: RootEdgeOverlap",
+            total = root_nodes.len(),
+            disable = !PROGRESS_BAR_ENABLED,
+            leave = false
+        );
+        #[cfg(rustrover)]
+        let it = root_nodes.iter();
+
+        for node in it {
+            let node_score = compute_edge_overlap_for_node(node);
+            if node_score > 0.0 {
+                scores.push(node_score);
+            }
+        }
+        NumericStats::from_samples(&scores).to_pretty_string()
+    }
+}
+
+pub struct NonRootEdgeOverlapMetric;
+impl Metric for NonRootEdgeOverlapMetric {
+    fn name(&self) -> &'static str { "non_root_edge_overlap" }
+    fn compute(&self, trie: &MiniTrie) -> String {
+        let mut scores: Vec<f64> = Vec::new();
+        let non_root_nodes: Vec<_> = trie
+            .nodes
+            .iter()
+            .filter(|n| !trie.root_ids.contains(&n.id))
+            .collect();
+
+        #[cfg(not(rustrover))]
+        let it = tqdm!(
+            non_root_nodes.iter(),
+            desc = "Metric: NonRootEdgeOverlap",
+            total = non_root_nodes.len(),
+            disable = !PROGRESS_BAR_ENABLED,
+            leave = false
+        );
+        #[cfg(rustrover)]
+        let it = non_root_nodes.iter();
+
+        for node in it {
+            let node_score = compute_edge_overlap_for_node(node);
+            if node_score > 0.0 {
+                scores.push(node_score);
+            }
+        }
+        NumericStats::from_samples(&scores).to_pretty_string()
+    }
+}
+
+/// Helper to compute state fanout values for a single node.
+fn compute_state_fanout_for_node(node: &crate::trie3_opt::core::Node) -> Vec<f64> {
+    use crate::trie3_opt::core::{NodeId, SortedSet};
+    use std::collections::BTreeMap;
+
+    // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
+    let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
+
+    for (edge_key, dest_map) in &node.children {
+        let pop = edge_key.pop;
+        let tokens = &edge_key.tokens;
+
+        for (dest, state_set) in dest_map {
+            for state_id in state_set.iter() {
+                fanout_map
+                    .entry((pop, state_id))
+                    .or_default()
+                    .push((*dest, tokens.clone()));
+            }
+        }
+    }
+
+    // Collect fanout values for this node
+    fanout_map.values().map(|fanout_vec| fanout_vec.len() as f64).collect()
+}
+
 pub struct StateFanoutMetric;
 impl Metric for StateFanoutMetric {
     fn name(&self) -> &'static str { "state_fanout" }
     fn compute(&self, trie: &MiniTrie) -> String {
-        use crate::trie3_opt::core::{NodeId, SortedSet};
-        use std::collections::BTreeMap;
-
         let mut stats = NumericStats::new();
 
         #[cfg(not(rustrover))]
@@ -216,29 +322,73 @@ impl Metric for StateFanoutMetric {
         let it = trie.nodes.iter();
 
         for node in it {
-            // For this node, build a map from (pop, state_id) -> Vec<(dest, tokens)>
-            let mut fanout_map: BTreeMap<(isize, usize), Vec<(NodeId, SortedSet)>> = BTreeMap::new();
-
-            for (edge_key, dest_map) in &node.children {
-                let pop = edge_key.pop;
-                let tokens = &edge_key.tokens;
-
-                for (dest, state_set) in dest_map {
-                    for state_id in state_set.iter() {
-                        fanout_map
-                            .entry((pop, state_id))
-                            .or_default()
-                            .push((*dest, tokens.clone()));
-                    }
-                }
-            }
-
-            // Collect fanout values for this node
-            for fanout_vec in fanout_map.values() {
-                stats.push(fanout_vec.len() as f64);
+            for val in compute_state_fanout_for_node(node) {
+                stats.push(val);
             }
         }
 
+        stats.to_pretty_string()
+    }
+}
+
+pub struct RootStateFanoutMetric;
+impl Metric for RootStateFanoutMetric {
+    fn name(&self) -> &'static str { "root_state_fanout" }
+    fn compute(&self, trie: &MiniTrie) -> String {
+        let mut stats = NumericStats::new();
+        let root_nodes: Vec<_> = trie
+            .nodes
+            .iter()
+            .filter(|n| trie.root_ids.contains(&n.id))
+            .collect();
+
+        #[cfg(not(rustrover))]
+        let it = tqdm!(
+            root_nodes.iter(),
+            desc = "Metric: RootStateFanout",
+            total = root_nodes.len(),
+            disable = !PROGRESS_BAR_ENABLED,
+            leave = false
+        );
+        #[cfg(rustrover)]
+        let it = root_nodes.iter();
+
+        for node in it {
+            for val in compute_state_fanout_for_node(node) {
+                stats.push(val);
+            }
+        }
+        stats.to_pretty_string()
+    }
+}
+
+pub struct NonRootStateFanoutMetric;
+impl Metric for NonRootStateFanoutMetric {
+    fn name(&self) -> &'static str { "non_root_state_fanout" }
+    fn compute(&self, trie: &MiniTrie) -> String {
+        let mut stats = NumericStats::new();
+        let non_root_nodes: Vec<_> = trie
+            .nodes
+            .iter()
+            .filter(|n| !trie.root_ids.contains(&n.id))
+            .collect();
+
+        #[cfg(not(rustrover))]
+        let it = tqdm!(
+            non_root_nodes.iter(),
+            desc = "Metric: NonRootStateFanout",
+            total = non_root_nodes.len(),
+            disable = !PROGRESS_BAR_ENABLED,
+            leave = false
+        );
+        #[cfg(rustrover)]
+        let it = non_root_nodes.iter();
+
+        for node in it {
+            for val in compute_state_fanout_for_node(node) {
+                stats.push(val);
+            }
+        }
         stats.to_pretty_string()
     }
 }
@@ -252,10 +402,15 @@ pub fn run_all_metrics(trie: &MiniTrie) -> BTreeMap<String, String> {
         Box::new(NumEndNodesMetric),
         Box::new(NumReachableNodesMetric),
         Box::new(NumProductiveNodesMetric),
+        Box::new(AllFanoutMetric),
         Box::new(RootFanoutMetric),
         Box::new(NonRootFanoutMetric),
         Box::new(EdgeOverlapMetric),
+        Box::new(RootEdgeOverlapMetric),
+        Box::new(NonRootEdgeOverlapMetric),
         Box::new(StateFanoutMetric),
+        Box::new(RootStateFanoutMetric),
+        Box::new(NonRootStateFanoutMetric),
     ];
 
     let mut results = BTreeMap::new();
