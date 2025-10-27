@@ -21,14 +21,19 @@ impl OptimizationPass for CompressEdgesPass {
             }
 
             let old_children = n.children.clone();
+            // Cost metric: sum of token set sizes and destination map sizes.
             let old_cost: usize = old_children
                 .iter()
                 .map(|(ek, dm)| ek.tokens.len() + dm.len())
                 .sum();
 
+            // Stage 1: Group by (pop, canonicalized dest-map), unioning token sets.
             let mut by_pop: BTreeMap<isize, HashMap<Vec<(u32, SortedSet)>, SortedSet>> =
                 BTreeMap::new();
             for (ek, dm) in &old_children {
+                if ek.tokens.is_empty() || dm.is_empty() {
+                    continue;
+                }
                 let mut dest_vec: Vec<(u32, SortedSet)> =
                     dm.iter().map(|(&dst, sids)| (dst, sids.clone())).collect();
                 dest_vec.sort_unstable_by_key(|k| k.0);
@@ -40,19 +45,29 @@ impl OptimizationPass for CompressEdgesPass {
                     .union_inplace(&ek.tokens);
             }
 
+            // Stage 2: For each pop, combine groups that yield identical final token sets
+            // by unioning their destination maps.
             let mut new_children: BTreeMap<EdgeKey, BTreeMap<u32, SortedSet>> = BTreeMap::new();
             for (pop, groups) in by_pop {
+                // tokens -> aggregated destination map
+                let mut out_by_tokens: BTreeMap<SortedSet, BTreeMap<u32, SortedSet>> =
+                    BTreeMap::new();
+
                 for (dest_vec, tokens) in groups {
                     if tokens.is_empty() {
                         continue;
                     }
-                    let mut dm = BTreeMap::new();
+                    let dest_out = out_by_tokens.entry(tokens).or_default();
                     for (dst, sids) in dest_vec {
                         if !sids.is_empty() {
-                            dm.insert(dst, sids);
+                            dest_out.entry(dst).or_default().union_inplace(&sids);
                         }
                     }
-                    if !dm.is_empty() {
+                }
+
+                // Emit final edges for this pop
+                for (tokens, dm) in out_by_tokens {
+                    if !tokens.is_empty() && !dm.is_empty() {
                         new_children.insert(EdgeKey::new(pop, tokens), dm);
                     }
                 }
