@@ -68,7 +68,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
         let mut next_token_set_id = 0;
         for masks in by_pop_masks.values() {
             for mask in masks {
-                if unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id).eq(&next_token_set_id) {
+                if &*unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id) == &next_token_set_id {
                     next_token_set_id += 1;
                 }
             }
@@ -173,13 +173,16 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                 for (ek, dm) in &u_node.children {
                     if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
                         if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
-                            let atom_idxs = &pop_map[*token_set_id];
-                            for &atom_idx in atom_idxs {
-                                let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
-                                for (v_id, sids) in dm {
-                                    let dest_class = prev_class[*v_id as usize];
-                                    entry.entry(dest_class).or_default().union_inplace(sids);
+                            if let Some(atom_idxs) = pop_map.get(*token_set_id) {
+                                for &atom_idx in atom_idxs {
+                                    let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+                                    for (v_id, sids) in dm {
+                                        let dest_class = prev_class[*v_id as usize];
+                                        entry.entry(dest_class).or_default().union_inplace(sids);
+                                    }
                                 }
+                            }
+                        }
                     }
                 }
                 let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();

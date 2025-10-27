@@ -6825,24 +6825,36 @@ local_system:
                   atoms_by_pop.insert(*pop, if aborted { vec![universe.clone()] } else { blocks });
               }
 
-              // Precompute atom overlaps for each unique token set.
-              let mut atom_idxs_by_pop_mask: BTreeMap<isize, HashMap<SortedSet, Vec<usize>>> =
-                  BTreeMap::new();
+              // Create dense IDs for all unique token sets for faster lookups.
+              let mut unique_token_sets: HashMap<SortedSet, usize> = HashMap::new();
+              let mut next_token_set_id = 0;
+              for masks in by_pop_masks.values() {
+                  for mask in masks {
+                      if unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id).eq(&next_token_set_id) {
+                          next_token_set_id += 1;
+                      }
+                  }
+              }
+
+              // Precompute atom overlaps for each unique token set ID.
+              // Map: pop -> Vec<Vec<usize>> where outer vec is indexed by token_set_id
+              let mut atom_idxs_by_pop_token_set_id: BTreeMap<isize, Vec<Vec<usize>>> = BTreeMap::new();
               for (pop, atoms) in &atoms_by_pop {
-                  let pop_map = atom_idxs_by_pop_mask.entry(*pop).or_default();
                   if let Some(masks) = by_pop_masks.get(pop) {
+                      let pop_map = atom_idxs_by_pop_token_set_id.entry(*pop).or_insert_with(Vec::new);
+                      pop_map.resize(next_token_set_id, Vec::new());
                       for mask in masks {
+                          let token_set_id = *unique_token_sets.get(mask).unwrap();
                           let mut idxs = Vec::new();
                           for (i, atom) in atoms.iter().enumerate() {
                               if !mask.intersect(atom).is_empty() {
                                   idxs.push(i);
                               }
                           }
-                          pop_map.insert(mask.clone(), idxs);
+                          pop_map[token_set_id] = idxs;
                       }
                   }
               }
-
               // Compute pop=0 distance for initial partitioning.
               let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
               let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
@@ -6921,16 +6933,15 @@ local_system:
                   for (u_idx, u_node) in trie.nodes.iter().enumerate() {
                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in &u_node.children {
-                          if let Some(pop_map) = atom_idxs_by_pop_mask.get(&ek.pop) {
-                              if let Some(atom_idxs) = pop_map.get(&ek.tokens) {
+                          if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                              if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+                                  let atom_idxs = &pop_map[*token_set_id];
                                   for &atom_idx in atom_idxs {
                                       let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
                                       for (v_id, sids) in dm {
                                           let dest_class = prev_class[*v_id as usize];
                                           entry.entry(dest_class).or_default().union_inplace(sids);
                                       }
-                                  }
-                              }
                           }
                       }
                       let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
@@ -14293,13 +14304,16 @@ local_system:
                       for (ek, dm) in &u_node.children {
                           if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
                               if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
-                                  let atom_idxs = &pop_map[*token_set_id];
-                                  for &atom_idx in atom_idxs {
-                                      let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
-                                      for (v_id, sids) in dm {
-                                          let dest_class = prev_class[*v_id as usize];
-                                          entry.entry(dest_class).or_default().union_inplace(sids);
+                                  if let Some(atom_idxs) = pop_map.get(*token_set_id) {
+                                      for &atom_idx in atom_idxs {
+                                          let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+                                          for (v_id, sids) in dm {
+                                              let dest_class = prev_class[*v_id as usize];
+                                              entry.entry(dest_class).or_default().union_inplace(sids);
+                                          }
                                       }
+                                  }
+                              }
                           }
                       }
                       let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
@@ -21789,24 +21803,36 @@ messages:
                   atoms_by_pop.insert(*pop, if aborted { vec![universe.clone()] } else { blocks });
               }
 
-              // Precompute atom overlaps for each unique token set.
-              let mut atom_idxs_by_pop_mask: BTreeMap<isize, HashMap<SortedSet, Vec<usize>>> =
-                  BTreeMap::new();
+              // Create dense IDs for all unique token sets for faster lookups.
+              let mut unique_token_sets: HashMap<SortedSet, usize> = HashMap::new();
+              let mut next_token_set_id = 0;
+              for masks in by_pop_masks.values() {
+                  for mask in masks {
+                      if unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id).eq(&next_token_set_id) {
+                          next_token_set_id += 1;
+                      }
+                  }
+              }
+
+              // Precompute atom overlaps for each unique token set ID.
+              // Map: pop -> Vec<Vec<usize>> where outer vec is indexed by token_set_id
+              let mut atom_idxs_by_pop_token_set_id: BTreeMap<isize, Vec<Vec<usize>>> = BTreeMap::new();
               for (pop, atoms) in &atoms_by_pop {
-                  let pop_map = atom_idxs_by_pop_mask.entry(*pop).or_default();
                   if let Some(masks) = by_pop_masks.get(pop) {
+                      let pop_map = atom_idxs_by_pop_token_set_id.entry(*pop).or_insert_with(Vec::new);
+                      pop_map.resize(next_token_set_id, Vec::new());
                       for mask in masks {
+                          let token_set_id = *unique_token_sets.get(mask).unwrap();
                           let mut idxs = Vec::new();
                           for (i, atom) in atoms.iter().enumerate() {
                               if !mask.intersect(atom).is_empty() {
                                   idxs.push(i);
                               }
                           }
-                          pop_map.insert(mask.clone(), idxs);
+                          pop_map[token_set_id] = idxs;
                       }
                   }
               }
-
               // Compute pop=0 distance for initial partitioning.
               let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
               let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
@@ -21885,16 +21911,15 @@ messages:
                   for (u_idx, u_node) in trie.nodes.iter().enumerate() {
                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in &u_node.children {
-                          if let Some(pop_map) = atom_idxs_by_pop_mask.get(&ek.pop) {
-                              if let Some(atom_idxs) = pop_map.get(&ek.tokens) {
+                          if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                              if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+                                  let atom_idxs = &pop_map[*token_set_id];
                                   for &atom_idx in atom_idxs {
                                       let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
                                       for (v_id, sids) in dm {
                                           let dest_class = prev_class[*v_id as usize];
                                           entry.entry(dest_class).or_default().union_inplace(sids);
                                       }
-                                  }
-                              }
                           }
                       }
                       let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
@@ -22399,10 +22424,38 @@ messages:
     metadata:
       filename: src/trie3_opt/passes/reorder_llm_tokens.rs
   - user: |-
-      Do the passes in `src/trie3_opt/passes/` match their full versions (if applicable) in `src/trie3_opt/passes/full/`? Are they going to be just as effective?
-      Note: we get stuck here
-      `[DEBUG] 1] src/trie3_opt/coordinator.rs:397: [Trie3 Opt] Running pass: MergeGlobalAtoms`
-      and it consumes all memory.
+      python scripts/compile.py \
+          --grammar src/js_simplified0_5.ebnf \
+          --output .cache/test_vocabs/js_constraint.json.gz \
+          --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
+          &&
+
+      SKIP_PLOTS=1 REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 CONSTRAINT_FILE=".cache/test_vocabs/js_constraint.json.gz" CODE_FILE=./src/example_code9.js bash python/run_benchmarks.sh python/aug25/models/precompute3_model_pure_python_opt4_5_clean.py
+      Loading vocabulary from cache: .cache/vocabs/vocab.json
+      Temporary vocabulary saved to: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmp21r_bcp0.json
+      Building compiler with 'cargo build --release'...
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error: this file contains an unclosed delimiter
+         --> src/trie3_opt/passes/merge_global_atoms.rs:251:3
+          |
+       20 | impl OptimizationPass for MergeGlobalAtomsPass {
+          |                                                - unclosed delimiter
+      ...
+       25 |     fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+          |                                                                       - unclosed delimiter
+      ...
+      177 |                             for &atom_idx in atom_idxs {
+          |                                                        - this delimiter might not be properly closed...
+      ...
+      183 |                     }
+          |                     - ...as it matches this but it has different indentation
+      ...
+      251 | }
+          |  ^
+
+      error: could not compile `sep1` (lib) due to 1 previous error
+      Cargo build failed.
+      Cleaned up temporary vocabulary file.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -22422,189 +22475,120 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The `MergeGlobalAtoms` pass is indeed memory-intensive, and its `MiniTrie`-based implementation has a performance issue that can lead to extreme memory consumption and effectively getting "stuck". The problem lies in repeatedly using large `SortedSet` objects as keys in a `HashMap` within the main refinement loop, which is very slow.
+      Hello! I've analyzed the compilation error. It's caused by several mismatched braces within a complex loop in `src/trie3_opt/passes/merge_global_atoms.rs`. The structure of the loops and conditional blocks was incorrect, leading the compiler to see unclosed delimiters.
 
-      The fix is to pre-compute dense integer IDs for each unique token set and use these cheap integer IDs for lookups inside the loop. This avoids the expensive hashing and comparison of large vector-backed sets on every edge of every node in every iteration.
-
-      Regarding the other passes, they are generally faithful and effective translations of their counterparts in `passes/full/`. In some cases, like `GeneralizeSidsPass`, the `MiniTrie` version is actually more complete because it applies the results of its analysis, whereas the "full" version only performs the analysis. With the following fix, the `MergeGlobalAtoms` pass will also be much more efficient.
-
-      Here are the step-by-step instructions to resolve the issue, followed by the corresponding git diff.
+      I will provide the necessary corrections to fix the block structure and ensure all loops and conditionals are properly closed.
 
       ### Step-by-step Instructions
 
       1.  **Open the file `src/trie3_opt/passes/merge_global_atoms.rs`**.
-      2.  Navigate to the `run` function inside the `impl OptimizationPass for MergeGlobalAtomsPass` block.
-      3.  We will replace the section that precomputes atom overlaps and modify the main refinement loop to use a more efficient lookup strategy.
-      4.  **Delete** the existing `atom_idxs_by_pop_mask` precomputation block, which starts around line 63:
 
+      2.  **Locate the main partition refinement loop**. It starts around line 191 with `for _ in 0..self.max_iters {`. Inside this, there's another loop: `for (u_idx, u_node) in trie.nodes.iter().enumerate() {`.
+
+      3.  **Correct the nested loops and conditional blocks**. The logic for building `per_atom_aggr` was not correctly scoped, and the subsequent signature calculation and class assignment were happening inside the wrong loop.
+
+          Specifically, you need to:
+          a.  Add closing braces `}` for the `for &atom_idx...`, `if let Some(token_set_id)...`, and `if let Some(pop_map)...` blocks.
+          b.  Ensure the `for (ek, dm) in &u_node.children` loop is fully closed before calculating `sig_entries`.
+          c.  Ensure the `for (u_idx, u_node) in trie.nodes.iter().enumerate()` loop is fully closed before updating `prev_class`.
+
+          Replace the code block from line 200 to line 218:
           ```rust
-          // Precompute atom overlaps for each unique token set.
-          let mut atom_idxs_by_pop_mask: BTreeMap<isize, HashMap<SortedSet, Vec<usize>>> =
-              BTreeMap::new();
-          for (pop, atoms) in &atoms_by_pop {
-              let pop_map = atom_idxs_by_pop_mask.entry(*pop).or_default();
-              if let Some(masks) = by_pop_masks.get(pop) {
-                  for mask in masks {
-                      let mut idxs = Vec::new();
-                      for (i, atom) in atoms.iter().enumerate() {
-                          if !mask.intersect(atom).is_empty() {
-                              idxs.push(i);
+                  for (u_idx, u_node) in trie.nodes.iter().enumerate() {
+                      let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
+                      for (ek, dm) in &u_node.children {
+                          if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                              if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+                                  let atom_idxs = &pop_map[*token_set_id];
+                                  for &atom_idx in atom_idxs {
+                                      let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+                                      for (v_id, sids) in dm {
+                                          let dest_class = prev_class[*v_id as usize];
+                                          entry.entry(dest_class).or_default().union_inplace(sids);
+                                      }
                           }
                       }
-                      pop_map.insert(mask.clone(), idxs);
+                      let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+                      let sig = (u_node.end, sig_entries);
+                      let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
+                      new_class[u_idx] = cid;
+                      if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
                   }
+                  prev_class = new_class;
+                  if changes == 0 { break; }
               }
-          }
           ```
 
-      5.  **Insert** the following new code in its place. This new block creates dense IDs for unique token sets and builds a lookup table that can be indexed by these cheap integer IDs.
+          with this corrected version:
 
           ```rust
-          // Create dense IDs for all unique token sets for faster lookups.
-          let mut unique_token_sets: HashMap<SortedSet, usize> = HashMap::new();
-          let mut next_token_set_id = 0;
-          for masks in by_pop_masks.values() {
-              for mask in masks {
-                  if unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id).eq(&next_token_set_id) {
-                      next_token_set_id += 1;
-                  }
-              }
-          }
-
-          // Precompute atom overlaps for each unique token set ID.
-          // Map: pop -> Vec<Vec<usize>> where outer vec is indexed by token_set_id
-          let mut atom_idxs_by_pop_token_set_id: BTreeMap<isize, Vec<Vec<usize>>> = BTreeMap::new();
-          for (pop, atoms) in &atoms_by_pop {
-              if let Some(masks) = by_pop_masks.get(pop) {
-                  let pop_map = atom_idxs_by_pop_token_set_id.entry(*pop).or_insert_with(Vec::new);
-                  pop_map.resize(next_token_set_id, Vec::new());
-                  for mask in masks {
-                      let token_set_id = *unique_token_sets.get(mask).unwrap();
-                      let mut idxs = Vec::new();
-                      for (i, atom) in atoms.iter().enumerate() {
-                          if !mask.intersect(atom).is_empty() {
-                              idxs.push(i);
+                  for (u_idx, u_node) in trie.nodes.iter().enumerate() {
+                      let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
+                      for (ek, dm) in &u_node.children {
+                          if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                              if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+                                  let atom_idxs = &pop_map[*token_set_id];
+                                  for &atom_idx in atom_idxs {
+                                      let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+                                      for (v_id, sids) in dm {
+                                          let dest_class = prev_class[*v_id as usize];
+                                          entry.entry(dest_class).or_default().union_inplace(sids);
+                                      }
+                                  }
+                              }
                           }
                       }
-                      pop_map[token_set_id] = idxs;
+                      let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+                      let sig = (u_node.end, sig_entries);
+                      let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
+                      new_class[u_idx] = cid;
+                      if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
                   }
+                  prev_class = new_class;
+                  if changes == 0 { break; }
               }
-          }
           ```
 
-      6.  Next, find the main partition refinement loop (`for _ in 0..self.max_iters`). Inside it, locate the loop over nodes (`for (u_idx, u_node) in trie.nodes.iter().enumerate()`).
-      7.  **Replace** the inner block that calculates `per_atom_aggr` with the updated version that uses the new lookup table.
-
-          **This is the old block to be replaced:**
-          ```rust
-          let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
-          for (ek, dm) in &u_node.children {
-              if let Some(pop_map) = atom_idxs_by_pop_mask.get(&ek.pop) {
-                  if let Some(atom_idxs) = pop_map.get(&ek.tokens) {
-                      for &atom_idx in atom_idxs {
-                          let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
-                          for (v_id, sids) in dm {
-                              let dest_class = prev_class[*v_id as usize];
-                              entry.entry(dest_class).or_default().union_inplace(sids);
-                          }
-                      }
-                  }
-              }
-          }
-          ```
-
-          **This is the new block to insert:**
-          ```rust
-          let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
-          for (ek, dm) in &u_node.children {
-              if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
-                  if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
-                      let atom_idxs = &pop_map[*token_set_id];
-                      for &atom_idx in atom_idxs {
-                          let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
-                          for (v_id, sids) in dm {
-                              let dest_class = prev_class[*v_id as usize];
-                              entry.entry(dest_class).or_default().union_inplace(sids);
-                          }
-                      }
-                  }
-              }
-          }
-          ```
+      4.  **Save the file**. The compilation should now succeed.
 
       ### Git Diffs
 
-      Here is the git diff to apply the changes automatically.
+      Here are the changes in `git diff` format for you to apply.
 
       ```diff
       --- a/src/trie3_opt/passes/merge_global_atoms.rs
       +++ b/src/trie3_opt/passes/merge_global_atoms.rs
-      @@ -59,26 +59,36 @@
-                   atoms_by_pop.insert(*pop, if aborted { vec![universe.clone()] } else { blocks });
-               }
-       
-      -        // Precompute atom overlaps for each unique token set.
-      -        let mut atom_idxs_by_pop_mask: BTreeMap<isize, HashMap<SortedSet, Vec<usize>>> =
-      -            BTreeMap::new();
-      +        // Create dense IDs for all unique token sets for faster lookups.
-      +        let mut unique_token_sets: HashMap<SortedSet, usize> = HashMap::new();
-      +        let mut next_token_set_id = 0;
-      +        for masks in by_pop_masks.values() {
-      +            for mask in masks {
-      +                if unique_token_sets.entry(mask.clone()).or_insert(next_token_set_id).eq(&next_token_set_id) {
-      +                    next_token_set_id += 1;
-      +                }
-      +            }
-      +        }
-      +
-      +        // Precompute atom overlaps for each unique token set ID.
-      +        // Map: pop -> Vec<Vec<usize>> where outer vec is indexed by token_set_id
-      +        let mut atom_idxs_by_pop_token_set_id: BTreeMap<isize, Vec<Vec<usize>>> = BTreeMap::new();
-               for (pop, atoms) in &atoms_by_pop {
-      -            let pop_map = atom_idxs_by_pop_mask.entry(*pop).or_default();
-                   if let Some(masks) = by_pop_masks.get(pop) {
-      +                let pop_map = atom_idxs_by_pop_token_set_id.entry(*pop).or_insert_with(Vec::new);
-      +                pop_map.resize(next_token_set_id, Vec::new());
-                       for mask in masks {
-      +                    let token_set_id = *unique_token_sets.get(mask).unwrap();
-                           let mut idxs = Vec::new();
-                           for (i, atom) in atoms.iter().enumerate() {
-                               if !mask.intersect(atom).is_empty() {
-                                   idxs.push(i);
-                               }
-                           }
-      -                    pop_map.insert(mask.clone(), idxs);
-      -                }
-      -            }
-      -        }
-      -
-      +                    pop_map[token_set_id] = idxs;
-      +                }
-      +            }
-      +        }
-               // Compute pop=0 distance for initial partitioning.
-               let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
-               let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
-      @@ -151,16 +161,15 @@
-                   for (u_idx, u_node) in trie.nodes.iter().enumerate() {
-                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
+      @@ -203,21 +203,22 @@
                        for (ek, dm) in &u_node.children {
-      -                    if let Some(pop_map) = atom_idxs_by_pop_mask.get(&ek.pop) {
-      -                        if let Some(atom_idxs) = pop_map.get(&ek.tokens) {
-      +                    if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
-      +                        if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
-      +                            let atom_idxs = &pop_map[*token_set_id];
-                                   for &atom_idx in atom_idxs {
-                                       let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
-                                       for (v_id, sids) in dm {
-                                           let dest_class = prev_class[*v_id as usize];
-                                           entry.entry(dest_class).or_default().union_inplace(sids);
+                           if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                               if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+      -                            let atom_idxs = &pop_map[*token_set_id];
+      -                            for &atom_idx in atom_idxs {
+      -                                let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+      -                                for (v_id, sids) in dm {
+      -                                    let dest_class = prev_class[*v_id as usize];
+      -                                    entry.entry(dest_class).or_default().union_inplace(sids);
+      +                            if let Some(atom_idxs) = pop_map.get(*token_set_id) {
+      +                                for &atom_idx in atom_idxs {
+      +                                    let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+      +                                    for (v_id, sids) in dm {
+      +                                        let dest_class = prev_class[*v_id as usize];
+      +                                        entry.entry(dest_class).or_default().union_inplace(sids);
+      +                                    }
                                        }
-      -                            }
-      -                        }
+      +                            }
+      +                        }
                            }
                        }
                        let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+                       let sig = (u_node.end, sig_entries);
+                       let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
+                       new_class[u_idx] = cid;
+                       if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
+                   }
+                   prev_class = new_class;
+                   if changes == 0 { break; }
+               }
 
       ```
     metadata:
@@ -22616,9 +22600,5 @@ messages:
       Identified target file: src/trie3_opt/passes/merge_global_atoms.rs
       Applying patch to 'src/trie3_opt/passes/merge_global_atoms.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/passes/merge_global_atoms.rs.
-    metadata:
-  - user: 'Changes committed with message: "trie3_opt: Optimize MergeGlobalAtomsPass
-      by using dense IDs for token sets to avoid expensive SortedSet hashing/comparison
-      in the main loop"'
     metadata:
 ...
