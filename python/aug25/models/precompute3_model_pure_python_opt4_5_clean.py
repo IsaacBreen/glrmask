@@ -1028,7 +1028,7 @@ class Model(GraphProvider):
             r = self.roots_map[int(sid)]
             stats.start('get_mask.setup.seeding.apply')
             gss_init = gss.apply(initialize_acc, init_cache)
-            print(f"{sid}:\n{gss_init.to_graph_string()}")
+            print(f"{sid}:\n{gss_init}\n{gss_init.to_graph_string()}")
             stats.stop('get_mask.setup.seeding.apply')
             if not gss_init.is_empty():
                 edge_priority = self.node_distance_to_end.get(r, 999999)
