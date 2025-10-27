@@ -84,7 +84,7 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
 }
 
 /// Convert the given precompute3 trie into a MiniTrie along with a stable list of root keys.
-fn export_to_mini(
+pub(crate) fn export_to_mini(
     roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
 ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
