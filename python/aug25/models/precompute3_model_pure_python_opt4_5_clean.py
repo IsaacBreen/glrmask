@@ -5,10 +5,12 @@ import heapq
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, Generator, Any
 import json
+import types
 
 import _sep1 as ffi
 from tqdm import tqdm
 
+from ..stats import Stats
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 from ..common_interface import GraphProvider
 from ..range_set import FFIRangeSet as RangeSet
@@ -21,8 +23,71 @@ LLMTokenSet = RangeSet
 StateIDSet = RangeSetStates
 TerminalIdSet = RangeSet
 
+# --- Monkey-patch RangeSet to collect stats on union/intersection ---
+# This is to fulfill the request of tracking ffi.Bitset.union and intersection calls.
+# Since the code was refactored to use a pure Python RangeSet, we track its methods instead.
+_original_rangeset_union = RangeSet.union
+_original_rangeset_intersection = RangeSet.intersection
+_original_rangeset_isdisjoint = RangeSet.isdisjoint
+_original_rangeset_len = RangeSet.__len__
 
-def _acc_memoize(use_value_cache: bool = True):
+def _patched_union(self, other: "RangeSet") -> "RangeSet":
+    """Patched version of RangeSet.union that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset.union.calls')
+    stats.start('bitset.union.time')
+    result = _original_rangeset_union(self, other)
+    stats.stop('bitset.union.time')
+    return result
+
+def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
+    """Patched version of RangeSet.intersection that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset.intersection.calls')
+    stats.start('bitset.intersection.time')
+    result = _original_rangeset_intersection(self, other)
+    stats.stop('bitset.intersection.time')
+    return result
+
+def _patched_isdisjoint(self, other: "RangeSet") -> bool:
+    """Patched version of RangeSet.isdisjoint that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset.isdisjoint.calls')
+    stats.start('bitset.isdisjoint.time')
+    result = _original_rangeset_isdisjoint(self, other)
+    stats.stop('bitset.isdisjoint.time')
+    return result
+
+def _patched_len(self) -> int:
+    """Patched version of RangeSet.__len__ that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset.len.calls')
+    stats.start('bitset.len.time')
+    result = _original_rangeset_len(self)
+    stats.stop('bitset.len.time')
+    return result
+
+# --- Monkey-patch RangeSetStates ---
+_original_rangesetstates_isdisjoint = RangeSetStates.isdisjoint
+
+def _patched_states_isdisjoint(self, other: "RangeSetStates") -> bool:
+    """Patched version of RangeSetStates.isdisjoint that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset.states.isdisjoint.calls')
+    stats.start('bitset.states.isdisjoint.time')
+    result = _original_rangesetstates_isdisjoint(self, other)
+    stats.stop('bitset.states.isdisjoint.time')
+    return result
+
+# Apply the patches
+RangeSet.union = _patched_union
+RangeSet.intersection = _patched_intersection
+RangeSet.isdisjoint = _patched_isdisjoint
+RangeSet.__len__ = _patched_len
+RangeSetStates.isdisjoint = _patched_states_isdisjoint
+# --- End of monkey-patch ---
+
+def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
     """Per-invocation memoization for PyAcc transformers."""
     def decorator(fn):
         id_memo = {}
@@ -30,12 +95,16 @@ def _acc_memoize(use_value_cache: bool = True):
         def wrapper(acc):
             acc_id = id(acc)
             if acc_id in id_memo:
+                if stats_prefix:
+                    Stats.get().inc(f'{stats_prefix}.memo_hits')
                 return id_memo[acc_id]
 
             if use_value_cache:
                 cached = val_memo.get(acc)
                 if cached is not None:
                     id_memo[acc_id] = cached
+                    if stats_prefix:
+                        Stats.get().inc(f'{stats_prefix}.memo_hits')
                     return cached
 
             result = fn(acc)
@@ -43,6 +112,7 @@ def _acc_memoize(use_value_cache: bool = True):
             if use_value_cache and result is not None:
                 val_memo[acc] = result
             return result
+        wrapper._acc_memo_size = lambda: len(id_memo)
         return wrapper
     return decorator
 
@@ -332,6 +402,10 @@ class WorkItemSuspended:
 
 @dataclass
 class Model(GraphProvider):
+    stats = Stats.get()
+    stats.add_group('get_mask')
+    stats.add_group('commit')
+
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
     max_depth: Dict[NodeID, int]
@@ -346,10 +420,14 @@ class Model(GraphProvider):
     state: Dict[int, GSS]
     gm_max_edges: int = 256
     gm_max_dests: int = 4096
+    suppress_stats_report: bool = False
+    last_get_mask_cost: int = 0
+    last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
     node_distance_to_end: Dict[NodeID, int] = field(default_factory=dict)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
+        Stats.get().reset()
         data = json.loads(s)
 
         roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
@@ -735,12 +813,15 @@ class Model(GraphProvider):
         apply_cache: Optional[Dict] = None,
         isolate_cache: Optional[Dict] = None,
     ) -> Generator[Union[Enqueue, Suspend], Optional[LLMTokenSet], None]:
+        stats = Stats.get()
         a_node = self.arena.get(node_id)
         if not a_node:
             return
 
+        stats.start('get_mask.traversal.node.initial_peek')
         peek0 = gss_node.peek()
         peek0_rs = RangeSetStates.from_indices(peek0) if peek0 else RangeSetStates.empty()
+        stats.stop('get_mask.traversal.node.initial_peek')
 
         if remaining_mask.is_empty():
             return
@@ -753,6 +834,7 @@ class Model(GraphProvider):
         checked_pops: Set[int] = set()
         local_apply_cache: Dict[Tuple[int, int], GSS] = {} if apply_cache is None else apply_cache
 
+        stats.inc('get_mask.traversal.node.fast_path')
         pops_in_node = sorted(a_node.fast_children.keys())
         group_index = 0
 
@@ -762,10 +844,11 @@ class Model(GraphProvider):
 
             if pop_val in pop_cache:
                 popped, popped_acc, peeked, peek_rs = pop_cache[pop_val]
+                stats.inc('get_mask.traversal.pop_cache_hits')
             else:
+                stats.start('get_mask.traversal.node.fast_path.pop_op')
                 if pop_val == 0:
                     popped = gss_node
-                    import types
                     popped_acc = types.SimpleNamespace(llm_mask=gss_mask)
                     peeked = peek0
                     peek_rs = peek0_rs
@@ -778,34 +861,51 @@ class Model(GraphProvider):
                         if cached is not None:
                             popped, popped_acc, peeked, peek_rs = cached
                             pop_cache[pop_val] = cached
+                            stats.inc('get_mask.traversal.global_pop_cache_hits')
                     if popped is None:
+                        stats.start('get_mask.traversal.node.fast_path.popn')
                         popped = gss_node.popn(pop_val)
+                        stats.stop('get_mask.traversal.node.fast_path.popn')
                     if popped.is_empty():
+                        stats.inc('get_mask.traversal.node.popped_empty')
                         pop_cache[pop_val] = (popped, None, [], RangeSetStates.empty())
+                        stats.stop('get_mask.traversal.node.fast_path.pop_op')
                         continue
+                    stats.start('get_mask.traversal.node.popped.reduce_acc')
                     popped_acc = popped.reduce_acc()
+                    stats.stop('get_mask.traversal.node.popped.reduce_acc')
                     if not popped_acc or popped_acc.llm_mask.is_empty():
                         pop_cache[pop_val] = (GSS.empty(), None, [], RangeSetStates.empty())
+                        stats.stop('get_mask.traversal.node.fast_path.pop_op')
                         continue
+                    stats.start('get_mask.traversal.node.post_pop_peek')
                     peeked = popped.peek()
                     peek_rs = RangeSetStates.from_indices(peeked)
                     pop_cache[pop_val] = (popped, popped_acc, peeked, peek_rs)
                     if global_pop_cache is not None:
                         global_pop_cache[(id(gss_node), pop_val)] = (popped, popped_acc, peeked, peek_rs)
+                stats.stop('get_mask.traversal.node.fast_path.pop_op')
 
+            stats.start('get_mask.traversal.node.fast_path.bucket_pruning')
             if pop_val not in checked_pops:
                 checked_pops.add(pop_val)
                 pop_states_union = a_node.pop_to_state_union.get(pop_val)
                 if pop_states_union is not None and pop_states_union.isdisjoint(peek_rs):
+                    stats.inc('get_mask.traversal.node.bucket_pruned_state')
                     skip_pops.add(pop_val)
+                    stats.stop('get_mask.traversal.node.fast_path.bucket_pruning')
                     continue
                 pop_llm_union = a_node.pop_to_llm_union.get(pop_val)
                 if pop_llm_union is not None and (
                     (popped_acc and popped_acc.llm_mask.isdisjoint(pop_llm_union)) or pop_llm_union.isdisjoint(active_remaining_mask)
                 ):
+                    stats.inc('get_mask.traversal.node.bucket_pruned_llm')
                     skip_pops.add(pop_val)
+                    stats.stop('get_mask.traversal.node.fast_path.bucket_pruning')
                     continue
+            stats.stop('get_mask.traversal.node.fast_path.bucket_pruning')
 
+            stats.start('get_mask.traversal.node.fast_path.group_building')
             groups: Dict[Tuple[int, int], Dict[str, Any]] = {}
             mapping_for_pop = a_node.fast_children.get(pop_val, {})
             for sid in peeked:
@@ -814,8 +914,12 @@ class Model(GraphProvider):
                     continue
                 for dest_id, triple in per_state_map.items():
                     llm_bv, llm_bv_not, llm_bv_thru = triple
+                    stats.start('get_mask.traversal.node.fast_path.group_building.isdisjoint')
                     if popped_acc.llm_mask.isdisjoint(llm_bv_thru):
+                        stats.inc('get_mask.traversal.node.fast_path.descendant_pruned_gss')
+                        stats.stop('get_mask.traversal.node.fast_path.group_building.isdisjoint')
                         continue
+                    stats.stop('get_mask.traversal.node.fast_path.group_building.isdisjoint')
                     key = (int(dest_id), id(llm_bv_thru))
                     entry = groups.get(key)
                     if entry is None:
@@ -823,50 +927,80 @@ class Model(GraphProvider):
                     else:
                         entry["states"].append(int(sid))
 
+            stats.stop('get_mask.traversal.node.fast_path.group_building')
+
             if not groups:
                 continue
 
             # Sort by edge priority (lower distance = higher priority)
+            stats.start('get_mask.traversal.node.fast_path.group_sorting')
             dest_keys = sorted(groups.keys(), key=lambda k: (
                 self.arena[int(k[0])].children[0].min_distance_to_end if self.arena.get(int(k[0])) and self.arena[int(k[0])].children else 999999
             ))
+            stats.stop('get_mask.traversal.node.fast_path.group_sorting')
 
             for (dest_id, llm_bv_id) in dest_keys:
                 entry = groups[(dest_id, llm_bv_id)]
                 llm_bv = entry["llm_bv"]
                 states_to_keep: List[int] = entry["states"]
 
+                stats.start('get_mask.traversal.node.fast_path.jit_prune')
                 if llm_bv.isdisjoint(active_remaining_mask):
+                    stats.inc('get_mask.traversal.node.fast_path.jit_pruned')
+                    stats.stop('get_mask.traversal.node.fast_path.jit_prune')
                     continue
+                stats.stop('get_mask.traversal.node.fast_path.jit_prune')
 
                 source_after_apply = popped
                 key_apply = (id(popped), id(llm_bv))
+                stats.start('get_mask.traversal.node.fast_path.apply_cache_check')
                 cached_apply = local_apply_cache.get(key_apply)
+                stats.stop('get_mask.traversal.node.fast_path.apply_cache_check')
                 if cached_apply is not None:
                     source_after_apply = cached_apply
+                    stats.inc('get_mask.traversal.apply_cache_hits')
                 else:
                     @_acc_memoize(use_value_cache=False)
                     def intersect(acc: PyAcc):
+                        stats.start('get_mask.traversal.apply.intersect')
                         new_mask = acc.llm_mask.intersection(llm_bv)
+                        stats.stop('get_mask.traversal.apply.intersect')
                         return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                    stats.start('get_mask.traversal.node.fast_path.apply_and_prune')
                     tmp = popped.apply_and_prune(intersect)
+                    stats.stop('get_mask.traversal.node.fast_path.apply_and_prune')
                     if tmp.is_empty():
                         continue
                     source_after_apply = tmp
                     local_apply_cache[key_apply] = tmp
 
+                stats.inc('get_mask.traversal.edges_traversed')
+                stats.inc(f'get_mask.traversal.edge_pop_val.{pop_val}')
+
+                stats.start('get_mask.traversal.node.fast_path.isolate_many')
+                stats.start('get_mask.traversal.node.fast_path.isolate_check')
                 if len(states_to_keep) == len(peeked):
                     child_gss = source_after_apply
                 else:
                     key_isolate = (id(source_after_apply), tuple(states_to_keep))
                     if isolate_cache is not None and key_isolate in isolate_cache:
+                        stats.inc('get_mask.traversal.isolate_many_cache_hits')
                         child_gss = isolate_cache[key_isolate]
                     else:
+                        stats.stop('get_mask.traversal.node.fast_path.isolate_check')
+                        stats.start('get_mask.traversal.node.fast_path.isolate_many')
                         child_gss = source_after_apply.isolate_many(states_to_keep)
+                        stats.stop('get_mask.traversal.node.fast_path.isolate_many')
                         if isolate_cache is not None:
                             isolate_cache[key_isolate] = child_gss
+                        continue
+                stats.stop('get_mask.traversal.node.fast_path.isolate_check')
+                stats.stop('get_mask.traversal.node.fast_path.isolate_many')
 
-                if child_gss.is_empty():
+                stats.start('get_mask.traversal.node.fast_path.child_gss_empty_check')
+                is_empty = child_gss.is_empty()
+                stats.stop('get_mask.traversal.node.fast_path.child_gss_empty_check')
+                if is_empty:
                     continue
 
                 d: NodeID = int(dest_id)
@@ -874,39 +1008,54 @@ class Model(GraphProvider):
                 edge_priority = dest_node.children[0].min_distance_to_end if dest_node and dest_node.children else 999999
 
                 new_mask = yield Enqueue(d, child_gss, depth + 1, edge_priority)
+                stats.start('get_mask.traversal.node.fast_path.update_active_mask')
                 if new_mask is not None:
                     active_remaining_mask = new_mask
+                stats.stop('get_mask.traversal.node.fast_path.update_active_mask')
                 if active_remaining_mask.is_empty():
                     return
 
                 dests_proc += 1
+                stats.start('get_mask.traversal.node.fast_path.check_suspend')
                 if dests_proc >= max_dests:
                     next_priority = min((e.min_distance_to_end for e in a_node.children[group_index:]), default=999999)
                     priority = (next_priority, -self.max_depth.get(node_id, 0), group_index, 0)
                     new_mask = yield Suspend(node_id, priority, depth)
+                    stats.start('get_mask.traversal.node.fast_path.update_active_mask_suspend')
                     if new_mask is not None:
                         active_remaining_mask = new_mask
+                    stats.stop('get_mask.traversal.node.fast_path.update_active_mask_suspend')
                     if active_remaining_mask.is_empty():
                         return
                     dests_proc = 0
+                stats.stop('get_mask.traversal.node.fast_path.check_suspend')
 
                 group_index += 1
 
             if active_remaining_mask.is_empty():
                 return
 
+            stats.start('get_mask.traversal.node.fast_path.check_suspend_edges')
             if edges_proc >= max_edges:
                 next_priority = min((e.min_distance_to_end for e in a_node.children[group_index:]), default=999999)
                 priority = (next_priority, -self.max_depth.get(node_id, 0), group_index, 0)
                 new_mask = yield Suspend(int(node_id), priority, depth)
+                stats.start('get_mask.traversal.node.fast_path.update_active_mask_suspend_edges')
                 if new_mask is not None:
                     active_remaining_mask = new_mask
+                stats.stop('get_mask.traversal.node.fast_path.update_active_mask_suspend_edges')
                 if active_remaining_mask.is_empty():
                     return
                 edges_proc = 0
+            stats.stop('get_mask.traversal.node.fast_path.check_suspend_edges')
             edges_proc += 1
 
     def get_mask(self) -> Union[RangeSetOut, Dict]:
+        stats = Stats.get()
+        stats.start('get_mask')
+        stats.counts['get_mask.traversal.max_depth'] = 0
+        stats.inc('get_mask.setup.initial_tokenizer_states', len(self.state))
+
         all_ones = self.all_internal_llm_tokens_bitset
         final_mask = RangeSet.empty()
         work_heap = []
@@ -932,16 +1081,21 @@ class Model(GraphProvider):
                             disallowed |= term_map[term_id]
             return PyAcc({}, all_ones.difference(disallowed))
 
+        stats.start('get_mask.setup.seeding')
         init_cache = {}
         for sid, gss in self.state.items():
             r = self.roots_map[int(sid)]
+            stats.start('get_mask.setup.seeding.apply')
             gss_init = gss.apply(initialize_acc, init_cache)
+            stats.stop('get_mask.setup.seeding.apply')
             if not gss_init.is_empty():
                 root_node = self.arena.get(r)
                 edge_priority = root_node.children[0].min_distance_to_end if root_node and root_node.children else 999999
                 priority = (edge_priority, -self.max_depth.get(r, 0), 0, 0)
                 heapq.heappush(work_heap, HeapItem(priority, WorkItemNew(r, gss_init, 0, edge_priority)))
+        stats.stop('get_mask.setup.seeding')
 
+        stats.start('get_mask.traversal')
         remaining_mask = all_ones
         global_pop_cache: Dict[Tuple[int, int], Tuple[Any, Any, List[int], StateIDSet]] = {}
         apply_cache_by_bv: Dict[Tuple[int, int], GSS] = {}
@@ -949,9 +1103,13 @@ class Model(GraphProvider):
 
         while work_heap:
             if remaining_mask.is_empty():
+                stats.inc('get_mask.traversal.early_exit_full_mask')
                 break
 
+            stats.inc('get_mask.traversal.heap_pops')
+            stats.start('get_mask.traversal.heap_pop')
             heap_item = heapq.heappop(work_heap)
+            stats.stop('get_mask.traversal.heap_pop')
             priority, work = heap_item.priority, heap_item.item
 
             gen = None
@@ -960,25 +1118,45 @@ class Model(GraphProvider):
             if isinstance(work, WorkItemSuspended):
                 gen, depth = work.generator, work.depth
             elif isinstance(work, WorkItemNew):
+                stats.start('get_mask.traversal.work_item_new')
                 is_new_gen = True
                 node_id, gss_node, depth = work.node_id, work.gss, work.depth
+                stats.inc('get_mask.traversal.nodes_processed')
+                stats.counts['get_mask.traversal.max_depth'] = max(stats.counts.get('get_mask.traversal.max_depth', 0), depth)
 
+                stats.start('get_mask.traversal.node.reduce_acc')
                 gss_acc = gss_node.reduce_acc()
+                stats.stop('get_mask.traversal.node.reduce_acc')
 
+                stats.start('get_mask.traversal.work_item_new.is_end_check')
                 if self.is_end(node_id):
+                    stats.stop('get_mask.traversal.work_item_new.is_end_check')
+                    stats.inc('get_mask.traversal.end_nodes')
+                    stats.start('get_mask.traversal.end_node.update_masks')
+                    stats.start('get_mask.traversal.end_node.final_mask_union')
                     final_mask |= gss_acc.llm_mask
+                    stats.stop('get_mask.traversal.end_node.final_mask_union')
+                    stats.start('get_mask.traversal.update_remaining_mask')
                     remaining_mask = all_ones.difference(final_mask)
+                    stats.stop('get_mask.traversal.update_remaining_mask')
+                    stats.stop('get_mask.traversal.end_node.update_masks')
                     if remaining_mask.is_empty():
+                        stats.inc('get_mask.traversal.early_exit_full_mask')
                         break
+                else:
+                    stats.stop('get_mask.traversal.work_item_new.is_end_check')
 
                 a_node = self.arena.get(node_id)
                 if not a_node or not a_node.children:
                     continue
 
+                stats.start('get_mask.traversal.node.desc_closure_intersect')
                 node_desc_mask = a_node.llm_bv_descendant
                 work_llm_mask = node_desc_mask.intersection(gss_acc.llm_mask)
+                stats.stop('get_mask.traversal.node.desc_closure_intersect')
 
                 if work_llm_mask.isdisjoint(remaining_mask):
+                    stats.inc('get_mask.traversal.node.closure_pruned')
                     continue
 
                 gen = self._process_internal_node_gen(
@@ -991,33 +1169,70 @@ class Model(GraphProvider):
                     apply_cache=apply_cache_by_bv,
                     isolate_cache=isolate_many_cache,
                 )
+                stats.stop('get_mask.traversal.work_item_new')
             else:
                 raise ValueError(f'Unexpected work item: {work}')
 
             if not gen:
                 continue
 
+            stats.start('get_mask.traversal.gen_drive')
             try:
+                stats.start('get_mask.traversal.gen_drive.resume')
                 if is_new_gen:
                     yielded = next(gen)
                 else:
                     yielded = gen.send(remaining_mask)
+                stats.stop('get_mask.traversal.gen_drive.resume')
 
                 if isinstance(yielded, Enqueue):
+                    stats.start('get_mask.traversal.gen_drive.process_enqueue')
                     new_node_id, new_gss, new_depth, new_edge_priority = yielded.node_id, yielded.gss, yielded.depth, yielded.edge_priority
                     child_priority = (new_edge_priority, -self.max_depth.get(new_node_id, 0), 0, 0)
+                    stats.start('get_mask.traversal.heap_push')
                     heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, new_depth, new_edge_priority)))
+                    stats.stop('get_mask.traversal.heap_push')
+                    stats.start('get_mask.traversal.heap_push')
                     heapq.heappush(work_heap, HeapItem(priority, WorkItemSuspended(gen, depth, new_edge_priority)))
+                    stats.stop('get_mask.traversal.heap_push')
+                    stats.stop('get_mask.traversal.gen_drive.process_enqueue')
                 elif isinstance(yielded, Suspend):
+                    stats.start('get_mask.traversal.gen_drive.process_suspend')
                     susp_pri = yielded.priority
                     next_edge_priority = susp_pri[0] if isinstance(susp_pri, tuple) and len(susp_pri) > 0 else 999999
+                    stats.start('get_mask.traversal.heap_push')
                     heapq.heappush(work_heap, HeapItem(susp_pri, WorkItemSuspended(gen, yielded.depth, next_edge_priority)))
+                    stats.stop('get_mask.traversal.heap_push')
+                    stats.stop('get_mask.traversal.gen_drive.process_suspend')
             except StopIteration:
                 pass
+            stats.stop('get_mask.traversal.gen_drive')
+        stats.stop('get_mask.traversal')
 
+        stats.start('get_mask.teardown.final_conversion')
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
+        stats.stop('get_mask.teardown.final_conversion')
+        stats.stop('get_mask')
+
+        self.last_get_mask_cost = int(Stats.get().counts.get('get_mask.traversal.edges_traversed', 0))
+        self.last_get_mask_metrics = {
+            "edges_traversed": float(self.last_get_mask_cost),
+            "nodes_processed": float(Stats.get().counts.get('get_mask.traversal.nodes_processed', 0)),
+            "end_nodes": float(Stats.get().counts.get('get_mask.traversal.end_nodes', 0)),
+            "traversal_ms": float(Stats.get().times.get('get_mask.traversal', 0.0) * 1000.0),
+            "total_ms": float(Stats.get().times.get('get_mask', 0.0) * 1000.0),
+            "max_depth": float(Stats.get().counts.get('get_mask.traversal.max_depth', 0)),
+        }
+
+        if not self.suppress_stats_report:
+            Stats.get().report(sort_by='alpha')
 
         return original_indices
+
+    def finalize(self):
+        """Called at the end of a benchmark run to perform any final actions, like printing stats."""
+        print("\n--- Final Stats Report from Model ---")
+        Stats.get().report(sort_by='alpha')
