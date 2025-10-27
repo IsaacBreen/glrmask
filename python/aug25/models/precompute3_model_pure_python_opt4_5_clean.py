@@ -10,7 +10,7 @@ import types
 import _sep1 as ffi
 from tqdm import tqdm
 
-from ..stats import Stats
+from ..stats import Stats, stats_generator
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 from ..common_interface import GraphProvider
 from ..range_set import FFIRangeSet as RangeSet
@@ -767,6 +767,7 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
+    @stats_generator
     def _process_internal_node_gen(
         self,
         node_id: NodeID,
