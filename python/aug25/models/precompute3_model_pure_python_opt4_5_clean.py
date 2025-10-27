@@ -1025,6 +1025,7 @@ class Model(GraphProvider):
         stats.start('get_mask.setup.seeding')
         init_cache = {}
         for sid, gss in self.state.items():
+            if sid != 0: continue
             r = self.roots_map[int(sid)]
             stats.start('get_mask.setup.seeding.apply')
             gss_init = gss.apply(initialize_acc, init_cache)
