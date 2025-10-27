@@ -78,7 +78,7 @@ pub fn optimize_trie3_size(
 
     // First normalize any stale derived fields so they don't affect downstream reasoning.
     crate::debug!(2, "Initial stats:");
-    compute_and_print_precompute_stats3(roots, trie3_god);
+    compute_and_print_precompute_stats3(roots, trie3_god, max_llm_token_id, max_state_id);
 
     let mut step_counter = 1;
     macro_rules! run_pass {
@@ -95,7 +95,7 @@ pub fn optimize_trie3_size(
                 duration
             );
             crate::debug!(2, "Stats after pass {}:", step_counter);
-            compute_and_print_precompute_stats3(roots, trie3_god);
+            compute_and_print_precompute_stats3(roots, trie3_god, max_llm_token_id, max_state_id);
             step_counter += 1;
         };
     }

@@ -24,13 +24,20 @@ pub fn count_total_ranges_trie3(
 pub fn compute_and_print_precompute_stats3(
     roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
+    max_llm_token_id: usize,
+    max_state_id: usize,
 ) {
     let mut stats = PrecomputeStats::default();
     calculate_final_stats3(roots, &mut stats, trie3_god);
     print_precompute_stats3(&stats, trie3_god);
 
     // Also print new MiniTrie-based metrics
-    let (mini, _, _) = crate::trie3_opt::coordinator::export_to_mini(roots, trie3_god);
+    let (mini, _, _) = crate::trie3_opt::coordinator::export_to_mini(
+        roots,
+        trie3_god,
+        max_llm_token_id,
+        max_state_id,
+    );
     let metrics = crate::trie3_opt::metrics::run_all_metrics(&mini);
     println!("  MiniTrie Metrics: {:#?}", metrics);
 }

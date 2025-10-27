@@ -87,6 +87,8 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
 pub(crate) fn export_to_mini(
     roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
+    max_llm_token_id: usize,
+    max_state_id: usize,
 ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
     let mut mini = MiniTrie::new();
 
@@ -111,8 +113,12 @@ pub(crate) fn export_to_mini(
         for (ek, dm) in r.children() {
             // Build token set
             let mut toks = SortedSet::new();
-            for t in ek.1.iter() {
-                toks.insert(t);
+            if ek.1.is_all() {
+                toks = SortedSet::from_iter(0..=max_llm_token_id);
+            } else {
+                for t in ek.1.iter() {
+                    toks.insert(t);
+                }
             }
             if toks.is_empty() {
                 continue;
@@ -131,8 +137,12 @@ pub(crate) fn export_to_mini(
                 };
                 // Build state set
                 let mut st = SortedSet::new();
-                for s in sids.iter() {
-                    st.insert(s);
+                if sids.is_all() {
+                    st = SortedSet::from_iter(0..=max_state_id);
+                } else {
+                    for s in sids.iter() {
+                        st.insert(s);
+                    }
                 }
                 if !st.is_empty() {
                     mini.add_edge(new_id, key.clone(), dst_id, st);
@@ -243,7 +253,8 @@ pub fn run_pipeline_on_precompute3(
     config: CoordinatorConfig,
 ) {
     // Export the current graph into a minimal structure
-    let (mut mini, root_pairs, _old_mapping) = export_to_mini(roots, trie3_god);
+    let (mut mini, root_pairs, _old_mapping) =
+        export_to_mini(roots, trie3_god, max_llm_token_id, max_state_id);
 
     // Build a fresh pass pipeline and context
     let mut ctx = OptimizationContext::new(max_llm_token_id, max_state_id);
