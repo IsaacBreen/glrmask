@@ -1,4 +1,6 @@
 use crate::trie3_opt::full::prune_end_reach::prune_nodes_not_reaching_end_trie3;
+use crate::trie3_opt::full::prune::prune_dead_paths_trie3;
+use crate::trie3_opt::full::compress_chains::compress_unary_chains_trie3;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
