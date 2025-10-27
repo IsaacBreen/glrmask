@@ -2808,7 +2808,7 @@ class Model(GraphProvider):
 
         # Optional internal stats printout (suppressed by default)
         if not self.suppress_stats_report:
-            Stats.get().report()
+            Stats.get().report(sort_by='alpha')
 
         if record_end_unions:
             oracle_data = {
@@ -3073,5 +3073,5 @@ class Model(GraphProvider):
     def finalize(self):
         """Called at the end of a benchmark run to perform any final actions, like printing stats."""
         print("\n--- Final Stats Report from Model ---")
-        Stats.get().report()
+        Stats.get().report(sort_by='alpha')
 
