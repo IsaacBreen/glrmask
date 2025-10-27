@@ -10,7 +10,7 @@ import types
 import _sep1 as ffi
 from tqdm import tqdm
 
-from ..stats import Stats, stats_generator
+from ..stats import Stats
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 from ..common_interface import GraphProvider
 from ..range_set import FFIRangeSet as RangeSet
@@ -770,7 +770,6 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
-    @stats_generator
     def _process_internal_node_gen(
         self,
         node_id: NodeID,
@@ -999,6 +998,8 @@ class Model(GraphProvider):
         stats.counts['get_mask.traversal.max_depth'] = 0
         stats.inc('get_mask.setup.initial_tokenizer_states', len(self.state))
 
+        _process_internal_node_gen = stats.stats_generator(self._process_internal_node_gen)
+
         all_ones = self.all_internal_llm_tokens_bitset
         final_mask = RangeSet.empty()
         work_heap = []
@@ -1101,7 +1102,7 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.node.closure_pruned')
                     continue
 
-                gen = self._process_internal_node_gen(
+                gen = _process_internal_node_gen(
                     node_id,
                     gss_node,
                     remaining_mask,
