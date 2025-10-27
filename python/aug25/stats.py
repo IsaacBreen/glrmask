@@ -143,8 +143,14 @@ class Stats:
 
     # -------- Reporting --------
 
-    def report(self):
-        """Print a formatted report of all collected stats."""
+    def report(self, sort_by: str = "position"):
+        """Print a formatted report of all collected stats.
+
+        Args:
+            sort_by (str): Sorting order for keys.
+                - "position": Sort by order of appearance in the code (default).
+                - "alpha": Sort alphabetically.
+        """
         if not self.enabled:
             return
 
@@ -158,7 +164,10 @@ class Stats:
         if self.show_all_stats:
             all_keys = self.counts.keys() | self.durations.keys()
             if all_keys:
-                sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
+                if sort_by == "alpha":
+                    sorted_keys = sorted(all_keys)
+                else:  # Default to "position"
+                    sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
                 for key in sorted_keys:
                     # 'hits' is timer hits if available, otherwise counter value.
                     hits = None
@@ -207,7 +216,10 @@ class Stats:
                     min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
                     group_sort_keys[g] = min_pos
 
-            sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
+            if sort_by == "alpha":
+                sorted_groups = sorted(self.groups)
+            else:  # Default to "position"
+                sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
             for g in sorted_groups:
                 all_members = self._group_members(g)
                 if not all_members:
@@ -230,7 +242,10 @@ class Stats:
 
                 member_rows = []
                 if all_members:
-                    sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
+                    if sort_by == "alpha":
+                        sorted_members = sorted(all_members)
+                    else:  # Default to "position"
+                        sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
                     for k in sorted_members:
                         # 'hits' is timer hits if available, otherwise counter value.
                         hits = None
