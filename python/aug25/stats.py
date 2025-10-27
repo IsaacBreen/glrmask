@@ -5,6 +5,7 @@ from typing import Dict, Iterable, List, Tuple, Optional
 import statistics
 import math
 import os
+import functools
 
 
 class Stats:
@@ -88,6 +89,70 @@ class Stats:
             duration = time.perf_counter() - self.timers[key]
             self.durations[key].append(duration)
             del self.timers[key]
+
+    def stats_generator(self, func):
+        """Decorator for generator functions to handle timers across yields.
+
+        This decorator ensures that timers started within a generator are paused
+        when the generator yields and resumed when it continues.
+        """
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if not self.enabled:
+                yield from func(*args, **kwargs)
+                return
+
+            gen = func(*args, **kwargs)
+            paused_generator_timers = {}  # key -> elapsed_seconds
+            sent_value = None
+
+            try:
+                while True:
+                    # --- RESUME ---
+                    # Resume timers that this generator instance had paused.
+                    resume_time = time.perf_counter()
+                    for key, elapsed_time in paused_generator_timers.items():
+                        self.timers[key] = resume_time - elapsed_time
+                    paused_generator_timers.clear()
+
+                    # Identify timers active before we step into the user's generator.
+                    # These are timers we should NOT touch.
+                    external_timers_before_resume = set(self.timers.keys())
+
+                    try:
+                        # Step into the user's generator.
+                        yielded_value = gen.send(sent_value)
+                    except StopIteration:
+                        # Generator finished.
+                        return
+
+                    # --- PAUSE ---
+                    # The generator has yielded. We need to pause any timers it started
+                    # and left running.
+                    pause_time = time.perf_counter()
+
+                    # Identify timers that are active now.
+                    all_active_timers = set(self.timers.keys())
+
+                    # Timers started by the generator are those active now that were NOT
+                    # active before we resumed it.
+                    generator_started_timers = all_active_timers - external_timers_before_resume
+
+                    for key in generator_started_timers:
+                        start_time = self.timers[key]
+                        elapsed_time = pause_time - start_time
+                        paused_generator_timers[key] = elapsed_time
+                        del self.timers[key]
+
+                    # The `yield` expression in the calling code evaluates to the value
+                    # we `send()` next time.
+                    sent_value = yield yielded_value
+            finally:
+                # When the generator is closed (e.g., garbage collected or `close()`
+                # called), we should also close the inner generator.
+                gen.close()
+
+        return wrapper
 
     def _record_key_position(self, key: str):
         """If seeing a key for the first time, record its call site (file, line)."""
