@@ -42,25 +42,16 @@ impl OptimizationPass for CompressEdgesPass {
 
             let mut new_children: BTreeMap<EdgeKey, BTreeMap<u32, SortedSet>> = BTreeMap::new();
             for (pop, groups) in by_pop {
-                // Stage 2: for each pop, combine groups that yield identical final token masks
-                // by unioning their destination maps.
-                let mut out_by_tokens: BTreeMap<SortedSet, BTreeMap<u32, SortedSet>> =
-                    BTreeMap::new();
-
                 for (dest_vec, tokens) in groups {
                     if tokens.is_empty() {
                         continue;
                     }
-                    let dest_out = out_by_tokens.entry(tokens).or_default();
+                    let mut dm = BTreeMap::new();
                     for (dst, sids) in dest_vec {
                         if !sids.is_empty() {
-                            dest_out.entry(dst).or_default().union_inplace(&sids);
+                            dm.insert(dst, sids);
                         }
                     }
-                }
-
-                // Emit final edges from the aggregated maps.
-                for (tokens, dm) in out_by_tokens {
                     if !dm.is_empty() {
                         new_children.insert(EdgeKey::new(pop, tokens), dm);
                     }
