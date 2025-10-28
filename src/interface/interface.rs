@@ -139,6 +139,7 @@ pub struct GrammarDefinition {
     pub regex_name_to_group_id: BiBTreeMap<String, usize>,
     pub regex_expr_to_group_id: BiBTreeMap<Expr, usize>,
     pub ignore_terminal_id: Option<TerminalID>,
+    pub external_name_to_group_id: BiBTreeMap<String, usize>,
 }
 
 impl GrammarDefinition {
@@ -162,6 +163,7 @@ impl JSONConvertible for GrammarDefinition {
         obj.insert("productions".to_string(), self.productions.to_json());
         obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
+        obj.insert("external_name_to_group_id".to_string(), self.external_name_to_group_id.to_json());
 
         let mut regexes_json_list = Vec::new();
         let mut sorted_regexes_info: Vec<(usize, String, Expr)> = Vec::new();
@@ -213,6 +215,10 @@ impl JSONConvertible for GrammarDefinition {
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GrammarDefinition".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
+                let external_name_to_group_id = obj.remove("external_name_to_group_id")
+                    .map(|node| BiBTreeMap::<String, usize>::from_json(node))
+                    .transpose()?
+                    .unwrap_or_default();
 
                 let mut new_literal_to_group_id = BiBTreeMap::new();
                 let mut new_regex_name_to_group_id = BiBTreeMap::new();
@@ -252,6 +258,7 @@ impl JSONConvertible for GrammarDefinition {
                     literal_to_group_id: new_literal_to_group_id,
                     regex_expr_to_group_id: new_regex_expr_to_group_id,
                     ignore_terminal_id,
+                    external_name_to_group_id,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
@@ -348,6 +355,24 @@ impl GrammarDefinition {
             ebnf_string.push_str(" ;\n");
         }
         ebnf_string
+    }
+
+    pub fn add_external_terminal(&mut self, name: &str) -> usize {
+        if let Some(group_id) = self.external_name_to_group_id.get_by_left(name) {
+            return *group_id;
+        }
+        if self.regex_name_to_group_id.contains_left(name) {
+            panic!("External terminal name '{}' conflicts with an existing terminal in the grammar.", name);
+        }
+
+        let all_gids: BTreeSet<usize> = self.regex_expr_to_group_id.values().copied()
+            .chain(self.external_name_to_group_id.values().copied())
+            .collect();
+
+        let new_group_id = all_gids.iter().max().map(|max_id| max_id + 1).unwrap_or(0);
+
+        self.external_name_to_group_id.insert(name.to_string(), new_group_id);
+        new_group_id
     }
 }
 
@@ -917,6 +942,7 @@ impl GrammarDefinition {
             regex_name_to_group_id,
             regex_expr_to_group_id,
             ignore_terminal_id: None,
+            external_name_to_group_id: BiBTreeMap::new(),
         })
     }
 
