@@ -35,6 +35,7 @@ use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_on_stored
 use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+use crate::glr::analyze::create_unique_name_generator;
 use crate::datastructures::trie::{EdgeInserter, PrettyPrintOptions, Trie, Trie2Index, TrieTraversalData};
 use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -42,7 +43,7 @@ use crate::datastructures::EntryApi;
 use crate::equivalence_analysis_finite_automata;
 use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
-use crate::glr::grammar::{Symbol, Terminal};
+use crate::glr::grammar::{prod, NonTerminal, Symbol, Terminal};
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::parser::{BelowBottomCacheKey, BelowBottomReductionMode, ExpectElse, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
 use crate::glr::table::StateID;
@@ -1105,19 +1106,19 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
         precompute0_cache: Option<Precompute0Cache>,
     ) -> Self {
+        let initial_compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
+        let initial_parser = &initial_compiled_grammar.glr_parser;
         // This function assumes dummy terminals (e.g., `__DUMMY_TERMINAL_.*__`) are defined in the grammar.
         // It will group real terminals under these dummies based on the structural similarity of their
         // corresponding Trie3 templates.
-        let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
-        let parser = &compiled_grammar.glr_parser;
 
         // We need internal_max_llm_token to build templates, so we compute it early.
-        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &compiled_grammar.tokenizer);
+        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &initial_compiled_grammar.tokenizer);
         let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
 
         // Build templates for all terminals to assess similarity.
         let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
-        let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
+        let templates = Self::build_terminal_trie3_templates(initial_parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
 
         // Group terminals by the similarity of their template trie's features.
         const SIMILARITY_THRESHOLD: f64 = 0.5;
@@ -1137,7 +1138,7 @@ impl GrammarConstraint {
         for tid in sorted_tids {
             let features = template_features.get(&tid).unwrap();
             let complexity = features.num_nodes; // Use num_nodes as complexity metric
-            let terminal_name = parser.terminal_map.get_by_right(&tid).unwrap();
+            let terminal_name = initial_parser.terminal_map.get_by_right(&tid).unwrap();
 
             let mut best_group: Option<(usize, f64)> = None;
 
@@ -1152,13 +1153,13 @@ impl GrammarConstraint {
                 if best_dist <= SIMILARITY_THRESHOLD {
                     // Add to existing similar group.
                     let best_group_tid = groups[best_idx].1[0];
-                    let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
+                    let best_group_terminal_name = initial_parser.terminal_map.get_by_right(&best_group_tid).unwrap();
                     crate::debug!(2, "Grouping terminal '{}' with group represented by '{}' (distance: {:.2})", terminal_name, best_group_terminal_name, best_dist);
                     groups[best_idx].1.push(tid);
                 } else {
                     // No group is similar enough, create a new one.
                     let best_group_tid = groups[best_idx].1[0];
-                    let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
+                    let best_group_terminal_name = initial_parser.terminal_map.get_by_right(&best_group_tid).unwrap();
                     crate::debug!(
                         2,
                         "Creating new group for terminal '{}'. Closest group (rep by '{}') has distance {:.2} > threshold {}.",
@@ -1178,52 +1179,50 @@ impl GrammarConstraint {
             }
         }
 
-        let mut new_config = config.clone();
-        new_config.dummy_terminal_map.clear();
-        new_config.dummy_terminal_penalties.clear();
+        let mut sorted_groups: Vec<_> = groups.into_iter().map(|(_, tids, _complexity)| tids).collect();
+        sorted_groups.sort_by_key(|tids| std::cmp::Reverse(tids.len()));
 
-        let mut sorted_groups: Vec<_> = groups.into_iter().map(|(_, tids, complexity)| (tids, complexity)).collect();
-        // Assign larger groups first to the available dummy terminals.
-        sorted_groups.sort_by_key(|(tids, _complexity)| std::cmp::Reverse(tids.len()));
+        let mut original_to_dummy_nt: BTreeMap<TerminalID, NonTerminal> = BTreeMap::new();
+        let mut new_dummy_productions = Vec::new();
+        let mut dummy_groups = BTreeMap::new();
 
-        let mut dummy_idx = 0;
-        for (tids, complexity) in sorted_groups {
-            if tids.len() <= 1 { // Don't group single-terminal groups
-                continue;
+        if !sorted_groups.is_empty() {
+            let all_nonterminals: BTreeSet<_> = initial_parser.productions.iter().flat_map(|p| {
+                let mut nts = vec![p.lhs.clone()];
+                for s in &p.rhs {
+                    if let Symbol::NonTerminal(nt) = s { nts.push(nt.clone()); }
+                }
+                nts
+            }).collect();
+            let mut name_generator = create_unique_name_generator(&all_nonterminals);
+
+            for tids in sorted_groups {
+                if tids.len() <= 1 { continue; }
+
+                let first_term_name = initial_parser.terminal_map.get_by_right(&tids[0]).unwrap().to_string();
+                let dummy_nt_name = name_generator(&format!("__DUMMY_GROUP_{}", first_term_name.replace(|c: char| !c.is_alphanumeric(), "_")));
+                let dummy_nt = crate::glr::grammar::NonTerminal(dummy_nt_name.clone());
+
+                let mut original_names = BTreeSet::new();
+                for tid in &tids {
+                    original_to_dummy_nt.insert(*tid, dummy_nt.clone());
+                    let original_terminal = initial_parser.terminal_map.get_by_right(tid).unwrap();
+                    new_dummy_productions.push(prod(&dummy_nt.0, vec![Symbol::Terminal(original_terminal.clone())]));
+                    original_names.insert(original_terminal.to_string());
+                }
+                dummy_groups.insert(dummy_nt_name, original_names);
             }
-
-            let dummy_name = format!("__DUMMY_TERMINAL_{}__", dummy_idx);
-            let dummy_term = Terminal::regex_name(&dummy_name);
-
-            if parser.terminal_map.get_by_left(&dummy_term).is_some() {
-                // Dummy terminal exists, create the group.
-                let original_names: BTreeSet<String> = tids.iter()
-                    .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
-                    .collect();
-                new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
-                new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
-            } else {
-                // Dummy terminal does not exist. Don't create the group and print a message.
-                let original_names: Vec<String> = tids.iter()
-                    .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
-                    .collect();
-                crate::debug!(1, "Skipping group for {{{}}} because dummy terminal '{}' is not defined in the grammar.", original_names.join(", "), dummy_name);
-            }
-            dummy_idx += 1;
         }
 
-        println!("\n--- Dummy Terminal Groups ---");
-        if new_config.dummy_terminal_map.is_empty() {
-            println!("No dummy groups were created. This may be because no terminals were similar enough to be grouped,");
-            println!("or because the required dummy terminals (e.g., '__DUMMY_TERMINAL_0__') are not defined in the grammar.");
-            println!("See debug logs (level 1) for details on skipped groups.");
+        println!("\n--- Dummy Non-Terminal Groups ---");
+        if dummy_groups.is_empty() {
+            println!("No terminal groups were created. This may be because no terminals were similar enough to be grouped.");
         } else {
-            let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
+            let mut sorted_dummies: Vec<_> = dummy_groups.iter().collect();
             sorted_dummies.sort_by_key(|(k, _)| *k);
 
             for (dummy_name, original_names) in sorted_dummies {
-                let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
-                println!("- {}: (penalty: {})", dummy_name, penalty);
+                println!("- {}:", dummy_name);
                 let mut sorted_originals: Vec<_> = original_names.iter().collect();
                 sorted_originals.sort();
                 for name in sorted_originals {
@@ -1233,9 +1232,35 @@ impl GrammarConstraint {
         }
         println!("---------------------------\n");
 
+        let final_parser = if !original_to_dummy_nt.is_empty() {
+            let mut modified_productions = initial_parser.productions.clone();
+            for p in &mut modified_productions {
+                for s in &mut p.rhs {
+                    if let Symbol::Terminal(t) = s {
+                        if let Some(tid) = initial_parser.terminal_map.get_by_left(t) {
+                            if let Some(dummy_nt) = original_to_dummy_nt.get(tid) {
+                                *s = Symbol::NonTerminal(dummy_nt.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            let final_prods = [modified_productions, new_dummy_productions].concat();
+
+            crate::debug!(1, "Re-compiling grammar with {} dummy non-terminal groups.", dummy_groups.len());
+            crate::glr::table::generate_glr_parser(&final_prods, initial_parser.ignore_terminal_id)
+        } else {
+            initial_parser.clone()
+        };
+
+        // We now use the final_parser. The config for dummy terminals is no longer needed.
+        let mut new_config = config.clone();
+        new_config.dummy_terminal_map.clear();
+        new_config.dummy_terminal_penalties.clear();
+
         Self::new_with_config_and_precompute0_cache(
-            compiled_grammar.tokenizer,
-            compiled_grammar.glr_parser,
+            initial_compiled_grammar.tokenizer,
+            final_parser, // Use the potentially new parser
             llm_token_map,
             compiled_grammar.definition.terminal_to_group_id().clone(),
             max_original_llm_token_id,
