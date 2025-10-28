@@ -1117,29 +1117,6 @@ impl CompiledGrammar {
         for (name, group_id) in &definition.external_name_to_group_id {
             terminal_map.insert(Terminal::RegexName(name.clone()), TerminalID(*group_id));
         }
-
-        // HACK: Scan productions for terminals not in the map, assuming they are
-        // dummy terminals with IDs encoded in their names. This is a workaround
-        // for the calling code not correctly populating the GrammarDefinition.
-        let all_terminals_in_prods: BTreeSet<Terminal> = definition.productions
-            .iter()
-            .flat_map(|p| p.rhs.iter())
-            .filter_map(|s| if let Symbol::Terminal(t) = s { Some(t.clone()) } else { None })
-            .collect();
-
-        for terminal in all_terminals_in_prods {
-            if !terminal_map.contains_left(&terminal) {
-                if let Terminal::RegexName(name) = &terminal {
-                    if let Some(id_str) = name.strip_prefix("__DUMMY_TERMINAL_") {
-                        if let Ok(id) = id_str.parse::<usize>() {
-                            crate::debug!(1, "Warning: Auto-registering dummy terminal '{}' with inferred ID {}", name, id);
-                            terminal_map.insert(terminal.clone(), TerminalID(id));
-                        }
-                    }
-                }
-            }
-        }
-
         let glr_parser = generate_glr_parser_with_terminal_map(
             &definition.productions,
             terminal_map,
