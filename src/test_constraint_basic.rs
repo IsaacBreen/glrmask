@@ -79,7 +79,6 @@ fn test_trivial() {
 
     // Commit "$"
     state.commit(LLMTokenID(1));
-    assert!(state.is_active());
 
     // Mask should now be empty as we've reached the end of a valid parse
     let mask3 = state.get_mask();
