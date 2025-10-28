@@ -27,7 +27,6 @@ pub mod reorder_llm_tokens;
 pub mod merge_state_agnostic;
 
 pub use canonicalize_end_nodes::CanonicalizeEndNodesPass;
-pub mod aggressive_state_pop_collapse;
 pub use compress_edges::CompressEdgesPass;
 pub use compress_unary_chains::CompressUnaryChainsPass;
 pub use eliminate_pop0::EliminatePop0ExceptRootsPass;
@@ -45,4 +44,3 @@ pub use prune_dead_paths::PruneDeadPathsPass;
 pub use prune_unproductive_paths::PruneUnproductivePathsPass;
 pub use reorder_llm_tokens::ReorderLLMTokensPass;
 pub use merge_state_agnostic::MergeStateAgnosticPass;
-pub use aggressive_state_pop_collapse::AggressiveStatePopCollapsePass;

@@ -43,7 +43,6 @@ pub fn optimize_trie3_size(
         factor_common_destinations_min_incoming: config.factor_common_destinations_min_incoming,
         factor_root_fanout: config.factor_root_fanout,
         factor_root_fanout_max_atoms_per_pop: config.factor_root_fanout_max_atoms_per_pop,
-        aggressive_state_pop_collapse: true,
         merge_structural_max_iters: config.merge_structural_max_iters,
         merge_bisimulation_max_iters: config.merge_bisimulation_max_iters,
         merge_global_atoms: config.merge_global_atoms,

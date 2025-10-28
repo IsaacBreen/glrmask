@@ -44,7 +44,6 @@ pub struct CoordinatorConfig {
     pub factor_common_destinations_min_incoming: usize,
     pub factor_root_fanout: bool,
     pub factor_root_fanout_max_atoms_per_pop: usize,
-    pub aggressive_state_pop_collapse: bool,
     pub merge_structural_max_iters: usize,
     pub merge_bisimulation_max_iters: usize,
     pub merge_global_atoms: bool,
@@ -81,7 +80,6 @@ impl Default for CoordinatorConfig {
             factor_common_destinations_min_incoming: 12,
             factor_root_fanout: true,
             factor_root_fanout_max_atoms_per_pop: 512,
-            aggressive_state_pop_collapse: false,
             merge_structural_max_iters: 4,
             merge_bisimulation_max_iters: 1000,
             merge_global_atoms: true,
@@ -120,7 +118,6 @@ impl CoordinatorConfig {
             factor_common_destinations_min_incoming: 0,
             factor_root_fanout: false,
             factor_root_fanout_max_atoms_per_pop: 0,
-            aggressive_state_pop_collapse: false,
             merge_structural_max_iters: 0,
             merge_bisimulation_max_iters: 0,
             merge_global_atoms: false,
@@ -184,9 +181,6 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
         }
         if config.factor_common_destinations {
             pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
-        }
-        if config.aggressive_state_pop_collapse {
-            pipeline.push(Box::new(AggressiveStatePopCollapsePass));
         }
 
         // Phase 4: Edge compression and chain contraction
