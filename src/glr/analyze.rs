@@ -843,24 +843,16 @@ pub fn rewrite_productions_with_dummies(
     for prod in original_productions {
         let mut new_rhs = Vec::new();
         for symbol in &prod.rhs {
-            let mut replaced = false;
             if let Symbol::Terminal(t) = symbol {
-                let terminal_name_for_lookup = match t {
-                    Terminal::RegexName(name) => name.clone(),
-                    Terminal::Literal(bytes) => String::from_utf8_lossy(bytes).to_string(),
-                };
-
-                if let Some(dummy_name) = original_to_dummy.get(&terminal_name_for_lookup) {
-                    let dummy_terminal = Terminal::RegexName(dummy_name.clone());
-                    new_rhs.push(Symbol::Terminal(dummy_terminal.clone()));
-                    new_dummy_terminals.insert(dummy_terminal);
-                    replaced = true;
+                if let Terminal::RegexName(name) = t {
+                    if let Some(dummy_name) = original_to_dummy.get(name) {
+                        let dummy_terminal = Terminal::RegexName(dummy_name.clone());
+                        new_rhs.push(Symbol::Terminal(dummy_terminal.clone()));
+                        new_dummy_terminals.insert(dummy_terminal);
+                    }
                 }
             }
-
-            if !replaced {
-                new_rhs.push(symbol.clone());
-            }
+            new_rhs.push(symbol.clone());
         }
         new_productions.push(Production {
             lhs: prod.lhs.clone(),

@@ -1233,43 +1233,8 @@ impl GrammarConstraint {
             crate::debug!(1, "Recompiling grammar with {} new dummy terminals.", new_dummy_terminals.len());
             let mut final_grammar_def = (*grammar_definition).clone();
             final_grammar_def.productions = final_productions;
-
-            // For each dummy terminal, create a regex `Expr::Choice` of its members' expressions.
-            for (dummy_name, original_names) in &new_config.dummy_terminal_map {
-                let mut choice_exprs = Vec::new();
-                for original_name in original_names {
-                    // Try to find it as a regex name first
-                    if let Some(original_gid) = grammar_definition.regex_name_to_group_id.get_by_left(original_name) {
-                        if let Some(original_expr) = grammar_definition.regex_expr_to_group_id.get_by_right(original_gid) {
-                            choice_exprs.push(original_expr.clone());
-                        }
-                    } 
-                    // Then try to find it as a literal
-                    else if let Some(original_gid) = grammar_definition.literal_to_group_id.get_by_left(original_name.as_bytes()) {
-                        if let Some(original_expr) = grammar_definition.regex_expr_to_group_id.get_by_right(original_gid) {
-                            choice_exprs.push(original_expr.clone());
-                        }
-                    }
-                }
-
-                if !choice_exprs.is_empty() {
-                    let dummy_expr = if choice_exprs.len() == 1 { choice_exprs.remove(0) } else { crate::finite_automata::Expr::Choice(choice_exprs) };
-                    final_grammar_def.add_regex_terminal(dummy_name, dummy_expr);
-                } else {
-                    final_grammar_def.add_external_terminal(dummy_name);
-                }
-            }
-
-            // The original terminals that are now part of a group should be removed from the grammar def.
-            for original_names in new_config.dummy_terminal_map.values() {
-                for name in original_names {
-                    if let Some((_name, group_id)) = final_grammar_def.regex_name_to_group_id.remove_by_left(name) {
-                        final_grammar_def.regex_expr_to_group_id.remove_by_right(&group_id);
-                    }
-                    if let Some((_bytes, group_id)) = final_grammar_def.literal_to_group_id.remove_by_left(name.as_bytes()) {
-                        final_grammar_def.regex_expr_to_group_id.remove_by_right(&group_id);
-                    }
-                }
+            for dummy_tid in new_dummy_terminals {
+                final_grammar_def.add_external_terminal(&format!("__DUMMY_TERMINAL_{}__", dummy_tid));
             }
             CompiledGrammar::from_definition(Arc::new(final_grammar_def))
         } else {
