@@ -1178,13 +1178,6 @@ impl GrammarConstraint {
             }
         }
 
-        // Find available dummy terminals defined in the grammar.
-        let mut available_dummy_terminals: Vec<String> = parser.terminal_map.left_values()
-            .filter(|term| term.to_string().starts_with("__DUMMY_TERMINAL_"))
-            .map(|term| term.to_string())
-            .collect();
-        available_dummy_terminals.sort(); // For determinism
-
         let mut new_config = config.clone();
         new_config.dummy_terminal_map.clear();
         new_config.dummy_terminal_penalties.clear();
@@ -1193,26 +1186,37 @@ impl GrammarConstraint {
         // Assign larger groups first to the available dummy terminals.
         sorted_groups.sort_by_key(|(tids, _complexity)| std::cmp::Reverse(tids.len()));
 
-        let mut dummy_iter = available_dummy_terminals.iter();
+        let mut dummy_idx = 0;
         for (tids, complexity) in sorted_groups {
             if tids.len() <= 1 { // Don't group single-terminal groups
                 continue;
             }
-            if let Some(dummy_name) = dummy_iter.next() {
+
+            let dummy_name = format!("__DUMMY_TERMINAL_{}__", dummy_idx);
+            let dummy_term = Terminal::regex_name(&dummy_name);
+
+            if parser.terminal_map.get_by_left(&dummy_term).is_some() {
+                // Dummy terminal exists, create the group.
                 let original_names: BTreeSet<String> = tids.iter()
                     .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
                     .collect();
                 new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
                 new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
             } else {
-                crate::debug!(1, "Warning: Ran out of dummy terminals for grouping. Some groups will not be grouped.");
-                break;
+                // Dummy terminal does not exist. Don't create the group and print a message.
+                let original_names: Vec<String> = tids.iter()
+                    .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
+                    .collect();
+                crate::debug!(1, "Skipping group for {{{}}} because dummy terminal '{}' is not defined in the grammar.", original_names.join(", "), dummy_name);
             }
+            dummy_idx += 1;
         }
 
         println!("\n--- Dummy Terminal Groups ---");
         if new_config.dummy_terminal_map.is_empty() {
-            println!("No dummy groups were created.");
+            println!("No dummy groups were created. This may be because no terminals were similar enough to be grouped,");
+            println!("or because the required dummy terminals (e.g., '__DUMMY_TERMINAL_0__') are not defined in the grammar.");
+            println!("See debug logs (level 1) for details on skipped groups.");
         } else {
             let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
             sorted_dummies.sort_by_key(|(k, _)| *k);

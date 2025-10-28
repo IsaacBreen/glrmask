@@ -4712,7 +4712,7 @@ local_system:
               let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
 
               // Group terminals by the similarity of their template trie's features.
-              const SIMILARITY_THRESHOLD: f64 = 10000.0;
+              const SIMILARITY_THRESHOLD: f64 = 0.5;
 
               let mut template_features = BTreeMap::new();
               for (tid, (start, _end)) in &templates {
@@ -4729,6 +4729,7 @@ local_system:
               for tid in sorted_tids {
                   let features = template_features.get(&tid).unwrap();
                   let complexity = features.num_nodes; // Use num_nodes as complexity metric
+                  let terminal_name = parser.terminal_map.get_by_right(&tid).unwrap();
 
                   let mut best_group: Option<(usize, f64)> = None;
 
@@ -4742,13 +4743,29 @@ local_system:
                   if let Some((best_idx, best_dist)) = best_group {
                       if best_dist <= SIMILARITY_THRESHOLD {
                           // Add to existing similar group.
+                          let best_group_tid = groups[best_idx].1[0];
+                          let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
+                          crate::debug!(2, "Grouping terminal '{}' with group represented by '{}' (distance: {:.2})", terminal_name, best_group_terminal_name, best_dist);
                           groups[best_idx].1.push(tid);
                       } else {
                           // No group is similar enough, create a new one.
+                          let best_group_tid = groups[best_idx].1[0];
+                          let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
+                          crate::debug!(
+                              2,
+                              "Creating new group for terminal '{}'. Closest group (rep by '{}') has distance {:.2} > threshold {}.",
+                              terminal_name,
+                              best_group_terminal_name,
+                              best_dist,
+                              SIMILARITY_THRESHOLD
+                          );
+                          crate::debug!(3, "  - Features for '{}': {:?}", terminal_name, features);
+                          crate::debug!(3, "  - Features for group '{}': {:?}", best_group_terminal_name, &groups[best_idx].0);
                           groups.push((features.clone(), vec![tid], complexity));
                       }
                   } else {
                       // This is the first group.
+                      crate::debug!(2, "Creating first group for terminal '{}'", terminal_name);
                       groups.push((features.clone(), vec![tid], complexity));
                   }
               }
@@ -12407,13 +12424,6 @@ local_system:
                   }
               }
 
-              // Find available dummy terminals defined in the grammar.
-              let mut available_dummy_terminals: Vec<String> = parser.terminal_map.left_values()
-                  .filter(|term| term.to_string().starts_with("__DUMMY_TERMINAL_"))
-                  .map(|term| term.to_string())
-                  .collect();
-              available_dummy_terminals.sort(); // For determinism
-
               let mut new_config = config.clone();
               new_config.dummy_terminal_map.clear();
               new_config.dummy_terminal_penalties.clear();
@@ -12422,26 +12432,37 @@ local_system:
               // Assign larger groups first to the available dummy terminals.
               sorted_groups.sort_by_key(|(tids, _complexity)| std::cmp::Reverse(tids.len()));
 
-              let mut dummy_iter = available_dummy_terminals.iter();
+              let mut dummy_idx = 0;
               for (tids, complexity) in sorted_groups {
                   if tids.len() <= 1 { // Don't group single-terminal groups
                       continue;
                   }
-                  if let Some(dummy_name) = dummy_iter.next() {
+
+                  let dummy_name = format!("__DUMMY_TERMINAL_{}__", dummy_idx);
+                  let dummy_term = Terminal::regex_name(&dummy_name);
+
+                  if parser.terminal_map.get_by_left(&dummy_term).is_some() {
+                      // Dummy terminal exists, create the group.
                       let original_names: BTreeSet<String> = tids.iter()
                           .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
                           .collect();
                       new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
                       new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
                   } else {
-                      crate::debug!(1, "Warning: Ran out of dummy terminals for grouping. Some groups will not be grouped.");
-                      break;
+                      // Dummy terminal does not exist. Don't create the group and print a message.
+                      let original_names: Vec<String> = tids.iter()
+                          .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
+                          .collect();
+                      crate::debug!(1, "Skipping group for {{{}}} because dummy terminal '{}' is not defined in the grammar.", original_names.join(", "), dummy_name);
                   }
+                  dummy_idx += 1;
               }
 
               println!("\n--- Dummy Terminal Groups ---");
               if new_config.dummy_terminal_map.is_empty() {
-                  println!("No dummy groups were created.");
+                  println!("No dummy groups were created. This may be because no terminals were similar enough to be grouped,");
+                  println!("or because the required dummy terminals (e.g., '__DUMMY_TERMINAL_0__') are not defined in the grammar.");
+                  println!("See debug logs (level 1) for details on skipped groups.");
               } else {
                   let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
                   sorted_dummies.sort_by_key(|(k, _)| *k);
@@ -20050,7 +20071,7 @@ messages:
               let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
 
               // Group terminals by the similarity of their template trie's features.
-              const SIMILARITY_THRESHOLD: f64 = 10000.0;
+              const SIMILARITY_THRESHOLD: f64 = 0.5;
 
               let mut template_features = BTreeMap::new();
               for (tid, (start, _end)) in &templates {
@@ -20067,6 +20088,7 @@ messages:
               for tid in sorted_tids {
                   let features = template_features.get(&tid).unwrap();
                   let complexity = features.num_nodes; // Use num_nodes as complexity metric
+                  let terminal_name = parser.terminal_map.get_by_right(&tid).unwrap();
 
                   let mut best_group: Option<(usize, f64)> = None;
 
@@ -20080,13 +20102,29 @@ messages:
                   if let Some((best_idx, best_dist)) = best_group {
                       if best_dist <= SIMILARITY_THRESHOLD {
                           // Add to existing similar group.
+                          let best_group_tid = groups[best_idx].1[0];
+                          let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
+                          crate::debug!(2, "Grouping terminal '{}' with group represented by '{}' (distance: {:.2})", terminal_name, best_group_terminal_name, best_dist);
                           groups[best_idx].1.push(tid);
                       } else {
                           // No group is similar enough, create a new one.
+                          let best_group_tid = groups[best_idx].1[0];
+                          let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
+                          crate::debug!(
+                              2,
+                              "Creating new group for terminal '{}'. Closest group (rep by '{}') has distance {:.2} > threshold {}.",
+                              terminal_name,
+                              best_group_terminal_name,
+                              best_dist,
+                              SIMILARITY_THRESHOLD
+                          );
+                          crate::debug!(3, "  - Features for '{}': {:?}", terminal_name, features);
+                          crate::debug!(3, "  - Features for group '{}': {:?}", best_group_terminal_name, &groups[best_idx].0);
                           groups.push((features.clone(), vec![tid], complexity));
                       }
                   } else {
                       // This is the first group.
+                      crate::debug!(2, "Creating first group for terminal '{}'", terminal_name);
                       groups.push((features.clone(), vec![tid], complexity));
                   }
               }
@@ -22983,6 +23021,93 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
+  - user: |-
+      [DEBUG] 2] src/constraint.rs:1176: Creating first group for terminal 'EOF'
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal 'IDENTIFIER'. Closest group (rep by 'EOF') has distance 1.34 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal 'IGNORE'. Closest group (rep by 'EOF') has distance 2.00 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal 'NUMERIC_LITERAL'. Closest group (rep by 'IDENTIFIER') has distance 0.79 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal 'STRING_LITERAL' with group represented by 'NUMERIC_LITERAL' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal 'TEMPLATE_CHARS'. Closest group (rep by 'EOF') has distance 1.70 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal '';''. Closest group (rep by 'EOF') has distance 1.02 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''{'' with group represented by 'IDENTIFIER' (distance: 0.34)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''}''. Closest group (rep by '';'') has distance 0.95 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''var'' with group represented by 'EOF' (distance: 0.02)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''let'' with group represented by 'EOF' (distance: 0.02)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''const'' with group represented by 'EOF' (distance: 0.02)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal '',''. Closest group (rep by 'IDENTIFIER') has distance 1.11 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''=''. Closest group (rep by '';'') has distance 1.45 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal '':''. Closest group (rep by 'NUMERIC_LITERAL') has distance 1.03 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''[''. Closest group (rep by 'IDENTIFIER') has distance 0.89 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal '']''. Closest group (rep by 'IDENTIFIER') has distance 0.86 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''if'' with group represented by 'EOF' (distance: 0.33)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''('' with group represented by ''['' (distance: 0.42)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal '')''. Closest group (rep by ''}'') has distance 0.67 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''else''. Closest group (rep by 'NUMERIC_LITERAL') has distance 0.76 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''while'' with group represented by 'EOF' (distance: 0.25)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''do'' with group represented by 'EOF' (distance: 0.33)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''for'' with group represented by 'EOF' (distance: 0.33)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''in''. Closest group (rep by ''='') has distance 0.79 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''of'' with group represented by 'TEMPLATE_CHARS' (distance: 0.39)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''switch'' with group represented by 'EOF' (distance: 0.33)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''case'' with group represented by 'EOF' (distance: 0.36)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''default'' with group represented by 'EOF' (distance: 0.34)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''try'' with group represented by 'EOF' (distance: 0.33)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''catch''. Closest group (rep by 'TEMPLATE_CHARS') has distance 0.77 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''finally'' with group represented by 'TEMPLATE_CHARS' (distance: 0.13)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''function'' with group represented by 'NUMERIC_LITERAL' (distance: 0.01)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''return'' with group represented by 'EOF' (distance: 0.33)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''break'' with group represented by 'EOF' (distance: 0.33)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''continue'' with group represented by 'EOF' (distance: 0.33)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''class'' with group represented by 'EOF' (distance: 0.33)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''extends''. Closest group (rep by ''catch'') has distance 1.35 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''+=''. Closest group (rep by ''='') has distance 0.81 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''-='' with group represented by ''+='' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''*='' with group represented by ''+='' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''/='' with group represented by ''+='' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''%='' with group represented by ''+='' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''**='' with group represented by ''+='' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''=>'' with group represented by ''catch'' (distance: 0.34)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''?''. Closest group (rep by ''in'') has distance 0.64 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''||'' with group represented by ''in'' (distance: 0.37)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''&&'' with group represented by ''in'' (distance: 0.20)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''=='' with group represented by ''?'' (distance: 0.42)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''!='' with group represented by ''?'' (distance: 0.42)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''==='' with group represented by ''?'' (distance: 0.42)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''!=='' with group represented by ''?'' (distance: 0.42)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''<''. Closest group (rep by ''in'') has distance 0.56 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''>'' with group represented by ''<'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''<='' with group represented by ''<'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''>='' with group represented by ''<'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''instanceof'' with group represented by ''<'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''+''. Closest group (rep by ''['') has distance 0.70 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''-'' with group represented by ''+'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''*'' with group represented by ''<'' (distance: 0.47)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''/'' with group represented by ''<'' (distance: 0.47)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''%'' with group represented by ''<'' (distance: 0.47)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''**'' with group represented by ''+='' (distance: 0.25)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''delete''. Closest group (rep by 'NUMERIC_LITERAL') has distance 0.50 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''typeof'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''void'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''++'' with group represented by ''+'' (distance: 0.31)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''--'' with group represented by ''+'' (distance: 0.31)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''~'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''!'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''.''. Closest group (rep by ''+='') has distance 1.12 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''...''. Closest group (rep by ''extends'') has distance 0.87 > threshold 0.5.
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''new'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''this'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''super'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''null'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''true'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''false'' with group represented by ''delete'' (distance: 0.00)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''`'' with group represented by 'NUMERIC_LITERAL' (distance: 0.21)
+      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''${'' with group represented by 'TEMPLATE_CHARS' (distance: 0.00)
+      [DEBUG] 1] src/constraint.rs:1208: Warning: Ran out of dummy terminals for grouping. Some groups will not be grouped.
+
+      --- Dummy Terminal Groups ---
+      No dummy groups were created.
+      ---------------------------
+    metadata:
   - user: In similarity grouping, we're getting 'No dummy groups were created.' But
       I can't see why. Make sure there's some kind of explaination. Like nearest match
       or smth.
@@ -23005,167 +23130,159 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to improve the debugging output for terminal grouping, followed by the corresponding git diff. The main issue was a very high similarity threshold that was likely a typo; lowering it and adding logging will help diagnose the grouping behavior.
+      Hello! As a helpful assistant, I'll guide you through the necessary changes. Based on your notes, it seems the main issue is with how dummy terminals are handled for similarity grouping, leading to confusion when no groups are created. I'll adjust the logic to provide clearer feedback and make the process more intuitive.
+
+      Here are the step-by-step instructions to apply the fix, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/constraint.rs`**.
+      I will modify the `new_from_grammar_definition` function in `src/constraint.rs`. The goal is to change the dummy terminal assignment logic to be more informative. Instead of only using pre-defined dummy terminals, the new logic will generate expected dummy terminal names (e.g., `__DUMMY_TERMINAL_0__`) and check if they exist in the grammar. If they don't, it will log a helpful message explaining why a group was skipped.
 
-      2.  **Adjust the similarity threshold.**
-          Navigate to the `GrammarConstraint::new_from_grammar_definition` function. Around line 1180, you will find the constant definition for `SIMILARITY_THRESHOLD`. Change its value from `10000.0` to a more reasonable `0.5`.
+      **File: `src/constraint.rs`**
 
-          *From:*
-          ```rust
-          const SIMILARITY_THRESHOLD: f64 = 10000.0;
-          ```
-          *To:*
-          ```rust
-          const SIMILARITY_THRESHOLD: f64 = 0.5;
-          ```
+      1.  Navigate to the function `pub fn new_from_grammar_definition`.
+      2.  Locate the block of code responsible for finding and assigning dummy terminals. It starts with the comment `// Find available dummy terminals defined in the grammar.` and ends with a `println!("---------------------------\n");`.
+      3.  **Replace** this entire block with the new code below. The new code generates dummy terminal names sequentially, checks for their existence in the compiled grammar, and provides much clearer output if they are missing.
 
-      3.  **Add detailed logging to the grouping logic.**
-          In the same function, locate the `for` loop that iterates over `sorted_tids` to group terminals. Replace the entire loop body with an updated version that includes logging to explain why terminals are grouped or why new groups are created.
+      ```rust
+              let mut new_config = config.clone();
+              new_config.dummy_terminal_map.clear();
+              new_config.dummy_terminal_penalties.clear();
 
-          *Replace this block:*
-          ```rust
-          for tid in sorted_tids {
-              let features = template_features.get(&tid).unwrap();
-              let complexity = features.num_nodes; // Use num_nodes as complexity metric
+              let mut sorted_groups: Vec<_> = groups.into_iter().map(|(_, tids, complexity)| (tids, complexity)).collect();
+              // Assign larger groups first to the available dummy terminals.
+              sorted_groups.sort_by_key(|(tids, _complexity)| std::cmp::Reverse(tids.len()));
 
-              let mut best_group: Option<(usize, f64)> = None;
-
-              for (i, (group_features, _, _)) in groups.iter().enumerate() {
-                  let dist = features.distance(group_features);
-                  if best_group.is_none() || dist < best_group.as_ref().unwrap().1 {
-                      best_group = Some((i, dist));
+              let mut dummy_idx = 0;
+              for (tids, complexity) in sorted_groups {
+                  if tids.len() <= 1 { // Don't group single-terminal groups
+                      continue;
                   }
-              }
 
-              if let Some((best_idx, best_dist)) = best_group {
-                  if best_dist <= SIMILARITY_THRESHOLD {
-                      // Add to existing similar group.
-                      groups[best_idx].1.push(tid);
+                  let dummy_name = format!("__DUMMY_TERMINAL_{}__", dummy_idx);
+                  let dummy_term = Terminal::regex_name(&dummy_name);
+
+                  if parser.terminal_map.get_by_left(&dummy_term).is_some() {
+                      // Dummy terminal exists, create the group.
+                      let original_names: BTreeSet<String> = tids.iter()
+                          .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
+                          .collect();
+                      new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
+                      new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
                   } else {
-                      // No group is similar enough, create a new one.
-                      groups.push((features.clone(), vec![tid], complexity));
+                      // Dummy terminal does not exist. Don't create the group and print a message.
+                      let original_names: Vec<String> = tids.iter()
+                          .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
+                          .collect();
+                      crate::debug!(1, "Skipping group for {{{}}} because dummy terminal '{}' is not defined in the grammar.", original_names.join(", "), dummy_name);
                   }
+                  dummy_idx += 1;
+              }
+
+              println!("\n--- Dummy Terminal Groups ---");
+              if new_config.dummy_terminal_map.is_empty() {
+                  println!("No dummy groups were created. This may be because no terminals were similar enough to be grouped,");
+                  println!("or because the required dummy terminals (e.g., '__DUMMY_TERMINAL_0__') are not defined in the grammar.");
+                  println!("See debug logs (level 1) for details on skipped groups.");
               } else {
-                  // This is the first group.
-                  groups.push((features.clone(), vec![tid], complexity));
-              }
-          }
-          ```
+                  let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
+                  sorted_dummies.sort_by_key(|(k, _)| *k);
 
-          *With this new block:*
-          ```rust
-          for tid in sorted_tids {
-              let features = template_features.get(&tid).unwrap();
-              let complexity = features.num_nodes; // Use num_nodes as complexity metric
-              let terminal_name = parser.terminal_map.get_by_right(&tid).unwrap();
-
-              let mut best_group: Option<(usize, f64)> = None;
-
-              for (i, (group_features, _, _)) in groups.iter().enumerate() {
-                  let dist = features.distance(group_features);
-                  if best_group.is_none() || dist < best_group.as_ref().unwrap().1 {
-                      best_group = Some((i, dist));
+                  for (dummy_name, original_names) in sorted_dummies {
+                      let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
+                      println!("- {}: (penalty: {})", dummy_name, penalty);
+                      let mut sorted_originals: Vec<_> = original_names.iter().collect();
+                      sorted_originals.sort();
+                      for name in sorted_originals {
+                          println!("  - {}", name);
+                      }
                   }
               }
+              println!("---------------------------\n");
+      ```
 
-              if let Some((best_idx, best_dist)) = best_group {
-                  if best_dist <= SIMILARITY_THRESHOLD {
-                      // Add to existing similar group.
-                      let best_group_tid = groups[best_idx].1[0];
-                      let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
-                      crate::debug!(2, "Grouping terminal '{}' with group represented by '{}' (distance: {:.2})", terminal_name, best_group_terminal_name, best_dist);
-                      groups[best_idx].1.push(tid);
-                  } else {
-                      // No group is similar enough, create a new one.
-                      let best_group_tid = groups[best_idx].1[0];
-                      let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
-                      crate::debug!(
-                          2,
-                          "Creating new group for terminal '{}'. Closest group (rep by '{}') has distance {:.2} > threshold {}.",
-                          terminal_name,
-                          best_group_terminal_name,
-                          best_dist,
-                          SIMILARITY_THRESHOLD
-                      );
-                      crate::debug!(3, "  - Features for '{}': {:?}", terminal_name, features);
-                      crate::debug!(3, "  - Features for group '{}': {:?}", best_group_terminal_name, &groups[best_idx].0);
-                      groups.push((features.clone(), vec![tid], complexity));
-                  }
-              } else {
-                  // This is the first group.
-                  crate::debug!(2, "Creating first group for terminal '{}'", terminal_name);
-                  groups.push((features.clone(), vec![tid], complexity));
-              }
-          }
-          ```
+      This change will resolve the confusion by making it clear that dummy terminals need to be defined in the grammar for grouping to work, and it will specify which ones are missing.
 
       ### Git Diffs
 
-      Here is the git diff for the changes described above.
+      Here is the git diff for the change described above.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1177,7 +1177,7 @@
-               let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
-       
-               // Group terminals by the similarity of their template trie's features.
-      -        const SIMILARITY_THRESHOLD: f64 = 10000.0;
-      +        const SIMILARITY_THRESHOLD: f64 = 0.5;
-       
-               let mut template_features = BTreeMap::new();
-               for (tid, (start, _end)) in &templates {
-      @@ -1191,28 +1191,45 @@
-               let mut sorted_tids: Vec<_> = templates.keys().copied().collect();
-               sorted_tids.sort();
-       
-               for tid in sorted_tids {
-                   let features = template_features.get(&tid).unwrap();
-                   let complexity = features.num_nodes; // Use num_nodes as complexity metric
-      +            let terminal_name = parser.terminal_map.get_by_right(&tid).unwrap();
-       
-                   let mut best_group: Option<(usize, f64)> = None;
-       
-                   for (i, (group_features, _, _)) in groups.iter().enumerate() {
-                       let dist = features.distance(group_features);
-                       if best_group.is_none() || dist < best_group.as_ref().unwrap().1 {
-                           best_group = Some((i, dist));
-                       }
-                   }
-       
-                   if let Some((best_idx, best_dist)) = best_group {
-                       if best_dist <= SIMILARITY_THRESHOLD {
-                           // Add to existing similar group.
-      +                    let best_group_tid = groups[best_idx].1[0];
-      +                    let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
-      +                    crate::debug!(2, "Grouping terminal '{}' with group represented by '{}' (distance: {:.2})", terminal_name, best_group_terminal_name, best_dist);
-                           groups[best_idx].1.push(tid);
-                       } else {
-                           // No group is similar enough, create a new one.
-      +                    let best_group_tid = groups[best_idx].1[0];
-      +                    let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
-      +                    crate::debug!(
-      +                        2,
-      +                        "Creating new group for terminal '{}'. Closest group (rep by '{}') has distance {:.2} > threshold {}.",
-      +                        terminal_name,
-      +                        best_group_terminal_name,
-      +                        best_dist,
-      +                        SIMILARITY_THRESHOLD
-      +                    );
-      +                    crate::debug!(3, "  - Features for '{}': {:?}", terminal_name, features);
-      +                    crate::debug!(3, "  - Features for group '{}': {:?}", best_group_terminal_name, &groups[best_idx].0);
-                           groups.push((features.clone(), vec![tid], complexity));
-                       }
-                   } else {
-                       // This is the first group.
-      +                crate::debug!(2, "Creating first group for terminal '{}'", terminal_name);
-                       groups.push((features.clone(), vec![tid], complexity));
+      @@ -1180,56 +1180,56 @@
                    }
                }
+       
+      -        // Find available dummy terminals defined in the grammar.
+      -        let mut available_dummy_terminals: Vec<String> = parser.terminal_map.left_values()
+      -            .filter(|term| term.to_string().starts_with("__DUMMY_TERMINAL_"))
+      -            .map(|term| term.to_string())
+      -            .collect();
+      -        available_dummy_terminals.sort(); // For determinism
+      -
+               let mut new_config = config.clone();
+               new_config.dummy_terminal_map.clear();
+               new_config.dummy_terminal_penalties.clear();
+       
+               let mut sorted_groups: Vec<_> = groups.into_iter().map(|(_, tids, complexity)| (tids, complexity)).collect();
+               // Assign larger groups first to the available dummy terminals.
+               sorted_groups.sort_by_key(|(tids, _complexity)| std::cmp::Reverse(tids.len()));
+       
+      -        let mut dummy_iter = available_dummy_terminals.iter();
+      +        let mut dummy_idx = 0;
+               for (tids, complexity) in sorted_groups {
+                   if tids.len() <= 1 { // Don't group single-terminal groups
+                       continue;
+                   }
+      -            if let Some(dummy_name) = dummy_iter.next() {
+      +
+      +            let dummy_name = format!("__DUMMY_TERMINAL_{}__", dummy_idx);
+      +            let dummy_term = Terminal::regex_name(&dummy_name);
+      +
+      +            if parser.terminal_map.get_by_left(&dummy_term).is_some() {
+      +                // Dummy terminal exists, create the group.
+                       let original_names: BTreeSet<String> = tids.iter()
+                           .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
+                           .collect();
+                       new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
+                       new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
+                   } else {
+      -                crate::debug!(1, "Warning: Ran out of dummy terminals for grouping. Some groups will not be grouped.");
+      -                break;
+      -            }
+      +                // Dummy terminal does not exist. Don't create the group and print a message.
+      +                let original_names: Vec<String> = tids.iter()
+      +                    .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
+      +                    .collect();
+      +                crate::debug!(1, "Skipping group for {{{}}} because dummy terminal '{}' is not defined in the grammar.", original_names.join(", "), dummy_name);
+      +            }
+      +            dummy_idx += 1;
+               }
+       
+               println!("\n--- Dummy Terminal Groups ---");
+               if new_config.dummy_terminal_map.is_empty() {
+      -            println!("No dummy groups were created.");
+      +            println!("No dummy groups were created. This may be because no terminals were similar enough to be grouped,");
+      +            println!("or because the required dummy terminals (e.g., '__DUMMY_TERMINAL_0__') are not defined in the grammar.");
+      +            println!("See debug logs (level 1) for details on skipped groups.");
+               } else {
+                   let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
+                   sorted_dummies.sort_by_key(|(k, _)| *k);
+       
+                   for (dummy_name, original_names) in sorted_dummies {
+                       let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
+                       println!("- {}: (penalty: {})", dummy_name, penalty);
+                       let mut sorted_originals: Vec<_> = original_names.iter().collect();
+                       sorted_originals.sort();
+                       for name in sorted_originals {
+                           println!("  - {}", name);
+                       }
+                   }
+               }
+               println!("---------------------------\n");
+       
+               Self::new_with_config_and_precompute0_cache(
 
       ```
     metadata:
@@ -23178,7 +23295,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Improve terminal grouping by lowering
-      similarity threshold and adding detailed debug logging in constraint precomputation."'
+  - user: 'Changes committed with message: "Refactor dummy terminal assignment in
+      constraint precomputation to dynamically check for existence and improve logging."'
     metadata:
 ...
