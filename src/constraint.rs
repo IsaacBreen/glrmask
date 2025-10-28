@@ -2066,6 +2066,8 @@ impl GrammarConstraint {
         let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
         for (items, _acc) in stacks.iter() {
+            let mut items = items.clone();
+            items.reverse();
             if items.is_empty() { continue; }
 
             let shifted_state_content = items[0].clone();
