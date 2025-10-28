@@ -22,7 +22,7 @@ impl OptimizationPass for FactorStateFanoutPass {
     }
 
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-        for node in trie.nodes.iter_mut() {
+        for node in trie.nodes.values_mut() {
             if node.children.is_empty() {
                 continue;
             }

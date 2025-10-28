@@ -285,16 +285,16 @@ pub(crate) fn import_from_mini(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     ctx: &OptimizationContext,
 ) {
-    // Create all nodes first
-    let mut new_nodes: Vec<PrecomputeNode3Index> = Vec::with_capacity(mini.nodes.len());
-    for _ in 0..mini.nodes.len() {
+    // Create all nodes first, and map MiniTrie NodeId to new PrecomputeNode3Index
+    let mut id_map: BTreeMap<NodeId, PrecomputeNode3Index> = BTreeMap::new();
+    for &node_id in mini.nodes.keys() {
         let idx = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::internal())));
-        new_nodes.push(idx);
+        id_map.insert(node_id, idx);
     }
 
     // Fill end flags and edges
-    for node in &mini.nodes {
-        let idx = new_nodes[node.id as usize];
+    for node in mini.nodes.values() {
+        let idx = *id_map.get(&node.id).unwrap();
         if let Some(mut w) = idx.write(trie3_god) {
             w.value.end = node.end;
 
@@ -323,7 +323,7 @@ pub(crate) fn import_from_mini(
                     if sbv.is_empty() {
                         continue;
                     }
-                    let dst_idx = new_nodes[*dst as usize];
+                    let dst_idx = *id_map.get(dst).unwrap();
                     entry.entry(dst_idx)
                         .and_modify(|e| *e |= &sbv)
                         .or_insert(sbv);
@@ -343,8 +343,9 @@ pub(crate) fn import_from_mini(
     // Remap roots to new nodes
     roots.clear();
     for (key, nid) in root_pairs {
-        let idx = new_nodes[*nid as usize];
-        roots.insert(*key, idx);
+        if let Some(idx) = id_map.get(nid) {
+            roots.insert(*key, *idx);
+        }
     }
 
     // GC and recompute depths

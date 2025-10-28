@@ -20,7 +20,7 @@ impl OptimizationPass for CompressUnaryChainsPass {
             let mut out_info: HashMap<NodeId, (EdgeKey, NodeId, crate::trie3_opt::core::SortedSet)> =
                 HashMap::new();
 
-            for node in &trie.nodes {
+            for node in trie.nodes.values() {
                 for (ek, dm) in &node.children {
                     for (dst, _) in dm {
                         let count = indegree.entry(*dst).or_default();
@@ -52,7 +52,7 @@ impl OptimizationPass for CompressUnaryChainsPass {
             }
 
             let mut rewrites = vec![];
-            for u_id in trie.nodes.iter().map(|n| n.id) {
+            for u_id in trie.nodes.keys().cloned() {
                 if roots_set.contains(&u_id) {
                     continue;
                 }
@@ -71,7 +71,7 @@ impl OptimizationPass for CompressUnaryChainsPass {
             }
 
             for (p_id, u_id, v_id, key, s_uv) in rewrites {
-                let p_node = &mut trie.nodes[p_id as usize];
+                let p_node = trie.nodes.get_mut(&p_id).unwrap();
                 if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
                     let dm = entry.get_mut();
                     if let Some(s_pu) = dm.remove(&u_id) {

@@ -24,7 +24,7 @@ impl OptimizationPass for FactorRootFanoutPass {
         let root_ids: Vec<_> = trie.root_ids.iter().cloned().collect();
 
         for root_id in root_ids {
-            let root_node = trie.nodes[root_id as usize].clone();
+            let root_node = trie.nodes.get(&root_id).unwrap().clone();
             if root_node.children.is_empty() {
                 continue;
             }
@@ -99,7 +99,7 @@ impl OptimizationPass for FactorRootFanoutPass {
                     }
 
                     let mid_id = trie.add_node(false);
-                    let mid_node = &mut trie.nodes[mid_id as usize];
+                    let mid_node = trie.nodes.get_mut(&mid_id).unwrap();
                     mid_node.children.insert(EdgeKey::new(pop, b.clone()), dest_agg);
 
                     new_children
@@ -111,7 +111,7 @@ impl OptimizationPass for FactorRootFanoutPass {
             }
 
             if made_progress {
-                trie.nodes[root_id as usize].children = new_children;
+                trie.nodes.get_mut(&root_id).unwrap().children = new_children;
             }
         }
     }

@@ -30,7 +30,7 @@ impl OptimizationPass for FactorCommonDestinationsPass {
         let mut incoming_map: HashMap<NodeId, HashMap<EdgeKey, HashMap<SortedSet, Vec<NodeId>>>> =
             HashMap::new();
 
-        for src_node in &trie.nodes {
+        for src_node in trie.nodes.values() {
             for (edge_key, dest_map) in &src_node.children {
                 for (dest_id, sids) in dest_map {
                     incoming_map
@@ -57,7 +57,7 @@ impl OptimizationPass for FactorCommonDestinationsPass {
 
                         // Reroute sources to point to intermediate node
                         for src_id in &sources {
-                            let src_node = &mut trie.nodes[*src_id as usize];
+                            let src_node = trie.nodes.get_mut(src_id).unwrap();
 
                             // Remove old edge
                             if let Some(dest_map_for_key) = src_node.children.get_mut(&edge_key) {

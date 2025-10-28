@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque, BTreeSet};
 
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
@@ -15,46 +15,39 @@ impl OptimizationPass for PruneDeadPathsPass {
     }
 
     fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-        let mut predecessors: HashMap<NodeId, Vec<(NodeId, EdgeKey)>> = HashMap::new();
         let mut worklist = VecDeque::new();
         let mut live: HashMap<NodeId, SortedSet> = HashMap::new();
         let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
 
-        for node in &trie.nodes {
+        for node in trie.nodes.values() {
             live.insert(node.id, SortedSet::new());
             if node.end {
                 live.insert(node.id, universe.clone());
                 worklist.push_back(node.id);
             }
-            for (ek, dm) in &node.children {
-                for (dst, _) in dm {
-                    predecessors
-                        .entry(*dst)
-                        .or_default()
-                        .push((node.id, ek.clone()));
-                }
-            }
         }
 
         while let Some(node_id) = worklist.pop_front() {
             let live_at_node = live.get(&node_id).unwrap().clone();
-            if let Some(preds) = predecessors.get(&node_id) {
-                for (pred_id, edge_key) in preds {
-                    let live_from_edge = live_at_node.intersect(&edge_key.tokens);
-                    if live_from_edge.is_empty() {
-                        continue;
-                    }
-                    let pred_live = live.get_mut(pred_id).unwrap();
-                    let old_len = pred_live.len();
-                    pred_live.union_inplace(&live_from_edge);
-                    if pred_live.len() > old_len {
-                        worklist.push_back(*pred_id);
+            if let Some(node) = trie.nodes.get(&node_id) {
+                for (pred_id, edges) in &node.parents {
+                    for edge_key in edges.keys() {
+                        let live_from_edge = live_at_node.intersect(&edge_key.tokens);
+                        if live_from_edge.is_empty() {
+                            continue;
+                        }
+                        let pred_live = live.get_mut(pred_id).unwrap();
+                        let old_len = pred_live.len();
+                        pred_live.union_inplace(&live_from_edge);
+                        if pred_live.len() > old_len {
+                            worklist.push_back(*pred_id);
+                        }
                     }
                 }
             }
         }
 
-        for node in &mut trie.nodes {
+        for node in trie.nodes.values_mut() {
             let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
             for (ek, dm) in &node.children {
                 for (dst, sids) in dm {

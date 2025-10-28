@@ -17,7 +17,7 @@ impl OptimizationPass for MergeEquivalentLLMTokensPass {
         };
 
         let mut all_bvs = HashSet::new();
-        for node in &trie.nodes {
+        for node in trie.nodes.values() {
             for (ek, _) in &node.children {
                 if !ek.tokens.is_empty() {
                     all_bvs.insert(ek.tokens.clone());
@@ -83,7 +83,7 @@ impl OptimizationPass for MergeEquivalentLLMTokensPass {
             SortedSet::from_iter(new_elems)
         };
 
-        for node in &mut trie.nodes {
+        for node in trie.nodes.values_mut() {
             let mut new_children = BTreeMap::new();
             for (mut ek, dm) in std::mem::take(&mut node.children) {
                 ek.tokens = remap_sorted_set(&ek.tokens);

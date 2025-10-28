@@ -15,7 +15,7 @@ impl OptimizationPass for CompressEdgesPass {
     }
 
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-        for n in trie.nodes.iter_mut() {
+        for n in trie.nodes.values_mut() {
             if n.children.is_empty() {
                 continue;
             }

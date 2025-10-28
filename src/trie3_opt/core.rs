@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 
 /// Compact node id for the mini trie.
 pub type NodeId = u32;
@@ -148,6 +148,8 @@ pub struct Node {
     pub end: bool,
     // key: (pop, tokens) -> dest map: dest node -> state-set
     pub children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>,
+    // src map: src node -> (key: (pop, tokens) -> state-set)
+    pub parents: BTreeMap<NodeId, BTreeMap<EdgeKey, SortedSet>>,
 }
 
 impl Node {
@@ -156,18 +158,24 @@ impl Node {
             id,
             end,
             children: BTreeMap::new(),
+            parents: BTreeMap::new(),
         }
     }
     pub fn out_degree(&self) -> usize {
         self.children.values().map(|m| m.len()).sum()
+    }
+    pub fn in_degree(&self) -> usize {
+        self.parents.values().map(|m| m.len()).sum()
     }
 }
 
 /// A compact, no-generics mini trie for precompute3 optimization.
 #[derive(Clone, Debug)]
 pub struct MiniTrie {
-    pub nodes: Vec<Node>,
+    pub nodes: BTreeMap<NodeId, Node>,
     pub root_ids: BTreeSet<NodeId>,
+    /// Counter to generate unique node IDs.
+    next_node_id: NodeId,
 }
 
 impl MiniTrie {
@@ -175,11 +183,13 @@ impl MiniTrie {
         Self {
             nodes: Vec::new(),
             root_ids: BTreeSet::new(),
+            next_node_id: 0,
         }
     }
     pub fn add_node(&mut self, end: bool) -> NodeId {
-        let id = self.nodes.len() as u32;
-        self.nodes.push(Node::new(id, end));
+        let id = self.next_node_id;
+        self.next_node_id += 1;
+        self.nodes.insert(id, Node::new(id, end));
         id
     }
     pub fn add_edge(
@@ -189,11 +199,21 @@ impl MiniTrie {
         dst: NodeId,
         states: SortedSet,
     ) {
-        let n = &mut self.nodes[src as usize];
-        let dm = n.children.entry(key).or_insert_with(BTreeMap::new);
-        dm.entry(dst)
-            .and_modify(|e| e.union_inplace(&states))
-            .or_insert(states);
+        // Update children of src node
+        if let Some(src_node) = self.nodes.get_mut(&src) {
+            let dm = src_node.children.entry(key.clone()).or_default();
+            dm.entry(dst)
+                .and_modify(|e| e.union_inplace(&states))
+                .or_insert(states.clone());
+        }
+
+        // Update parents of dst node
+        if let Some(dst_node) = self.nodes.get_mut(&dst) {
+            let parent_edges = dst_node.parents.entry(src).or_default();
+            parent_edges.entry(key)
+                .and_modify(|e| e.union_inplace(&states))
+                .or_insert(states);
+        }
     }
     pub fn add_root(&mut self, id: NodeId) {
         self.root_ids.insert(id);
@@ -207,7 +227,7 @@ impl MiniTrie {
             if !seen.insert(u) {
                 continue;
             }
-            let node = &self.nodes[u as usize];
+            let node = self.nodes.get(&u).unwrap();
             for (_ek, dm) in node.children.iter() {
                 for (v, _s) in dm.iter() {
                     if !seen.contains(v) {
@@ -221,26 +241,18 @@ impl MiniTrie {
 
     /// Compute set of nodes that can reach an end node (reverse reachability).
     pub fn can_reach_end(&self) -> BTreeSet<NodeId> {
-        let mut incoming: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
-        for n in &self.nodes {
-            for (_ek, dm) in &n.children {
-                for (dst, _s) in dm {
-                    incoming.entry(*dst).or_default().push(n.id);
-                }
-            }
-        }
         let mut productive: BTreeSet<NodeId> = BTreeSet::new();
         let mut q: VecDeque<NodeId> = VecDeque::new();
-        for n in &self.nodes {
+        for n in self.nodes.values() {
             if n.end {
                 productive.insert(n.id);
                 q.push_back(n.id);
             }
         }
-        while let Some(v) = q.pop_front() {
-            if let Some(srcs) = incoming.get(&v) {
-                for &u in srcs {
-                    if productive.insert(u) {
+        while let Some(v_id) = q.pop_front() {
+            if let Some(v_node) = self.nodes.get(&v_id) {
+                for &u_id in v_node.parents.keys() {
+                    if productive.insert(u_id) {
                         q.push_back(u);
                     }
                 }

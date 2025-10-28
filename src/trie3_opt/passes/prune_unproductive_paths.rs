@@ -16,7 +16,7 @@ impl OptimizationPass for PruneUnproductivePathsPass {
         if productive.len() == trie.nodes.len() {
             return;
         }
-        for node in &mut trie.nodes {
+        for node in trie.nodes.values_mut() {
             if !productive.contains(&node.id) {
                 node.children.clear();
             } else {
