@@ -2223,6 +2223,7 @@ impl GrammarConstraint {
 
         // Flatten the active GSS into explicit stacks.
         let stacks = s.active_state.stack.inner.to_stacks();
+        dbg!(&stacks);
 
         // This new function will build the paths for the stack *below* the shifted state.
         let (_head, final_nodes_map) = Self::reduce_gss_stacks_to_trie3_paths_from_start(trie3_god, &stacks);
