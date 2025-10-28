@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque, BTreeSet};
 
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
@@ -14,22 +14,56 @@ impl OptimizationPass for PruneDeadPathsPass {
         "PruneDeadPaths"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-        let productive = trie.productive_llm_tokens();
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+        let mut worklist = VecDeque::new();
+        let mut live: HashMap<NodeId, SortedSet> = HashMap::new();
+        let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
+
+        for node in trie.nodes() {
+            live.insert(node.id(), SortedSet::new());
+            if node.is_end() {
+                live.insert(node.id(), universe.clone());
+                worklist.push_back(node.id());
+            }
+        }
+
+        while let Some(node_id) = worklist.pop_front() {
+            let live_at_node = live.get(&node_id).unwrap().clone();
+            if let Some(node) = trie.get_node(node_id) {
+                for (pred_id, edges) in node.parents() {
+                    for edge_key in edges.keys() {
+                        let live_from_edge = live_at_node.intersect(&edge_key.tokens);
+                        if live_from_edge.is_empty() {
+                            continue;
+                        }
+                        let pred_live = live.get_mut(pred_id).unwrap();
+                        let old_len = pred_live.len();
+                        pred_live.union_inplace(&live_from_edge);
+                        if pred_live.len() > old_len {
+                            worklist.push_back(*pred_id);
+                        }
+                    }
+                }
+            }
+        }
 
         let node_ids: Vec<_> = trie.node_ids().collect();
         for node_id in node_ids {
             let node = trie.get_node(node_id).unwrap();
-            let node_productive_tokens = productive.get(&node_id).unwrap();
-
             let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
             for (ek, dm) in node.children() {
-                let new_tokens = ek.tokens.intersect(node_productive_tokens);
-                if !new_tokens.is_empty() {
-                    let new_ek = EdgeKey::new(ek.pop, new_tokens);
-                    let entry = new_children.entry(new_ek).or_default();
-                    for (dst, sids) in dm {
-                        entry.entry(*dst).or_default().union_inplace(sids);
+                for (dst, sids) in dm {
+                    let live_from_child = live.get(dst).unwrap();
+                    let live_on_edge = ek.tokens.intersect(live_from_child);
+
+                    if !live_on_edge.is_empty() {
+                        let new_ek = EdgeKey::new(ek.pop, live_on_edge);
+                        new_children
+                            .entry(new_ek)
+                            .or_default()
+                            .entry(*dst)
+                            .and_modify(|e: &mut SortedSet| e.union_inplace(sids))
+                            .or_insert(sids.clone());
                     }
                 }
             }
