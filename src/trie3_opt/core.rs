@@ -260,4 +260,28 @@ impl MiniTrie {
         }
         productive
     }
+
+    /// Rebuilds all parent pointers from scratch by scanning all children.
+    /// This is useful after complex transformations that modify `children` directly.
+    pub fn rebuild_parents(&mut self) {
+        for node in self.nodes.values_mut() {
+            node.parents.clear();
+        }
+        // Collect children first to avoid borrow checker issues.
+        let all_children: Vec<(NodeId, BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>)> = self
+            .nodes
+            .values()
+            .map(|n| (n.id, n.children.clone()))
+            .collect();
+
+        for (src_id, children) in all_children {
+            for (ek, dm) in children {
+                for (dst_id, sids) in dm {
+                    if let Some(dst_node) = self.nodes.get_mut(&dst_id) {
+                        dst_node.parents.entry(src_id).or_default().entry(ek.clone()).or_default().union_inplace(&sids);
+                    }
+                }
+            }
+        }
+    }
 }

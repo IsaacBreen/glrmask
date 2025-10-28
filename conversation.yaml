@@ -366,16 +366,16 @@ local_system:
           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
           ctx: &OptimizationContext,
       ) {
-          // Create all nodes first
-          let mut new_nodes: Vec<PrecomputeNode3Index> = Vec::with_capacity(mini.nodes.len());
-          for _ in 0..mini.nodes.len() {
+          // Create all nodes first, and map MiniTrie NodeId to new PrecomputeNode3Index
+          let mut id_map: BTreeMap<NodeId, PrecomputeNode3Index> = BTreeMap::new();
+          for &node_id in mini.nodes.keys() {
               let idx = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::internal())));
-              new_nodes.push(idx);
+              id_map.insert(node_id, idx);
           }
 
           // Fill end flags and edges
-          for node in &mini.nodes {
-              let idx = new_nodes[node.id as usize];
+          for node in mini.nodes.values() {
+              let idx = *id_map.get(&node.id).unwrap();
               if let Some(mut w) = idx.write(trie3_god) {
                   w.value.end = node.end;
 
@@ -404,7 +404,7 @@ local_system:
                           if sbv.is_empty() {
                               continue;
                           }
-                          let dst_idx = new_nodes[*dst as usize];
+                          let dst_idx = *id_map.get(dst).unwrap();
                           entry.entry(dst_idx)
                               .and_modify(|e| *e |= &sbv)
                               .or_insert(sbv);
@@ -424,8 +424,9 @@ local_system:
           // Remap roots to new nodes
           roots.clear();
           for (key, nid) in root_pairs {
-              let idx = new_nodes[*nid as usize];
-              roots.insert(*key, idx);
+              if let Some(idx) = id_map.get(nid) {
+                  roots.insert(*key, *idx);
+              }
           }
 
           // GC and recompute depths
@@ -566,7 +567,7 @@ local_system:
           }
       }
     src/trie3_opt/core.rs: |
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 
       /// Compact node id for the mini trie.
       pub type NodeId = u32;
@@ -716,6 +717,8 @@ local_system:
           pub end: bool,
           // key: (pop, tokens) -> dest map: dest node -> state-set
           pub children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>,
+          // src map: src node -> (key: (pop, tokens) -> state-set)
+          pub parents: BTreeMap<NodeId, BTreeMap<EdgeKey, SortedSet>>,
       }
 
       impl Node {
@@ -724,30 +727,38 @@ local_system:
                   id,
                   end,
                   children: BTreeMap::new(),
+                  parents: BTreeMap::new(),
               }
           }
           pub fn out_degree(&self) -> usize {
               self.children.values().map(|m| m.len()).sum()
+          }
+          pub fn in_degree(&self) -> usize {
+              self.parents.values().map(|m| m.len()).sum()
           }
       }
 
       /// A compact, no-generics mini trie for precompute3 optimization.
       #[derive(Clone, Debug)]
       pub struct MiniTrie {
-          pub nodes: Vec<Node>,
+          pub nodes: BTreeMap<NodeId, Node>,
           pub root_ids: BTreeSet<NodeId>,
+          /// Counter to generate unique node IDs.
+          next_node_id: NodeId,
       }
 
       impl MiniTrie {
           pub fn new() -> Self {
               Self {
-                  nodes: Vec::new(),
+                  nodes: BTreeMap::new(),
                   root_ids: BTreeSet::new(),
+                  next_node_id: 0,
               }
           }
           pub fn add_node(&mut self, end: bool) -> NodeId {
-              let id = self.nodes.len() as u32;
-              self.nodes.push(Node::new(id, end));
+              let id = self.next_node_id;
+              self.next_node_id += 1;
+              self.nodes.insert(id, Node::new(id, end));
               id
           }
           pub fn add_edge(
@@ -757,11 +768,21 @@ local_system:
               dst: NodeId,
               states: SortedSet,
           ) {
-              let n = &mut self.nodes[src as usize];
-              let dm = n.children.entry(key).or_insert_with(BTreeMap::new);
-              dm.entry(dst)
-                  .and_modify(|e| e.union_inplace(&states))
-                  .or_insert(states);
+              // Update children of src node
+              if let Some(src_node) = self.nodes.get_mut(&src) {
+                  let dm = src_node.children.entry(key.clone()).or_default();
+                  dm.entry(dst)
+                      .and_modify(|e| e.union_inplace(&states))
+                      .or_insert(states.clone());
+              }
+
+              // Update parents of dst node
+              if let Some(dst_node) = self.nodes.get_mut(&dst) {
+                  let parent_edges = dst_node.parents.entry(src).or_default();
+                  parent_edges.entry(key)
+                      .and_modify(|e| e.union_inplace(&states))
+                      .or_insert(states);
+              }
           }
           pub fn add_root(&mut self, id: NodeId) {
               self.root_ids.insert(id);
@@ -775,7 +796,7 @@ local_system:
                   if !seen.insert(u) {
                       continue;
                   }
-                  let node = &self.nodes[u as usize];
+                  let node = self.nodes.get(&u).unwrap();
                   for (_ek, dm) in node.children.iter() {
                       for (v, _s) in dm.iter() {
                           if !seen.contains(v) {
@@ -789,27 +810,19 @@ local_system:
 
           /// Compute set of nodes that can reach an end node (reverse reachability).
           pub fn can_reach_end(&self) -> BTreeSet<NodeId> {
-              let mut incoming: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
-              for n in &self.nodes {
-                  for (_ek, dm) in &n.children {
-                      for (dst, _s) in dm {
-                          incoming.entry(*dst).or_default().push(n.id);
-                      }
-                  }
-              }
               let mut productive: BTreeSet<NodeId> = BTreeSet::new();
               let mut q: VecDeque<NodeId> = VecDeque::new();
-              for n in &self.nodes {
+              for n in self.nodes.values() {
                   if n.end {
                       productive.insert(n.id);
                       q.push_back(n.id);
                   }
               }
-              while let Some(v) = q.pop_front() {
-                  if let Some(srcs) = incoming.get(&v) {
-                      for &u in srcs {
-                          if productive.insert(u) {
-                              q.push_back(u);
+              while let Some(v_id) = q.pop_front() {
+                  if let Some(v_node) = self.nodes.get(&v_id) {
+                      for &u_id in v_node.parents.keys() {
+                          if productive.insert(u_id) {
+                              q.push_back(u_id);
                           }
                       }
                   }
@@ -930,7 +943,7 @@ local_system:
       impl Metric for NumEdgesMetric {
           fn name(&self) -> &'static str { "num_edges" }
           fn compute(&self, trie: &MiniTrie) -> String {
-              trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_string()
+              trie.nodes.values().map(|n| n.out_degree()).sum::<usize>().to_string()
           }
       }
 
@@ -944,7 +957,7 @@ local_system:
       impl Metric for NumEndNodesMetric {
           fn name(&self) -> &'static str { "num_end_nodes" }
           fn compute(&self, trie: &MiniTrie) -> String {
-              trie.nodes.iter().filter(|n| n.end).count().to_string()
+              trie.nodes.values().filter(|n| n.end).count().to_string()
           }
       }
 
@@ -965,8 +978,7 @@ local_system:
           fn name(&self) -> &'static str { "root_fanout" }
           fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| trie.root_ids.contains(&n.id))
                   .map(|n| n.out_degree() as f64)
                   .collect();
@@ -979,8 +991,7 @@ local_system:
           fn name(&self) -> &'static str { "non_root_fanout" }
           fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| !trie.root_ids.contains(&n.id))
                   .map(|n| n.out_degree() as f64)
                   .collect();
@@ -993,8 +1004,7 @@ local_system:
           fn name(&self) -> &'static str { "all_fanout" }
           fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .map(|n| n.out_degree() as f64)
                   .collect();
               NumericStats::from_samples(&fanouts).to_pretty_string()
@@ -1045,14 +1055,14 @@ local_system:
               let mut scores: Vec<f64> = Vec::new();
               #[cfg(not(rustrover))]
               let it = tqdm!(
-                  trie.nodes.iter(),
+                  trie.nodes.values(),
                   desc = "Metric: EdgeOverlap",
                   total = trie.nodes.len(),
                   disable = !PROGRESS_BAR_ENABLED,
                   leave = false
               );
               #[cfg(rustrover)]
-              let it = trie.nodes.iter();
+              let it = trie.nodes.values();
 
               for node in it {
                   let node_score = compute_edge_overlap_for_node(node);
@@ -1070,8 +1080,7 @@ local_system:
           fn compute(&self, trie: &MiniTrie) -> String {
               let mut scores: Vec<f64> = Vec::new();
               let root_nodes: Vec<_> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| trie.root_ids.contains(&n.id))
                   .collect();
 
@@ -1102,8 +1111,7 @@ local_system:
           fn compute(&self, trie: &MiniTrie) -> String {
               let mut scores: Vec<f64> = Vec::new();
               let non_root_nodes: Vec<_> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| !trie.root_ids.contains(&n.id))
                   .collect();
 
@@ -1165,14 +1173,14 @@ local_system:
 
               #[cfg(not(rustrover))]
               let it = tqdm!(
-                  trie.nodes.iter(),
+                  trie.nodes.values(),
                   desc = "Metric: StateFanout",
                   total = trie.nodes.len(),
                   disable = !PROGRESS_BAR_ENABLED,
                   leave = false
               );
               #[cfg(rustrover)]
-              let it = trie.nodes.iter();
+              let it = trie.nodes.values();
 
               for node in it {
                   compute_state_fanout_for_node_into(node, &mut stats);
@@ -1188,8 +1196,7 @@ local_system:
           fn compute(&self, trie: &MiniTrie) -> String {
               let mut stats = NumericStats::new();
               let root_nodes: Vec<_> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| trie.root_ids.contains(&n.id))
                   .collect();
 
@@ -1217,8 +1224,7 @@ local_system:
           fn compute(&self, trie: &MiniTrie) -> String {
               let mut stats = NumericStats::new();
               let non_root_nodes: Vec<_> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| !trie.root_ids.contains(&n.id))
                   .collect();
 
@@ -1381,7 +1387,12 @@ local_system:
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
               // Collect end nodes
-              let mut ends: Vec<NodeId> = trie.nodes.iter().filter(|n| n.end).map(|n| n.id).collect();
+              let mut ends: Vec<NodeId> = trie
+                  .nodes
+                  .values()
+                  .filter(|n| n.end)
+                  .map(|n| n.id)
+                  .collect();
               if ends.len() <= 1 {
                   return;
               }
@@ -1390,7 +1401,7 @@ local_system:
 
               // Ensure canonical has no outgoing edges
               {
-                  let cnode = &mut trie.nodes[canonical as usize];
+                  let cnode = trie.nodes.get_mut(&canonical).unwrap();
                   cnode.children.clear();
                   cnode.end = true;
               }
@@ -1398,7 +1409,7 @@ local_system:
               // Rewire all edges to target canonical if they target any end
               let end_set: std::collections::BTreeSet<NodeId> = ends.into_iter().collect();
 
-              for node in trie.nodes.iter_mut() {
+              for node in trie.nodes.values_mut() {
                   let mut new_children: BTreeMap<_, _> = BTreeMap::new();
                   for (ek, dm) in node.children.clone() {
                       let mut dm2: BTreeMap<NodeId, _> = BTreeMap::new();
@@ -1434,7 +1445,7 @@ local_system:
           }
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              for n in trie.nodes.iter_mut() {
+              for n in trie.nodes.values_mut() {
                   if n.children.is_empty() {
                       continue;
                   }
@@ -1526,7 +1537,7 @@ local_system:
                   let mut out_info: HashMap<NodeId, (EdgeKey, NodeId, crate::trie3_opt::core::SortedSet)> =
                       HashMap::new();
 
-                  for node in &trie.nodes {
+                  for node in trie.nodes.values() {
                       for (ek, dm) in &node.children {
                           for (dst, _) in dm {
                               let count = indegree.entry(*dst).or_default();
@@ -1558,7 +1569,7 @@ local_system:
                   }
 
                   let mut rewrites = vec![];
-                  for u_id in trie.nodes.iter().map(|n| n.id) {
+                  for u_id in trie.nodes.keys().cloned() {
                       if roots_set.contains(&u_id) {
                           continue;
                       }
@@ -1577,7 +1588,7 @@ local_system:
                   }
 
                   for (p_id, u_id, v_id, key, s_uv) in rewrites {
-                      let p_node = &mut trie.nodes[p_id as usize];
+                      let p_node = trie.nodes.get_mut(&p_id).unwrap();
                       if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
                           let dm = entry.get_mut();
                           if let Some(s_pu) = dm.remove(&u_id) {
@@ -1620,61 +1631,54 @@ local_system:
               }
 
               loop {
-                  // Build incoming map and collect pop=0 edges
-                  let mut incoming: HashMap<NodeId, Vec<(NodeId, isize, SortedSet, SortedSet)>> = HashMap::new();
+                  // Collect pop=0 edges
                   let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
 
-                  for node in &trie.nodes {
+                  for node in trie.nodes.values() {
                       for (ek, dm) in &node.children {
-                          for (dst, sids) in dm {
-                              incoming.entry(*dst).or_default().push((node.id, ek.pop, ek.tokens.clone(), sids.clone()));
-                              if ek.pop == 0 {
+                          if ek.pop == 0 {
+                              for (dst, sids) in dm {
                                   zero_edges.push((node.id, ek.tokens.clone(), *dst, sids.clone()));
                               }
                           }
                       }
                   }
 
-                  if zero_edges.is_empty() {
-                      break;
-                  }
+                  if zero_edges.is_empty() { break; }
 
                   let mut removed_this_iter = 0usize;
 
                   for (b, llm_bc, c, s_bc) in zero_edges {
-                      if root_set.contains(&b) {
-                          // pop=0 from root is allowed; skip
-                          continue;
-                      }
-                      if let Some(preds) = incoming.get(&b) {
-                          for (a, p_ab, llm_ab, s_ab) in preds {
-                              let new_tokens = llm_ab.intersect(&llm_bc);
-                              if new_tokens.is_empty() {
-                                  continue;
+                      if root_set.contains(&b) { continue; }
+
+                      if let Some(b_node) = trie.nodes.get(&b) {
+                          let preds = b_node.parents.clone(); // clone to avoid borrow issues
+                          for (a, edges_from_a) in &preds {
+                              for (key_ab, s_ab) in edges_from_a {
+                                  let p_ab = key_ab.pop;
+                                  let llm_ab = &key_ab.tokens;
+                                  let new_tokens = llm_ab.intersect(&llm_bc);
+                                  if new_tokens.is_empty() { continue; }
+                                  let new_sids = s_ab.intersect(&s_bc);
+                                  if new_sids.is_empty() { continue; }
+
+                                  let a_node = trie.nodes.get_mut(a).unwrap();
+                                  let key = crate::trie3_opt::core::EdgeKey::new(p_ab, new_tokens.clone());
+                                  let dm = a_node.children.entry(key).or_default();
+                                  dm.entry(c).or_default().union_inplace(&new_sids);
                               }
-                              let new_sids = s_ab.intersect(&s_bc);
-                              if new_sids.is_empty() {
-                                  continue;
-                              }
-                              // Add/update A -> C with (p_ab, new_tokens) and SIDs = intersection
-                              let a_node = &mut trie.nodes[*a as usize];
-                              let key = crate::trie3_opt::core::EdgeKey::new(*p_ab, new_tokens.clone());
-                              let dm = a_node.children.entry(key).or_insert_with(BTreeMap::new);
-                              dm.entry(c)
-                                  .and_modify(|e| e.union_inplace(&new_sids))
-                                  .or_insert(new_sids);
                           }
                       }
 
                       // Remove B -> C under (0, llm_bc)
-                      let bnode = &mut trie.nodes[b as usize];
+                      let bnode = trie.nodes.get_mut(&b).unwrap();
                       let key = crate::trie3_opt::core::EdgeKey::new(0, llm_bc.clone());
-                      if let Some(dm) = bnode.children.get_mut(&key) {
-                          if dm.remove(&c).is_some() {
+                      if let std::collections::btree_map::Entry::Occupied(mut dm_entry) = bnode.children.entry(key) {
+                          if dm_entry.get_mut().remove(&c).is_some() {
                               removed_this_iter += 1;
                           }
-                          if dm.is_empty() {
-                              bnode.children.remove(&key);
+                          if dm_entry.get().is_empty() {
+                              dm_entry.remove();
                           }
                       }
                   }
@@ -1718,7 +1722,7 @@ local_system:
               let mut incoming_map: HashMap<NodeId, HashMap<EdgeKey, HashMap<SortedSet, Vec<NodeId>>>> =
                   HashMap::new();
 
-              for src_node in &trie.nodes {
+              for src_node in trie.nodes.values() {
                   for (edge_key, dest_map) in &src_node.children {
                       for (dest_id, sids) in dest_map {
                           incoming_map
@@ -1745,7 +1749,7 @@ local_system:
 
                               // Reroute sources to point to intermediate node
                               for src_id in &sources {
-                                  let src_node = &mut trie.nodes[*src_id as usize];
+                                  let src_node = trie.nodes.get_mut(src_id).unwrap();
 
                                   // Remove old edge
                                   if let Some(dest_map_for_key) = src_node.children.get_mut(&edge_key) {
@@ -1800,7 +1804,7 @@ local_system:
               let root_ids: Vec<_> = trie.root_ids.iter().cloned().collect();
 
               for root_id in root_ids {
-                  let root_node = trie.nodes[root_id as usize].clone();
+                  let root_node = trie.nodes.get(&root_id).unwrap().clone();
                   if root_node.children.is_empty() {
                       continue;
                   }
@@ -1875,7 +1879,7 @@ local_system:
                           }
 
                           let mid_id = trie.add_node(false);
-                          let mid_node = &mut trie.nodes[mid_id as usize];
+                          let mid_node = trie.nodes.get_mut(&mid_id).unwrap();
                           mid_node.children.insert(EdgeKey::new(pop, b.clone()), dest_agg);
 
                           new_children
@@ -1887,7 +1891,7 @@ local_system:
                   }
 
                   if made_progress {
-                      trie.nodes[root_id as usize].children = new_children;
+                      trie.nodes.get_mut(&root_id).unwrap().children = new_children;
                   }
               }
           }
@@ -1917,7 +1921,7 @@ local_system:
           }
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              for node in trie.nodes.iter_mut() {
+              for node in trie.nodes.values_mut() {
                   if node.children.is_empty() {
                       continue;
                   }
@@ -2001,7 +2005,7 @@ local_system:
 
               let one_step_back_map = parser.build_one_step_back_map();
               let mut max_pop = 0;
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   for (ek, _) in &node.children {
                       if ek.pop > 0 {
                           max_pop = max_pop.max(ek.pop as usize);
@@ -2072,7 +2076,7 @@ local_system:
                   if s_u.is_empty() {
                       continue;
                   }
-                  let u_node = &trie.nodes[u_id as usize];
+                  let u_node = trie.nodes.get(&u_id).unwrap();
                   for (ek, dm) in &u_node.children {
                       let s_u_popped = if ek.pop > 0 {
                           apply_n_step_back(&s_u, ek.pop as usize)
@@ -2097,7 +2101,7 @@ local_system:
                   }
               }
 
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   for (_ek, dm) in &mut node.children {
                       dm.retain(|v_id, sids| {
                           if let Some(s_v) = possible_states.get(v_id) {
@@ -2141,13 +2145,18 @@ local_system:
           }
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              let n = trie.nodes.len();
+              let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
+              let id_to_idx: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+              let n = node_ids.len();
               if n == 0 {
                   return;
               }
 
-              let mut prev_class: Vec<usize> =
-                  trie.nodes.iter().map(|node| if node.end { 1 } else { 0 }).collect();
+              let mut prev_class: Vec<usize> = vec![0; n];
+              for (i, id) in node_ids.iter().enumerate() {
+                  let node = trie.nodes.get(id).unwrap();
+                  prev_class[i] = if node.end { 1 } else { 0 };
+              }
 
               for _ in 0..self.max_iters {
                   type AggregatedEdge = ((isize, SortedSet, usize), SortedSet);
@@ -2157,11 +2166,12 @@ local_system:
                   let mut next_id = 0;
                   let mut changes = 0;
 
-                  for (u_idx, u_node) in trie.nodes.iter().enumerate() {
+                  for (u_idx, u_id) in node_ids.iter().enumerate() {
+                      let u_node = trie.nodes.get(u_id).unwrap();
                       let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
                       for (ek, dm) in &u_node.children {
                           for (v_id, sids) in dm {
-                              let dest_class = prev_class[*v_id as usize];
+                              let dest_class = prev_class[id_to_idx[v_id]];
                               let key = (ek.pop, ek.tokens.clone(), dest_class);
                               aggr.entry(key).or_default().union_inplace(sids);
                           }
@@ -2187,24 +2197,23 @@ local_system:
               let mut representatives: Vec<Option<NodeId>> = vec![None; num_classes];
               for (u_idx, &class_id) in prev_class.iter().enumerate() {
                   if representatives[class_id].is_none() {
-                      representatives[class_id] = Some(u_idx as NodeId);
+                      representatives[class_id] = Some(node_ids[u_idx]);
                   }
               }
               let mut node_to_rep: HashMap<NodeId, NodeId> = HashMap::new();
               for (u_idx, &class_id) in prev_class.iter().enumerate() {
-                  node_to_rep.insert(u_idx as NodeId, representatives[class_id].unwrap());
+                  node_to_rep.insert(node_ids[u_idx], representatives[class_id].unwrap());
               }
 
-              let original_nodes = trie.nodes.clone();
               for (class_id, rep_id_opt) in representatives.iter().enumerate() {
                   if let Some(rep_id) = rep_id_opt {
                       let exemplar_idx = prev_class.iter().position(|&c| c == class_id).unwrap();
-                      let exemplar_node = &original_nodes[exemplar_idx];
+                      let exemplar_node = trie.nodes.get(&node_ids[exemplar_idx]).unwrap().clone();
 
                       let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
                       for (ek, dm) in &exemplar_node.children {
                           for (v_id, sids) in dm {
-                              let v_class = prev_class[*v_id as usize];
+                              let v_class = prev_class[id_to_idx[v_id]];
                               aggr.entry((ek.pop, ek.tokens.clone(), v_class))
                                   .or_default()
                                   .union_inplace(sids);
@@ -2219,13 +2228,13 @@ local_system:
                               new_children.entry(key).or_default().insert(dest_rep, sids);
                           }
                       }
-                      trie.nodes[*rep_id as usize].children = new_children;
+                      trie.nodes.get_mut(rep_id).unwrap().children = new_children;
                   }
               }
 
               let rep_set: std::collections::HashSet<NodeId> =
                   representatives.iter().filter_map(|&x| x).collect();
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   if !rep_set.contains(&node.id) {
                       node.children.clear();
                       node.end = false;
@@ -2255,7 +2264,7 @@ local_system:
               };
 
               let mut all_bvs = HashSet::new();
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   for (ek, _) in &node.children {
                       if !ek.tokens.is_empty() {
                           all_bvs.insert(ek.tokens.clone());
@@ -2321,7 +2330,7 @@ local_system:
                   SortedSet::from_iter(new_elems)
               };
 
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   let mut new_children = BTreeMap::new();
                   for (mut ek, dm) in std::mem::take(&mut node.children) {
                       ek.tokens = remap_sorted_set(&ek.tokens);
@@ -2373,13 +2382,15 @@ local_system:
           }
 
           fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-              let n = trie.nodes.len();
+              let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
+              let id_to_idx: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+              let n = node_ids.len();
               if n == 0 {
                   return;
               }
 
               let mut by_pop_masks: BTreeMap<isize, HashSet<SortedSet>> = BTreeMap::new();
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   for (ek, _) in &node.children {
                       if !ek.tokens.is_empty() {
                           by_pop_masks.entry(ek.pop).or_default().insert(ek.tokens.clone());
@@ -2486,12 +2497,13 @@ local_system:
               let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
               let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
               let mut pop0_out_degree = vec![0; n];
-              for (u_idx, u_node) in trie.nodes.iter().enumerate() {
+              for u_node in trie.nodes.values() {
+                  let u_idx = id_to_idx[&u_node.id];
                   for (ek, dm) in &u_node.children {
                       if ek.pop == 0 {
                           for v_id in dm.keys() {
                               pop0_adj[u_idx].push(*v_id);
-                              pop0_rev_adj[*v_id as usize].push(u_node.id);
+                              pop0_rev_adj[id_to_idx[v_id]].push(u_node.id);
                               pop0_out_degree[u_idx] += 1;
                           }
                       }
@@ -2509,8 +2521,8 @@ local_system:
               let mut processed_count = 0;
               while let Some(v_idx) = q.pop_front() {
                   processed_count += 1;
-                  for &u_id in &pop0_rev_adj[v_idx] {
-                      let u_idx = u_id as usize;
+                  for u_id in &pop0_rev_adj[v_idx] {
+                      let u_idx = id_to_idx[u_id];
                       dist[u_idx] = dist[u_idx].max(1 + dist[v_idx]);
                       pop0_out_degree[u_idx] -= 1;
                       if pop0_out_degree[u_idx] == 0 {
@@ -2529,8 +2541,8 @@ local_system:
                   while let Some(v_idx) = q.pop_front() {
                       if dist[v_idx] != max_dist {
                           dist[v_idx] = max_dist;
-                          for &u_id in &pop0_rev_adj[v_idx] {
-                              q.push_back(u_id as usize);
+                          for u_id in &pop0_rev_adj[v_idx] {
+                              q.push_back(id_to_idx[u_id]);
                           }
                       }
                   }
@@ -2540,8 +2552,9 @@ local_system:
               let mut prev_class: Vec<usize> = vec![0; n];
               let mut class_map: HashMap<(bool, usize), usize> = HashMap::new();
               let mut next_class_id = 0;
-              for (i, node) in trie.nodes.iter().enumerate() {
-                  let key = (node.end, dist[i]);
+              for (i, id) in node_ids.iter().enumerate() {
+                  let node = trie.nodes.get(id).unwrap();
+                  let key = (node.end, dist[id_to_idx[&node.id]]);
                   let class_id = *class_map.entry(key).or_insert_with(|| {
                       let id = next_class_id;
                       next_class_id += 1;
@@ -2557,7 +2570,8 @@ local_system:
                   let mut new_class = vec![0; n];
                   let mut changes = 0;
 
-                  for (u_idx, u_node) in trie.nodes.iter().enumerate() {
+                  for (u_idx, u_id) in node_ids.iter().enumerate() {
+                      let u_node = trie.nodes.get(u_id).unwrap();
                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in &u_node.children {
                           if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
@@ -2566,7 +2580,7 @@ local_system:
                                       for &atom_idx in atom_idxs {
                                           let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
                                           for (v_id, sids) in dm {
-                                              let dest_class = prev_class[*v_id as usize];
+                                              let dest_class = prev_class[id_to_idx[v_id]];
                                               entry.entry(dest_class).or_default().union_inplace(sids);
                                           }
                                       }
@@ -2590,26 +2604,26 @@ local_system:
               let mut representatives: Vec<Option<NodeId>> = vec![None; num_classes];
               for (u_idx, &class_id) in prev_class.iter().enumerate() {
                   if representatives[class_id].is_none() {
-                      representatives[class_id] = Some(trie.nodes[u_idx].id);
+                      representatives[class_id] = Some(node_ids[u_idx]);
                   }
               }
               let mut node_to_rep: HashMap<NodeId, NodeId> = HashMap::new();
               for (u_idx, &class_id) in prev_class.iter().enumerate() {
-                  node_to_rep.insert(trie.nodes[u_idx].id, representatives[class_id].unwrap());
+                  node_to_rep.insert(node_ids[u_idx], representatives[class_id].unwrap());
               }
 
               // Rebuild representative edges.
-              let original_nodes = trie.nodes.clone();
               for class_id in 0..num_classes {
                   if let Some(rep_id) = representatives[class_id] {
                       let exemplar_idx = final_partition.iter().position(|&c| c == class_id).unwrap();
-                      let exemplar_node = &original_nodes[exemplar_idx];
+                      let exemplar_id = node_ids[exemplar_idx];
+                      let exemplar_node = trie.nodes.get(&exemplar_id).unwrap().clone();
 
                       // Aggregate by (pop, tokens, dest_class) -> union of sids
                       let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
                       for (ek, dm) in &exemplar_node.children {
                           for (v_id, sids) in dm {
-                              let v_class = final_partition[*v_id as usize];
+                              let v_class = final_partition[id_to_idx[v_id]];
                               aggr.entry((ek.pop, ek.tokens.clone(), v_class))
                                   .or_default()
                                   .union_inplace(sids);
@@ -2624,13 +2638,13 @@ local_system:
                               new_children.entry(key).or_default().insert(dest_rep, sids);
                           }
                       }
-                      trie.nodes[rep_id as usize].children = new_children;
+                      trie.nodes.get_mut(&rep_id).unwrap().children = new_children;
                   }
               }
 
               // Clear children of non-representatives.
               let rep_set: HashSet<NodeId> = representatives.iter().filter_map(|&x| x).collect();
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   if !rep_set.contains(&node.id) {
                       node.children.clear();
                       node.end = false; // Non-reps are effectively deleted.
@@ -2669,24 +2683,19 @@ local_system:
           }
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              let n = trie.nodes.len();
+              let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
+              let dense_of: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+              let n = node_ids.len();
               if n == 0 {
                   return;
-              }
-
-              // Map node id -> dense index
-              let mut dense_of: HashMap<NodeId, usize> = HashMap::with_capacity(n);
-              let mut old_of: Vec<NodeId> = Vec::with_capacity(n);
-              for (i, node) in trie.nodes.iter().enumerate() {
-                  dense_of.insert(node.id, i);
-                  old_of.push(node.id);
               }
 
               // Initial classes by end flag and out-degree
               let mut prev_class: Vec<usize> = vec![0; n];
               let mut class_map: HashMap<(bool, usize), usize> = HashMap::new();
               let mut next_class = 0usize;
-              for (i, node) in trie.nodes.iter().enumerate() {
+              for (i, node_id) in node_ids.iter().enumerate() {
+                  let node = trie.nodes.get(node_id).unwrap();
                   let key = (node.end, node.out_degree());
                   let cid = *class_map.entry(key).or_insert_with(|| {
                       let v = next_class;
@@ -2711,7 +2720,8 @@ local_system:
                   let mut next = 0usize;
                   let mut changes = 0usize;
 
-                  for (i, node) in trie.nodes.iter().enumerate() {
+                  for (i, node_id) in node_ids.iter().enumerate() {
+                      let node = trie.nodes.get(node_id).unwrap();
                       // Aggregate by (pop, tokens) -> dest_class -> union of states
                       let mut per_key: BTreeMap<(isize, SortedSet), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in &node.children {
@@ -2764,20 +2774,19 @@ local_system:
               let mut rep_of_class: Vec<Option<NodeId>> = vec![None; num_classes];
               for (i, &cid) in prev_class.iter().enumerate() {
                   if rep_of_class[cid].is_none() {
-                      rep_of_class[cid] = Some(old_of[i]);
+                      rep_of_class[cid] = Some(node_ids[i]);
                   }
               }
               let mut rep_of_node: HashMap<NodeId, NodeId> = HashMap::with_capacity(n);
-              for (i, node_id) in old_of.iter().enumerate() {
+              for (i, node_id) in node_ids.iter().enumerate() {
                   let cid = prev_class[i];
                   rep_of_node.insert(*node_id, rep_of_class[cid].unwrap());
               }
 
-              let original_nodes = trie.nodes.clone();
               for (cid, rep_id_opt) in rep_of_class.iter().enumerate() {
                   if let Some(rep_id) = rep_id_opt {
                       let exemplar_idx = prev_class.iter().position(|&c| c == cid).unwrap();
-                      let exemplar_node = &original_nodes[exemplar_idx];
+                      let exemplar_node = trie.nodes.get(&node_ids[exemplar_idx]).unwrap().clone();
 
                       let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
                           BTreeMap::new();
@@ -2791,13 +2800,13 @@ local_system:
                               new_children.insert(ek.clone(), new_dm);
                           }
                       }
-                      trie.nodes[*rep_id as usize].children = new_children;
+                      trie.nodes.get_mut(rep_id).unwrap().children = new_children;
                   }
               }
 
               let rep_set: std::collections::HashSet<NodeId> =
                   rep_of_class.iter().filter_map(|&x| x).collect();
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   if !rep_set.contains(&node.id) {
                       node.children.clear();
                       node.end = false;
@@ -2853,7 +2862,7 @@ local_system:
       pub use prune_unproductive_paths::PruneUnproductivePathsPass;
       pub use reorder_llm_tokens::ReorderLLMTokensPass;
     src/trie3_opt/passes/prune_dead_paths.rs: |
-      use std::collections::{BTreeMap, HashMap, VecDeque};
+      use std::collections::{BTreeMap, HashMap, VecDeque, BTreeSet};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
@@ -2870,46 +2879,39 @@ local_system:
           }
 
           fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-              let mut predecessors: HashMap<NodeId, Vec<(NodeId, EdgeKey)>> = HashMap::new();
               let mut worklist = VecDeque::new();
               let mut live: HashMap<NodeId, SortedSet> = HashMap::new();
               let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
 
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   live.insert(node.id, SortedSet::new());
                   if node.end {
                       live.insert(node.id, universe.clone());
                       worklist.push_back(node.id);
                   }
-                  for (ek, dm) in &node.children {
-                      for (dst, _) in dm {
-                          predecessors
-                              .entry(*dst)
-                              .or_default()
-                              .push((node.id, ek.clone()));
-                      }
-                  }
               }
 
               while let Some(node_id) = worklist.pop_front() {
                   let live_at_node = live.get(&node_id).unwrap().clone();
-                  if let Some(preds) = predecessors.get(&node_id) {
-                      for (pred_id, edge_key) in preds {
-                          let live_from_edge = live_at_node.intersect(&edge_key.tokens);
-                          if live_from_edge.is_empty() {
-                              continue;
-                          }
-                          let pred_live = live.get_mut(pred_id).unwrap();
-                          let old_len = pred_live.len();
-                          pred_live.union_inplace(&live_from_edge);
-                          if pred_live.len() > old_len {
-                              worklist.push_back(*pred_id);
+                  if let Some(node) = trie.nodes.get(&node_id) {
+                      for (pred_id, edges) in &node.parents {
+                          for edge_key in edges.keys() {
+                              let live_from_edge = live_at_node.intersect(&edge_key.tokens);
+                              if live_from_edge.is_empty() {
+                                  continue;
+                              }
+                              let pred_live = live.get_mut(pred_id).unwrap();
+                              let old_len = pred_live.len();
+                              pred_live.union_inplace(&live_from_edge);
+                              if pred_live.len() > old_len {
+                                  worklist.push_back(*pred_id);
+                              }
                           }
                       }
                   }
               }
 
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
                   for (ek, dm) in &node.children {
                       for (dst, sids) in dm {
@@ -2950,7 +2952,7 @@ local_system:
               if productive.len() == trie.nodes.len() {
                   return;
               }
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   if !productive.contains(&node.id) {
                       node.children.clear();
                   } else {
@@ -2983,7 +2985,7 @@ local_system:
 
               let max_tok = ctx.max_llm_token_id;
               let mut freq: Vec<usize> = vec![0; max_tok + 1];
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   for (ek, _) in &node.children {
                       for t in ek.tokens.iter() {
                           if t <= max_tok {
@@ -3012,7 +3014,7 @@ local_system:
                   SortedSet::from_iter(new_elems)
               };
 
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   let mut new_children = BTreeMap::new();
                   for (mut ek, dm) in std::mem::take(&mut node.children) {
                       ek.tokens = remap_sorted_set(&ek.tokens);
@@ -3501,6 +3503,7 @@ local_system:
                   crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
               }
               pass.run(&mut mini, &mut ctx);
+              mini.rebuild_parents();
               if ctx.debug_level > 0 {
                   let metrics = run_all_metrics(&mini);
                   crate::debug!(
@@ -3772,7 +3775,7 @@ local_system:
       impl MiniTrie {
           pub fn new() -> Self {
               Self {
-                  nodes: Vec::new(),
+                  nodes: BTreeMap::new(),
                   root_ids: BTreeSet::new(),
                   next_node_id: 0,
               }
@@ -3844,12 +3847,36 @@ local_system:
                   if let Some(v_node) = self.nodes.get(&v_id) {
                       for &u_id in v_node.parents.keys() {
                           if productive.insert(u_id) {
-                              q.push_back(u);
+                              q.push_back(u_id);
                           }
                       }
                   }
               }
               productive
+          }
+
+          /// Rebuilds all parent pointers from scratch by scanning all children.
+          /// This is useful after complex transformations that modify `children` directly.
+          pub fn rebuild_parents(&mut self) {
+              for node in self.nodes.values_mut() {
+                  node.parents.clear();
+              }
+              // Collect children first to avoid borrow checker issues.
+              let all_children: Vec<(NodeId, BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>)> = self
+                  .nodes
+                  .values()
+                  .map(|n| (n.id, n.children.clone()))
+                  .collect();
+
+              for (src_id, children) in all_children {
+                  for (ek, dm) in children {
+                      for (dst_id, sids) in dm {
+                          if let Some(dst_node) = self.nodes.get_mut(&dst_id) {
+                              dst_node.parents.entry(src_id).or_default().entry(ek.clone()).or_default().union_inplace(&sids);
+                          }
+                      }
+                  }
+              }
           }
       }
     src/trie3_opt/metrics.rs: |+
@@ -6459,16 +6486,16 @@ messages:
           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
           ctx: &OptimizationContext,
       ) {
-          // Create all nodes first
-          let mut new_nodes: Vec<PrecomputeNode3Index> = Vec::with_capacity(mini.nodes.len());
-          for _ in 0..mini.nodes.len() {
+          // Create all nodes first, and map MiniTrie NodeId to new PrecomputeNode3Index
+          let mut id_map: BTreeMap<NodeId, PrecomputeNode3Index> = BTreeMap::new();
+          for &node_id in mini.nodes.keys() {
               let idx = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::internal())));
-              new_nodes.push(idx);
+              id_map.insert(node_id, idx);
           }
 
           // Fill end flags and edges
-          for node in &mini.nodes {
-              let idx = new_nodes[node.id as usize];
+          for node in mini.nodes.values() {
+              let idx = *id_map.get(&node.id).unwrap();
               if let Some(mut w) = idx.write(trie3_god) {
                   w.value.end = node.end;
 
@@ -6497,7 +6524,7 @@ messages:
                           if sbv.is_empty() {
                               continue;
                           }
-                          let dst_idx = new_nodes[*dst as usize];
+                          let dst_idx = *id_map.get(dst).unwrap();
                           entry.entry(dst_idx)
                               .and_modify(|e| *e |= &sbv)
                               .or_insert(sbv);
@@ -6517,8 +6544,9 @@ messages:
           // Remap roots to new nodes
           roots.clear();
           for (key, nid) in root_pairs {
-              let idx = new_nodes[*nid as usize];
-              roots.insert(*key, idx);
+              if let Some(idx) = id_map.get(nid) {
+                  roots.insert(*key, *idx);
+              }
           }
 
           // GC and recompute depths
@@ -6664,7 +6692,7 @@ messages:
       filename: src/trie3_opt/coordinator.rs
   - user: |-
       ```rust "src/trie3_opt/core.rs"
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 
       /// Compact node id for the mini trie.
       pub type NodeId = u32;
@@ -6814,6 +6842,8 @@ messages:
           pub end: bool,
           // key: (pop, tokens) -> dest map: dest node -> state-set
           pub children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>,
+          // src map: src node -> (key: (pop, tokens) -> state-set)
+          pub parents: BTreeMap<NodeId, BTreeMap<EdgeKey, SortedSet>>,
       }
 
       impl Node {
@@ -6822,30 +6852,38 @@ messages:
                   id,
                   end,
                   children: BTreeMap::new(),
+                  parents: BTreeMap::new(),
               }
           }
           pub fn out_degree(&self) -> usize {
               self.children.values().map(|m| m.len()).sum()
+          }
+          pub fn in_degree(&self) -> usize {
+              self.parents.values().map(|m| m.len()).sum()
           }
       }
 
       /// A compact, no-generics mini trie for precompute3 optimization.
       #[derive(Clone, Debug)]
       pub struct MiniTrie {
-          pub nodes: Vec<Node>,
+          pub nodes: BTreeMap<NodeId, Node>,
           pub root_ids: BTreeSet<NodeId>,
+          /// Counter to generate unique node IDs.
+          next_node_id: NodeId,
       }
 
       impl MiniTrie {
           pub fn new() -> Self {
               Self {
-                  nodes: Vec::new(),
+                  nodes: BTreeMap::new(),
                   root_ids: BTreeSet::new(),
+                  next_node_id: 0,
               }
           }
           pub fn add_node(&mut self, end: bool) -> NodeId {
-              let id = self.nodes.len() as u32;
-              self.nodes.push(Node::new(id, end));
+              let id = self.next_node_id;
+              self.next_node_id += 1;
+              self.nodes.insert(id, Node::new(id, end));
               id
           }
           pub fn add_edge(
@@ -6855,11 +6893,21 @@ messages:
               dst: NodeId,
               states: SortedSet,
           ) {
-              let n = &mut self.nodes[src as usize];
-              let dm = n.children.entry(key).or_insert_with(BTreeMap::new);
-              dm.entry(dst)
-                  .and_modify(|e| e.union_inplace(&states))
-                  .or_insert(states);
+              // Update children of src node
+              if let Some(src_node) = self.nodes.get_mut(&src) {
+                  let dm = src_node.children.entry(key.clone()).or_default();
+                  dm.entry(dst)
+                      .and_modify(|e| e.union_inplace(&states))
+                      .or_insert(states.clone());
+              }
+
+              // Update parents of dst node
+              if let Some(dst_node) = self.nodes.get_mut(&dst) {
+                  let parent_edges = dst_node.parents.entry(src).or_default();
+                  parent_edges.entry(key)
+                      .and_modify(|e| e.union_inplace(&states))
+                      .or_insert(states);
+              }
           }
           pub fn add_root(&mut self, id: NodeId) {
               self.root_ids.insert(id);
@@ -6873,7 +6921,7 @@ messages:
                   if !seen.insert(u) {
                       continue;
                   }
-                  let node = &self.nodes[u as usize];
+                  let node = self.nodes.get(&u).unwrap();
                   for (_ek, dm) in node.children.iter() {
                       for (v, _s) in dm.iter() {
                           if !seen.contains(v) {
@@ -6887,27 +6935,19 @@ messages:
 
           /// Compute set of nodes that can reach an end node (reverse reachability).
           pub fn can_reach_end(&self) -> BTreeSet<NodeId> {
-              let mut incoming: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
-              for n in &self.nodes {
-                  for (_ek, dm) in &n.children {
-                      for (dst, _s) in dm {
-                          incoming.entry(*dst).or_default().push(n.id);
-                      }
-                  }
-              }
               let mut productive: BTreeSet<NodeId> = BTreeSet::new();
               let mut q: VecDeque<NodeId> = VecDeque::new();
-              for n in &self.nodes {
+              for n in self.nodes.values() {
                   if n.end {
                       productive.insert(n.id);
                       q.push_back(n.id);
                   }
               }
-              while let Some(v) = q.pop_front() {
-                  if let Some(srcs) = incoming.get(&v) {
-                      for &u in srcs {
-                          if productive.insert(u) {
-                              q.push_back(u);
+              while let Some(v_id) = q.pop_front() {
+                  if let Some(v_node) = self.nodes.get(&v_id) {
+                      for &u_id in v_node.parents.keys() {
+                          if productive.insert(u_id) {
+                              q.push_back(u_id);
                           }
                       }
                   }
@@ -7033,7 +7073,7 @@ messages:
       impl Metric for NumEdgesMetric {
           fn name(&self) -> &'static str { "num_edges" }
           fn compute(&self, trie: &MiniTrie) -> String {
-              trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_string()
+              trie.nodes.values().map(|n| n.out_degree()).sum::<usize>().to_string()
           }
       }
 
@@ -7047,7 +7087,7 @@ messages:
       impl Metric for NumEndNodesMetric {
           fn name(&self) -> &'static str { "num_end_nodes" }
           fn compute(&self, trie: &MiniTrie) -> String {
-              trie.nodes.iter().filter(|n| n.end).count().to_string()
+              trie.nodes.values().filter(|n| n.end).count().to_string()
           }
       }
 
@@ -7068,8 +7108,7 @@ messages:
           fn name(&self) -> &'static str { "root_fanout" }
           fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| trie.root_ids.contains(&n.id))
                   .map(|n| n.out_degree() as f64)
                   .collect();
@@ -7082,8 +7121,7 @@ messages:
           fn name(&self) -> &'static str { "non_root_fanout" }
           fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| !trie.root_ids.contains(&n.id))
                   .map(|n| n.out_degree() as f64)
                   .collect();
@@ -7096,8 +7134,7 @@ messages:
           fn name(&self) -> &'static str { "all_fanout" }
           fn compute(&self, trie: &MiniTrie) -> String {
               let fanouts: Vec<f64> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .map(|n| n.out_degree() as f64)
                   .collect();
               NumericStats::from_samples(&fanouts).to_pretty_string()
@@ -7148,14 +7185,14 @@ messages:
               let mut scores: Vec<f64> = Vec::new();
               #[cfg(not(rustrover))]
               let it = tqdm!(
-                  trie.nodes.iter(),
+                  trie.nodes.values(),
                   desc = "Metric: EdgeOverlap",
                   total = trie.nodes.len(),
                   disable = !PROGRESS_BAR_ENABLED,
                   leave = false
               );
               #[cfg(rustrover)]
-              let it = trie.nodes.iter();
+              let it = trie.nodes.values();
 
               for node in it {
                   let node_score = compute_edge_overlap_for_node(node);
@@ -7173,8 +7210,7 @@ messages:
           fn compute(&self, trie: &MiniTrie) -> String {
               let mut scores: Vec<f64> = Vec::new();
               let root_nodes: Vec<_> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| trie.root_ids.contains(&n.id))
                   .collect();
 
@@ -7205,8 +7241,7 @@ messages:
           fn compute(&self, trie: &MiniTrie) -> String {
               let mut scores: Vec<f64> = Vec::new();
               let non_root_nodes: Vec<_> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| !trie.root_ids.contains(&n.id))
                   .collect();
 
@@ -7268,14 +7303,14 @@ messages:
 
               #[cfg(not(rustrover))]
               let it = tqdm!(
-                  trie.nodes.iter(),
+                  trie.nodes.values(),
                   desc = "Metric: StateFanout",
                   total = trie.nodes.len(),
                   disable = !PROGRESS_BAR_ENABLED,
                   leave = false
               );
               #[cfg(rustrover)]
-              let it = trie.nodes.iter();
+              let it = trie.nodes.values();
 
               for node in it {
                   compute_state_fanout_for_node_into(node, &mut stats);
@@ -7291,8 +7326,7 @@ messages:
           fn compute(&self, trie: &MiniTrie) -> String {
               let mut stats = NumericStats::new();
               let root_nodes: Vec<_> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| trie.root_ids.contains(&n.id))
                   .collect();
 
@@ -7320,8 +7354,7 @@ messages:
           fn compute(&self, trie: &MiniTrie) -> String {
               let mut stats = NumericStats::new();
               let non_root_nodes: Vec<_> = trie
-                  .nodes
-                  .iter()
+                  .nodes.values()
                   .filter(|n| !trie.root_ids.contains(&n.id))
                   .collect();
 
@@ -7499,7 +7532,12 @@ messages:
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
               // Collect end nodes
-              let mut ends: Vec<NodeId> = trie.nodes.iter().filter(|n| n.end).map(|n| n.id).collect();
+              let mut ends: Vec<NodeId> = trie
+                  .nodes
+                  .values()
+                  .filter(|n| n.end)
+                  .map(|n| n.id)
+                  .collect();
               if ends.len() <= 1 {
                   return;
               }
@@ -7508,7 +7546,7 @@ messages:
 
               // Ensure canonical has no outgoing edges
               {
-                  let cnode = &mut trie.nodes[canonical as usize];
+                  let cnode = trie.nodes.get_mut(&canonical).unwrap();
                   cnode.children.clear();
                   cnode.end = true;
               }
@@ -7516,7 +7554,7 @@ messages:
               // Rewire all edges to target canonical if they target any end
               let end_set: std::collections::BTreeSet<NodeId> = ends.into_iter().collect();
 
-              for node in trie.nodes.iter_mut() {
+              for node in trie.nodes.values_mut() {
                   let mut new_children: BTreeMap<_, _> = BTreeMap::new();
                   for (ek, dm) in node.children.clone() {
                       let mut dm2: BTreeMap<NodeId, _> = BTreeMap::new();
@@ -7557,7 +7595,7 @@ messages:
           }
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              for n in trie.nodes.iter_mut() {
+              for n in trie.nodes.values_mut() {
                   if n.children.is_empty() {
                       continue;
                   }
@@ -7654,7 +7692,7 @@ messages:
                   let mut out_info: HashMap<NodeId, (EdgeKey, NodeId, crate::trie3_opt::core::SortedSet)> =
                       HashMap::new();
 
-                  for node in &trie.nodes {
+                  for node in trie.nodes.values() {
                       for (ek, dm) in &node.children {
                           for (dst, _) in dm {
                               let count = indegree.entry(*dst).or_default();
@@ -7686,7 +7724,7 @@ messages:
                   }
 
                   let mut rewrites = vec![];
-                  for u_id in trie.nodes.iter().map(|n| n.id) {
+                  for u_id in trie.nodes.keys().cloned() {
                       if roots_set.contains(&u_id) {
                           continue;
                       }
@@ -7705,7 +7743,7 @@ messages:
                   }
 
                   for (p_id, u_id, v_id, key, s_uv) in rewrites {
-                      let p_node = &mut trie.nodes[p_id as usize];
+                      let p_node = trie.nodes.get_mut(&p_id).unwrap();
                       if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
                           let dm = entry.get_mut();
                           if let Some(s_pu) = dm.remove(&u_id) {
@@ -7753,61 +7791,54 @@ messages:
               }
 
               loop {
-                  // Build incoming map and collect pop=0 edges
-                  let mut incoming: HashMap<NodeId, Vec<(NodeId, isize, SortedSet, SortedSet)>> = HashMap::new();
+                  // Collect pop=0 edges
                   let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
 
-                  for node in &trie.nodes {
+                  for node in trie.nodes.values() {
                       for (ek, dm) in &node.children {
-                          for (dst, sids) in dm {
-                              incoming.entry(*dst).or_default().push((node.id, ek.pop, ek.tokens.clone(), sids.clone()));
-                              if ek.pop == 0 {
+                          if ek.pop == 0 {
+                              for (dst, sids) in dm {
                                   zero_edges.push((node.id, ek.tokens.clone(), *dst, sids.clone()));
                               }
                           }
                       }
                   }
 
-                  if zero_edges.is_empty() {
-                      break;
-                  }
+                  if zero_edges.is_empty() { break; }
 
                   let mut removed_this_iter = 0usize;
 
                   for (b, llm_bc, c, s_bc) in zero_edges {
-                      if root_set.contains(&b) {
-                          // pop=0 from root is allowed; skip
-                          continue;
-                      }
-                      if let Some(preds) = incoming.get(&b) {
-                          for (a, p_ab, llm_ab, s_ab) in preds {
-                              let new_tokens = llm_ab.intersect(&llm_bc);
-                              if new_tokens.is_empty() {
-                                  continue;
+                      if root_set.contains(&b) { continue; }
+
+                      if let Some(b_node) = trie.nodes.get(&b) {
+                          let preds = b_node.parents.clone(); // clone to avoid borrow issues
+                          for (a, edges_from_a) in &preds {
+                              for (key_ab, s_ab) in edges_from_a {
+                                  let p_ab = key_ab.pop;
+                                  let llm_ab = &key_ab.tokens;
+                                  let new_tokens = llm_ab.intersect(&llm_bc);
+                                  if new_tokens.is_empty() { continue; }
+                                  let new_sids = s_ab.intersect(&s_bc);
+                                  if new_sids.is_empty() { continue; }
+
+                                  let a_node = trie.nodes.get_mut(a).unwrap();
+                                  let key = crate::trie3_opt::core::EdgeKey::new(p_ab, new_tokens.clone());
+                                  let dm = a_node.children.entry(key).or_default();
+                                  dm.entry(c).or_default().union_inplace(&new_sids);
                               }
-                              let new_sids = s_ab.intersect(&s_bc);
-                              if new_sids.is_empty() {
-                                  continue;
-                              }
-                              // Add/update A -> C with (p_ab, new_tokens) and SIDs = intersection
-                              let a_node = &mut trie.nodes[*a as usize];
-                              let key = crate::trie3_opt::core::EdgeKey::new(*p_ab, new_tokens.clone());
-                              let dm = a_node.children.entry(key).or_insert_with(BTreeMap::new);
-                              dm.entry(c)
-                                  .and_modify(|e| e.union_inplace(&new_sids))
-                                  .or_insert(new_sids);
                           }
                       }
 
                       // Remove B -> C under (0, llm_bc)
-                      let bnode = &mut trie.nodes[b as usize];
+                      let bnode = trie.nodes.get_mut(&b).unwrap();
                       let key = crate::trie3_opt::core::EdgeKey::new(0, llm_bc.clone());
-                      if let Some(dm) = bnode.children.get_mut(&key) {
-                          if dm.remove(&c).is_some() {
+                      if let std::collections::btree_map::Entry::Occupied(mut dm_entry) = bnode.children.entry(key) {
+                          if dm_entry.get_mut().remove(&c).is_some() {
                               removed_this_iter += 1;
                           }
-                          if dm.is_empty() {
-                              bnode.children.remove(&key);
+                          if dm_entry.get().is_empty() {
+                              dm_entry.remove();
                           }
                       }
                   }
@@ -7856,7 +7887,7 @@ messages:
               let mut incoming_map: HashMap<NodeId, HashMap<EdgeKey, HashMap<SortedSet, Vec<NodeId>>>> =
                   HashMap::new();
 
-              for src_node in &trie.nodes {
+              for src_node in trie.nodes.values() {
                   for (edge_key, dest_map) in &src_node.children {
                       for (dest_id, sids) in dest_map {
                           incoming_map
@@ -7883,7 +7914,7 @@ messages:
 
                               // Reroute sources to point to intermediate node
                               for src_id in &sources {
-                                  let src_node = &mut trie.nodes[*src_id as usize];
+                                  let src_node = trie.nodes.get_mut(src_id).unwrap();
 
                                   // Remove old edge
                                   if let Some(dest_map_for_key) = src_node.children.get_mut(&edge_key) {
@@ -7943,7 +7974,7 @@ messages:
               let root_ids: Vec<_> = trie.root_ids.iter().cloned().collect();
 
               for root_id in root_ids {
-                  let root_node = trie.nodes[root_id as usize].clone();
+                  let root_node = trie.nodes.get(&root_id).unwrap().clone();
                   if root_node.children.is_empty() {
                       continue;
                   }
@@ -8018,7 +8049,7 @@ messages:
                           }
 
                           let mid_id = trie.add_node(false);
-                          let mid_node = &mut trie.nodes[mid_id as usize];
+                          let mid_node = trie.nodes.get_mut(&mid_id).unwrap();
                           mid_node.children.insert(EdgeKey::new(pop, b.clone()), dest_agg);
 
                           new_children
@@ -8030,7 +8061,7 @@ messages:
                   }
 
                   if made_progress {
-                      trie.nodes[root_id as usize].children = new_children;
+                      trie.nodes.get_mut(&root_id).unwrap().children = new_children;
                   }
               }
           }
@@ -8065,7 +8096,7 @@ messages:
           }
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              for node in trie.nodes.iter_mut() {
+              for node in trie.nodes.values_mut() {
                   if node.children.is_empty() {
                       continue;
                   }
@@ -8154,7 +8185,7 @@ messages:
 
               let one_step_back_map = parser.build_one_step_back_map();
               let mut max_pop = 0;
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   for (ek, _) in &node.children {
                       if ek.pop > 0 {
                           max_pop = max_pop.max(ek.pop as usize);
@@ -8225,7 +8256,7 @@ messages:
                   if s_u.is_empty() {
                       continue;
                   }
-                  let u_node = &trie.nodes[u_id as usize];
+                  let u_node = trie.nodes.get(&u_id).unwrap();
                   for (ek, dm) in &u_node.children {
                       let s_u_popped = if ek.pop > 0 {
                           apply_n_step_back(&s_u, ek.pop as usize)
@@ -8250,7 +8281,7 @@ messages:
                   }
               }
 
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   for (_ek, dm) in &mut node.children {
                       dm.retain(|v_id, sids| {
                           if let Some(s_v) = possible_states.get(v_id) {
@@ -8299,13 +8330,18 @@ messages:
           }
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              let n = trie.nodes.len();
+              let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
+              let id_to_idx: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+              let n = node_ids.len();
               if n == 0 {
                   return;
               }
 
-              let mut prev_class: Vec<usize> =
-                  trie.nodes.iter().map(|node| if node.end { 1 } else { 0 }).collect();
+              let mut prev_class: Vec<usize> = vec![0; n];
+              for (i, id) in node_ids.iter().enumerate() {
+                  let node = trie.nodes.get(id).unwrap();
+                  prev_class[i] = if node.end { 1 } else { 0 };
+              }
 
               for _ in 0..self.max_iters {
                   type AggregatedEdge = ((isize, SortedSet, usize), SortedSet);
@@ -8315,11 +8351,12 @@ messages:
                   let mut next_id = 0;
                   let mut changes = 0;
 
-                  for (u_idx, u_node) in trie.nodes.iter().enumerate() {
+                  for (u_idx, u_id) in node_ids.iter().enumerate() {
+                      let u_node = trie.nodes.get(u_id).unwrap();
                       let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
                       for (ek, dm) in &u_node.children {
                           for (v_id, sids) in dm {
-                              let dest_class = prev_class[*v_id as usize];
+                              let dest_class = prev_class[id_to_idx[v_id]];
                               let key = (ek.pop, ek.tokens.clone(), dest_class);
                               aggr.entry(key).or_default().union_inplace(sids);
                           }
@@ -8345,24 +8382,23 @@ messages:
               let mut representatives: Vec<Option<NodeId>> = vec![None; num_classes];
               for (u_idx, &class_id) in prev_class.iter().enumerate() {
                   if representatives[class_id].is_none() {
-                      representatives[class_id] = Some(u_idx as NodeId);
+                      representatives[class_id] = Some(node_ids[u_idx]);
                   }
               }
               let mut node_to_rep: HashMap<NodeId, NodeId> = HashMap::new();
               for (u_idx, &class_id) in prev_class.iter().enumerate() {
-                  node_to_rep.insert(u_idx as NodeId, representatives[class_id].unwrap());
+                  node_to_rep.insert(node_ids[u_idx], representatives[class_id].unwrap());
               }
 
-              let original_nodes = trie.nodes.clone();
               for (class_id, rep_id_opt) in representatives.iter().enumerate() {
                   if let Some(rep_id) = rep_id_opt {
                       let exemplar_idx = prev_class.iter().position(|&c| c == class_id).unwrap();
-                      let exemplar_node = &original_nodes[exemplar_idx];
+                      let exemplar_node = trie.nodes.get(&node_ids[exemplar_idx]).unwrap().clone();
 
                       let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
                       for (ek, dm) in &exemplar_node.children {
                           for (v_id, sids) in dm {
-                              let v_class = prev_class[*v_id as usize];
+                              let v_class = prev_class[id_to_idx[v_id]];
                               aggr.entry((ek.pop, ek.tokens.clone(), v_class))
                                   .or_default()
                                   .union_inplace(sids);
@@ -8377,13 +8413,13 @@ messages:
                               new_children.entry(key).or_default().insert(dest_rep, sids);
                           }
                       }
-                      trie.nodes[*rep_id as usize].children = new_children;
+                      trie.nodes.get_mut(rep_id).unwrap().children = new_children;
                   }
               }
 
               let rep_set: std::collections::HashSet<NodeId> =
                   representatives.iter().filter_map(|&x| x).collect();
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   if !rep_set.contains(&node.id) {
                       node.children.clear();
                       node.end = false;
@@ -8418,7 +8454,7 @@ messages:
               };
 
               let mut all_bvs = HashSet::new();
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   for (ek, _) in &node.children {
                       if !ek.tokens.is_empty() {
                           all_bvs.insert(ek.tokens.clone());
@@ -8484,7 +8520,7 @@ messages:
                   SortedSet::from_iter(new_elems)
               };
 
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   let mut new_children = BTreeMap::new();
                   for (mut ek, dm) in std::mem::take(&mut node.children) {
                       ek.tokens = remap_sorted_set(&ek.tokens);
@@ -8541,13 +8577,15 @@ messages:
           }
 
           fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-              let n = trie.nodes.len();
+              let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
+              let id_to_idx: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+              let n = node_ids.len();
               if n == 0 {
                   return;
               }
 
               let mut by_pop_masks: BTreeMap<isize, HashSet<SortedSet>> = BTreeMap::new();
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   for (ek, _) in &node.children {
                       if !ek.tokens.is_empty() {
                           by_pop_masks.entry(ek.pop).or_default().insert(ek.tokens.clone());
@@ -8654,12 +8692,13 @@ messages:
               let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
               let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
               let mut pop0_out_degree = vec![0; n];
-              for (u_idx, u_node) in trie.nodes.iter().enumerate() {
+              for u_node in trie.nodes.values() {
+                  let u_idx = id_to_idx[&u_node.id];
                   for (ek, dm) in &u_node.children {
                       if ek.pop == 0 {
                           for v_id in dm.keys() {
                               pop0_adj[u_idx].push(*v_id);
-                              pop0_rev_adj[*v_id as usize].push(u_node.id);
+                              pop0_rev_adj[id_to_idx[v_id]].push(u_node.id);
                               pop0_out_degree[u_idx] += 1;
                           }
                       }
@@ -8677,8 +8716,8 @@ messages:
               let mut processed_count = 0;
               while let Some(v_idx) = q.pop_front() {
                   processed_count += 1;
-                  for &u_id in &pop0_rev_adj[v_idx] {
-                      let u_idx = u_id as usize;
+                  for u_id in &pop0_rev_adj[v_idx] {
+                      let u_idx = id_to_idx[u_id];
                       dist[u_idx] = dist[u_idx].max(1 + dist[v_idx]);
                       pop0_out_degree[u_idx] -= 1;
                       if pop0_out_degree[u_idx] == 0 {
@@ -8697,8 +8736,8 @@ messages:
                   while let Some(v_idx) = q.pop_front() {
                       if dist[v_idx] != max_dist {
                           dist[v_idx] = max_dist;
-                          for &u_id in &pop0_rev_adj[v_idx] {
-                              q.push_back(u_id as usize);
+                          for u_id in &pop0_rev_adj[v_idx] {
+                              q.push_back(id_to_idx[u_id]);
                           }
                       }
                   }
@@ -8708,8 +8747,9 @@ messages:
               let mut prev_class: Vec<usize> = vec![0; n];
               let mut class_map: HashMap<(bool, usize), usize> = HashMap::new();
               let mut next_class_id = 0;
-              for (i, node) in trie.nodes.iter().enumerate() {
-                  let key = (node.end, dist[i]);
+              for (i, id) in node_ids.iter().enumerate() {
+                  let node = trie.nodes.get(id).unwrap();
+                  let key = (node.end, dist[id_to_idx[&node.id]]);
                   let class_id = *class_map.entry(key).or_insert_with(|| {
                       let id = next_class_id;
                       next_class_id += 1;
@@ -8725,7 +8765,8 @@ messages:
                   let mut new_class = vec![0; n];
                   let mut changes = 0;
 
-                  for (u_idx, u_node) in trie.nodes.iter().enumerate() {
+                  for (u_idx, u_id) in node_ids.iter().enumerate() {
+                      let u_node = trie.nodes.get(u_id).unwrap();
                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in &u_node.children {
                           if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
@@ -8734,7 +8775,7 @@ messages:
                                       for &atom_idx in atom_idxs {
                                           let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
                                           for (v_id, sids) in dm {
-                                              let dest_class = prev_class[*v_id as usize];
+                                              let dest_class = prev_class[id_to_idx[v_id]];
                                               entry.entry(dest_class).or_default().union_inplace(sids);
                                           }
                                       }
@@ -8758,26 +8799,26 @@ messages:
               let mut representatives: Vec<Option<NodeId>> = vec![None; num_classes];
               for (u_idx, &class_id) in prev_class.iter().enumerate() {
                   if representatives[class_id].is_none() {
-                      representatives[class_id] = Some(trie.nodes[u_idx].id);
+                      representatives[class_id] = Some(node_ids[u_idx]);
                   }
               }
               let mut node_to_rep: HashMap<NodeId, NodeId> = HashMap::new();
               for (u_idx, &class_id) in prev_class.iter().enumerate() {
-                  node_to_rep.insert(trie.nodes[u_idx].id, representatives[class_id].unwrap());
+                  node_to_rep.insert(node_ids[u_idx], representatives[class_id].unwrap());
               }
 
               // Rebuild representative edges.
-              let original_nodes = trie.nodes.clone();
               for class_id in 0..num_classes {
                   if let Some(rep_id) = representatives[class_id] {
                       let exemplar_idx = final_partition.iter().position(|&c| c == class_id).unwrap();
-                      let exemplar_node = &original_nodes[exemplar_idx];
+                      let exemplar_id = node_ids[exemplar_idx];
+                      let exemplar_node = trie.nodes.get(&exemplar_id).unwrap().clone();
 
                       // Aggregate by (pop, tokens, dest_class) -> union of sids
                       let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
                       for (ek, dm) in &exemplar_node.children {
                           for (v_id, sids) in dm {
-                              let v_class = final_partition[*v_id as usize];
+                              let v_class = final_partition[id_to_idx[v_id]];
                               aggr.entry((ek.pop, ek.tokens.clone(), v_class))
                                   .or_default()
                                   .union_inplace(sids);
@@ -8792,13 +8833,13 @@ messages:
                               new_children.entry(key).or_default().insert(dest_rep, sids);
                           }
                       }
-                      trie.nodes[rep_id as usize].children = new_children;
+                      trie.nodes.get_mut(&rep_id).unwrap().children = new_children;
                   }
               }
 
               // Clear children of non-representatives.
               let rep_set: HashSet<NodeId> = representatives.iter().filter_map(|&x| x).collect();
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   if !rep_set.contains(&node.id) {
                       node.children.clear();
                       node.end = false; // Non-reps are effectively deleted.
@@ -8842,24 +8883,19 @@ messages:
           }
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              let n = trie.nodes.len();
+              let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
+              let dense_of: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+              let n = node_ids.len();
               if n == 0 {
                   return;
-              }
-
-              // Map node id -> dense index
-              let mut dense_of: HashMap<NodeId, usize> = HashMap::with_capacity(n);
-              let mut old_of: Vec<NodeId> = Vec::with_capacity(n);
-              for (i, node) in trie.nodes.iter().enumerate() {
-                  dense_of.insert(node.id, i);
-                  old_of.push(node.id);
               }
 
               // Initial classes by end flag and out-degree
               let mut prev_class: Vec<usize> = vec![0; n];
               let mut class_map: HashMap<(bool, usize), usize> = HashMap::new();
               let mut next_class = 0usize;
-              for (i, node) in trie.nodes.iter().enumerate() {
+              for (i, node_id) in node_ids.iter().enumerate() {
+                  let node = trie.nodes.get(node_id).unwrap();
                   let key = (node.end, node.out_degree());
                   let cid = *class_map.entry(key).or_insert_with(|| {
                       let v = next_class;
@@ -8884,7 +8920,8 @@ messages:
                   let mut next = 0usize;
                   let mut changes = 0usize;
 
-                  for (i, node) in trie.nodes.iter().enumerate() {
+                  for (i, node_id) in node_ids.iter().enumerate() {
+                      let node = trie.nodes.get(node_id).unwrap();
                       // Aggregate by (pop, tokens) -> dest_class -> union of states
                       let mut per_key: BTreeMap<(isize, SortedSet), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in &node.children {
@@ -8937,20 +8974,19 @@ messages:
               let mut rep_of_class: Vec<Option<NodeId>> = vec![None; num_classes];
               for (i, &cid) in prev_class.iter().enumerate() {
                   if rep_of_class[cid].is_none() {
-                      rep_of_class[cid] = Some(old_of[i]);
+                      rep_of_class[cid] = Some(node_ids[i]);
                   }
               }
               let mut rep_of_node: HashMap<NodeId, NodeId> = HashMap::with_capacity(n);
-              for (i, node_id) in old_of.iter().enumerate() {
+              for (i, node_id) in node_ids.iter().enumerate() {
                   let cid = prev_class[i];
                   rep_of_node.insert(*node_id, rep_of_class[cid].unwrap());
               }
 
-              let original_nodes = trie.nodes.clone();
               for (cid, rep_id_opt) in rep_of_class.iter().enumerate() {
                   if let Some(rep_id) = rep_id_opt {
                       let exemplar_idx = prev_class.iter().position(|&c| c == cid).unwrap();
-                      let exemplar_node = &original_nodes[exemplar_idx];
+                      let exemplar_node = trie.nodes.get(&node_ids[exemplar_idx]).unwrap().clone();
 
                       let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
                           BTreeMap::new();
@@ -8964,13 +9000,13 @@ messages:
                               new_children.insert(ek.clone(), new_dm);
                           }
                       }
-                      trie.nodes[*rep_id as usize].children = new_children;
+                      trie.nodes.get_mut(rep_id).unwrap().children = new_children;
                   }
               }
 
               let rep_set: std::collections::HashSet<NodeId> =
                   rep_of_class.iter().filter_map(|&x| x).collect();
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   if !rep_set.contains(&node.id) {
                       node.children.clear();
                       node.end = false;
@@ -9036,7 +9072,7 @@ messages:
       filename: src/trie3_opt/passes/mod.rs
   - user: |-
       ```rust "src/trie3_opt/passes/prune_dead_paths.rs"
-      use std::collections::{BTreeMap, HashMap, VecDeque};
+      use std::collections::{BTreeMap, HashMap, VecDeque, BTreeSet};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
@@ -9053,46 +9089,39 @@ messages:
           }
 
           fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-              let mut predecessors: HashMap<NodeId, Vec<(NodeId, EdgeKey)>> = HashMap::new();
               let mut worklist = VecDeque::new();
               let mut live: HashMap<NodeId, SortedSet> = HashMap::new();
               let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
 
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   live.insert(node.id, SortedSet::new());
                   if node.end {
                       live.insert(node.id, universe.clone());
                       worklist.push_back(node.id);
                   }
-                  for (ek, dm) in &node.children {
-                      for (dst, _) in dm {
-                          predecessors
-                              .entry(*dst)
-                              .or_default()
-                              .push((node.id, ek.clone()));
-                      }
-                  }
               }
 
               while let Some(node_id) = worklist.pop_front() {
                   let live_at_node = live.get(&node_id).unwrap().clone();
-                  if let Some(preds) = predecessors.get(&node_id) {
-                      for (pred_id, edge_key) in preds {
-                          let live_from_edge = live_at_node.intersect(&edge_key.tokens);
-                          if live_from_edge.is_empty() {
-                              continue;
-                          }
-                          let pred_live = live.get_mut(pred_id).unwrap();
-                          let old_len = pred_live.len();
-                          pred_live.union_inplace(&live_from_edge);
-                          if pred_live.len() > old_len {
-                              worklist.push_back(*pred_id);
+                  if let Some(node) = trie.nodes.get(&node_id) {
+                      for (pred_id, edges) in &node.parents {
+                          for edge_key in edges.keys() {
+                              let live_from_edge = live_at_node.intersect(&edge_key.tokens);
+                              if live_from_edge.is_empty() {
+                                  continue;
+                              }
+                              let pred_live = live.get_mut(pred_id).unwrap();
+                              let old_len = pred_live.len();
+                              pred_live.union_inplace(&live_from_edge);
+                              if pred_live.len() > old_len {
+                                  worklist.push_back(*pred_id);
+                              }
                           }
                       }
                   }
               }
 
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
                   for (ek, dm) in &node.children {
                       for (dst, sids) in dm {
@@ -9138,7 +9167,7 @@ messages:
               if productive.len() == trie.nodes.len() {
                   return;
               }
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   if !productive.contains(&node.id) {
                       node.children.clear();
                   } else {
@@ -9176,7 +9205,7 @@ messages:
 
               let max_tok = ctx.max_llm_token_id;
               let mut freq: Vec<usize> = vec![0; max_tok + 1];
-              for node in &trie.nodes {
+              for node in trie.nodes.values() {
                   for (ek, _) in &node.children {
                       for t in ek.tokens.iter() {
                           if t <= max_tok {
@@ -9205,7 +9234,7 @@ messages:
                   SortedSet::from_iter(new_elems)
               };
 
-              for node in &mut trie.nodes {
+              for node in trie.nodes.values_mut() {
                   let mut new_children = BTreeMap::new();
                   for (mut ek, dm) in std::mem::take(&mut node.children) {
                       ek.tokens = remap_sorted_set(&ek.tokens);
@@ -9244,12 +9273,10 @@ messages:
     metadata:
       filename: src/trie3_opt/passes/reorder_llm_tokens.rs
   - user: |-
-      Clean up the 'mini trie' structure. Make it simpler but also better.
-      eg Make it kind of 'ambidexterous' wrt which direction edges go in. I mean there still must be a notion of direction. But you know. It shouldn't matter that much. An optimization pass that goes backwards should look similar to one that goes forwards in the way it's written, but should also perform similarly. i.e. it's just as efficient to get/modify incoming edges as outgoing edges.
-
-      Having just a vector of nodes kind of makes it difficult when one is removed, for example. Like, the node continues to exist. We can't just remove it from the vector.
-      We need removal to be efficient.
-      Let's keep it simple and use a map from ID to node, and use unique IDs via a counter.
+      Make the `nodes` fields of `MiniTrie` private.
+      Don't allow for direct modification of `nodes`. Require it to be done through functions.
+      Never allow a mutable reference to a `Node` to leak out.
+      This is important in part because we need to make sure `children` and `parents` stay in sync.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9269,1098 +9296,140 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to refactor the `MiniTrie` structure for better performance and easier implementation of bidirectional optimization passes.
+      It appears the refactoring of `MiniTrie` introduced a subtle bug. Many optimization passes modify the trie's edge structure by directly manipulating the `children` map of nodes. However, they were not updating the corresponding `parents` maps on the destination nodes, leading to an inconsistent graph state. Passes that rely on these parent pointers for reverse traversal (like `PruneDeadPaths` or `EliminatePop0ExceptRoots`) would then operate on stale data, causing incorrect modifications that lead to the test failure you're seeing.
+
+      The fix is to ensure the `parents` map is kept consistent. The most robust and straightforward way to do this is to add a method to `MiniTrie` to rebuild all parent pointers from the `children` maps and call it after each optimization pass runs.
+
+      Here are the step-by-step instructions to fix the issue:
 
       ### Step-by-step Instructions
 
       #### 1. Update `src/trie3_opt/core.rs`
 
-      This is the core of the change. We will modify `Node` to include parent pointers and `MiniTrie` to use a map for storing nodes, which allows for efficient removal and non-contiguous `NodeId`s.
+      We'll add a new method, `rebuild_parents`, to the `MiniTrie` implementation. This method will scan all nodes and their children to reconstruct a correct and up-to-date `parents` map for every node in the trie.
 
-      1.  In `struct Node`, add a `parents` field to store incoming edges. This makes reverse traversal efficient.
-      2.  Update `Node::new` to initialize the new `parents` field.
-      3.  Add an `in_degree` method to `Node` for symmetry with `out_degree`.
-      4.  In `struct MiniTrie`, change `nodes` from `Vec<Node>` to `BTreeMap<NodeId, Node>`. This allows for efficient node lookups and removals.
-      5.  Add a `next_node_id` field to `MiniTrie` to generate unique node IDs.
-      6.  Update `MiniTrie::new` to reflect the struct changes.
-      7.  Update `MiniTrie::add_node` to use `next_node_id` and insert into the `BTreeMap`.
-      8.  Update `MiniTrie::add_edge` to maintain the `parents` map on the destination node, ensuring the graph is consistent.
-      9.  In `MiniTrie::reachable_from_roots`, update node access from vector indexing to map lookups and iterate over map values.
-      10. Rewrite `MiniTrie::can_reach_end` to use the new `parents` map for a much more efficient and cleaner implementation of reverse reachability.
+      -   Open `src/trie3_opt/core.rs`.
+      -   Navigate to the `impl MiniTrie` block.
+      -   Add the following `rebuild_parents` method at the end of the `impl` block:
+
+      ```rust
+          /// Rebuilds all parent pointers from scratch by scanning all children.
+          /// This is useful after complex transformations that modify `children` directly.
+          pub fn rebuild_parents(&mut self) {
+              for node in self.nodes.values_mut() {
+                  node.parents.clear();
+              }
+              // Collect children first to avoid borrow checker issues.
+              let all_children: Vec<(NodeId, BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>)> = self
+                  .nodes
+                  .values()
+                  .map(|n| (n.id, n.children.clone()))
+                  .collect();
+
+              for (src_id, children) in all_children {
+                  for (ek, dm) in children {
+                      for (dst_id, sids) in dm {
+                          if let Some(dst_node) = self.nodes.get_mut(&dst_id) {
+                              dst_node
+                                  .parents
+                                  .entry(src_id)
+                                  .or_default()
+                                  .entry(ek.clone())
+                                  .or_default()
+                                  .union_inplace(&sids);
+                          }
+                      }
+                  }
+              }
+          }
+      ```
 
       #### 2. Update `src/trie3_opt/coordinator.rs`
 
-      The `import_from_mini` function assumed `NodeId`s were dense and could be used as vector indices. This needs to be fixed to work with the new `BTreeMap`-based node storage.
+      Now, we'll call the new `rebuild_parents` method from the main optimization loop in the coordinator. This ensures that before each pass (and before metrics are calculated), the `parents` map is consistent with the `children` map.
 
-      1.  In `import_from_mini`, replace the `Vec`-based mapping from `NodeId` to `PrecomputeNode3Index` with a `BTreeMap`.
-      2.  Update the loops that create and fill nodes to iterate over the `MiniTrie`'s nodes via `keys()` and `values()` and use the new map for lookups.
-      3.  Adjust the root remapping logic to use the new map.
+      -   Open `src/trie3_opt/coordinator.rs`.
+      -   Find the `run_pipeline_on_precompute3` function.
+      -   Locate the loop where optimization passes are executed.
+      -   Add a call to `mini.rebuild_parents()` immediately after `pass.run(...)`.
 
-      #### 3. Update `src/trie3_opt/metrics.rs`
+      ```rust
+          // Run passes
+          for pass in pipeline.iter() {
+              if ctx.debug_level > 0 {
+                  crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
+              }
+              pass.run(&mut mini, &mut ctx);
+              mini.rebuild_parents(); // <--- ADD THIS LINE
+              if ctx.debug_level > 0 {
+                  let metrics = run_all_metrics(&mini);
+                  crate::debug!(
+                      1,
+                      "[Trie3 Opt] Metrics after '{}': {}",
+                      pass.name(),
+                      crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics)
+                  );
+              }
+          }
+      ```
 
-      The metrics calculations iterated over `trie.nodes`. This needs to be updated to iterate over the values of the new `nodes` map.
-
-      1.  In all metric implementations (`NumEdgesMetric`, `NumEndNodesMetric`, `RootFanoutMetric`, etc.), change `trie.nodes.iter()` to `trie.nodes.values()`.
-      2.  For metrics that collect nodes into a `Vec` before iterating (e.g., `RootEdgeOverlapMetric`), update the initial filtering to use `trie.nodes.values()`.
-
-      #### 4. Update Optimization Passes
-
-      Many passes need minor adjustments to work with the new `MiniTrie` structure. Some, like `eliminate_pop0` and `prune_dead_paths`, can be significantly simplified.
-
-      -   **For all passes in `src/trie3_opt/passes/`**:
-          -   Replace `trie.nodes.iter()` with `trie.nodes.values()`.
-          -   Replace `trie.nodes.iter_mut()` with `trie.nodes.values_mut()`.
-          -   Replace `&trie.nodes[id as usize]` with `trie.nodes.get(&id).unwrap()`.
-          -   Replace `&mut trie.nodes[id as usize]` with `trie.nodes.get_mut(&id).unwrap()`.
-
-      -   **`passes/eliminate_pop0.rs`**: Rewrite the pass to use the new `parents` map on nodes instead of building a local `incoming` map. This simplifies the code and improves performance.
-
-      -   **`passes/prune_dead_paths.rs`**: Rewrite the pass to use the `parents` map instead of building a `predecessors` map.
-
-      -   **`passes/merge_bisimulation.rs`, `passes/merge_global_atoms.rs`, `passes/merge_structural.rs`**: These passes relied on `enumerate()` over the nodes vector to get dense indices. Update them to create an explicit mapping from `NodeId` to a dense index at the beginning of the `run` method.
+      These changes will fix the inconsistency and should resolve the test failure.
 
       ### Git Diffs
 
-      Here are the git diffs to apply the changes.
+      Here are the corresponding git diffs for the changes.
 
       ```diff
       --- a/src/trie3_opt/core.rs
       +++ b/src/trie3_opt/core.rs
-      @@ -1,4 +1,4 @@
-      -use std::collections::{BTreeMap, BTreeSet, VecDeque};
-      +use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
-       
-       /// Compact node id for the mini trie.
-       pub type NodeId = u32;
-      @@ -162,6 +162,8 @@
-           pub end: bool,
-           // key: (pop, tokens) -> dest map: dest node -> state-set
-           pub children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>,
-      +    // src map: src node -> (key: (pop, tokens) -> state-set)
-      +    pub parents: BTreeMap<NodeId, BTreeMap<EdgeKey, SortedSet>>,
-       }
-       
-       impl Node {
-      @@ -170,18 +172,25 @@
-                   id,
-                   end,
-                   children: BTreeMap::new(),
-      +            parents: BTreeMap::new(),
+      @@ -273,4 +273,29 @@
                }
+               productive
            }
-           pub fn out_degree(&self) -> usize {
-               self.children.values().map(|m| m.len()).sum()
-           }
-      +    pub fn in_degree(&self) -> usize {
-      +        self.parents.values().map(|m| m.len()).sum()
+      +
+      +    /// Rebuilds all parent pointers from scratch by scanning all children.
+      +    /// This is useful after complex transformations that modify `children` directly.
+      +    pub fn rebuild_parents(&mut self) {
+      +        for node in self.nodes.values_mut() {
+      +            node.parents.clear();
+      +        }
+      +        // Collect children first to avoid borrow checker issues.
+      +        let all_children: Vec<(NodeId, BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>)> = self
+      +            .nodes
+      +            .values()
+      +            .map(|n| (n.id, n.children.clone()))
+      +            .collect();
+      +
+      +        for (src_id, children) in all_children {
+      +            for (ek, dm) in children {
+      +                for (dst_id, sids) in dm {
+      +                    if let Some(dst_node) = self.nodes.get_mut(&dst_id) {
+      +                        dst_node.parents.entry(src_id).or_default().entry(ek.clone()).or_default().union_inplace(&sids);
+      +                    }
+      +                }
+      +            }
+      +        }
       +    }
        }
-       
-       /// A compact, no-generics mini trie for precompute3 optimization.
-       #[derive(Clone, Debug)]
-       pub struct MiniTrie {
-      -    pub nodes: Vec<Node>,
-      +    pub nodes: BTreeMap<NodeId, Node>,
-           pub root_ids: BTreeSet<NodeId>,
-      +    /// Counter to generate unique node IDs.
-      +    next_node_id: NodeId,
-       }
-       
-       impl MiniTrie {
-      @@ -189,13 +198,15 @@
-               Self {
-                   nodes: Vec::new(),
-                   root_ids: BTreeSet::new(),
-      +            next_node_id: 0,
-               }
-           }
-           pub fn add_node(&mut self, end: bool) -> NodeId {
-      -        let id = self.nodes.len() as u32;
-      -        self.nodes.push(Node::new(id, end));
-      +        let id = self.next_node_id;
-      +        self.next_node_id += 1;
-      +        self.nodes.insert(id, Node::new(id, end));
-               id
-           }
-           pub fn add_edge(
-      @@ -205,11 +216,21 @@
-               dst: NodeId,
-               states: SortedSet,
-           ) {
-      -        let n = &mut self.nodes[src as usize];
-      -        let dm = n.children.entry(key).or_insert_with(BTreeMap::new);
-      -        dm.entry(dst)
-      -            .and_modify(|e| e.union_inplace(&states))
-      -            .or_insert(states);
-      +        // Update children of src node
-      +        if let Some(src_node) = self.nodes.get_mut(&src) {
-      +            let dm = src_node.children.entry(key.clone()).or_default();
-      +            dm.entry(dst)
-      +                .and_modify(|e| e.union_inplace(&states))
-      +                .or_insert(states.clone());
-      +        }
-      +
-      +        // Update parents of dst node
-      +        if let Some(dst_node) = self.nodes.get_mut(&dst) {
-      +            let parent_edges = dst_node.parents.entry(src).or_default();
-      +            parent_edges.entry(key)
-      +                .and_modify(|e| e.union_inplace(&states))
-      +                .or_insert(states);
-      +        }
-           }
-           pub fn add_root(&mut self, id: NodeId) {
-               self.root_ids.insert(id);
-      @@ -223,7 +244,7 @@
-                   if !seen.insert(u) {
-                       continue;
-                   }
-      -            let node = &self.nodes[u as usize];
-      +            let node = self.nodes.get(&u).unwrap();
-                   for (_ek, dm) in node.children.iter() {
-                       for (v, _s) in dm.iter() {
-                           if !seen.contains(v) {
-      @@ -237,27 +258,20 @@
-       
-           /// Compute set of nodes that can reach an end node (reverse reachability).
-           pub fn can_reach_end(&self) -> BTreeSet<NodeId> {
-      -        let mut incoming: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
-      -        for n in &self.nodes {
-      -            for (_ek, dm) in &n.children {
-      -                for (dst, _s) in dm {
-      -                    incoming.entry(*dst).or_default().push(n.id);
-      -                }
-      -            }
-      -        }
-               let mut productive: BTreeSet<NodeId> = BTreeSet::new();
-               let mut q: VecDeque<NodeId> = VecDeque::new();
-      -        for n in &self.nodes {
-      +        for n in self.nodes.values() {
-                   if n.end {
-                       productive.insert(n.id);
-                       q.push_back(n.id);
-                   }
-               }
-      -        while let Some(v) = q.pop_front() {
-      -            if let Some(srcs) = incoming.get(&v) {
-      -                for &u in srcs {
-      -                    if productive.insert(u) {
-      +        while let Some(v_id) = q.pop_front() {
-      +            if let Some(v_node) = self.nodes.get(&v_id) {
-      +                for &u_id in v_node.parents.keys() {
-      +                    if productive.insert(u_id) {
-                               q.push_back(u);
-                           }
-                       }
 
       ```
       ```diff
       --- a/src/trie3_opt/coordinator.rs
       +++ b/src/trie3_opt/coordinator.rs
-      @@ -280,16 +280,18 @@
-           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-           ctx: &OptimizationContext,
-       ) {
-      -    // Create all nodes first
-      -    let mut new_nodes: Vec<PrecomputeNode3Index> = Vec::with_capacity(mini.nodes.len());
-      -    for _ in 0..mini.nodes.len() {
-      +    // Create all nodes first, and map MiniTrie NodeId to new PrecomputeNode3Index
-      +    let mut id_map: BTreeMap<NodeId, PrecomputeNode3Index> = BTreeMap::new();
-      +    for &node_id in mini.nodes.keys() {
-               let idx = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::internal())));
-      -        new_nodes.push(idx);
-      +        id_map.insert(node_id, idx);
-           }
-       
-           // Fill end flags and edges
-      -    for node in &mini.nodes {
-      -        let idx = new_nodes[node.id as usize];
-      +    for node in mini.nodes.values() {
-      +        let idx = *id_map.get(&node.id).unwrap();
-               if let Some(mut w) = idx.write(trie3_god) {
-                   w.value.end = node.end;
-       
-      @@ -316,7 +318,7 @@
-                           if sbv.is_empty() {
-                               continue;
-                           }
-      -                    let dst_idx = new_nodes[*dst as usize];
-      +                    let dst_idx = *id_map.get(dst).unwrap();
-                           entry.entry(dst_idx)
-                               .and_modify(|e| *e |= &sbv)
-                               .or_insert(sbv);
-      @@ -335,8 +337,9 @@
-           // Remap roots to new nodes
-           roots.clear();
-           for (key, nid) in root_pairs {
-      -        let idx = new_nodes[*nid as usize];
-      -        roots.insert(*key, idx);
-      +        if let Some(idx) = id_map.get(nid) {
-      +            roots.insert(*key, *idx);
-      +        }
-           }
-       
-           // GC and recompute depths
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/metrics.rs
-      +++ b/src/trie3_opt/metrics.rs
-      @@ -120,7 +120,7 @@
-       impl Metric for NumEdgesMetric {
-           fn name(&self) -> &'static str { "num_edges" }
-           fn compute(&self, trie: &MiniTrie) -> String {
-      -        trie.nodes.iter().map(|n| n.out_degree()).sum::<usize>().to_string()
-      +        trie.nodes.values().map(|n| n.out_degree()).sum::<usize>().to_string()
-           }
-       }
-       
-      @@ -133,7 +133,7 @@
-       impl Metric for NumEndNodesMetric {
-           fn name(&self) -> &'static str { "num_end_nodes" }
-           fn compute(&self, trie: &MiniTrie) -> String {
-      -        trie.nodes.iter().filter(|n| n.end).count().to_string()
-      +        trie.nodes.values().filter(|n| n.end).count().to_string()
-           }
-       }
-       
-      @@ -152,8 +152,7 @@
-           fn name(&self) -> &'static str { "root_fanout" }
-           fn compute(&self, trie: &MiniTrie) -> String {
-               let fanouts: Vec<f64> = trie
-      -            .nodes
-      -            .iter()
-      +            .nodes.values()
-                   .filter(|n| trie.root_ids.contains(&n.id))
-                   .map(|n| n.out_degree() as f64)
-                   .collect();
-      @@ -166,8 +165,7 @@
-           fn name(&self) -> &'static str { "non_root_fanout" }
-           fn compute(&self, trie: &MiniTrie) -> String {
-               let fanouts: Vec<f64> = trie
-      -            .nodes
-      -            .iter()
-      +            .nodes.values()
-                   .filter(|n| !trie.root_ids.contains(&n.id))
-                   .map(|n| n.out_degree() as f64)
-                   .collect();
-      @@ -180,8 +178,7 @@
-           fn name(&self) -> &'static str { "all_fanout" }
-           fn compute(&self, trie: &MiniTrie) -> String {
-               let fanouts: Vec<f64> = trie
-      -            .nodes
-      -            .iter()
-      +            .nodes.values()
-                   .map(|n| n.out_degree() as f64)
-                   .collect();
-               NumericStats::from_samples(&fanouts).to_pretty_string()
-      @@ -230,7 +227,7 @@
-               let mut scores: Vec<f64> = Vec::new();
-               #[cfg(not(rustrover))]
-               let it = tqdm!(
-      -            trie.nodes.iter(),
-      +            trie.nodes.values(),
-                   desc = "Metric: EdgeOverlap",
-                   total = trie.nodes.len(),
-                   disable = !PROGRESS_BAR_ENABLED,
-      @@ -238,7 +235,7 @@
-                   leave = false
-               );
-               #[cfg(rustrover)]
-      -        let it = trie.nodes.iter();
-      +        let it = trie.nodes.values();
-       
-               for node in it {
-                   let node_score = compute_edge_overlap_for_node(node);
-      @@ -255,8 +252,7 @@
-           fn compute(&self, trie: &MiniTrie) -> String {
-               let mut scores: Vec<f64> = Vec::new();
-               let root_nodes: Vec<_> = trie
-      -            .nodes
-      -            .iter()
-      +            .nodes.values()
-                   .filter(|n| trie.root_ids.contains(&n.id))
-                   .collect();
-       
-      @@ -284,8 +280,7 @@
-           fn compute(&self, trie: &MiniTrie) -> String {
-               let mut scores: Vec<f64> = Vec::new();
-               let non_root_nodes: Vec<_> = trie
-      -            .nodes
-      -            .iter()
-      +            .nodes.values()
-                   .filter(|n| !trie.root_ids.contains(&n.id))
-                   .collect();
-       
-      @@ -341,7 +336,7 @@
-       
-               #[cfg(not(rustrover))]
-               let it = tqdm!(
-      -            trie.nodes.iter(),
-      +            trie.nodes.values(),
-                   desc = "Metric: StateFanout",
-                   total = trie.nodes.len(),
-                   disable = !PROGRESS_BAR_ENABLED,
-      @@ -349,7 +344,7 @@
-                   leave = false
-               );
-               #[cfg(rustrover)]
-      -        let it = trie.nodes.iter();
-      +        let it = trie.nodes.values();
-       
-               for node in it {
-                   compute_state_fanout_for_node_into(node, &mut stats);
-      @@ -364,8 +359,7 @@
-           fn compute(&self, trie: &MiniTrie) -> String {
-               let mut stats = NumericStats::new();
-               let root_nodes: Vec<_> = trie
-      -            .nodes
-      -            .iter()
-      +            .nodes.values()
-                   .filter(|n| trie.root_ids.contains(&n.id))
-                   .collect();
-       
-      @@ -392,8 +386,7 @@
-           fn compute(&self, trie: &MiniTrie) -> String {
-               let mut stats = NumericStats::new();
-               let non_root_nodes: Vec<_> = trie
-      -            .nodes
-      -            .iter()
-      +            .nodes.values()
-                   .filter(|n| !trie.root_ids.contains(&n.id))
-                   .collect();
-       
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/canonicalize_end_nodes.rs
-      +++ b/src/trie3_opt/passes/canonicalize_end_nodes.rs
-      @@ -15,7 +15,12 @@
-       
-           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-               // Collect end nodes
-      -        let mut ends: Vec<NodeId> = trie.nodes.iter().filter(|n| n.end).map(|n| n.id).collect();
-      +        let mut ends: Vec<NodeId> = trie
-      +            .nodes
-      +            .values()
-      +            .filter(|n| n.end)
-      +            .map(|n| n.id)
-      +            .collect();
-               if ends.len() <= 1 {
-                   return;
+      @@ -400,6 +400,7 @@
+                   crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
                }
-      @@ -24,14 +29,14 @@
-       
-               // Ensure canonical has no outgoing edges
-               {
-      -            let cnode = &mut trie.nodes[canonical as usize];
-      +            let cnode = trie.nodes.get_mut(&canonical).unwrap();
-                   cnode.children.clear();
-                   cnode.end = true;
-               }
-       
-               // Rewire all edges to target canonical if they target any end
-               let end_set: std::collections::BTreeSet<NodeId> = ends.into_iter().collect();
-       
-      -        for node in trie.nodes.iter_mut() {
-      +        for node in trie.nodes.values_mut() {
-                   let mut new_children: BTreeMap<_, _> = BTreeMap::new();
-                   for (ek, dm) in node.children.clone() {
-                       let mut dm2: BTreeMap<NodeId, _> = BTreeMap::new();
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/compress_edges.rs
-      +++ b/src/trie3_opt/passes/compress_edges.rs
-      @@ -15,7 +15,7 @@
-           }
-       
-           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-      -        for n in trie.nodes.iter_mut() {
-      +        for n in trie.nodes.values_mut() {
-                   if n.children.is_empty() {
-                       continue;
-                   }
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/compress_unary_chains.rs
-      +++ b/src/trie3_opt/passes/compress_unary_chains.rs
-      @@ -19,7 +19,7 @@
-                   let mut out_info: HashMap<NodeId, (EdgeKey, NodeId, crate::trie3_opt::core::SortedSet)> =
-                       HashMap::new();
-       
-      -            for node in &trie.nodes {
-      +            for node in trie.nodes.values() {
-                       for (ek, dm) in &node.children {
-                           for (dst, _) in dm {
-                               let count = indegree.entry(*dst).or_default();
-      @@ -49,7 +49,7 @@
-                   }
-       
-                   let mut rewrites = vec![];
-      -            for u_id in trie.nodes.iter().map(|n| n.id) {
-      +            for u_id in trie.nodes.keys().cloned() {
-                       if roots_set.contains(&u_id) {
-                           continue;
-                       }
-      @@ -66,7 +66,7 @@
-                   }
-       
-                   for (p_id, u_id, v_id, key, s_uv) in rewrites {
-      -                let p_node = &mut trie.nodes[p_id as usize];
-      +                let p_node = trie.nodes.get_mut(&p_id).unwrap();
-                       if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
-                           let dm = entry.get_mut();
-                           if let Some(s_pu) = dm.remove(&u_id) {
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/eliminate_pop0.rs
-      +++ b/src/trie3_opt/passes/eliminate_pop0.rs
-      @@ -21,58 +21,51 @@
-               }
-       
-               loop {
-      -            // Build incoming map and collect pop=0 edges
-      -            let mut incoming: HashMap<NodeId, Vec<(NodeId, isize, SortedSet, SortedSet)>> = HashMap::new();
-      +            // Collect pop=0 edges
-                   let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
-       
-      -            for node in &trie.nodes {
-      +            for node in trie.nodes.values() {
-                       for (ek, dm) in &node.children {
-      -                    for (dst, sids) in dm {
-      -                        incoming.entry(*dst).or_default().push((node.id, ek.pop, ek.tokens.clone(), sids.clone()));
-      -                        if ek.pop == 0 {
-      -                            zero_edges.push((node.id, ek.tokens.clone(), *dst, sids.clone()));
-      -                        }
-      +                    if ek.pop == 0 {
-      +                        for (dst, sids) in dm {
-      +                            zero_edges.push((node.id, ek.tokens.clone(), *dst, sids.clone()));
-      +                        }
-                           }
-                       }
-                   }
-       
-      -            if zero_edges.is_empty() {
-      -                break;
-      -            }
-      +            if zero_edges.is_empty() { break; }
-       
-                   let mut removed_this_iter = 0usize;
-       
-                   for (b, llm_bc, c, s_bc) in zero_edges {
-      -                if root_set.contains(&b) {
-      -                    // pop=0 from root is allowed; skip
-      -                    continue;
-      -                }
-      -                if let Some(preds) = incoming.get(&b) {
-      -                    for (a, p_ab, llm_ab, s_ab) in preds {
-      -                        let new_tokens = llm_ab.intersect(&llm_bc);
-      -                        if new_tokens.is_empty() {
-      -                            continue;
-      -                        }
-      -                        let new_sids = s_ab.intersect(&s_bc);
-      -                        if new_sids.is_empty() {
-      -                            continue;
-      -                        }
-      -                        // Add/update A -> C with (p_ab, new_tokens) and SIDs = intersection
-      -                        let a_node = &mut trie.nodes[*a as usize];
-      -                        let key = crate::trie3_opt::core::EdgeKey::new(*p_ab, new_tokens.clone());
-      -                        let dm = a_node.children.entry(key).or_insert_with(BTreeMap::new);
-      -                        dm.entry(c)
-      -                            .and_modify(|e| e.union_inplace(&new_sids))
-      -                            .or_insert(new_sids);
-      +                if root_set.contains(&b) { continue; }
-      +
-      +                if let Some(b_node) = trie.nodes.get(&b) {
-      +                    let preds = b_node.parents.clone(); // clone to avoid borrow issues
-      +                    for (a, edges_from_a) in &preds {
-      +                        for (key_ab, s_ab) in edges_from_a {
-      +                            let p_ab = key_ab.pop;
-      +                            let llm_ab = &key_ab.tokens;
-      +                            let new_tokens = llm_ab.intersect(&llm_bc);
-      +                            if new_tokens.is_empty() { continue; }
-      +                            let new_sids = s_ab.intersect(&s_bc);
-      +                            if new_sids.is_empty() { continue; }
-      +
-      +                            let a_node = trie.nodes.get_mut(a).unwrap();
-      +                            let key = crate::trie3_opt::core::EdgeKey::new(p_ab, new_tokens.clone());
-      +                            let dm = a_node.children.entry(key).or_default();
-      +                            dm.entry(c).or_default().union_inplace(&new_sids);
-      +                        }
-                           }
-                       }
-       
-                       // Remove B -> C under (0, llm_bc)
-      -                let bnode = &mut trie.nodes[b as usize];
-      +                let bnode = trie.nodes.get_mut(&b).unwrap();
-                       let key = crate::trie3_opt::core::EdgeKey::new(0, llm_bc.clone());
-      -                if let Some(dm) = bnode.children.get_mut(&key) {
-      -                    if dm.remove(&c).is_some() {
-      +                if let std::collections::btree_map::Entry::Occupied(mut dm_entry) = bnode.children.entry(key) {
-      +                    if dm_entry.get_mut().remove(&c).is_some() {
-                               removed_this_iter += 1;
-                           }
-      -                    if dm.is_empty() {
-      -                        bnode.children.remove(&key);
-      +                    if dm_entry.get().is_empty() {
-      +                        dm_entry.remove();
-                           }
-                       }
-                   }
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/factor_common_destinations.rs
-      +++ b/src/trie3_opt/passes/factor_common_destinations.rs
-      @@ -27,7 +27,7 @@
-               let mut incoming_map: HashMap<NodeId, HashMap<EdgeKey, HashMap<SortedSet, Vec<NodeId>>>> =
-                   HashMap::new();
-       
-      -        for src_node in &trie.nodes {
-      +        for src_node in trie.nodes.values() {
-                   for (edge_key, dest_map) in &src_node.children {
-                       for (dest_id, sids) in dest_map {
-                           incoming_map
-      @@ -52,7 +52,7 @@
-       
-                               // Reroute sources to point to intermediate node
-                               for src_id in &sources {
-      -                            let src_node = &mut trie.nodes[*src_id as usize];
-      +                            let src_node = trie.nodes.get_mut(src_id).unwrap();
-       
-                                   // Remove old edge
-                                   if let Some(dest_map_for_key) = src_node.children.get_mut(&edge_key) {
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/factor_root_fanout.rs
-      +++ b/src/trie3_opt/passes/factor_root_fanout.rs
-      @@ -21,7 +21,7 @@
-               let root_ids: Vec<_> = trie.root_ids.iter().cloned().collect();
-       
-               for root_id in root_ids {
-      -            let root_node = trie.nodes[root_id as usize].clone();
-      +            let root_node = trie.nodes.get(&root_id).unwrap().clone();
-                   if root_node.children.is_empty() {
-                       continue;
-                   }
-      @@ -91,7 +91,7 @@
-                           }
-       
-                           let mid_id = trie.add_node(false);
-      -                    let mid_node = &mut trie.nodes[mid_id as usize];
-      +                    let mid_node = trie.nodes.get_mut(&mid_id).unwrap();
-                           mid_node.children.insert(EdgeKey::new(pop, b.clone()), dest_agg);
-       
-                           new_children
-      @@ -103,7 +103,7 @@
-                   }
-       
-                   if made_progress {
-      -                trie.nodes[root_id as usize].children = new_children;
-      +                trie.nodes.get_mut(&root_id).unwrap().children = new_children;
-                   }
-               }
-           }
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/factor_state_fanout.rs
-      +++ b/src/trie3_opt/passes/factor_state_fanout.rs
-      @@ -19,7 +19,7 @@
-           }
-       
-           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-      -        for node in trie.nodes.iter_mut() {
-      +        for node in trie.nodes.values_mut() {
-                   if node.children.is_empty() {
-                       continue;
-                   }
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/generalize_sids.rs
-      +++ b/src/trie3_opt/passes/generalize_sids.rs
-      @@ -22,7 +22,7 @@
-       
-               let one_step_back_map = parser.build_one_step_back_map();
-               let mut max_pop = 0;
-      -        for node in &trie.nodes {
-      +        for node in trie.nodes.values() {
-                   for (ek, _) in &node.children {
-                       if ek.pop > 0 {
-                           max_pop = max_pop.max(ek.pop as usize);
-      @@ -93,7 +93,7 @@
-                   if s_u.is_empty() {
-                       continue;
-                   }
-      -            let u_node = &trie.nodes[u_id as usize];
-      +            let u_node = trie.nodes.get(&u_id).unwrap();
-                   for (ek, dm) in &u_node.children {
-                       let s_u_popped = if ek.pop > 0 {
-                           apply_n_step_back(&s_u, ek.pop as usize)
-      @@ -118,7 +118,7 @@
-                   }
-               }
-       
-      -        for node in &mut trie.nodes {
-      +        for node in trie.nodes.values_mut() {
-                   for (_ek, dm) in &mut node.children {
-                       dm.retain(|v_id, sids| {
-                           if let Some(s_v) = possible_states.get(v_id) {
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/merge_bisimulation.rs
-      +++ b/src/trie3_opt/passes/merge_bisimulation.rs
-      @@ -20,12 +20,18 @@
-           }
-       
-           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-      -        let n = trie.nodes.len();
-      +        let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
-      +        let id_to_idx: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-      +        let n = node_ids.len();
-               if n == 0 {
-                   return;
-               }
-       
-      -        let mut prev_class: Vec<usize> =
-      -            trie.nodes.iter().map(|node| if node.end { 1 } else { 0 }).collect();
-      +        let mut prev_class: Vec<usize> = vec![0; n];
-      +        for (i, id) in node_ids.iter().enumerate() {
-      +            let node = trie.nodes.get(id).unwrap();
-      +            prev_class[i] = if node.end { 1 } else { 0 };
-      +        }
-       
-               for _ in 0..self.max_iters {
-                   type AggregatedEdge = ((isize, SortedSet, usize), SortedSet);
-      @@ -35,11 +41,12 @@
-                   let mut next_id = 0;
-                   let mut changes = 0;
-       
-      -            for (u_idx, u_node) in trie.nodes.iter().enumerate() {
-      +            for (u_idx, u_id) in node_ids.iter().enumerate() {
-      +                let u_node = trie.nodes.get(u_id).unwrap();
-                       let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
-                       for (ek, dm) in &u_node.children {
-                           for (v_id, sids) in dm {
-      -                        let dest_class = prev_class[*v_id as usize];
-      +                        let dest_class = prev_class[id_to_idx[v_id]];
-                               let key = (ek.pop, ek.tokens.clone(), dest_class);
-                               aggr.entry(key).or_default().union_inplace(sids);
-                           }
-      @@ -64,20 +71,20 @@
-               let mut representatives: Vec<Option<NodeId>> = vec![None; num_classes];
-               for (u_idx, &class_id) in prev_class.iter().enumerate() {
-                   if representatives[class_id].is_none() {
-      -                representatives[class_id] = Some(u_idx as NodeId);
-      +                representatives[class_id] = Some(node_ids[u_idx]);
-                   }
-               }
-               let mut node_to_rep: HashMap<NodeId, NodeId> = HashMap::new();
-               for (u_idx, &class_id) in prev_class.iter().enumerate() {
-      -            node_to_rep.insert(u_idx as NodeId, representatives[class_id].unwrap());
-      +            node_to_rep.insert(node_ids[u_idx], representatives[class_id].unwrap());
-               }
-       
-      -        let original_nodes = trie.nodes.clone();
-               for (class_id, rep_id_opt) in representatives.iter().enumerate() {
-                   if let Some(rep_id) = rep_id_opt {
-                       let exemplar_idx = prev_class.iter().position(|&c| c == class_id).unwrap();
-      -                let exemplar_node = &original_nodes[exemplar_idx];
-      +                let exemplar_node = trie.nodes.get(&node_ids[exemplar_idx]).unwrap().clone();
-       
-                       let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
-                       for (ek, dm) in &exemplar_node.children {
-                           for (v_id, sids) in dm {
-      -                        let v_class = prev_class[*v_id as usize];
-      +                        let v_class = prev_class[id_to_idx[v_id]];
-                               aggr.entry((ek.pop, ek.tokens.clone(), v_class))
-                                   .or_default()
-                                   .union_inplace(sids);
-      @@ -91,13 +98,13 @@
-                               new_children.entry(key).or_default().insert(dest_rep, sids);
-                           }
-                       }
-      -                trie.nodes[*rep_id as usize].children = new_children;
-      +                trie.nodes.get_mut(rep_id).unwrap().children = new_children;
-                   }
-               }
-       
-               let rep_set: std::collections::HashSet<NodeId> =
-                   representatives.iter().filter_map(|&x| x).collect();
-      -        for node in &mut trie.nodes {
-      +        for node in trie.nodes.values_mut() {
-                   if !rep_set.contains(&node.id) {
-                       node.children.clear();
-                       node.end = false;
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/merge_equivalent_llm_tokens.rs
-      +++ b/src/trie3_opt/passes/merge_equivalent_llm_tokens.rs
-      @@ -18,7 +18,7 @@
-               };
-       
-               let mut all_bvs = HashSet::new();
-      -        for node in &trie.nodes {
-      +        for node in trie.nodes.values() {
-                   for (ek, _) in &node.children {
-                       if !ek.tokens.is_empty() {
-                           all_bvs.insert(ek.tokens.clone());
-      @@ -82,7 +82,7 @@
-                   SortedSet::from_iter(new_elems)
-               };
-       
-      -        for node in &mut trie.nodes {
-      +        for node in trie.nodes.values_mut() {
-                   let mut new_children = BTreeMap::new();
-                   for (mut ek, dm) in std::mem::take(&mut node.children) {
-                       ek.tokens = remap_sorted_set(&ek.tokens);
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/merge_global_atoms.rs
-      +++ b/src/trie3_opt/passes/merge_global_atoms.rs
-      @@ -24,13 +24,15 @@
-           }
-       
-           fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-      -        let n = trie.nodes.len();
-      +        let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
-      +        let id_to_idx: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-      +        let n = node_ids.len();
-               if n == 0 {
-                   return;
-               }
-       
-               let mut by_pop_masks: BTreeMap<isize, HashSet<SortedSet>> = BTreeMap::new();
-      -        for node in &trie.nodes {
-      +        for node in trie.nodes.values() {
-                   for (ek, _) in &node.children {
-                       if !ek.tokens.is_empty() {
-                           by_pop_masks.entry(ek.pop).or_default().insert(ek.tokens.clone());
-      @@ -131,12 +133,13 @@
-               let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
-               let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
-               let mut pop0_out_degree = vec![0; n];
-      -        for (u_idx, u_node) in trie.nodes.iter().enumerate() {
-      +        for u_node in trie.nodes.values() {
-      +            let u_idx = id_to_idx[&u_node.id];
-                   for (ek, dm) in &u_node.children {
-                       if ek.pop == 0 {
-                           for v_id in dm.keys() {
-                               pop0_adj[u_idx].push(*v_id);
-      -                        pop0_rev_adj[*v_id as usize].push(u_node.id);
-      +                        pop0_rev_adj[id_to_idx[v_id]].push(u_node.id);
-                               pop0_out_degree[u_idx] += 1;
-                           }
-                       }
-      @@ -153,8 +156,8 @@
-               let mut processed_count = 0;
-               while let Some(v_idx) = q.pop_front() {
-                   processed_count += 1;
-      -            for &u_id in &pop0_rev_adj[v_idx] {
-      -                let u_idx = u_id as usize;
-      +            for u_id in &pop0_rev_adj[v_idx] {
-      +                let u_idx = id_to_idx[u_id];
-                       dist[u_idx] = dist[u_idx].max(1 + dist[v_idx]);
-                       pop0_out_degree[u_idx] -= 1;
-                       if pop0_out_degree[u_idx] == 0 {
-      @@ -172,8 +175,8 @@
-                   while let Some(v_idx) = q.pop_front() {
-                       if dist[v_idx] != max_dist {
-                           dist[v_idx] = max_dist;
-      -                    for &u_id in &pop0_rev_adj[v_idx] {
-      -                        q.push_back(u_id as usize);
-      +                    for u_id in &pop0_rev_adj[v_idx] {
-      +                        q.push_back(id_to_idx[u_id]);
-                           }
-                       }
-                   }
-      @@ -183,8 +186,9 @@
-               let mut prev_class: Vec<usize> = vec![0; n];
-               let mut class_map: HashMap<(bool, usize), usize> = HashMap::new();
-               let mut next_class_id = 0;
-      -        for (i, node) in trie.nodes.iter().enumerate() {
-      -            let key = (node.end, dist[i]);
-      +        for (i, id) in node_ids.iter().enumerate() {
-      +            let node = trie.nodes.get(id).unwrap();
-      +            let key = (node.end, dist[id_to_idx[&node.id]]);
-                   let class_id = *class_map.entry(key).or_insert_with(|| {
-                       let id = next_class_id;
-                       next_class_id += 1;
-      @@ -200,7 +204,8 @@
-                   let mut new_class = vec![0; n];
-                   let mut changes = 0;
-       
-      -            for (u_idx, u_node) in trie.nodes.iter().enumerate() {
-      +            for (u_idx, u_id) in node_ids.iter().enumerate() {
-      +                let u_node = trie.nodes.get(u_id).unwrap();
-                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
-                       for (ek, dm) in &u_node.children {
-                           if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
-      @@ -209,7 +214,7 @@
-                                       for &atom_idx in atom_idxs {
-                                           let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
-                                           for (v_id, sids) in dm {
-      -                                        let dest_class = prev_class[*v_id as usize];
-      +                                        let dest_class = prev_class[id_to_idx[v_id]];
-                                               entry.entry(dest_class).or_default().union_inplace(sids);
-                                           }
-                                       }
-      @@ -232,26 +237,26 @@
-               let mut representatives: Vec<Option<NodeId>> = vec![None; num_classes];
-               for (u_idx, &class_id) in prev_class.iter().enumerate() {
-                   if representatives[class_id].is_none() {
-      -                representatives[class_id] = Some(trie.nodes[u_idx].id);
-      +                representatives[class_id] = Some(node_ids[u_idx]);
-                   }
-               }
-               let mut node_to_rep: HashMap<NodeId, NodeId> = HashMap::new();
-               for (u_idx, &class_id) in prev_class.iter().enumerate() {
-      -            node_to_rep.insert(trie.nodes[u_idx].id, representatives[class_id].unwrap());
-      +            node_to_rep.insert(node_ids[u_idx], representatives[class_id].unwrap());
-               }
-       
-               // Rebuild representative edges.
-      -        let original_nodes = trie.nodes.clone();
-               for class_id in 0..num_classes {
-                   if let Some(rep_id) = representatives[class_id] {
-                       let exemplar_idx = final_partition.iter().position(|&c| c == class_id).unwrap();
-      -                let exemplar_node = &original_nodes[exemplar_idx];
-      +                let exemplar_id = node_ids[exemplar_idx];
-      +                let exemplar_node = trie.nodes.get(&exemplar_id).unwrap().clone();
-       
-                       // Aggregate by (pop, tokens, dest_class) -> union of sids
-                       let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
-                       for (ek, dm) in &exemplar_node.children {
-                           for (v_id, sids) in dm {
-      -                        let v_class = final_partition[*v_id as usize];
-      +                        let v_class = final_partition[id_to_idx[v_id]];
-                               aggr.entry((ek.pop, ek.tokens.clone(), v_class))
-                                   .or_default()
-                                   .union_inplace(sids);
-      @@ -265,13 +270,13 @@
-                               new_children.entry(key).or_default().insert(dest_rep, sids);
-                           }
-                       }
-      -                trie.nodes[rep_id as usize].children = new_children;
-      +                trie.nodes.get_mut(&rep_id).unwrap().children = new_children;
-                   }
-               }
-       
-               // Clear children of non-representatives.
-               let rep_set: HashSet<NodeId> = representatives.iter().filter_map(|&x| x).collect();
-      -        for node in &mut trie.nodes {
-      +        for node in trie.nodes.values_mut() {
-                   if !rep_set.contains(&node.id) {
-                       node.children.clear();
-                       node.end = false; // Non-reps are effectively deleted.
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/merge_structural.rs
-      +++ b/src/trie3_opt/passes/merge_structural.rs
-      @@ -25,20 +25,19 @@
-           }
-       
-           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-      -        let n = trie.nodes.len();
-      +        let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
-      +        let dense_of: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-      +        let n = node_ids.len();
-               if n == 0 {
-                   return;
-               }
-       
-      -        // Map node id -> dense index
-      -        let mut dense_of: HashMap<NodeId, usize> = HashMap::with_capacity(n);
-      -        let mut old_of: Vec<NodeId> = Vec::with_capacity(n);
-      -        for (i, node) in trie.nodes.iter().enumerate() {
-      -            dense_of.insert(node.id, i);
-      -            old_of.push(node.id);
-      -        }
-      -
-               // Initial classes by end flag and out-degree
-               let mut prev_class: Vec<usize> = vec![0; n];
-               let mut class_map: HashMap<(bool, usize), usize> = HashMap::new();
-               let mut next_class = 0usize;
-      -        for (i, node) in trie.nodes.iter().enumerate() {
-      +        for (i, node_id) in node_ids.iter().enumerate() {
-      +            let node = trie.nodes.get(node_id).unwrap();
-                   let key = (node.end, node.out_degree());
-                   let cid = *class_map.entry(key).or_insert_with(|| {
-                       let v = next_class;
-      @@ -61,7 +60,8 @@
-                   let mut next = 0usize;
-                   let mut changes = 0usize;
-       
-      -            for (i, node) in trie.nodes.iter().enumerate() {
-      +            for (i, node_id) in node_ids.iter().enumerate() {
-      +                let node = trie.nodes.get(node_id).unwrap();
-                       // Aggregate by (pop, tokens) -> dest_class -> union of states
-                       let mut per_key: BTreeMap<(isize, SortedSet), BTreeMap<usize, SortedSet>> = BTreeMap::new();
-                       for (ek, dm) in &node.children {
-      @@ -108,13 +108,13 @@
-               let mut rep_of_class: Vec<Option<NodeId>> = vec![None; num_classes];
-               for (i, &cid) in prev_class.iter().enumerate() {
-                   if rep_of_class[cid].is_none() {
-      -                rep_of_class[cid] = Some(old_of[i]);
-      +                rep_of_class[cid] = Some(node_ids[i]);
-                   }
-               }
-               let mut rep_of_node: HashMap<NodeId, NodeId> = HashMap::with_capacity(n);
-      -        for (i, node_id) in old_of.iter().enumerate() {
-      +        for (i, node_id) in node_ids.iter().enumerate() {
-                   let cid = prev_class[i];
-                   rep_of_node.insert(*node_id, rep_of_class[cid].unwrap());
-               }
-       
-      -        let original_nodes = trie.nodes.clone();
-               for (cid, rep_id_opt) in rep_of_class.iter().enumerate() {
-                   if let Some(rep_id) = rep_id_opt {
-                       let exemplar_idx = prev_class.iter().position(|&c| c == cid).unwrap();
-      -                let exemplar_node = &original_nodes[exemplar_idx];
-      +                let exemplar_node = trie.nodes.get(&node_ids[exemplar_idx]).unwrap().clone();
-       
-                       let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
-                           BTreeMap::new();
-      @@ -127,13 +127,13 @@
-                               new_children.insert(ek.clone(), new_dm);
-                           }
-                       }
-      -                trie.nodes[*rep_id as usize].children = new_children;
-      +                trie.nodes.get_mut(rep_id).unwrap().children = new_children;
-                   }
-               }
-       
-               let rep_set: std::collections::HashSet<NodeId> =
-                   rep_of_class.iter().filter_map(|&x| x).collect();
-      -        for node in &mut trie.nodes {
-      +        for node in trie.nodes.values_mut() {
-                   if !rep_set.contains(&node.id) {
-                       node.children.clear();
-                       node.end = false;
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/prune_dead_paths.rs
-      +++ b/src/trie3_opt/passes/prune_dead_paths.rs
-      @@ -1,4 +1,4 @@
-      -use std::collections::{BTreeMap, HashMap, VecDeque};
-      +use std::collections::{BTreeMap, HashMap, VecDeque, BTreeSet};
-       
-       use crate::trie3_opt::context::OptimizationContext;
-       use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
-      @@ -14,46 +14,38 @@
-           }
-       
-           fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-      -        let mut predecessors: HashMap<NodeId, Vec<(NodeId, EdgeKey)>> = HashMap::new();
-               let mut worklist = VecDeque::new();
-               let mut live: HashMap<NodeId, SortedSet> = HashMap::new();
-               let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
-       
-      -        for node in &trie.nodes {
-      +        for node in trie.nodes.values() {
-                   live.insert(node.id, SortedSet::new());
-                   if node.end {
-                       live.insert(node.id, universe.clone());
-                       worklist.push_back(node.id);
-                   }
-      -            for (ek, dm) in &node.children {
-      -                for (dst, _) in dm {
-      -                    predecessors
-      -                        .entry(*dst)
-      -                        .or_default()
-      -                        .push((node.id, ek.clone()));
-      -                }
-      -            }
-               }
-       
-               while let Some(node_id) = worklist.pop_front() {
-                   let live_at_node = live.get(&node_id).unwrap().clone();
-      -            if let Some(preds) = predecessors.get(&node_id) {
-      -                for (pred_id, edge_key) in preds {
-      -                    let live_from_edge = live_at_node.intersect(&edge_key.tokens);
-      -                    if live_from_edge.is_empty() {
-      -                        continue;
-      -                    }
-      -                    let pred_live = live.get_mut(pred_id).unwrap();
-      -                    let old_len = pred_live.len();
-      -                    pred_live.union_inplace(&live_from_edge);
-      -                    if pred_live.len() > old_len {
-      -                        worklist.push_back(*pred_id);
-      +            if let Some(node) = trie.nodes.get(&node_id) {
-      +                for (pred_id, edges) in &node.parents {
-      +                    for edge_key in edges.keys() {
-      +                        let live_from_edge = live_at_node.intersect(&edge_key.tokens);
-      +                        if live_from_edge.is_empty() {
-      +                            continue;
-      +                        }
-      +                        let pred_live = live.get_mut(pred_id).unwrap();
-      +                        let old_len = pred_live.len();
-      +                        pred_live.union_inplace(&live_from_edge);
-      +                        if pred_live.len() > old_len {
-      +                            worklist.push_back(*pred_id);
-      +                        }
-                           }
-                       }
-                   }
-               }
-       
-      -        for node in &mut trie.nodes {
-      +        for node in trie.nodes.values_mut() {
-                   let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-                   for (ek, dm) in &node.children {
-                       for (dst, sids) in dm {
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/prune_unproductive_paths.rs
-      +++ b/src/trie3_opt/passes/prune_unproductive_paths.rs
-      @@ -15,7 +15,7 @@
-               if productive.len() == trie.nodes.len() {
-                   return;
-               }
-      -        for node in &mut trie.nodes {
-      +        for node in trie.nodes.values_mut() {
-                   if !productive.contains(&node.id) {
-                       node.children.clear();
-                   } else {
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/passes/reorder_llm_tokens.rs
-      +++ b/src/trie3_opt/passes/reorder_llm_tokens.rs
-      @@ -18,7 +18,7 @@
-       
-               let max_tok = ctx.max_llm_token_id;
-               let mut freq: Vec<usize> = vec![0; max_tok + 1];
-      -        for node in &trie.nodes {
-      +        for node in trie.nodes.values() {
-                   for (ek, _) in &node.children {
-                       for t in ek.tokens.iter() {
-                           if t <= max_tok {
-      @@ -46,7 +46,7 @@
-                   SortedSet::from_iter(new_elems)
-               };
-       
-      -        for node in &mut trie.nodes {
-      +        for node in trie.nodes.values_mut() {
-                   let mut new_children = BTreeMap::new();
-                   for (mut ek, dm) in std::mem::take(&mut node.children) {
-                       ek.tokens = remap_sorted_set(&ek.tokens);
+               pass.run(&mut mini, &mut ctx);
+      +        mini.rebuild_parents();
+               if ctx.debug_level > 0 {
+                   let metrics = run_all_metrics(&mini);
+                   crate::debug!(
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 18 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/trie3_opt/core.rs
@@ -10371,88 +9440,8 @@ messages:
       Identified target file: src/trie3_opt/coordinator.rs
       Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/trie3_opt/metrics.rs
-      Applying patch to 'src/trie3_opt/metrics.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/metrics.rs.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: src/trie3_opt/passes/canonicalize_end_nodes.rs
-      Applying patch to 'src/trie3_opt/passes/canonicalize_end_nodes.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/canonicalize_end_nodes.rs.
-
-      --- Processing Diff Block 5 ---
-      Identified target file: src/trie3_opt/passes/compress_edges.rs
-      Applying patch to 'src/trie3_opt/passes/compress_edges.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/compress_edges.rs.
-
-      --- Processing Diff Block 6 ---
-      Identified target file: src/trie3_opt/passes/compress_unary_chains.rs
-      Applying patch to 'src/trie3_opt/passes/compress_unary_chains.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/compress_unary_chains.rs.
-
-      --- Processing Diff Block 7 ---
-      Identified target file: src/trie3_opt/passes/eliminate_pop0.rs
-      Applying patch to 'src/trie3_opt/passes/eliminate_pop0.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/eliminate_pop0.rs.
-
-      --- Processing Diff Block 8 ---
-      Identified target file: src/trie3_opt/passes/factor_common_destinations.rs
-      Applying patch to 'src/trie3_opt/passes/factor_common_destinations.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/factor_common_destinations.rs.
-
-      --- Processing Diff Block 9 ---
-      Identified target file: src/trie3_opt/passes/factor_root_fanout.rs
-      Applying patch to 'src/trie3_opt/passes/factor_root_fanout.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/factor_root_fanout.rs.
-
-      --- Processing Diff Block 10 ---
-      Identified target file: src/trie3_opt/passes/factor_state_fanout.rs
-      Applying patch to 'src/trie3_opt/passes/factor_state_fanout.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/factor_state_fanout.rs.
-
-      --- Processing Diff Block 11 ---
-      Identified target file: src/trie3_opt/passes/generalize_sids.rs
-      Applying patch to 'src/trie3_opt/passes/generalize_sids.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/generalize_sids.rs.
-
-      --- Processing Diff Block 12 ---
-      Identified target file: src/trie3_opt/passes/merge_bisimulation.rs
-      Applying patch to 'src/trie3_opt/passes/merge_bisimulation.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/merge_bisimulation.rs.
-
-      --- Processing Diff Block 13 ---
-      Identified target file: src/trie3_opt/passes/merge_equivalent_llm_tokens.rs
-      Applying patch to 'src/trie3_opt/passes/merge_equivalent_llm_tokens.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/merge_equivalent_llm_tokens.rs.
-
-      --- Processing Diff Block 14 ---
-      Identified target file: src/trie3_opt/passes/merge_global_atoms.rs
-      Applying patch to 'src/trie3_opt/passes/merge_global_atoms.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/merge_global_atoms.rs.
-
-      --- Processing Diff Block 15 ---
-      Identified target file: src/trie3_opt/passes/merge_structural.rs
-      Applying patch to 'src/trie3_opt/passes/merge_structural.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/merge_structural.rs.
-
-      --- Processing Diff Block 16 ---
-      Identified target file: src/trie3_opt/passes/prune_dead_paths.rs
-      Applying patch to 'src/trie3_opt/passes/prune_dead_paths.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/prune_dead_paths.rs.
-
-      --- Processing Diff Block 17 ---
-      Identified target file: src/trie3_opt/passes/prune_unproductive_paths.rs
-      Applying patch to 'src/trie3_opt/passes/prune_unproductive_paths.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/prune_unproductive_paths.rs.
-
-      --- Processing Diff Block 18 ---
-      Identified target file: src/trie3_opt/passes/reorder_llm_tokens.rs
-      Applying patch to 'src/trie3_opt/passes/reorder_llm_tokens.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/reorder_llm_tokens.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor MiniTrie to use BTreeMap for
-      nodes and add parent pointers for bidirectional traversal"'
+  - user: 'Changes committed with message: "Fix: Rebuild MiniTrie parent pointers
+      after each optimization pass to maintain graph consistency"'
     metadata:
 ...

@@ -398,6 +398,7 @@ pub fn run_pipeline_on_precompute3<'a>(
             crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
         }
         pass.run(&mut mini, &mut ctx);
+        mini.rebuild_parents();
         if ctx.debug_level > 0 {
             let metrics = run_all_metrics(&mini);
             crate::debug!(
