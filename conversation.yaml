@@ -10,7 +10,7 @@ local_system:
     - src/glr/stats.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |+
@@ -13559,6 +13559,32 @@ local_system:
           stage_2_table
       }
 
+      fn assert_lr0_invariants(stage_2_table: &Stage2Table) {
+          for (item_set, row) in stage_2_table {
+              let has_reduces = !row.reduces.is_empty();
+              let has_shifts = !row.shifts.is_empty();
+              let num_reduces = row.reduces.len();
+
+              if has_reduces && has_shifts {
+                  // Shift/Reduce conflict
+                  panic!(
+                      "LR(0) shift/reduce conflict detected in state with kernel: {:?}.\nShifts: {:?}\nReduces: {:?}",
+                      item_set,
+                      row.shifts.keys().collect::<Vec<_>>(),
+                      row.reduces
+                  );
+              }
+
+              if num_reduces > 1 {
+                  // Reduce/Reduce conflict
+                  panic!(
+                      "LR(0) reduce/reduce conflict detected in state with kernel: {:?}.\nReduces: {:?}",
+                      item_set, row.reduces
+                  );
+              }
+          }
+      }
+
       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
           let mut stage_3_table = BTreeMap::new();
 
@@ -14581,6 +14607,9 @@ local_system:
           crate::debug!(6, &stage_1_table);
           crate::debug!(2, "Stage 2");
           let stage_2_table = stage_2(stage_1_table, &productions);
+          if matches!(LR_MODE, LRMode::LR0) {
+              assert_lr0_invariants(&stage_2_table);
+          }
           crate::debug!(6, &stage_2_table);
           crate::debug!(2, "Stage 3");
           let stage_3_table = stage_3(stage_2_table, &productions);
@@ -24150,5 +24179,146 @@ messages:
       Successfully applied patch and wrote to src/glr/table.rs.
     metadata:
   - user: 'Changes committed with message: "Add support for LR(0) parsing mode"'
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/minimizer.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: If in LR0 mode, after constructing the table, assert that it matches LR0
+      expectations.
+    metadata:
+  - assistant: |-
+      Here are the step-by-step instructions to add an assertion for LR(0) table properties, followed by the corresponding git diff.
+
+      ### Step-by-Step Instructions
+
+      1.  **`src/glr/table.rs`**:
+          *   First, add a new helper function named `assert_lr0_invariants` just after the `stage_2` function. This function will check for LR(0) conflicts.
+          *   The function should iterate over the `Stage2Table`. For each state (row), it will check for two conditions:
+              *   A **shift/reduce conflict**: This occurs if the state has both shift actions (`row.shifts` is not empty) and reduce items (`row.reduces` is not empty).
+              *   A **reduce/reduce conflict**: This occurs if the state has more than one reduce item (`row.reduces.len() > 1`).
+          *   If either conflict is found, the function should `panic!` with a detailed error message showing the conflicting state's kernel items and the conflicting actions.
+          *   Next, locate the `generate_glr_parser_with_maps` function.
+          *   Inside this function, find the line where `stage_2_table` is created (`let stage_2_table = stage_2(...)`).
+          *   Immediately after that line, insert a conditional block to call `assert_lr0_invariants(&stage_2_table)` if the `LR_MODE` is `LR0`.
+
+      ### Git Diffs
+
+      ```diff
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -265,6 +265,35 @@
+           stage_2_table
+       }
+       
+      +fn assert_lr0_invariants(stage_2_table: &Stage2Table) {
+      +    for (item_set, row) in stage_2_table {
+      +        let has_reduces = !row.reduces.is_empty();
+      +        let has_shifts = !row.shifts.is_empty();
+      +        let num_reduces = row.reduces.len();
+      +
+      +        if has_reduces && has_shifts {
+      +            // Shift/Reduce conflict
+      +            panic!(
+      +                "LR(0) shift/reduce conflict detected in state with kernel: {:?}.\nShifts: {:?}\nReduces: {:?}",
+      +                item_set,
+      +                row.shifts.keys().collect::<Vec<_>>(),
+      +                row.reduces
+      +            );
+      +        }
+      +
+      +        if num_reduces > 1 {
+      +            // Reduce/Reduce conflict
+      +            panic!(
+      +                "LR(0) reduce/reduce conflict detected in state with kernel: {:?}.\nReduces: {:?}",
+      +                item_set, row.reduces
+      +            );
+      +        }
+      +    }
+      +}
+      +
+       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+           let mut stage_3_table = BTreeMap::new();
+       
+      @@ -1025,6 +1054,9 @@
+           crate::debug!(6, &stage_1_table);
+           crate::debug!(2, "Stage 2");
+           let stage_2_table = stage_2(stage_1_table, &productions);
+      +    if matches!(LR_MODE, LRMode::LR0) {
+      +        assert_lr0_invariants(&stage_2_table);
+      +    }
+           crate::debug!(6, &stage_2_table);
+           crate::debug!(2, "Stage 3");
+           let stage_3_table = stage_3(stage_2_table, &productions);
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+    metadata:
+  - user: 'Changes committed with message: "Implement LR(0) parsing mode support with
+      invariant checks"'
     metadata:
 ...
