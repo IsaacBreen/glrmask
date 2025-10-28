@@ -460,9 +460,11 @@ fn test_aborted_tokenizer_restart_equivalence() {
         &GrammarConstraintConfig::default(),
         None,
     );
+    println!("parser: {}", constraint.parser);
     println!("Vocab: {:?}", constraint.llm_vocab);
     println!("Precompute0 vocab: {:?}", constraint.precompute0_vocab);
     constraint.dump_precomputed0();
+    constraint.dump_precomputed3();
 
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state1 = constraint.init();
