@@ -1263,11 +1263,11 @@ impl GrammarConstraint {
             // The original terminals that are now part of a group should be removed from the grammar def.
             for original_names in new_config.dummy_terminal_map.values() {
                 for name in original_names {
-                    if let Some(gid) = final_grammar_def.regex_name_to_group_id.remove_by_left(name) {
-                        final_grammar_def.regex_expr_to_group_id.remove_by_right(&gid);
+                    if let Some((_name, group_id)) = final_grammar_def.regex_name_to_group_id.remove_by_left(name) {
+                        final_grammar_def.regex_expr_to_group_id.remove_by_right(&group_id);
                     }
-                    if let Some(gid) = final_grammar_def.literal_to_group_id.remove_by_left(name.as_bytes()) {
-                        final_grammar_def.regex_expr_to_group_id.remove_by_right(&gid);
+                    if let Some((_bytes, group_id)) = final_grammar_def.literal_to_group_id.remove_by_left(name.as_bytes()) {
+                        final_grammar_def.regex_expr_to_group_id.remove_by_right(&group_id);
                     }
                 }
             }
