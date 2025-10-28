@@ -13513,7 +13513,10 @@ local_system:
           }
 
           while let Some(item_set) = worklist.pop_front() {
-              assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
+              assert!(
+                  matches!(LR_MODE, LRMode::LALR | LRMode::LR0),
+                  "Only LALR and LR0 modes are supported by the table builder"
+              );
               let closure = compute_closure(&item_set, &prods_by_lhs);
               let splits = split_on_dot(&closure);
               let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
@@ -13672,51 +13675,64 @@ local_system:
       }
 
       fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
-          // Stage 5 turns
-          //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
-          // into
-          //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-          // ie it removes the None entries, which represent EOF.
-          // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
-          // merging with any existing production ID sets in the reduces map.
           let mut stage_5_table = BTreeMap::new();
-          let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
 
-          for (item_set, row) in stage_4_table {
-              let Stage4Row { shifts, gotos, reduces } = row;
+          match LR_MODE {
+              LRMode::LR0 => {
+                  for (item_set, row) in stage_4_table {
+                      let Stage4Row { shifts, gotos, reduces } = row;
+                      // For LR(0), stage_3 has already populated reduces for all terminals.
+                      // We just need to convert the map key from Option<Terminal> to Terminal,
+                      // dropping the None (EOF) key.
+                      let new_reduces = reduces
+                          .into_iter()
+                          .filter_map(|(opt_term, pids)| opt_term.map(|term| (term, pids)))
+                          .collect();
 
-              // 2. Start building the new reduces map keyed by concrete terminals.
-              let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
-
-
-              // 2a. Copy over entries that already have a concrete terminal key.
-              for (opt_term, prod_ids) in reduces {
-                  if let Some(term) = opt_term {
-                      new_reduces
-                          .entry(term)
-                          .or_default()
-                          .extend(prod_ids.into_iter());
-                  } else {
-                      // 2b. For None entries, copy the production IDs to all terminals.
-                      for terminal in &all_terminals {
-                          new_reduces
-                              .entry(terminal.clone())
-                              .or_default()
-                              .extend(prod_ids.iter().cloned());
-                      }
+                      stage_5_table.insert(
+                          item_set,
+                          Stage5Row {
+                              shifts,
+                              gotos,
+                              reduces: new_reduces,
+                          },
+                      );
                   }
               }
+              LRMode::LALR | LRMode::LALR_EX_SHIFT_STATES | LRMode::LR1 => {
+                  // Original LALR logic for handling EOF lookahead.
+                  let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
+                  for (item_set, row) in stage_4_table {
+                      let Stage4Row { shifts, gotos, reduces } = row;
+                      let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
 
-              stage_5_table.insert(
-                  item_set,
-                  Stage5Row {
-                      shifts,
-                      gotos,
-                      reduces: new_reduces,
-                  },
-              );
+                      for (opt_term, prod_ids) in reduces {
+                          if let Some(term) = opt_term {
+                              new_reduces
+                                  .entry(term)
+                                  .or_default()
+                                  .extend(prod_ids.into_iter());
+                          } else {
+                              // For None entries, copy the production IDs to all terminals.
+                              for terminal in &all_terminals {
+                                  new_reduces
+                                      .entry(terminal.clone())
+                                      .or_default()
+                                      .extend(prod_ids.iter().cloned());
+                              }
+                          }
+                      }
+                      stage_5_table.insert(
+                          item_set,
+                          Stage5Row {
+                              shifts,
+                              gotos,
+                              reduces: new_reduces,
+                          },
+                      );
+                  }
+              }
           }
-
           stage_5_table
       }
 
@@ -24320,5 +24336,277 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Implement LR(0) parsing mode support with
       invariant checks"'
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+      --- original version of src/glr/items.rs
+      +++ current version of src/glr/items.rs
+      @@ -97,6 +97,6 @@
+           LR0,
+       }
+       
+      -pub const LR_MODE: LRMode = LRMode::LALR;
+      +pub const LR_MODE: LRMode = LRMode::LR0;
+       // pub const LR_MODE: LRMode = LRMode::LALR_EX_GOTO;
+       // pub const LR_MODE: LRMode = LRMode::LR1;
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/minimizer.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+      --- original version of src/glr/parser.rs
+      +++ current version of src/glr/parser.rs
+      @@ -2301,6 +2301,7 @@
+                       Some(llm_tokens)
+                   }
+                   LRMode::LALR => None,
+      +            LRMode::LR0 => None,
+               }
+           }
+       
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/stats.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      [DEBUG] 2] src/glr/table.rs:1465: Validating initial grammar
+      [DEBUG] 2] src/glr/table.rs:1471: Removing productions with undefined non-terminals
+      [DEBUG] 2] src/glr/table.rs:1507: Stage 1
+
+
+      thread 'test_constraint_basic::test_trivial' (28312310) panicked at src/glr/table.rs:418:9:
+      Only LALR mode is supported by the table builder
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::glr::table::stage_1
+                   at ./src/glr/table.rs:418:9
+         3: sep1::glr::table::generate_glr_parser_with_maps
+                   at ./src/glr/table.rs:1508:25
+         4: sep1::glr::table::generate_glr_parser_with_terminal_map
+                   at ./src/glr/table.rs:1581:5
+         5: sep1::test_constraint_basic::test_trivial
+                   at ./src/test_constraint_basic.rs:57:18
+         6: sep1::test_constraint_basic::test_trivial::{{closure}}
+                   at ./src/test_constraint_basic.rs:34:18
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+      ---
+
+      Some of the stages have logic that is implicitly hard-coded for LALR(1).
+    metadata:
+  - assistant: |-
+      I've identified the source of the panic and also addressed your observation that some stages have logic implicitly hard-coded for LALR(1). The issue was a second assertion inside `stage_1` that I missed, and `stage_5`'s logic was indeed not appropriate for LR(0) mode.
+
+      Here are the step-by-step instructions to fix these issues, followed by the git diff.
+
+      ### Step-by-Step Instructions
+
+      1.  **`src/glr/table.rs`**:
+          *   **Modify `stage_5` for Mode-Specific Logic**:
+              *   Replace the entire body of the `stage_5` function with a `match LR_MODE` block.
+              *   For the `LRMode::LR0` case, the logic should now correctly handle the `reduces` map. Since `stage_3` already populated reduce actions for all terminals in LR(0) mode, this new logic will simply convert the map's key from `Option<Terminal>` to `Terminal` by filtering out the `None` (EOF) entry.
+              *   For the `LRMode::LALR`, `LRMode::LALR_EX_SHIFT_STATES`, and `LRMode::LR1` cases, move the original body of `stage_5` into this branch. This preserves the existing LALR(1) behavior of propagating EOF-based reduce actions to all terminals.
+          *   **Fix Assertion in `stage_1`**:
+              *   Inside the `stage_1` function, locate the `while let Some(item_set) = worklist.pop_front()` loop.
+              *   Find the `assert!` macro inside this loop.
+              *   Update the assertion to `assert!(matches!(LR_MODE, LRMode::LALR | LRMode::LR0), "Only LALR and LR0 modes are supported by the table builder");`. This allows both `LALR` and `LR0` modes to pass this check, fixing the panic.
+
+      ### Git Diffs
+
+      ```diff
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -329,57 +329,69 @@
+       }
+       
+       fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
+      -    // Stage 5 turns
+      -    //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+      -    // into
+      -    //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+      -    // ie it removes the None entries, which represent EOF.
+      -    // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
+      -    // merging with any existing production ID sets in the reduces map.
+           let mut stage_5_table = BTreeMap::new();
+      -    let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
+      -
+      -    for (item_set, row) in stage_4_table {
+      -        let Stage4Row { shifts, gotos, reduces } = row;
+      -
+      -        // 2. Start building the new reduces map keyed by concrete terminals.
+      -        let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
+      -
+      -
+      -        // 2a. Copy over entries that already have a concrete terminal key.
+      -        for (opt_term, prod_ids) in reduces {
+      -            if let Some(term) = opt_term {
+      -                new_reduces
+      -                    .entry(term)
+      -                    .or_default()
+      -                    .extend(prod_ids.into_iter());
+      -            } else {
+      -                // 2b. For None entries, copy the production IDs to all terminals.
+      -                for terminal in &all_terminals {
+      -                    new_reduces
+      -                        .entry(terminal.clone())
+      -                        .or_default()
+      -                        .extend(prod_ids.iter().cloned());
+      -                }
+      -            }
+      -        }
+      -
+      -        stage_5_table.insert(
+      -            item_set,
+      -            Stage5Row {
+      -                shifts,
+      -                gotos,
+      -                reduces: new_reduces,
+      -            },
+      -        );
+      -    }
+      -
+      +
+      +    match LR_MODE {
+      +        LRMode::LR0 => {
+      +            for (item_set, row) in stage_4_table {
+      +                let Stage4Row { shifts, gotos, reduces } = row;
+      +                // For LR(0), stage_3 has already populated reduces for all terminals.
+      +                // We just need to convert the map key from Option<Terminal> to Terminal,
+      +                // dropping the None (EOF) key.
+      +                let new_reduces = reduces
+      +                    .into_iter()
+      +                    .filter_map(|(opt_term, pids)| opt_term.map(|term| (term, pids)))
+      +                    .collect();
+      +
+      +                stage_5_table.insert(
+      +                    item_set,
+      +                    Stage5Row {
+      +                        shifts,
+      +                        gotos,
+      +                        reduces: new_reduces,
+      +                    },
+      +                );
+      +            }
+      +        }
+      +        LRMode::LALR | LRMode::LALR_EX_SHIFT_STATES | LRMode::LR1 => {
+      +            // Original LALR logic for handling EOF lookahead.
+      +            let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
+      +            for (item_set, row) in stage_4_table {
+      +                let Stage4Row { shifts, gotos, reduces } = row;
+      +                let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
+      +
+      +                for (opt_term, prod_ids) in reduces {
+      +                    if let Some(term) = opt_term {
+      +                        new_reduces
+      +                            .entry(term)
+      +                            .or_default()
+      +                            .extend(prod_ids.into_iter());
+      +                    } else {
+      +                        // For None entries, copy the production IDs to all terminals.
+      +                        for terminal in &all_terminals {
+      +                            new_reduces
+      +                                .entry(terminal.clone())
+      +                                .or_default()
+      +                                .extend(prod_ids.iter().cloned());
+      +                        }
+      +                    }
+      +                }
+      +                stage_5_table.insert(
+      +                    item_set,
+      +                    Stage5Row {
+      +                        shifts,
+      +                        gotos,
+      +                        reduces: new_reduces,
+      +                    },
+      +                );
+      +            }
+      +        }
+      +    }
+           stage_5_table
+       }
+       
+      @@ -453,7 +465,10 @@
+           }
+       
+           while let Some(item_set) = worklist.pop_front() {
+      -        assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
+      +        assert!(
+      +            matches!(LR_MODE, LRMode::LALR | LRMode::LR0),
+      +            "Only LALR and LR0 modes are supported by the table builder"
+      +        );
+               let closure = compute_closure(&item_set, &prods_by_lhs);
+               let splits = split_on_dot(&closure);
+               let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+    metadata:
+  - user: 'Changes committed with message: "Make table generation stages mode-aware
+      (LALR/LR0) and add LR(0) invariant checks"'
     metadata:
 ...

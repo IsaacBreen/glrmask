@@ -415,7 +415,10 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     }
 
     while let Some(item_set) = worklist.pop_front() {
-        assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
+        assert!(
+            matches!(LR_MODE, LRMode::LALR | LRMode::LR0),
+            "Only LALR and LR0 modes are supported by the table builder"
+        );
         let closure = compute_closure(&item_set, &prods_by_lhs);
         let splits = split_on_dot(&closure);
         let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
@@ -574,51 +577,64 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
 }
 
 fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
-    // Stage 5 turns
-    //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
-    // into
-    //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-    // ie it removes the None entries, which represent EOF.
-    // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
-    // merging with any existing production ID sets in the reduces map.
     let mut stage_5_table = BTreeMap::new();
-    let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
 
-    for (item_set, row) in stage_4_table {
-        let Stage4Row { shifts, gotos, reduces } = row;
+    match LR_MODE {
+        LRMode::LR0 => {
+            for (item_set, row) in stage_4_table {
+                let Stage4Row { shifts, gotos, reduces } = row;
+                // For LR(0), stage_3 has already populated reduces for all terminals.
+                // We just need to convert the map key from Option<Terminal> to Terminal,
+                // dropping the None (EOF) key.
+                let new_reduces = reduces
+                    .into_iter()
+                    .filter_map(|(opt_term, pids)| opt_term.map(|term| (term, pids)))
+                    .collect();
 
-        // 2. Start building the new reduces map keyed by concrete terminals.
-        let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
-
-
-        // 2a. Copy over entries that already have a concrete terminal key.
-        for (opt_term, prod_ids) in reduces {
-            if let Some(term) = opt_term {
-                new_reduces
-                    .entry(term)
-                    .or_default()
-                    .extend(prod_ids.into_iter());
-            } else {
-                // 2b. For None entries, copy the production IDs to all terminals.
-                for terminal in &all_terminals {
-                    new_reduces
-                        .entry(terminal.clone())
-                        .or_default()
-                        .extend(prod_ids.iter().cloned());
-                }
+                stage_5_table.insert(
+                    item_set,
+                    Stage5Row {
+                        shifts,
+                        gotos,
+                        reduces: new_reduces,
+                    },
+                );
             }
         }
+        LRMode::LALR | LRMode::LALR_EX_SHIFT_STATES | LRMode::LR1 => {
+            // Original LALR logic for handling EOF lookahead.
+            let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
+            for (item_set, row) in stage_4_table {
+                let Stage4Row { shifts, gotos, reduces } = row;
+                let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
 
-        stage_5_table.insert(
-            item_set,
-            Stage5Row {
-                shifts,
-                gotos,
-                reduces: new_reduces,
-            },
-        );
+                for (opt_term, prod_ids) in reduces {
+                    if let Some(term) = opt_term {
+                        new_reduces
+                            .entry(term)
+                            .or_default()
+                            .extend(prod_ids.into_iter());
+                    } else {
+                        // For None entries, copy the production IDs to all terminals.
+                        for terminal in &all_terminals {
+                            new_reduces
+                                .entry(terminal.clone())
+                                .or_default()
+                                .extend(prod_ids.iter().cloned());
+                        }
+                    }
+                }
+                stage_5_table.insert(
+                    item_set,
+                    Stage5Row {
+                        shifts,
+                        gotos,
+                        reduces: new_reduces,
+                    },
+                );
+            }
+        }
     }
-
     stage_5_table
 }
 
