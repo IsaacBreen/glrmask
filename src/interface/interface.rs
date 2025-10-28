@@ -374,6 +374,25 @@ impl GrammarDefinition {
         self.external_name_to_group_id.insert(name.to_string(), new_group_id);
         new_group_id
     }
+
+    pub fn add_regex_terminal(&mut self, name: &str, expr: Expr) -> usize {
+        if let Some(group_id) = self.regex_name_to_group_id.get_by_left(name) {
+            return *group_id;
+        }
+        if self.external_name_to_group_id.contains_left(name) {
+            panic!("Regex terminal name '{}' conflicts with an existing external terminal.", name);
+        }
+
+        let all_gids: BTreeSet<usize> = self.regex_expr_to_group_id.right_values().copied()
+            .chain(self.external_name_to_group_id.right_values().copied())
+            .collect();
+        
+        let new_group_id = all_gids.iter().max().map(|max_id| max_id + 1).unwrap_or(0);
+
+        self.regex_name_to_group_id.insert(name.to_string(), new_group_id);
+        self.regex_expr_to_group_id.insert(expr, new_group_id);
+        new_group_id
+    }
 }
 
 impl GrammarDefinition {
