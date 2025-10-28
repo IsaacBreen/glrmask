@@ -2066,15 +2066,16 @@ impl GrammarConstraint {
         let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
         for (items, _acc) in stacks.iter() {
-            let mut items = items.clone();
-            items.reverse();
-            if items.is_empty() { continue; }
+            if items.is_empty() {
+                continue;
+            }
 
             let shifted_state_content = items[0].clone();
+            let pre_shift_stack = &items[1..];
 
-            // Walk the rest of the stack (below the shifted state)
+            // Walk the pre-shift stack from top to bottom to build the trie path
             let mut cur = head.clone();
-            for state_content in items.iter().skip(1).rev() {
+            for state_content in pre_shift_stack.iter() {
                 let mut state_bv = StateIDBV::zeros();
                 state_bv.insert(state_content.state_id.0);
                 let inserter = EdgeInserter::new(
@@ -2089,7 +2090,6 @@ impl GrammarConstraint {
 
             // The current node `cur` is the end of the path for this stack configuration.
             // Map the shifted state to this end node.
-            // If another stack has the same shifted state and stack path, it will resolve to the same `cur` node.
             final_nodes_map.insert(shifted_state_content, cur);
         }
 
