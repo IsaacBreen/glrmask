@@ -2182,6 +2182,30 @@ impl GrammarConstraint {
             // Temporarily mark the end node as 'end' for optimization purposes
             end.write(trie3_god).unwrap().value.end = true;
             out.insert(tid, (start, end));
+
+            let terminal_name = parser.terminal_map.get_by_right(&tid).unwrap().clone();
+
+            println!("Template3 for terminal '{}' ({}):", terminal_name, tid.0);
+
+            let template_paths = IntermediatePrecomputeNode3::get_all_paths(
+                &trie3_god,
+                &[start.clone()],
+                |idx, _node| idx == end
+            );
+
+            if template_paths.is_empty() {
+                println!("  (No paths found to end node)");
+            }
+
+            for (_root_value, path_edges) in &template_paths {
+                let edge_keys_str: Vec<_> = path_edges.iter()
+                    .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+                    .map(|(ek, _, _)| format!("{}", ek))
+                    .collect();
+                if !edge_keys_str.is_empty() {
+                    println!("  [{}]", edge_keys_str.join(", "));
+                }
+            }
         }
 
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
