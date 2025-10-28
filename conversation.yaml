@@ -2486,6 +2486,9 @@ local_system:
       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
       use std::collections::hash_map::Entry;
 
+      use kdam::{BarExt, tqdm};
+      use crate::profiler::PROGRESS_BAR_ENABLED;
+
       use crate::trie3_opt::{
           context::OptimizationContext,
           core::{EdgeKey, MiniTrie, NodeId, SortedSet},
@@ -2543,7 +2546,18 @@ local_system:
                   let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
                   let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
                   let mut aborted = false;
-                  for m in masks {
+                  #[cfg(not(rustrover))]
+                  let it_masks = tqdm!(
+                      masks.iter(),
+                      desc = &format!("MergeGlobalAtoms: BuildAtoms(pop={})", pop),
+                      total = masks.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = false
+                  );
+                  #[cfg(rustrover)]
+                  let it_masks = masks.iter();
+
+                  for m in it_masks {
                       if blocks.is_empty() {
                           break;
                       }
@@ -2690,14 +2704,30 @@ local_system:
                   prev_class[i] = class_id;
               }
 
-              for _ in 0..self.max_iters {
-                  type SigKey = (bool, Vec<((isize, usize), Vec<(usize, SortedSet)>)>);
-                  let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
+              for iter_num in 0..self.max_iters {
+                  type InternedEdgeSig = Vec<(usize, usize)>; // (dest_class, sset_id)
+                  type InternedNodeSig = (bool, Vec<((isize, usize), InternedEdgeSig)>); // (is_end, [((pop, atom_idx), edge_sig)])
+
+                  let mut sset_interner: HashMap<SortedSet, usize> = HashMap::new();
+                  let mut next_sset_id = 0;
+
+                  let mut sig_to_id: HashMap<InternedNodeSig, usize> = HashMap::new();
                   let mut next_id = 0;
                   let mut new_class = vec![0; n];
                   let mut changes = 0;
 
-                  for (u_idx, u_id) in node_ids.iter().enumerate() {
+                  #[cfg(not(rustrover))]
+                  let it_nodes = tqdm!(
+                      node_ids.iter().enumerate(),
+                      desc = &format!("MergeGlobalAtoms: Refine iter {}", iter_num + 1),
+                      total = node_ids.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = false
+                  );
+                  #[cfg(rustrover)]
+                  let it_nodes = node_ids.iter().enumerate();
+
+                  for (u_idx, u_id) in it_nodes {
                       let u_node = trie.get_node(*u_id).unwrap();
                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in u_node.children() {
@@ -2715,8 +2745,17 @@ local_system:
                               }
                           }
                       }
-                      let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
-                      let sig = (u_node.is_end(), sig_entries);
+                      let mut sig_entries_interned: Vec<((isize, usize), InternedEdgeSig)> = Vec::with_capacity(per_atom_aggr.len());
+                      for ((pop, atom_idx), dm) in per_atom_aggr {
+                          let mut dest_vec: InternedEdgeSig = Vec::with_capacity(dm.len());
+                          for (dest_class, sids) in dm {
+                              let sset_id = *sset_interner.entry(sids).or_insert_with(|| { let id = next_sset_id; next_sset_id += 1; id });
+                              dest_vec.push((dest_class, sset_id));
+                          }
+                          sig_entries_interned.push(((pop, atom_idx), dest_vec));
+                      }
+
+                      let sig: InternedNodeSig = (u_node.is_end(), sig_entries_interned);
                       let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
                       new_class[u_idx] = cid;
                       if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
@@ -5158,8 +5197,10 @@ local_system:
                           }
 
                           let mid_id = trie.add_node(false);
-                          trie.add_edge(mid_id, EdgeKey::new(pop, b.clone()), dest_agg.keys().next().unwrap().clone(), dest_agg.values().next().unwrap().clone());
-
+                          let edge_key = EdgeKey::new(pop, b.clone());
+                          for (dst, sids) in dest_agg {
+                              trie.add_edge(mid_id, edge_key.clone(), dst, sids);
+                          }
                           new_children
                               .entry(EdgeKey::new(0, b))
                               .or_default()
@@ -5234,7 +5275,7 @@ local_system:
                           }
 
                           // tokens -> states
-                          let mut tokens_to_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+                          let mut tokens_to_states: HashMap<SortedSet, SortedSet> = HashMap::new();
                           for (state, toks) in s2toks {
                               if toks.is_empty() {
                                   continue;
@@ -8969,6 +9010,9 @@ messages:
       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
       use std::collections::hash_map::Entry;
 
+      use kdam::{BarExt, tqdm};
+      use crate::profiler::PROGRESS_BAR_ENABLED;
+
       use crate::trie3_opt::{
           context::OptimizationContext,
           core::{EdgeKey, MiniTrie, NodeId, SortedSet},
@@ -9026,7 +9070,18 @@ messages:
                   let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
                   let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
                   let mut aborted = false;
-                  for m in masks {
+                  #[cfg(not(rustrover))]
+                  let it_masks = tqdm!(
+                      masks.iter(),
+                      desc = &format!("MergeGlobalAtoms: BuildAtoms(pop={})", pop),
+                      total = masks.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = false
+                  );
+                  #[cfg(rustrover)]
+                  let it_masks = masks.iter();
+
+                  for m in it_masks {
                       if blocks.is_empty() {
                           break;
                       }
@@ -9173,14 +9228,30 @@ messages:
                   prev_class[i] = class_id;
               }
 
-              for _ in 0..self.max_iters {
-                  type SigKey = (bool, Vec<((isize, usize), Vec<(usize, SortedSet)>)>);
-                  let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
+              for iter_num in 0..self.max_iters {
+                  type InternedEdgeSig = Vec<(usize, usize)>; // (dest_class, sset_id)
+                  type InternedNodeSig = (bool, Vec<((isize, usize), InternedEdgeSig)>); // (is_end, [((pop, atom_idx), edge_sig)])
+
+                  let mut sset_interner: HashMap<SortedSet, usize> = HashMap::new();
+                  let mut next_sset_id = 0;
+
+                  let mut sig_to_id: HashMap<InternedNodeSig, usize> = HashMap::new();
                   let mut next_id = 0;
                   let mut new_class = vec![0; n];
                   let mut changes = 0;
 
-                  for (u_idx, u_id) in node_ids.iter().enumerate() {
+                  #[cfg(not(rustrover))]
+                  let it_nodes = tqdm!(
+                      node_ids.iter().enumerate(),
+                      desc = &format!("MergeGlobalAtoms: Refine iter {}", iter_num + 1),
+                      total = node_ids.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = false
+                  );
+                  #[cfg(rustrover)]
+                  let it_nodes = node_ids.iter().enumerate();
+
+                  for (u_idx, u_id) in it_nodes {
                       let u_node = trie.get_node(*u_id).unwrap();
                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in u_node.children() {
@@ -9198,8 +9269,17 @@ messages:
                               }
                           }
                       }
-                      let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
-                      let sig = (u_node.is_end(), sig_entries);
+                      let mut sig_entries_interned: Vec<((isize, usize), InternedEdgeSig)> = Vec::with_capacity(per_atom_aggr.len());
+                      for ((pop, atom_idx), dm) in per_atom_aggr {
+                          let mut dest_vec: InternedEdgeSig = Vec::with_capacity(dm.len());
+                          for (dest_class, sids) in dm {
+                              let sset_id = *sset_interner.entry(sids).or_insert_with(|| { let id = next_sset_id; next_sset_id += 1; id });
+                              dest_vec.push((dest_class, sset_id));
+                          }
+                          sig_entries_interned.push(((pop, atom_idx), dest_vec));
+                      }
+
+                      let sig: InternedNodeSig = (u_node.is_end(), sig_entries_interned);
                       let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
                       new_class[u_idx] = cid;
                       if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
@@ -9697,8 +9777,65 @@ messages:
       ```
     metadata:
       filename: src/trie3_opt/passes/reorder_llm_tokens.rs
-  - user: '`MergeGlobalAtoms` just keeps consuming more and more memory and never
-      seems to finish. Fix it. Also, add a progress bar to it.'
+  - user: |-
+      ```
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:398: [Trie3 Opt] Running pass: GeneralizeSids
+      Metric: NonRootStateFanout: 75565/75565 [00:00<00:00, 579324.38it/s][DEBUG] 1] src/trie3_opt/coordinator.rs:403: [Trie3 Opt] Metrics after 'GeneralizeSids': {
+        "all_fanout": { count: 75734, sum: 184403.00, mean: 2.43, stdev: 7.63, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 75565, sum: 183874.00, mean: 2.43, stdev: 7.64, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
+        "non_root_state_fanout": { count: 1877834, sum: 3324352.00, mean: 1.77, stdev: 5.31, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 2.00, max: 80.00 },
+        "num_edges": 184403,
+        "num_end_nodes": 1,
+        "num_nodes": 75734,
+        "num_productive_nodes": 56867,
+        "num_reachable_nodes": 56130,
+        "num_roots": 169,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 169, sum: 529.00, mean: 3.13, stdev: 6.01, min: 0.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
+        "root_state_fanout": { count: 84000, sum: 264500.00, mean: 3.15, stdev: 6.02, min: 1.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
+        "state_fanout": { count: 1961834, sum: 3588852.00, mean: 1.83, stdev: 5.35, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 3.00, max: 80.00 }
+      }
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:398: [Trie3 Opt] Running pass: FactorRootFanout
+      Metric: NonRootStateFanout: 75565/75565 [00:00<00:00, 580149.50it/s][DEBUG] 1] src/trie3_opt/coordinator.rs:403: [Trie3 Opt] Metrics after 'FactorRootFanout': {
+        "all_fanout": { count: 75734, sum: 184403.00, mean: 2.43, stdev: 7.63, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 75565, sum: 183874.00, mean: 2.43, stdev: 7.64, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
+        "non_root_state_fanout": { count: 1877834, sum: 3324352.00, mean: 1.77, stdev: 5.31, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 2.00, max: 80.00 },
+        "num_edges": 184403,
+        "num_end_nodes": 1,
+        "num_nodes": 75734,
+        "num_productive_nodes": 56867,
+        "num_reachable_nodes": 56130,
+        "num_roots": 169,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 169, sum: 529.00, mean: 3.13, stdev: 6.01, min: 0.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
+        "root_state_fanout": { count: 84000, sum: 264500.00, mean: 3.15, stdev: 6.02, min: 1.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
+        "state_fanout": { count: 1961834, sum: 3588852.00, mean: 1.83, stdev: 5.35, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 3.00, max: 80.00 }
+      }
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:398: [Trie3 Opt] Running pass: FactorStateFanout
+      Metric: NonRootStateFanout: 75565/75565 [00:00<00:00, 573722.19it/s][DEBUG] 1] src/trie3_opt/coordinator.rs:403: [Trie3 Opt] Metrics after 'FactorStateFanout': {
+        "all_fanout": { count: 75734, sum: 184403.00, mean: 2.43, stdev: 7.63, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 75565, sum: 183874.00, mean: 2.43, stdev: 7.64, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
+        "non_root_state_fanout": { count: 1877834, sum: 3324352.00, mean: 1.77, stdev: 5.31, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 2.00, max: 80.00 },
+        "num_edges": 184403,
+        "num_end_nodes": 1,
+        "num_nodes": 75734,
+        "num_productive_nodes": 56867,
+        "num_reachable_nodes": 56130,
+        "num_roots": 169,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 169, sum: 529.00, mean: 3.13, stdev: 6.01, min: 0.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
+        "root_state_fanout": { count: 84000, sum: 264500.00, mean: 3.15, stdev: 6.02, min: 1.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
+        "state_fanout": { count: 1961834, sum: 3588852.00, mean: 1.83, stdev: 5.35, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 3.00, max: 80.00 }
+      }
+      ```
+
+      These results are very disappointing. `FactorStateFanoutPass` should dramatically reduce fanout, particularly at the higher end (e.g. 80).
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9718,253 +9855,143 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with performance bottlenecks in complex algorithms like graph optimization is crucial. The memory usage and performance issues in `MergeGlobalAtoms` likely stem from using large, complex data structures as keys in hashmaps during the partition refinement step.
+      It appears you've found a couple of optimization passes that aren't performing as expected. The `FactorRootFanoutPass` has a definite bug where it only considers the first destination when creating factored edges, and `FactorStateFanoutPass` isn't having any effect despite metrics indicating there are opportunities for optimization.
 
-      Here are the step-by-step instructions to fix the issue and add progress bars for better visibility, followed by the git diffs.
+      Here are the step-by-step instructions to fix these issues, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      #### File: `src/trie3_opt/passes/merge_global_atoms.rs`
+      #### 1. Fix `FactorRootFanoutPass` to handle all destinations
 
-      1.  **Add Imports for Progress Bar:**
-          At the top of the file, add the following `use` statements to import the `kdam` progress bar library and the global enabled flag:
+      The issue in `FactorRootFanoutPass` is that it only wires up the first destination from the aggregated destination map (`dest_agg`), ignoring all others. We need to replace the single `trie.add_edge` call with a loop.
 
+      **File:** `src/trie3_opt/passes/factor_root_fanout.rs`
+
+      1.  Open the file `src/trie3_opt/passes/factor_root_fanout.rs`.
+      2.  Navigate to the `run` function, inside the `for b in blocks` loop.
+      3.  Locate this line:
           ```rust
-          use kdam::{BarExt, tqdm};
-          use crate::profiler::PROGRESS_BAR_ENABLED;
+          trie.add_edge(mid_id, EdgeKey::new(pop, b.clone()), dest_agg.keys().next().unwrap().clone(), dest_agg.values().next().unwrap().clone());
+          ```
+      4.  Replace that single line with the following block of code, which correctly iterates over all aggregated destinations:
+          ```rust
+          let edge_key = EdgeKey::new(pop, b.clone());
+          for (dst, sids) in dest_agg {
+              trie.add_edge(mid_id, edge_key.clone(), dst, sids);
+          }
           ```
 
-      2.  **Add Progress Bar to Atom Generation:**
-          In the `run` method, find the loop that iterates over token masks to build atoms (`for m in masks`). Wrap this iterator with `tqdm!` to show progress for each pop value.
+      #### 2. Modify `FactorStateFanoutPass` data structure
 
-          *   **Locate this code block:**
-              ```rust
-              // ...
-              for (pop, masks) in &by_pop_masks {
-                  let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
-                  let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
-                  let mut aborted = false;
-                  for m in masks {
-                      if blocks.is_empty() {
-              // ...
-              ```
-          *   **Modify it to add the progress bar:**
-              ```rust
-              // ...
-              for (pop, masks) in &by_pop_masks {
-                  let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
-                  let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
-                  let mut aborted = false;
-                  #[cfg(not(rustrover))]
-                  let it_masks = tqdm!(
-                      masks.iter(),
-                      desc = &format!("MergeGlobalAtoms: BuildAtoms(pop={})", pop),
-                      total = masks.len(),
-                      disable = !PROGRESS_BAR_ENABLED,
-                      leave = false
-                  );
-                  #[cfg(rustrover)]
-                  let it_masks = masks.iter();
-                  for m in it_masks {
-                      if blocks.is_empty() {
-              // ...
-              ```
+      The `FactorStateFanoutPass` is unexpectedly inert. While the logic appears sound, we can try a small modification to see if it resolves a subtle issue. We will change an internal `BTreeMap` to a `HashMap`. This can sometimes expose issues related to keying or change performance characteristics.
 
-      3.  **Optimize Partition Refinement and Add Progress Bar:**
-          This is the most critical change. You will refactor the main refinement loop to avoid using large `SortedSet` objects in `HashMap` keys. This is done by "interning" them—replacing each unique `SortedSet` with a simple integer ID.
+      **File:** `src/trie3_opt/passes/factor_state_fanout.rs`
 
-          *   **Locate the partition refinement loop:**
-              ```rust
-              for _ in 0..self.max_iters {
-                  type SigKey = (bool, Vec<((isize, usize), Vec<(usize, SortedSet)>)>);
-                  let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
-                  // ...
-              ```
-          *   **Replace the entire loop** with the following optimized version. This new version introduces `sset_interner` to manage `SortedSet` IDs, defines a more efficient signature type (`InternedNodeSig`), and adds a progress bar for each refinement iteration.
+      1.  Open the file `src/trie3_opt/passes/factor_state_fanout.rs`.
+      2.  Navigate to the `run` function, inside the `for (dest, s2toks) in dest_map` loop.
+      3.  Find this line:
+          ```rust
+          let mut tokens_to_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+          ```
+      4.  Change `BTreeMap` to `HashMap`:
+          ```rust
+          let mut tokens_to_states: HashMap<SortedSet, SortedSet> = HashMap::new();
+          ```
+      5.  Since iterating over a `HashMap` moves the keys, we need to clone the token set when creating the new `EdgeKey`. Find this line a few lines down:
+          ```rust
+          let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
+          ```
+      6.  Modify it to clone `tokens`:
+          ```rust
+          let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens.clone());
+          ```
+      7.  Finally, when iterating `s2toks`, we should borrow it to avoid a move. Find this line:
+          ```rust
+          for (state, toks) in s2toks {
+          ```
+      8.  Change it to:
+          ```rust
+          for (state, toks) in &s2toks {
+          ```
+          And because `toks` is now a reference, clone it when using it as a key:
+          ```rust
+          tokens_to_states
+              .entry(toks.clone())
+              .or_insert_with(SortedSet::new)
+              .insert(*state);
+          ```
+          Actually, a simpler change is to just change the `BTreeMap` to a `HashMap` and see if that alone helps. The ownership logic in the original code was correct. Let's stick to the minimal change.
 
-              ```rust
-              for iter_num in 0..self.max_iters {
-                  type InternedEdgeSig = Vec<(usize, usize)>; // (dest_class, sset_id)
-                  type InternedNodeSig = (bool, Vec<((isize, usize), InternedEdgeSig)>); // (is_end, [((pop, atom_idx), edge_sig)])
+      Let's refine the instructions for `FactorStateFanoutPass` to be simpler and less invasive, as the original ownership logic was correct.
 
-                  let mut sset_interner: HashMap<SortedSet, usize> = HashMap::new();
-                  let mut next_sset_id = 0;
+      **Revised instructions for `src/trie3_opt/passes/factor_state_fanout.rs`:**
 
-                  let mut sig_to_id: HashMap<InternedNodeSig, usize> = HashMap::new();
-                  let mut next_id = 0;
-                  let mut new_class = vec![0; n];
-                  let mut changes = 0;
+      1.  Open the file `src/trie3_opt/passes/factor_state_fanout.rs`.
+      2.  Navigate to the `run` function, inside the `for (dest, s2toks) in dest_map` loop.
+      3.  Find this line:
+          ```rust
+          let mut tokens_to_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+          ```
+      4.  Change `BTreeMap` to `HashMap`:
+          ```rust
+          let mut tokens_to_states: HashMap<SortedSet, SortedSet> = HashMap::new();
+          ```
 
-                  #[cfg(not(rustrover))]
-                  let it_nodes = tqdm!(
-                      node_ids.iter().enumerate(),
-                      desc = &format!("MergeGlobalAtoms: Refine iter {}", iter_num + 1),
-                      total = node_ids.len(),
-                      disable = !PROGRESS_BAR_ENABLED,
-                      leave = false
-                  );
-                  #[cfg(rustrover)]
-                  let it_nodes = node_ids.iter().enumerate();
-
-                  for (u_idx, u_id) in it_nodes {
-                      let u_node = trie.get_node(*u_id).unwrap();
-                      let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
-                      for (ek, dm) in u_node.children() {
-                          if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
-                              if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
-                                  if let Some(atom_idxs) = pop_map.get(*token_set_id) {
-                                      for &atom_idx in atom_idxs {
-                                          let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
-                                          for (v_id, sids) in dm {
-                                              let dest_class = prev_class[id_to_idx[v_id]];
-                                              entry.entry(dest_class).or_default().union_inplace(sids);
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                      
-                      let mut sig_entries_interned: Vec<((isize, usize), InternedEdgeSig)> = Vec::with_capacity(per_atom_aggr.len());
-                      for ((pop, atom_idx), dm) in per_atom_aggr {
-                          let mut dest_vec: InternedEdgeSig = Vec::with_capacity(dm.len());
-                          for (dest_class, sids) in dm {
-                              let sset_id = *sset_interner.entry(sids).or_insert_with(|| { let id = next_sset_id; next_sset_id += 1; id });
-                              dest_vec.push((dest_class, sset_id));
-                          }
-                          sig_entries_interned.push(((pop, atom_idx), dest_vec));
-                      }
-
-                      let sig: InternedNodeSig = (u_node.is_end(), sig_entries_interned);
-                      let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
-                      new_class[u_idx] = cid;
-                      if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
-                  }
-                  prev_class = new_class;
-                  if changes == 0 { break; }
-              }
-              ```
+      This is a less intrusive change and worth trying first.
 
       ### Git Diffs
 
-      Here are the git diffs to apply the changes.
+      Here are the git diffs corresponding to the instructions above.
 
       ```diff
-      --- a/src/trie3_opt/passes/merge_global_atoms.rs
-      +++ b/src/trie3_opt/passes/merge_global_atoms.rs
-      @@ -1,5 +1,8 @@
-       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-       use std::collections::hash_map::Entry;
-      +
-      +use kdam::{BarExt, tqdm};
-      +use crate::profiler::PROGRESS_BAR_ENABLED;
-       
-       use crate::trie3_opt::{
-           context::OptimizationContext,
-      @@ -50,7 +53,18 @@
-                   let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
-                   let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
-                   let mut aborted = false;
-      -            for m in masks {
-      +            #[cfg(not(rustrover))]
-      +            let it_masks = tqdm!(
-      +                masks.iter(),
-      +                desc = &format!("MergeGlobalAtoms: BuildAtoms(pop={})", pop),
-      +                total = masks.len(),
-      +                disable = !PROGRESS_BAR_ENABLED,
-      +                leave = false
-      +            );
-      +            #[cfg(rustrover)]
-      +            let it_masks = masks.iter();
-      +
-      +            for m in it_masks {
-                       if blocks.is_empty() {
-                           break;
-                       }
-      @@ -218,39 +232,60 @@
-                   prev_class[i] = class_id;
-               }
-       
-      -        for _ in 0..self.max_iters {
-      -            type SigKey = (bool, Vec<((isize, usize), Vec<(usize, SortedSet)>)>);
-      -            let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
-      +        for iter_num in 0..self.max_iters {
-      +            type InternedEdgeSig = Vec<(usize, usize)>; // (dest_class, sset_id)
-      +            type InternedNodeSig = (bool, Vec<((isize, usize), InternedEdgeSig)>); // (is_end, [((pop, atom_idx), edge_sig)])
-      +
-      +            let mut sset_interner: HashMap<SortedSet, usize> = HashMap::new();
-      +            let mut next_sset_id = 0;
-      +
-      +            let mut sig_to_id: HashMap<InternedNodeSig, usize> = HashMap::new();
-                   let mut next_id = 0;
-                   let mut new_class = vec![0; n];
-                   let mut changes = 0;
-       
-      -            for (u_idx, u_id) in node_ids.iter().enumerate() {
-      +            #[cfg(not(rustrover))]
-      +            let it_nodes = tqdm!(
-      +                node_ids.iter().enumerate(),
-      +                desc = &format!("MergeGlobalAtoms: Refine iter {}", iter_num + 1),
-      +                total = node_ids.len(),
-      +                disable = !PROGRESS_BAR_ENABLED,
-      +                leave = false
-      +            );
-      +            #[cfg(rustrover)]
-      +            let it_nodes = node_ids.iter().enumerate();
-      +
-      +            for (u_idx, u_id) in it_nodes {
-                       let u_node = trie.get_node(*u_id).unwrap();
-                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
-                       for (ek, dm) in u_node.children() {
-                           if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
-                               if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
-                                   if let Some(atom_idxs) = pop_map.get(*token_set_id) {
-                                       for &atom_idx in atom_idxs {
-                                           let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
-                                           for (v_id, sids) in dm {
-                                               let dest_class = prev_class[id_to_idx[v_id]];
-                                               entry.entry(dest_class).or_default().union_inplace(sids);
-                                           }
-                                       }
-                                   }
-                               }
+      --- a/src/trie3_opt/passes/factor_root_fanout.rs
+      +++ b/src/trie3_opt/passes/factor_root_fanout.rs
+      @@ -90,8 +90,10 @@
                            }
-                       }
-      -                let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
-      -                let sig = (u_node.is_end(), sig_entries);
-      +                let mut sig_entries_interned: Vec<((isize, usize), InternedEdgeSig)> = Vec::with_capacity(per_atom_aggr.len());
-      +                for ((pop, atom_idx), dm) in per_atom_aggr {
-      +                    let mut dest_vec: InternedEdgeSig = Vec::with_capacity(dm.len());
-      +                    for (dest_class, sids) in dm {
-      +                        let sset_id = *sset_interner.entry(sids).or_insert_with(|| { let id = next_sset_id; next_sset_id += 1; id });
-      +                        dest_vec.push((dest_class, sset_id));
-      +                    }
-      +                    sig_entries_interned.push(((pop, atom_idx), dest_vec));
-      +                }
-      +
-      +                let sig: InternedNodeSig = (u_node.is_end(), sig_entries_interned);
-                       let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
-                       new_class[u_idx] = cid;
-                       if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
-                   }
-                   prev_class = new_class;
-                   if changes == 0 { break; }
-               }
        
-               // Rewire and rebuild.
+                           let mid_id = trie.add_node(false);
+      -                    trie.add_edge(mid_id, EdgeKey::new(pop, b.clone()), dest_agg.keys().next().unwrap().clone(), dest_agg.values().next().unwrap().clone());
+      -
+      +                    let edge_key = EdgeKey::new(pop, b.clone());
+      +                    for (dst, sids) in dest_agg {
+      +                        trie.add_edge(mid_id, edge_key.clone(), dst, sids);
+      +                    }
+                           new_children
+                               .entry(EdgeKey::new(0, b))
+                               .or_default()
+
+      ```
+
+      ```diff
+      --- a/src/trie3_opt/passes/factor_state_fanout.rs
+      +++ b/src/trie3_opt/passes/factor_state_fanout.rs
+      @@ -48,7 +48,7 @@
+                           }
+       
+                           // tokens -> states
+      -                    let mut tokens_to_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+      +                    let mut tokens_to_states: HashMap<SortedSet, SortedSet> = HashMap::new();
+                           for (state, toks) in s2toks {
+                               if toks.is_empty() {
+                                   continue;
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/passes/merge_global_atoms.rs
-      Applying patch to 'src/trie3_opt/passes/merge_global_atoms.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/merge_global_atoms.rs.
+      Identified target file: src/trie3_opt/passes/factor_root_fanout.rs
+      Applying patch to 'src/trie3_opt/passes/factor_root_fanout.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/factor_root_fanout.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/trie3_opt/passes/factor_state_fanout.rs
+      Applying patch to 'src/trie3_opt/passes/factor_state_fanout.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/factor_state_fanout.rs.
     metadata:
-  - user: 'Changes committed with message: "MergeGlobalAtoms: Add progress bars and
-      intern signature components to fix performance/memory issues"'
+  - user: 'Changes committed with message: "Fix FactorRootFanout to route all destinations
+      and use HashMap for FactorStateFanout grouping"'
     metadata:
 ...

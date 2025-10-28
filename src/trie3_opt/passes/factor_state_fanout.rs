@@ -57,7 +57,7 @@ impl OptimizationPass for FactorStateFanoutPass {
                     }
 
                     // tokens -> states
-                    let mut tokens_to_states: BTreeMap<SortedSet, SortedSet> = BTreeMap::new();
+                    let mut tokens_to_states: HashMap<SortedSet, SortedSet> = HashMap::new();
                     for (state, toks) in s2toks {
                         if toks.is_empty() {
                             continue;

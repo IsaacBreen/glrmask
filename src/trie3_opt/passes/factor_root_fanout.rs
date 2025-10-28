@@ -98,8 +98,10 @@ impl OptimizationPass for FactorRootFanoutPass {
                     }
 
                     let mid_id = trie.add_node(false);
-                    trie.add_edge(mid_id, EdgeKey::new(pop, b.clone()), dest_agg.keys().next().unwrap().clone(), dest_agg.values().next().unwrap().clone());
-
+                    let edge_key = EdgeKey::new(pop, b.clone());
+                    for (dst, sids) in dest_agg {
+                        trie.add_edge(mid_id, edge_key.clone(), dst, sids);
+                    }
                     new_children
                         .entry(EdgeKey::new(0, b))
                         .or_default()
