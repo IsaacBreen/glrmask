@@ -129,11 +129,11 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
         }
 
         // Phase 3: Factoring and structural simplification
-        if config.factor_root_fanout {
-            pipeline.push(Box::new(FactorRootFanoutPass::new(config.factor_root_fanout_max_atoms_per_pop)));
-        }
         if config.factor_state_fanout {
             pipeline.push(Box::new(FactorStateFanoutPass));
+        }
+        if config.factor_root_fanout {
+            pipeline.push(Box::new(FactorRootFanoutPass::new(config.factor_root_fanout_max_atoms_per_pop)));
         }
         if config.factor_common_destinations {
             pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));

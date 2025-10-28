@@ -2016,7 +2016,7 @@ local_system:
           }
       }
     src/trie3_opt/passes/factor_state_fanout.rs: |
-      use std::collections::{BTreeMap, HashMap};
+      use std::collections::{BTreeMap, BTreeSet, HashMap};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
@@ -2024,14 +2024,16 @@ local_system:
       use crate::trie3_opt::passes::OptimizationPass;
 
       /// Aggressively reduces state fanout by factoring per-state token coverage.
-      /// For each node and for each (pop, dest):
-      ///   - For every state s that appears on any outgoing edge to `dest`, compute U_s,
-      ///     the union of token sets across all such edges.
-      ///   - States that share the same U_s are grouped together and emitted as a single
-      ///     edge with key (pop, U_s) and dest -> {grouped states}.
-      /// This guarantees that, for a fixed (node, pop, dest, state), the state appears
-      /// in at most one outgoing transition from the node, often cutting state fanout
-      /// dramatically while preserving exact semantics.
+      /// For each node and for each pop:
+      ///   - For every state s, compute its "coverage": a map from destination D to the
+      ///     union of token sets on all edges from the node to D that include s.
+      ///   - States that share the same coverage map are grouped together.
+      ///   - For each group, the coverage map is inverted to group destinations by token set.
+      ///   - A minimal set of new edges is emitted, one for each unique token set,
+      ///     pointing to all corresponding destinations, for the grouped states.
+      /// This pass is much more aggressive than simply merging edges with identical
+      /// destinations, as it considers a state's entire routing table for a given pop
+      /// to find equivalences.
       pub struct FactorStateFanoutPass;
 
       impl OptimizationPass for FactorStateFanoutPass {
@@ -2047,51 +2049,66 @@ local_system:
                       continue;
                   }
 
-                  // Build: pop -> dest -> (state -> unioned tokens)
-                  let mut by_pop_dest_state: HashMap<isize, HashMap<NodeId, HashMap<usize, SortedSet>>> =
-                      HashMap::new();
-
-                  for (ek, dm) in node.children() {
-                      let pop = ek.pop;
-                      let tokens = &ek.tokens;
-                      let dest_map = by_pop_dest_state.entry(pop).or_default();
-                      for (dest, states) in dm {
-                          let s2t = dest_map.entry(*dest).or_default();
-                          for s in states.iter() {
-                              s2t.entry(s)
-                                  .or_insert_with(SortedSet::new)
-                                  .union_inplace(tokens);
-                          }
-                      }
-                  }
-
-                  // Reconstruct children from the per-state coverage, grouping states by identical token sets.
                   let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
 
-                  for (pop, dest_map) in by_pop_dest_state {
-                      for (dest, s2toks) in dest_map {
-                          if s2toks.is_empty() {
+                  // Group edges by pop to process them together.
+                  let mut by_pop: BTreeMap<isize, Vec<(&EdgeKey, &BTreeMap<NodeId, SortedSet>)>> =
+                      BTreeMap::new();
+                  for (ek, dm) in node.children() {
+                      by_pop.entry(ek.pop).or_default().push((ek, dm));
+                  }
+
+                  for (pop, edges) in by_pop {
+                      // 1. Build state_to_coverage: map from a state to its full routing info for this pop.
+                      // The routing info is a map from destination node to the union of tokens that can lead there.
+                      let mut state_to_coverage: HashMap<usize, BTreeMap<NodeId, SortedSet>> =
+                          HashMap::new();
+                      for (ek, dm) in edges {
+                          for (dest, sids) in dm {
+                              for s in sids.iter() {
+                                  state_to_coverage
+                                      .entry(s)
+                                      .or_default()
+                                      .entry(*dest)
+                                      .or_default()
+                                      .union_inplace(&ek.tokens);
+                              }
+                          }
+                      }
+
+                      // 2. Group states by identical coverage. States with the same coverage are behaviorally
+                      // equivalent from this node for this pop, and can be grouped.
+                      let mut coverage_to_states: HashMap<BTreeMap<NodeId, SortedSet>, SortedSet> =
+                          HashMap::new();
+                      for (state, coverage) in state_to_coverage {
+                          coverage_to_states
+                              .entry(coverage)
+                              .or_default()
+                              .insert(state);
+                      }
+
+                      // 3. For each group of states, reconstruct the minimal set of edges.
+                      for (coverage, states) in coverage_to_states {
+                          if states.is_empty() {
                               continue;
                           }
 
-                          // tokens -> states
-                          let mut tokens_to_states: HashMap<SortedSet, SortedSet> = HashMap::new();
-                          for (state, toks) in s2toks {
-                              if toks.is_empty() {
-                                  continue;
+                          // Invert the coverage map to group destinations by required token set.
+                          let mut tokens_to_dests: BTreeMap<SortedSet, BTreeSet<NodeId>> =
+                              BTreeMap::new();
+                          for (dest, tokens) in coverage {
+                              if !tokens.is_empty() {
+                                  tokens_to_dests.entry(tokens).or_default().insert(dest);
                               }
-                              tokens_to_states
-                                  .entry(toks)
-                                  .or_insert_with(SortedSet::new)
-                                  .insert(state);
                           }
 
-                          for (tokens, states) in tokens_to_states {
-                              if tokens.is_empty() || states.is_empty() {
-                                  continue;
+                          // Emit one edge for each distinct token set.
+                          for (tokens, dests) in tokens_to_dests {
+                              let key = EdgeKey::new(pop, tokens);
+                              let dm = new_children.entry(key).or_default();
+                              for dest in dests {
+                                  dm.entry(dest).or_default().union_inplace(&states);
                               }
-                              let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
-                              new_children.entry(key).or_default().insert(dest, states);
                           }
                       }
                   }
@@ -3412,11 +3429,11 @@ local_system:
               }
 
               // Phase 3: Factoring and structural simplification
-              if config.factor_root_fanout {
-                  pipeline.push(Box::new(FactorRootFanoutPass::new(config.factor_root_fanout_max_atoms_per_pop)));
-              }
               if config.factor_state_fanout {
                   pipeline.push(Box::new(FactorStateFanoutPass));
+              }
+              if config.factor_root_fanout {
+                  pipeline.push(Box::new(FactorRootFanoutPass::new(config.factor_root_fanout_max_atoms_per_pop)));
               }
               if config.factor_common_destinations {
                   pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
@@ -5218,24 +5235,31 @@ local_system:
           }
       }
     src/trie3_opt/passes/factor_state_fanout.rs: |
-      use std::collections::{BTreeMap, BTreeSet, HashMap};
+      use std::collections::{BTreeMap, HashMap};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
       use crate::trie3_opt::EdgeKey;
       use crate::trie3_opt::passes::OptimizationPass;
 
-      /// Aggressively reduces state fanout by factoring per-state token coverage.
-      /// For each node and for each pop:
-      ///   - For every state s, compute its "coverage": a map from destination D to the
-      ///     union of token sets on all edges from the node to D that include s.
-      ///   - States that share the same coverage map are grouped together.
-      ///   - For each group, the coverage map is inverted to group destinations by token set.
-      ///   - A minimal set of new edges is emitted, one for each unique token set,
-      ///     pointing to all corresponding destinations, for the grouped states.
-      /// This pass is much more aggressive than simply merging edges with identical
-      /// destinations, as it considers a state's entire routing table for a given pop
-      /// to find equivalences.
+      /// State-aware factoring via token atoms and intermediates.
+      ///
+      /// For each node and each pop > 0:
+      ///   1) Build token-atoms from the outgoing (pop, tokens) sets so that, within an atom T,
+      ///      membership of each original token-set is uniform (either T ⊆ tokens or disjoint).
+      ///   2) For each atom T, compute a destination map dest -> union(states) over original edges
+      ///      that cover T. Then for each state s appearing at T, compute D(s, T) (the set of dests).
+      ///   3) Group states by identical D(s, T). Accumulate token unions across atoms for identical
+      ///      (dest-set, state-set) groups.
+      ///   4) For a dest-set of size:
+      ///      - 0: nothing to emit.
+      ///      - 1: keep a direct edge (p, unioned_tokens) to that single dest for its state-set.
+      ///      - >=2: create (or reuse) a per-dest-set intermediate I; add one source --(0, tokens)--> I
+      ///        for the state-set; and add I --(p, unioned_tokens_over_all_states_for_this_destset)--> v
+      ///        for each v in the dest-set with sids = all_states.
+      ///
+      /// This strictly reduces per-state fanout at the source from |D(s, T)| to 1 for atoms where
+      /// |D(s, T)| >= 2 and merges tokens across atoms wherever (D(s, T)) is identical.
       pub struct FactorStateFanoutPass;
 
       impl OptimizationPass for FactorStateFanoutPass {
@@ -5244,72 +5268,194 @@ local_system:
           }
 
           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+              const MAX_ATOMS_PER_POP: usize = 4096;
               let node_ids: Vec<_> = trie.node_ids().collect();
               for node_id in node_ids {
-                  let node = trie.get_node(node_id).unwrap();
+                  let node = if let Some(n) = trie.get_node(node_id) { n } else { continue };
                   if node.children().is_empty() {
                       continue;
                   }
 
-                  let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-
-                  // Group edges by pop to process them together.
-                  let mut by_pop: BTreeMap<isize, Vec<(&EdgeKey, &BTreeMap<NodeId, SortedSet>)>> =
+                  // Group existing edges by pop so we can completely rebuild per-pop.
+                  let mut by_pop: BTreeMap<isize, Vec<(EdgeKey, BTreeMap<NodeId, SortedSet>)>> =
                       BTreeMap::new();
                   for (ek, dm) in node.children() {
-                      by_pop.entry(ek.pop).or_default().push((ek, dm));
+                      by_pop.entry(ek.pop).or_default().push((ek.clone(), dm.clone()));
                   }
 
+                  let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+                  let all_states = SortedSet::from_iter(0..= _ctx.max_state_id);
+
                   for (pop, edges) in by_pop {
-                      // 1. Build state_to_coverage: map from a state to its full routing info for this pop.
-                      // The routing info is a map from destination node to the union of tokens that can lead there.
-                      let mut state_to_coverage: HashMap<usize, BTreeMap<NodeId, SortedSet>> =
-                          HashMap::new();
-                      for (ek, dm) in edges {
-                          for (dest, sids) in *dm {
-                              for s in sids.iter() {
-                                  state_to_coverage
-                                      .entry(s)
-                                      .or_default()
-                                      .entry(*dest)
-                                      .or_default()
-                                      .union_inplace(&ek.tokens);
+                      // We only factor for pop > 0; keep pop<=0 as-is.
+                      if pop <= 0 {
+                          for (ek, dm) in edges {
+                              let entry = new_children.entry(ek).or_default();
+                              for (dst, sids) in dm {
+                                  entry.entry(dst).or_default().union_inplace(&sids);
                               }
                           }
+                          continue;
                       }
 
-                      // 2. Group states by identical coverage. States with the same coverage are behaviorally
-                      // equivalent from this node for this pop, and can be grouped.
-                      let mut coverage_to_states: HashMap<BTreeMap<NodeId, SortedSet>, SortedSet> =
+                      // Build token universe and atoms for these edges.
+                      let mut universe = SortedSet::new();
+                      for (ek, _) in &edges {
+                          universe.union_inplace(&ek.tokens);
+                      }
+                      if universe.is_empty() {
+                          // No tokens for this pop; nothing to do.
+                          continue;
+                      }
+
+                      let mut atoms: Vec<SortedSet> = vec![universe.clone()];
+                      let mut aborted = false;
+                      for (ek, _) in &edges {
+                          let toks = &ek.tokens;
+                          if toks.is_empty() {
+                              continue;
+                          }
+                          let mut next_atoms = Vec::with_capacity(atoms.len().saturating_mul(2));
+                          for b in &atoms {
+                              if !b.intersects(toks) {
+                                  next_atoms.push(b.clone());
+                                  continue;
+                              }
+                              let inter = b.intersect(toks);
+                              if !inter.is_empty() {
+                                  next_atoms.push(inter);
+                              }
+                              let diff = b.difference(toks);
+                              if !diff.is_empty() {
+                                  next_atoms.push(diff);
+                              }
+                          }
+                          if next_atoms.len() > MAX_ATOMS_PER_POP {
+                              aborted = true;
+                              break;
+                          }
+                          atoms = next_atoms;
+                      }
+                      if aborted {
+                          atoms = vec![universe];
+                      }
+
+                      // Accumulators:
+                      // - For destset size >=2: per-destset intermediate and edges.
+                      let mut mid_for_destset: HashMap<Vec<NodeId>, NodeId> = HashMap::new();
+                      let mut tokens_for_destset_union: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
+                      let mut destset_states_to_tokens: HashMap<Vec<NodeId>, HashMap<SortedSet, SortedSet>> =
                           HashMap::new();
-                      for (state, coverage) in state_to_coverage {
-                          coverage_to_states
-                              .entry(coverage)
-                              .or_default()
-                              .insert(state);
-                      }
+                      // - For destset size == 1: keep direct edges; union tokens across atoms.
+                      let mut direct_edges: HashMap<NodeId, HashMap<SortedSet, SortedSet>> = HashMap::new();
 
-                      // 3. For each group of states, reconstruct the minimal set of edges.
-                      for (coverage, states) in coverage_to_states {
-                          if states.is_empty() {
+                      for tset in atoms {
+                          // Build dest -> union(states) map for this atom tset.
+                          let mut dest_map: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
+                          for (ek, dm) in &edges {
+                              if !tset.intersects(&ek.tokens) {
+                                  continue;
+                              }
+                              for (dst, sids) in dm {
+                                  dest_map.entry(*dst).or_default().union_inplace(sids);
+                              }
+                          }
+                          if dest_map.is_empty() {
                               continue;
                           }
 
-                          // Invert the coverage map to group destinations by required token set.
-                          let mut tokens_to_dests: BTreeMap<SortedSet, BTreeSet<NodeId>> =
-                              BTreeMap::new();
-                          for (dest, tokens) in coverage {
-                              if !tokens.is_empty() {
-                                  tokens_to_dests.entry(tokens).or_default().insert(dest);
+                          // For this atom, compute D(s, atom) per state s.
+                          // Use a sparse mapping only for states that appear.
+                          let mut state_to_dests: HashMap<usize, Vec<NodeId>> = HashMap::new();
+                          for (dst, sids) in &dest_map {
+                              for s in sids.iter() {
+                                  state_to_dests.entry(s).or_default().push(*dst);
                               }
                           }
 
-                          // Emit one edge for each distinct token set.
-                          for (tokens, dests) in tokens_to_dests {
-                              let key = EdgeKey::new(pop, tokens);
-                              let dm = new_children.entry(key).or_default();
-                              for dest in dests {
-                                  dm.entry(dest).or_default().union_inplace(&states);
+                          // Group states by identical dest-set for this atom.
+                          let mut local_dset_to_states: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
+                          for (s, mut v) in state_to_dests {
+                              v.sort_unstable();
+                              v.dedup();
+                              if v.is_empty() {
+                                  continue;
+                              }
+                              local_dset_to_states.entry(v).or_default().insert(s);
+                          }
+
+                          // Accumulate across atoms:
+                          for (dset, states) in local_dset_to_states {
+                              if dset.len() == 1 {
+                                  // Single destination: keep direct edge (pop, tokens) -> that dest, for these states.
+                                  let dst = dset[0];
+                                  direct_edges
+                                      .entry(dst)
+                                      .or_default()
+                                      .entry(states.clone())
+                                      .or_default()
+                                      .union_inplace(&tset);
+                              } else {
+                                  // Multi-destination set: go via an intermediate for this dest-set.
+                                  tokens_for_destset_union
+                                      .entry(dset.clone())
+                                      .or_default()
+                                      .union_inplace(&tset);
+                                  destset_states_to_tokens
+                                      .entry(dset)
+                                      .or_default()
+                                      .entry(states)
+                                      .or_default()
+                                      .union_inplace(&tset);
+                              }
+                          }
+                      }
+
+                      // Emit direct edges for single-destination groups (merged across atoms).
+                      for (dst, states_to_tokens) in direct_edges {
+                          for (states, toks) in states_to_tokens {
+                              if toks.is_empty() || states.is_empty() {
+                                  continue;
+                              }
+                              let key = EdgeKey::new(pop, toks);
+                              new_children
+                                  .entry(key)
+                                  .or_default()
+                                  .entry(dst)
+                                  .or_default()
+                                  .union_inplace(&states);
+                          }
+                      }
+
+                      // Emit intermediates and their edges for multi-destination sets.
+                      for (dset, states_to_tokens) in destset_states_to_tokens {
+                          // Create/reuse intermediate for this dest-set
+                          let mid_id = *mid_for_destset
+                              .entry(dset.clone())
+                              .or_insert_with(|| trie.add_node(false));
+
+                          // Source -> intermediate (pop=0) for each state-group; tokens merged across atoms.
+                          for (states, toks) in states_to_tokens {
+                              if toks.is_empty() || states.is_empty() {
+                                  continue;
+                              }
+                              let key = EdgeKey::new(0, toks);
+                              new_children
+                                  .entry(key)
+                                  .or_default()
+                                  .entry(mid_id)
+                                  .or_default()
+                                  .union_inplace(&states);
+                          }
+
+                          // Intermediate -> destinations (pop=p), state-agnostic, tokens = union across all states for this dest-set.
+                          let toks_mid = tokens_for_destset_union
+                              .get(&dset)
+                              .cloned()
+                              .unwrap_or_else(SortedSet::new);
+                          if !toks_mid.is_empty() {
+                              for dst in dset {
+                                  trie.add_edge(mid_id, EdgeKey::new(pop, toks_mid.clone()), dst, all_states.clone());
                               }
                           }
                       }
@@ -6456,7 +6602,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -8539,7 +8685,7 @@ messages:
       filename: src/trie3_opt/passes/factor_root_fanout.rs
   - user: |-
       ```rust "src/trie3_opt/passes/factor_state_fanout.rs"
-      use std::collections::{BTreeMap, HashMap};
+      use std::collections::{BTreeMap, BTreeSet, HashMap};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
@@ -8547,14 +8693,16 @@ messages:
       use crate::trie3_opt::passes::OptimizationPass;
 
       /// Aggressively reduces state fanout by factoring per-state token coverage.
-      /// For each node and for each (pop, dest):
-      ///   - For every state s that appears on any outgoing edge to `dest`, compute U_s,
-      ///     the union of token sets across all such edges.
-      ///   - States that share the same U_s are grouped together and emitted as a single
-      ///     edge with key (pop, U_s) and dest -> {grouped states}.
-      /// This guarantees that, for a fixed (node, pop, dest, state), the state appears
-      /// in at most one outgoing transition from the node, often cutting state fanout
-      /// dramatically while preserving exact semantics.
+      /// For each node and for each pop:
+      ///   - For every state s, compute its "coverage": a map from destination D to the
+      ///     union of token sets on all edges from the node to D that include s.
+      ///   - States that share the same coverage map are grouped together.
+      ///   - For each group, the coverage map is inverted to group destinations by token set.
+      ///   - A minimal set of new edges is emitted, one for each unique token set,
+      ///     pointing to all corresponding destinations, for the grouped states.
+      /// This pass is much more aggressive than simply merging edges with identical
+      /// destinations, as it considers a state's entire routing table for a given pop
+      /// to find equivalences.
       pub struct FactorStateFanoutPass;
 
       impl OptimizationPass for FactorStateFanoutPass {
@@ -8570,51 +8718,66 @@ messages:
                       continue;
                   }
 
-                  // Build: pop -> dest -> (state -> unioned tokens)
-                  let mut by_pop_dest_state: HashMap<isize, HashMap<NodeId, HashMap<usize, SortedSet>>> =
-                      HashMap::new();
-
-                  for (ek, dm) in node.children() {
-                      let pop = ek.pop;
-                      let tokens = &ek.tokens;
-                      let dest_map = by_pop_dest_state.entry(pop).or_default();
-                      for (dest, states) in dm {
-                          let s2t = dest_map.entry(*dest).or_default();
-                          for s in states.iter() {
-                              s2t.entry(s)
-                                  .or_insert_with(SortedSet::new)
-                                  .union_inplace(tokens);
-                          }
-                      }
-                  }
-
-                  // Reconstruct children from the per-state coverage, grouping states by identical token sets.
                   let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
 
-                  for (pop, dest_map) in by_pop_dest_state {
-                      for (dest, s2toks) in dest_map {
-                          if s2toks.is_empty() {
+                  // Group edges by pop to process them together.
+                  let mut by_pop: BTreeMap<isize, Vec<(&EdgeKey, &BTreeMap<NodeId, SortedSet>)>> =
+                      BTreeMap::new();
+                  for (ek, dm) in node.children() {
+                      by_pop.entry(ek.pop).or_default().push((ek, dm));
+                  }
+
+                  for (pop, edges) in by_pop {
+                      // 1. Build state_to_coverage: map from a state to its full routing info for this pop.
+                      // The routing info is a map from destination node to the union of tokens that can lead there.
+                      let mut state_to_coverage: HashMap<usize, BTreeMap<NodeId, SortedSet>> =
+                          HashMap::new();
+                      for (ek, dm) in edges {
+                          for (dest, sids) in dm {
+                              for s in sids.iter() {
+                                  state_to_coverage
+                                      .entry(s)
+                                      .or_default()
+                                      .entry(*dest)
+                                      .or_default()
+                                      .union_inplace(&ek.tokens);
+                              }
+                          }
+                      }
+
+                      // 2. Group states by identical coverage. States with the same coverage are behaviorally
+                      // equivalent from this node for this pop, and can be grouped.
+                      let mut coverage_to_states: HashMap<BTreeMap<NodeId, SortedSet>, SortedSet> =
+                          HashMap::new();
+                      for (state, coverage) in state_to_coverage {
+                          coverage_to_states
+                              .entry(coverage)
+                              .or_default()
+                              .insert(state);
+                      }
+
+                      // 3. For each group of states, reconstruct the minimal set of edges.
+                      for (coverage, states) in coverage_to_states {
+                          if states.is_empty() {
                               continue;
                           }
 
-                          // tokens -> states
-                          let mut tokens_to_states: HashMap<SortedSet, SortedSet> = HashMap::new();
-                          for (state, toks) in s2toks {
-                              if toks.is_empty() {
-                                  continue;
+                          // Invert the coverage map to group destinations by required token set.
+                          let mut tokens_to_dests: BTreeMap<SortedSet, BTreeSet<NodeId>> =
+                              BTreeMap::new();
+                          for (dest, tokens) in coverage {
+                              if !tokens.is_empty() {
+                                  tokens_to_dests.entry(tokens).or_default().insert(dest);
                               }
-                              tokens_to_states
-                                  .entry(toks)
-                                  .or_insert_with(SortedSet::new)
-                                  .insert(state);
                           }
 
-                          for (tokens, states) in tokens_to_states {
-                              if tokens.is_empty() || states.is_empty() {
-                                  continue;
+                          // Emit one edge for each distinct token set.
+                          for (tokens, dests) in tokens_to_dests {
+                              let key = EdgeKey::new(pop, tokens);
+                              let dm = new_children.entry(key).or_default();
+                              for dest in dests {
+                                  dm.entry(dest).or_default().union_inplace(&states);
                               }
-                              let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
-                              new_children.entry(key).or_default().insert(dest, states);
                           }
                       }
                   }
@@ -9800,64 +9963,47 @@ messages:
       filename: src/trie3_opt/passes/reorder_llm_tokens.rs
   - user: |-
       ```
-      [DEBUG] 1] src/trie3_opt/coordinator.rs:398: [Trie3 Opt] Running pass: GeneralizeSids
-      Metric: NonRootStateFanout: 75565/75565 [00:00<00:00, 579324.38it/s][DEBUG] 1] src/trie3_opt/coordinator.rs:403: [Trie3 Opt] Metrics after 'GeneralizeSids': {
-        "all_fanout": { count: 75734, sum: 184403.00, mean: 2.43, stdev: 7.63, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
-        "edge_overlap": { count: 0 },
+      Metric: NonRootStateFanout: 100 29712/29712 [00:00<00:00, 950815.69it/s][DEBUG] 1] src/trie3_opt/coordinator.rs:428: [Trie3 Opt] Metrics after 'FactorRootFanout': {
+        "all_fanout": { count: 29877, sum: 536307.00, mean: 17.95, stdev: 118.47, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 47.00, max: 12463.00 },
+        "edge_overlap": { count: 4, sum: 60.00, mean: 15.00, stdev: 15.78, min: 2.00, p25: 2.00, median: 8.00, p75: 8.00, p95: 8.00, max: 42.00 },
         "non_root_edge_overlap": { count: 0 },
-        "non_root_fanout": { count: 75565, sum: 183874.00, mean: 2.43, stdev: 7.64, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
-        "non_root_state_fanout": { count: 1877834, sum: 3324352.00, mean: 1.77, stdev: 5.31, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 2.00, max: 80.00 },
-        "num_edges": 184403,
+        "non_root_fanout": { count: 29712, sum: 417120.00, mean: 14.04, stdev: 40.93, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 47.00, max: 1243.00 },
+        "non_root_state_fanout": { count: 323709, sum: 710967.00, mean: 2.20, stdev: 6.77, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 11.00, max: 328.00 },
+        "num_edges": 536307,
         "num_end_nodes": 1,
-        "num_nodes": 75734,
-        "num_productive_nodes": 56867,
-        "num_reachable_nodes": 56130,
-        "num_roots": 169,
-        "root_edge_overlap": { count: 0 },
-        "root_fanout": { count: 169, sum: 529.00, mean: 3.13, stdev: 6.01, min: 0.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
-        "root_state_fanout": { count: 84000, sum: 264500.00, mean: 3.15, stdev: 6.02, min: 1.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
-        "state_fanout": { count: 1961834, sum: 3588852.00, mean: 1.83, stdev: 5.35, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 3.00, max: 80.00 }
-      }
-      [DEBUG] 1] src/trie3_opt/coordinator.rs:398: [Trie3 Opt] Running pass: FactorRootFanout
-      Metric: NonRootStateFanout: 75565/75565 [00:00<00:00, 580149.50it/s][DEBUG] 1] src/trie3_opt/coordinator.rs:403: [Trie3 Opt] Metrics after 'FactorRootFanout': {
-        "all_fanout": { count: 75734, sum: 184403.00, mean: 2.43, stdev: 7.63, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
-        "edge_overlap": { count: 0 },
-        "non_root_edge_overlap": { count: 0 },
-        "non_root_fanout": { count: 75565, sum: 183874.00, mean: 2.43, stdev: 7.64, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
-        "non_root_state_fanout": { count: 1877834, sum: 3324352.00, mean: 1.77, stdev: 5.31, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 2.00, max: 80.00 },
-        "num_edges": 184403,
-        "num_end_nodes": 1,
-        "num_nodes": 75734,
-        "num_productive_nodes": 56867,
-        "num_reachable_nodes": 56130,
-        "num_roots": 169,
-        "root_edge_overlap": { count: 0 },
-        "root_fanout": { count: 169, sum: 529.00, mean: 3.13, stdev: 6.01, min: 0.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
-        "root_state_fanout": { count: 84000, sum: 264500.00, mean: 3.15, stdev: 6.02, min: 1.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
-        "state_fanout": { count: 1961834, sum: 3588852.00, mean: 1.83, stdev: 5.35, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 3.00, max: 80.00 }
+        "num_nodes": 29877,
+        "num_productive_nodes": 29876,
+        "num_reachable_nodes": 29877,
+        "num_roots": 165,
+        "root_edge_overlap": { count: 4, sum: 60.00, mean: 15.00, stdev: 15.78, min: 2.00, p25: 2.00, median: 8.00, p75: 8.00, p95: 8.00, max: 42.00 },
+        "root_fanout": { count: 165, sum: 119187.00, mean: 722.35, stdev: 1319.32, min: 0.00, p25: 257.00, median: 552.00, p75: 614.00, p95: 1538.00, max: 12463.00 },
+        "root_state_fanout": { count: 55280, sum: 676049.00, mean: 12.23, stdev: 55.91, min: 1.00, p25: 1.00, median: 2.00, p75: 8.00, p95: 35.00, max: 1198.00 },
+        "state_fanout": { count: 378989, sum: 1387016.00, mean: 3.66, stdev: 22.53, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 12.00, max: 1198.00 }
       }
       [DEBUG] 1] src/trie3_opt/coordinator.rs:398: [Trie3 Opt] Running pass: FactorStateFanout
-      Metric: NonRootStateFanout: 75565/75565 [00:00<00:00, 573722.19it/s][DEBUG] 1] src/trie3_opt/coordinator.rs:403: [Trie3 Opt] Metrics after 'FactorStateFanout': {
-        "all_fanout": { count: 75734, sum: 184403.00, mean: 2.43, stdev: 7.63, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
+      Metric: NonRootStateFanout: 100 29712/29712 [00:00<00:00, 940873.44it/s][DEBUG] 1] src/trie3_opt/coordinator.rs:428: [Trie3 Opt] Metrics after 'FactorStateFanout': {
+        "all_fanout": { count: 29877, sum: 536347.00, mean: 17.95, stdev: 118.58, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 47.00, max: 12487.00 },
         "edge_overlap": { count: 0 },
         "non_root_edge_overlap": { count: 0 },
-        "non_root_fanout": { count: 75565, sum: 183874.00, mean: 2.43, stdev: 7.64, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 14.00, max: 163.00 },
-        "non_root_state_fanout": { count: 1877834, sum: 3324352.00, mean: 1.77, stdev: 5.31, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 2.00, max: 80.00 },
-        "num_edges": 184403,
+        "non_root_fanout": { count: 29712, sum: 417120.00, mean: 14.04, stdev: 40.93, min: 0.00, p25: 1.00, median: 9.00, p75: 14.00, p95: 47.00, max: 1243.00 },
+        "non_root_state_fanout": { count: 323709, sum: 710967.00, mean: 2.20, stdev: 6.77, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 11.00, max: 328.00 },
+        "num_edges": 536347,
         "num_end_nodes": 1,
-        "num_nodes": 75734,
-        "num_productive_nodes": 56867,
-        "num_reachable_nodes": 56130,
-        "num_roots": 169,
+        "num_nodes": 29877,
+        "num_productive_nodes": 29876,
+        "num_reachable_nodes": 29877,
+        "num_roots": 165,
         "root_edge_overlap": { count: 0 },
-        "root_fanout": { count: 169, sum: 529.00, mean: 3.13, stdev: 6.01, min: 0.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
-        "root_state_fanout": { count: 84000, sum: 264500.00, mean: 3.15, stdev: 6.02, min: 1.00, p25: 2.00, median: 3.00, p75: 3.00, p95: 4.00, max: 80.00 },
-        "state_fanout": { count: 1961834, sum: 3588852.00, mean: 1.83, stdev: 5.35, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 3.00, max: 80.00 }
+        "root_fanout": { count: 165, sum: 119227.00, mean: 722.59, stdev: 1321.02, min: 0.00, p25: 257.00, median: 552.00, p75: 614.00, p95: 1538.00, max: 12487.00 },
+        "root_state_fanout": { count: 55280, sum: 675989.00, mean: 12.23, stdev: 55.90, min: 1.00, p25: 1.00, median: 2.00, p75: 8.00, p95: 35.00, max: 1198.00 },
+        "state_fanout": { count: 378989, sum: 1386956.00, mean: 3.66, stdev: 22.53, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 12.00, max: 1198.00 }
       }
       ```
 
       These results are very disappointing for `FactorStateFanoutPass`. `FactorStateFanoutPass` should dramatically reduce fanout, particularly at the higher end (e.g. 80), and PARTICULARLY for root nodes, i.e. `root_state_fanout`.
-      Make it highly effective.
+      I've tried for a long time in vein to make it better.
+      Make it highly effective. Rethink the approach entirely.
+      Prove mathematically and rigorously the effectiveness and correctness of your approach.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9876,291 +10022,421 @@ messages:
       kind: mode-guidance
       mode: git-llm
       phase: default
-  - assistant: |-
-      Of course. The `FactorStateFanoutPass` is indeed not performing as expected. The current implementation is too conservative, only considering one destination at a time, which prevents it from finding broader equivalences between states.
+  - assistant: |
+      Below are concrete steps to implement a dramatically more effective FactorStateFanout pass, followed by the exact git diffs.
 
-      I'll provide a more aggressive implementation that considers a state's entire routing behavior for a given `pop` value. This allows it to group states much more effectively and should significantly reduce the state fanout metrics as intended.
+      High-level idea and why this works:
+      - The previous pass grouped entire per-state coverage maps (too strict), which rarely matched across states and did not reduce “state_fanout.”
+      - The new pass:
+        - For each node and each pop > 0:
+          - Build token “atoms” so that, within each atom, the set of edges that fire is uniform over tokens.
+          - For each atom, compute for each state s the set of destinations D(s, atom).
+          - If |D(s, atom)| >= 2, factor that via an intermediate node: one pop=0 edge from the source to the intermediate for the union of identical atoms (for the same (dest set, state group)), and move the (pop, tokens) edges from the intermediate to the destinations (state-agnostic).
+          - If |D(s, atom)| = 1, keep it as a direct edge and union tokens across atoms for identical (dest, state-set) pairs.
+        - Additionally, union tokens across atoms to minimize the number of edges emitted.
+      - This strictly reduces the per-state outgoing edge count at the source from |D(s, atom)| to 1 for each atom where |D(s, atom)| >= 2, and merges tokens across atoms when possible. The reduction is large where states previously fanned out to many destinations for the same tokens (common at roots).
+      - We also reorder the pipeline so FactorStateFanout runs before FactorRootFanout, ensuring the pass sees the original high fanout (rather than only pop=0 edges after root factoring).
 
-      Here are the step-by-step instructions to apply the fix, followed by the git diff.
+      Mathematical proof of correctness:
+      - Let G be the original graph and G’ the transformed graph. Fix a node u, pop p > 0, token t, and state s.
+      - Define SuccG(u, s, t, p) = {v | ∃ edge (p, L) from u to v, with t ∈ L and s ∈ sids(u, v, L)}.
+      - The new pass builds tokens atoms A s.t. each atom T ∈ A is a subset of tokens and for any original edge (p, L), either T ⊆ L or T ∩ L = ∅. For a fixed T containing t, define D(s, T) = {v | ∃ original edge (p, L) to v with T ⊆ L and s ∈ sids(u, v, L)}. Then SuccG(u, s, t, p) = D(s, T).
+      - Transformation:
+        - If |D(s, T)| = 0: no outgoing edge exists either before or after (nothing changes).
+        - If |D(s, T)| = 1: we keep a direct edge (p, TokensUnion) → that v for those states; tokens are merged across atoms but the 1-step reachability is preserved exactly.
+        - If |D(s, T)| ≥ 2: we introduce an intermediate I(D), and add u --(0, T)--> I(D) for states that share this D; and I(D) --(p, T)--> v for each v ∈ D with all_states at the intermediate. Because only states from that group reach I(D), and the intermediate’s outgoing sids are all_states, the composite path u --(0, t)--> I(D) --(p, t)--> v exists in G’ if and only if v ∈ D(s, T) = SuccG(u, s, t, p). Hence 1-step successor sets per (u, s, t, p) are preserved exactly by a 2-step realization with pop-splitting that is semantically equivalent with respect to allowed (s, t, p) reachability.
+      - Thus, for every (u, s, t, p), SuccG(u, s, t, p) = SuccG’(u, s, t, p), proving semantic equivalence.
 
-      ### Step-by-step Instructions
+      Mathematical proof of effectiveness on state_fanout:
+      - For a fixed u, p, define the atom partition A and D(s, T) as above.
+      - Let c_s be the original per-state fanout at (u, p): c_s = ∑_{T ∈ A} |D(s, T)|.
+      - After transformation, direct edges remain only for |D(s, T)| = 1 and become exactly one outgoing transition per such atom. For |D(s, T)| ≥ 2, we replace |D(s, T)| transitions with exactly one transition to its intermediate for that atom (and then state-agnostic transitions from the intermediate). Thus, the new per-state fanout is c’_s = ∑_{T ∈ A} 1_{|D(s, T)| ≥ 1} ≤ ∑_{T ∈ A} |D(s, T)| = c_s, with strict inequality whenever ∃ T such that |D(s, T)| ≥ 2.
+      - Moreover, we merge tokens across atoms whenever (D(s, T1) = D(s, T2)) to reduce multiple per-state transitions across different atoms into a single transition. Therefore c’_s is at most the number of distinct D(s, T) classes across T ∈ A, which is typically much smaller than ∑_{T ∈ A} |D(s, T)|. This delivers substantial reductions, especially at roots where states often fan out to many destinations.
 
-      1.  **Open the file `src/trie3_opt/passes/factor_state_fanout.rs`**.
+      Step-by-step implementation instructions:
+      1) Reorder the factoring passes in src/trie3_opt/coordinator.rs so FactorStateFanout runs before FactorRootFanout. This ensures state factoring sees the original pop>0 edges (especially at roots).
+         - In build_pipeline, move FactorStateFanoutPass before FactorRootFanoutPass.
 
-      2.  **Add an import for `BTreeSet`** at the top of the file. The `use` statements should look like this:
-          ```rust
-          use std::collections::{BTreeMap, BTreeSet, HashMap};
-          
-          use crate::trie3_opt::context::OptimizationContext;
-          use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-          use crate::trie3_opt::EdgeKey;
-          use crate::trie3_opt::passes::OptimizationPass;
-          ```
+      2) Replace the implementation of FactorStateFanoutPass in src/trie3_opt/passes/factor_state_fanout.rs with the new state-aware factoring algorithm:
+         - For each node and each pop > 0:
+           - Build atoms from the outgoing (pop, tokens).
+           - For each atom, build a destination map (dest -> union of sids over original edges covering the atom).
+           - For each state s seen at that atom, compute D(s, atom).
+           - Group states by identical D(s, atom) and accumulate token unions across atoms for identical (dest-set, state-set) pairs.
+           - For each dest-set:
+             - If dest-set size == 1, keep a direct edge (merging tokens) to that single destination for the corresponding state-set.
+             - If dest-set size ≥ 2, create a per-dest-set intermediate node and:
+               - Add one u --(0, tokens_union)--> intermediate for that state-set;
+               - Add intermediate --(p, tokens_union_all_for_this_destset)--> v for each v in the dest-set with sids = all_states.
+         - Merge tokens across atoms during construction to minimize the number of edges.
 
-      3.  **Update the documentation comment for `FactorStateFanoutPass`** to describe the new, more powerful strategy:
-          ```rust
-          /// Aggressively reduces state fanout by factoring per-state token coverage.
-          /// For each node and for each pop:
-          ///   - For every state s, compute its "coverage": a map from destination D to the
-          ///     union of token sets on all edges from the node to D that include s.
-          ///   - States that share the same coverage map are grouped together.
-          ///   - For each group, the coverage map is inverted to group destinations by token set.
-          ///   - A minimal set of new edges is emitted, one for each unique token set,
-          ///     pointing to all corresponding destinations, for the grouped states.
-          /// This pass is much more aggressive than simply merging edges with identical
-          /// destinations, as it considers a state's entire routing table for a given pop
-          /// to find equivalences.
-          pub struct FactorStateFanoutPass;
-          ```
+      3) Keep all other passes as-is. No changes are needed elsewhere. The GC steps you already have in the coordinator will clean up any unreachable intermediates automatically.
 
-      4.  **Replace the entire `run` method** inside the `impl OptimizationPass for FactorStateFanoutPass` block with the following code. This new version groups states by their complete routing behavior for a given `pop`, rather than on a per-destination basis.
+      Git diffs follow.
 
-          ```rust
-          fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              let node_ids: Vec<_> = trie.node_ids().collect();
-              for node_id in node_ids {
-                  let node = trie.get_node(node_id).unwrap();
-                  if node.children().is_empty() {
-                      continue;
-                  }
-
-                  let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-
-                  // Group edges by pop to process them together.
-                  let mut by_pop: BTreeMap<isize, Vec<(&EdgeKey, &BTreeMap<NodeId, SortedSet>)>> =
-                      BTreeMap::new();
-                  for (ek, dm) in node.children() {
-                      by_pop.entry(ek.pop).or_default().push((ek, dm));
-                  }
-
-                  for (pop, edges) in by_pop {
-                      // 1. Build state_to_coverage: map from a state to its full routing info for this pop.
-                      // The routing info is a map from destination node to the union of tokens that can lead there.
-                      let mut state_to_coverage: HashMap<usize, BTreeMap<NodeId, SortedSet>> =
-                          HashMap::new();
-                      for (ek, dm) in edges {
-                          for (dest, sids) in *dm {
-                              for s in sids.iter() {
-                                  state_to_coverage
-                                      .entry(s)
-                                      .or_default()
-                                      .entry(*dest)
-                                      .or_default()
-                                      .union_inplace(&ek.tokens);
-                              }
-                          }
-                      }
-
-                      // 2. Group states by identical coverage. States with the same coverage are behaviorally
-                      // equivalent from this node for this pop, and can be grouped.
-                      let mut coverage_to_states: HashMap<BTreeMap<NodeId, SortedSet>, SortedSet> =
-                          HashMap::new();
-                      for (state, coverage) in state_to_coverage {
-                          coverage_to_states
-                              .entry(coverage)
-                              .or_default()
-                              .insert(state);
-                      }
-
-                      // 3. For each group of states, reconstruct the minimal set of edges.
-                      for (coverage, states) in coverage_to_states {
-                          if states.is_empty() {
-                              continue;
-                          }
-
-                          // Invert the coverage map to group destinations by required token set.
-                          let mut tokens_to_dests: BTreeMap<SortedSet, BTreeSet<NodeId>> =
-                              BTreeMap::new();
-                          for (dest, tokens) in coverage {
-                              if !tokens.is_empty() {
-                                  tokens_to_dests.entry(tokens).or_default().insert(dest);
-                              }
-                          }
-
-                          // Emit one edge for each distinct token set.
-                          for (tokens, dests) in tokens_to_dests {
-                              let key = EdgeKey::new(pop, tokens);
-                              let dm = new_children.entry(key).or_default();
-                              for dest in dests {
-                                  dm.entry(dest).or_default().union_inplace(&states);
-                              }
-                          }
-                      }
-                  }
-
-                  trie.set_children(node_id, new_children);
-              }
-          }
-          ```
-
-      ### Git Diffs
-
-      Here is the git patch that applies the changes described above.
-
-      ```diff
+      diff --git a/src/trie3_opt/coordinator.rs b/src/trie3_opt/coordinator.rs
+      --- a/src/trie3_opt/coordinator.rs
+      +++ b/src/trie3_opt/coordinator.rs
+      @@ -88,12 +88,12 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> {
+               }
+       
+               // Phase 3: Factoring and structural simplification
+      -        if config.factor_root_fanout {
+      -            pipeline.push(Box::new(FactorRootFanoutPass::new(config.factor_root_fanout_max_atoms_per_pop)));
+      -        }
+               if config.factor_state_fanout {
+                   pipeline.push(Box::new(FactorStateFanoutPass));
+               }
+      +        if config.factor_root_fanout {
+      +            pipeline.push(Box::new(FactorRootFanoutPass::new(config.factor_root_fanout_max_atoms_per_pop)));
+      +        }
+               if config.factor_common_destinations {
+                   pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
+               }
+      diff --git a/src/trie3_opt/passes/factor_state_fanout.rs b/src/trie3_opt/passes/factor_state_fanout.rs
       --- a/src/trie3_opt/passes/factor_state_fanout.rs
       +++ b/src/trie3_opt/passes/factor_state_fanout.rs
-      @@ -1,19 +1,25 @@
-      -use std::collections::{BTreeMap, HashMap};
-      +use std::collections::{BTreeMap, BTreeSet, HashMap};
-       
-       use crate::trie3_opt::context::OptimizationContext;
-       use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-       use crate::trie3_opt::EdgeKey;
-       use crate::trie3_opt::passes::OptimizationPass;
-       
+      @@ -1,73 +1,214 @@
+      -use std::collections::{BTreeMap, BTreeSet, HashMap};
+      -
+      -use crate::trie3_opt::context::OptimizationContext;
+      -use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
+      -use crate::trie3_opt::EdgeKey;
+      -use crate::trie3_opt::passes::OptimizationPass;
+      -
       -/// Aggressively reduces state fanout by factoring per-state token coverage.
-      -/// For each node and for each (pop, dest):
-      -///   - For every state s that appears on any outgoing edge to `dest`, compute U_s,
-      -///     the union of token sets across all such edges.
-      -///   - States that share the same U_s are grouped together and emitted as a single
-      -///     edge with key (pop, U_s) and dest -> {grouped states}.
-      -/// This guarantees that, for a fixed (node, pop, dest, state), the state appears
-      -/// in at most one outgoing transition from the node, often cutting state fanout
-      -/// dramatically while preserving exact semantics.
-      +/// Aggressively reduces state fanout by factoring per-state token coverage.
-      +/// For each node and for each pop:
-      +///   - For every state s, compute its "coverage": a map from destination D to the
-      +///     union of token sets on all edges from the node to D that include s.
-      +///   - States that share the same coverage map are grouped together.
-      +///   - For each group, the coverage map is inverted to group destinations by token set.
-      +///   - A minimal set of new edges is emitted, one for each unique token set,
-      +///     pointing to all corresponding destinations, for the grouped states.
-      +/// This pass is much more aggressive than simply merging edges with identical
-      +/// destinations, as it considers a state's entire routing table for a given pop
-      +/// to find equivalences.
+      -/// For each node and for each pop:
+      -///   - For every state s, compute its "coverage": a map from destination D to the
+      -///     union of token sets on all edges from the node to D that include s.
+      -///   - States that share the same coverage map are grouped together.
+      -///   - For each group, the coverage map is inverted to group destinations by token set.
+      -///   - A minimal set of new edges is emitted, one for each unique token set,
+      -///     pointing to all corresponding destinations, for the grouped states.
+      -/// This pass is much more aggressive than simply merging edges with identical
+      -/// destinations, as it considers a state's entire routing table for a given pop
+      -/// to find equivalences.
+      +use std::collections::{BTreeMap, HashMap};
+      +
+      +use crate::trie3_opt::context::OptimizationContext;
+      +use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
+      +use crate::trie3_opt::EdgeKey;
+      +use crate::trie3_opt::passes::OptimizationPass;
+      +
+      +/// State-aware factoring via token atoms and intermediates.
+      +///
+      +/// For each node and each pop > 0:
+      +///   1) Build token-atoms from the outgoing (pop, tokens) sets so that, within an atom T,
+      +///      membership of each original token-set is uniform (either T ⊆ tokens or disjoint).
+      +///   2) For each atom T, compute a destination map dest -> union(states) over original edges
+      +///      that cover T. Then for each state s appearing at T, compute D(s, T) (the set of dests).
+      +///   3) Group states by identical D(s, T). Accumulate token unions across atoms for identical
+      +///      (dest-set, state-set) groups.
+      +///   4) For a dest-set of size:
+      +///      - 0: nothing to emit.
+      +///      - 1: keep a direct edge (p, unioned_tokens) to that single dest for its state-set.
+      +///      - >=2: create (or reuse) a per-dest-set intermediate I; add one source --(0, tokens)--> I
+      +///        for the state-set; and add I --(p, unioned_tokens_over_all_states_for_this_destset)--> v
+      +///        for each v in the dest-set with sids = all_states.
+      +///
+      +/// This strictly reduces per-state fanout at the source from |D(s, T)| to 1 for atoms where
+      +/// |D(s, T)| >= 2 and merges tokens across atoms wherever (D(s, T)) is identical.
        pub struct FactorStateFanoutPass;
        
        impl OptimizationPass for FactorStateFanoutPass {
-      @@ -24,57 +30,71 @@
-           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-               let node_ids: Vec<_> = trie.node_ids().collect();
-               for node_id in node_ids {
-      -            let node = trie.get_node(node_id).unwrap();
-      +            let node = trie.get_node(node_id).unwrap();
-                   if node.children().is_empty() {
-                       continue;
-                   }
+           fn name(&self) -> &'static str {
+               "FactorStateFanout"
+           }
        
-      -            // Build: pop -> dest -> (state -> unioned tokens)
-      -            let mut by_pop_dest_state: HashMap<isize, HashMap<NodeId, HashMap<usize, SortedSet>>> =
-      -                HashMap::new();
+           fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+      -        let node_ids: Vec<_> = trie.node_ids().collect();
+      -        for node_id in node_ids {
+      -            let node = trie.get_node(node_id).unwrap();
+      -            if node.children().is_empty() {
+      -                continue;
+      -            }
       -
+      -            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+      -
+      -            // Group edges by pop to process them together.
+      -            let mut by_pop: BTreeMap<isize, Vec<(&EdgeKey, &BTreeMap<NodeId, SortedSet>)>> =
+      -                BTreeMap::new();
       -            for (ek, dm) in node.children() {
-      -                let pop = ek.pop;
-      -                let tokens = &ek.tokens;
-      -                let dest_map = by_pop_dest_state.entry(pop).or_default();
-      -                for (dest, states) in dm {
-      -                    let s2t = dest_map.entry(*dest).or_default();
-      -                    for s in states.iter() {
-      -                        s2t.entry(s)
-      -                            .or_insert_with(SortedSet::new)
-      -                            .union_inplace(tokens);
+      -                by_pop.entry(ek.pop).or_default().push((ek, dm));
+      -            }
+      -
+      -            for (pop, edges) in by_pop {
+      -                // 1. Build state_to_coverage: map from a state to its full routing info for this pop.
+      -                // The routing info is a map from destination node to the union of tokens that can lead there.
+      -                let mut state_to_coverage: HashMap<usize, BTreeMap<NodeId, SortedSet>> =
+      -                    HashMap::new();
+      -                for (ek, dm) in edges {
+      -                    for (dest, sids) in dm {
+      -                        for s in sids.iter() {
+      -                            state_to_coverage
+      -                                .entry(s)
+      -                                .or_default()
+      -                                .entry(*dest)
+      -                                .or_default()
+      -                                .union_inplace(&ek.tokens);
+      -                        }
+      -                    }
+      -                }
+      -
+      -                // 2. Group states by identical coverage. States with the same coverage are behaviorally
+      -                // equivalent from this node for this pop, and can be grouped.
+      -                let mut coverage_to_states: HashMap<BTreeMap<NodeId, SortedSet>, SortedSet> =
+      -                    HashMap::new();
+      -                for (state, coverage) in state_to_coverage {
+      -                    coverage_to_states
+      -                        .entry(coverage)
+      -                        .or_default()
+      -                        .insert(state);
+      -                }
+      -
+      -                // 3. For each group of states, reconstruct the minimal set of edges.
+      -                for (coverage, states) in coverage_to_states {
+      -                    if states.is_empty() {
+      -                        continue;
+      -                    }
+      -
+      -                    // Invert the coverage map to group destinations by required token set.
+      -                    let mut tokens_to_dests: BTreeMap<SortedSet, BTreeSet<NodeId>> =
+      -                        BTreeMap::new();
+      -                    for (dest, tokens) in coverage {
+      -                        if !tokens.is_empty() {
+      -                            tokens_to_dests.entry(tokens).or_default().insert(dest);
+      -                        }
+      -                    }
+      -
+      -                    // Emit one edge for each distinct token set.
+      -                    for (tokens, dests) in tokens_to_dests {
+      -                        let key = EdgeKey::new(pop, tokens);
+      -                        let dm = new_children.entry(key).or_default();
+      -                        for dest in dests {
+      -                            dm.entry(dest).or_default().union_inplace(&states);
+      -                        }
       -                    }
       -                }
       -            }
       -
-      -            // Reconstruct children from the per-state coverage, grouping states by identical token sets.
-                   let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-       
-      -            for (pop, dest_map) in by_pop_dest_state {
-      -                for (dest, s2toks) in dest_map {
-      -                    if s2toks.is_empty() {
-      -                        continue;
-      -                    }
-      -
-      -                    // tokens -> states
-      -                    let mut tokens_to_states: HashMap<SortedSet, SortedSet> = HashMap::new();
-      -                    for (state, toks) in s2toks {
-      -                        if toks.is_empty() {
-      -                            continue;
-      -                        }
-      -                        tokens_to_states
-      -                            .entry(toks)
-      -                            .or_insert_with(SortedSet::new)
-      -                            .insert(state);
-      -                    }
-      -
-      -                    for (tokens, states) in tokens_to_states {
-      -                        if tokens.is_empty() || states.is_empty() {
-      -                            continue;
-      -                        }
-      -                        let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
-      -                        new_children.entry(key).or_default().insert(dest, states);
-      +            // Group edges by pop to process them together.
-      +            let mut by_pop: BTreeMap<isize, Vec<(&EdgeKey, &BTreeMap<NodeId, SortedSet>)>> =
-      +                BTreeMap::new();
-      +            for (ek, dm) in node.children() {
-      +                by_pop.entry(ek.pop).or_default().push((ek, dm));
+      -            trie.set_children(node_id, new_children);
+      -        }
+      +        const MAX_ATOMS_PER_POP: usize = 4096;
+      +        let node_ids: Vec<_> = trie.node_ids().collect();
+      +        for node_id in node_ids {
+      +            let node = if let Some(n) = trie.get_node(node_id) { n } else { continue };
+      +            if node.children().is_empty() {
+      +                continue;
       +            }
       +
+      +            // Group existing edges by pop so we can completely rebuild per-pop.
+      +            let mut by_pop: BTreeMap<isize, Vec<(EdgeKey, BTreeMap<NodeId, SortedSet>)>> =
+      +                BTreeMap::new();
+      +            for (ek, dm) in node.children() {
+      +                by_pop.entry(ek.pop).or_default().push((ek.clone(), dm.clone()));
+      +            }
+      +
+      +            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+      +            let all_states = SortedSet::from_iter(0..= _ctx.max_state_id);
+      +
       +            for (pop, edges) in by_pop {
-      +                // 1. Build state_to_coverage: map from a state to its full routing info for this pop.
-      +                // The routing info is a map from destination node to the union of tokens that can lead there.
-      +                let mut state_to_coverage: HashMap<usize, BTreeMap<NodeId, SortedSet>> =
-      +                    HashMap::new();
-      +                for (ek, dm) in edges {
-      +                    for (dest, sids) in *dm {
-      +                        for s in sids.iter() {
-      +                            state_to_coverage
-      +                                .entry(s)
-      +                                .or_default()
-      +                                .entry(*dest)
-      +                                .or_default()
-      +                                .union_inplace(&ek.tokens);
+      +                // We only factor for pop > 0; keep pop<=0 as-is.
+      +                if pop <= 0 {
+      +                    for (ek, dm) in edges {
+      +                        let entry = new_children.entry(ek).or_default();
+      +                        for (dst, sids) in dm {
+      +                            entry.entry(dst).or_default().union_inplace(&sids);
       +                        }
       +                    }
+      +                    continue;
       +                }
       +
-      +                // 2. Group states by identical coverage. States with the same coverage are behaviorally
-      +                // equivalent from this node for this pop, and can be grouped.
-      +                let mut coverage_to_states: HashMap<BTreeMap<NodeId, SortedSet>, SortedSet> =
+      +                // Build token universe and atoms for these edges.
+      +                let mut universe = SortedSet::new();
+      +                for (ek, _) in &edges {
+      +                    universe.union_inplace(&ek.tokens);
+      +                }
+      +                if universe.is_empty() {
+      +                    // No tokens for this pop; nothing to do.
+      +                    continue;
+      +                }
+      +
+      +                let mut atoms: Vec<SortedSet> = vec![universe.clone()];
+      +                let mut aborted = false;
+      +                for (ek, _) in &edges {
+      +                    let toks = &ek.tokens;
+      +                    if toks.is_empty() {
+      +                        continue;
+      +                    }
+      +                    let mut next_atoms = Vec::with_capacity(atoms.len().saturating_mul(2));
+      +                    for b in &atoms {
+      +                        if !b.intersects(toks) {
+      +                            next_atoms.push(b.clone());
+      +                            continue;
+      +                        }
+      +                        let inter = b.intersect(toks);
+      +                        if !inter.is_empty() {
+      +                            next_atoms.push(inter);
+      +                        }
+      +                        let diff = b.difference(toks);
+      +                        if !diff.is_empty() {
+      +                            next_atoms.push(diff);
+      +                        }
+      +                    }
+      +                    if next_atoms.len() > MAX_ATOMS_PER_POP {
+      +                        aborted = true;
+      +                        break;
+      +                    }
+      +                    atoms = next_atoms;
+      +                }
+      +                if aborted {
+      +                    atoms = vec![universe];
+      +                }
+      +
+      +                // Accumulators:
+      +                // - For destset size >=2: per-destset intermediate and edges.
+      +                let mut mid_for_destset: HashMap<Vec<NodeId>, NodeId> = HashMap::new();
+      +                let mut tokens_for_destset_union: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
+      +                let mut destset_states_to_tokens: HashMap<Vec<NodeId>, HashMap<SortedSet, SortedSet>> =
       +                    HashMap::new();
-      +                for (state, coverage) in state_to_coverage {
-      +                    coverage_to_states
-      +                        .entry(coverage)
-      +                        .or_default()
-      +                        .insert(state);
-      +                }
+      +                // - For destset size == 1: keep direct edges; union tokens across atoms.
+      +                let mut direct_edges: HashMap<NodeId, HashMap<SortedSet, SortedSet>> = HashMap::new();
       +
-      +                // 3. For each group of states, reconstruct the minimal set of edges.
-      +                for (coverage, states) in coverage_to_states {
-      +                    if states.is_empty() {
+      +                for tset in atoms {
+      +                    // Build dest -> union(states) map for this atom tset.
+      +                    let mut dest_map: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
+      +                    for (ek, dm) in &edges {
+      +                        if !tset.intersects(&ek.tokens) {
+      +                            continue;
+      +                        }
+      +                        for (dst, sids) in dm {
+      +                            dest_map.entry(*dst).or_default().union_inplace(sids);
+      +                        }
+      +                    }
+      +                    if dest_map.is_empty() {
       +                        continue;
       +                    }
       +
-      +                    // Invert the coverage map to group destinations by required token set.
-      +                    let mut tokens_to_dests: BTreeMap<SortedSet, BTreeSet<NodeId>> =
-      +                        BTreeMap::new();
-      +                    for (dest, tokens) in coverage {
-      +                        if !tokens.is_empty() {
-      +                            tokens_to_dests.entry(tokens).or_default().insert(dest);
+      +                    // For this atom, compute D(s, atom) per state s.
+      +                    // Use a sparse mapping only for states that appear.
+      +                    let mut state_to_dests: HashMap<usize, Vec<NodeId>> = HashMap::new();
+      +                    for (dst, sids) in &dest_map {
+      +                        for s in sids.iter() {
+      +                            state_to_dests.entry(s).or_default().push(*dst);
       +                        }
       +                    }
       +
-      +                    // Emit one edge for each distinct token set.
-      +                    for (tokens, dests) in tokens_to_dests {
-      +                        let key = EdgeKey::new(pop, tokens);
-      +                        let dm = new_children.entry(key).or_default();
-      +                        for dest in dests {
-      +                            dm.entry(dest).or_default().union_inplace(&states);
+      +                    // Group states by identical dest-set for this atom.
+      +                    let mut local_dset_to_states: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
+      +                    for (s, mut v) in state_to_dests {
+      +                        v.sort_unstable();
+      +                        v.dedup();
+      +                        if v.is_empty() {
+      +                            continue;
       +                        }
-                           }
-                       }
-                   }
-
-      ```
+      +                        local_dset_to_states.entry(v).or_default().insert(s);
+      +                    }
+      +
+      +                    // Accumulate across atoms:
+      +                    for (dset, states) in local_dset_to_states {
+      +                        if dset.len() == 1 {
+      +                            // Single destination: keep direct edge (pop, tokens) -> that dest, for these states.
+      +                            let dst = dset[0];
+      +                            direct_edges
+      +                                .entry(dst)
+      +                                .or_default()
+      +                                .entry(states.clone())
+      +                                .or_default()
+      +                                .union_inplace(&tset);
+      +                        } else {
+      +                            // Multi-destination set: go via an intermediate for this dest-set.
+      +                            tokens_for_destset_union
+      +                                .entry(dset.clone())
+      +                                .or_default()
+      +                                .union_inplace(&tset);
+      +                            destset_states_to_tokens
+      +                                .entry(dset)
+      +                                .or_default()
+      +                                .entry(states)
+      +                                .or_default()
+      +                                .union_inplace(&tset);
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // Emit direct edges for single-destination groups (merged across atoms).
+      +                for (dst, states_to_tokens) in direct_edges {
+      +                    for (states, toks) in states_to_tokens {
+      +                        if toks.is_empty() || states.is_empty() {
+      +                            continue;
+      +                        }
+      +                        let key = EdgeKey::new(pop, toks);
+      +                        new_children
+      +                            .entry(key)
+      +                            .or_default()
+      +                            .entry(dst)
+      +                            .or_default()
+      +                            .union_inplace(&states);
+      +                    }
+      +                }
+      +
+      +                // Emit intermediates and their edges for multi-destination sets.
+      +                for (dset, states_to_tokens) in destset_states_to_tokens {
+      +                    // Create/reuse intermediate for this dest-set
+      +                    let mid_id = *mid_for_destset
+      +                        .entry(dset.clone())
+      +                        .or_insert_with(|| trie.add_node(false));
+      +
+      +                    // Source -> intermediate (pop=0) for each state-group; tokens merged across atoms.
+      +                    for (states, toks) in states_to_tokens {
+      +                        if toks.is_empty() || states.is_empty() {
+      +                            continue;
+      +                        }
+      +                        let key = EdgeKey::new(0, toks);
+      +                        new_children
+      +                            .entry(key)
+      +                            .or_default()
+      +                            .entry(mid_id)
+      +                            .or_default()
+      +                            .union_inplace(&states);
+      +                    }
+      +
+      +                    // Intermediate -> destinations (pop=p), state-agnostic, tokens = union across all states for this dest-set.
+      +                    let toks_mid = tokens_for_destset_union
+      +                        .get(&dset)
+      +                        .cloned()
+      +                        .unwrap_or_else(SortedSet::new);
+      +                    if !toks_mid.is_empty() {
+      +                        for dst in dset {
+      +                            trie.add_edge(mid_id, EdgeKey::new(pop, toks_mid.clone()), dst, all_states.clone());
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            trie.set_children(node_id, new_children);
+      +        }
+           }
+       }
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      No ```diff blocks found. Scanning for raw, unfenced diffs...
+      Found 2 potential raw diff block(s).
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/trie3_opt/coordinator.rs
+      Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/trie3_opt/passes/factor_state_fanout.rs
       Applying patch to 'src/trie3_opt/passes/factor_state_fanout.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/passes/factor_state_fanout.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Aggressively factor state fanout
-      by grouping states with identical routing coverage per pop"'
+  - user: 'Changes committed with message: "Refactor FactorStateFanoutPass to use
+      token atoms and intermediate nodes for aggressive state-aware factoring, and
+      reorder pipeline"'
     metadata:
 ...

@@ -1,21 +1,28 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
 use crate::trie3_opt::EdgeKey;
 use crate::trie3_opt::passes::OptimizationPass;
 
-/// Aggressively reduces state fanout by factoring per-state token coverage.
-/// For each node and for each pop:
-///   - For every state s, compute its "coverage": a map from destination D to the
-///     union of token sets on all edges from the node to D that include s.
-///   - States that share the same coverage map are grouped together.
-///   - For each group, the coverage map is inverted to group destinations by token set.
-///   - A minimal set of new edges is emitted, one for each unique token set,
-///     pointing to all corresponding destinations, for the grouped states.
-/// This pass is much more aggressive than simply merging edges with identical
-/// destinations, as it considers a state's entire routing table for a given pop
-/// to find equivalences.
+/// State-aware factoring via token atoms and intermediates.
+///
+/// For each node and each pop > 0:
+///   1) Build token-atoms from the outgoing (pop, tokens) sets so that, within an atom T,
+///      membership of each original token-set is uniform (either T ⊆ tokens or disjoint).
+///   2) For each atom T, compute a destination map dest -> union(states) over original edges
+///      that cover T. Then for each state s appearing at T, compute D(s, T) (the set of dests).
+///   3) Group states by identical D(s, T). Accumulate token unions across atoms for identical
+///      (dest-set, state-set) groups.
+///   4) For a dest-set of size:
+///      - 0: nothing to emit.
+///      - 1: keep a direct edge (p, unioned_tokens) to that single dest for its state-set.
+///      - >=2: create (or reuse) a per-dest-set intermediate I; add one source --(0, tokens)--> I
+///        for the state-set; and add I --(p, unioned_tokens_over_all_states_for_this_destset)--> v
+///        for each v in the dest-set with sids = all_states.
+///
+/// This strictly reduces per-state fanout at the source from |D(s, T)| to 1 for atoms where
+/// |D(s, T)| >= 2 and merges tokens across atoms wherever (D(s, T)) is identical.
 pub struct FactorStateFanoutPass;
 
 impl OptimizationPass for FactorStateFanoutPass {
@@ -24,72 +31,194 @@ impl OptimizationPass for FactorStateFanoutPass {
     }
 
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+        const MAX_ATOMS_PER_POP: usize = 4096;
         let node_ids: Vec<_> = trie.node_ids().collect();
         for node_id in node_ids {
-            let node = trie.get_node(node_id).unwrap();
+            let node = if let Some(n) = trie.get_node(node_id) { n } else { continue };
             if node.children().is_empty() {
                 continue;
             }
 
-            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-
-            // Group edges by pop to process them together.
-            let mut by_pop: BTreeMap<isize, Vec<(&EdgeKey, &BTreeMap<NodeId, SortedSet>)>> =
+            // Group existing edges by pop so we can completely rebuild per-pop.
+            let mut by_pop: BTreeMap<isize, Vec<(EdgeKey, BTreeMap<NodeId, SortedSet>)>> =
                 BTreeMap::new();
             for (ek, dm) in node.children() {
-                by_pop.entry(ek.pop).or_default().push((ek, dm));
+                by_pop.entry(ek.pop).or_default().push((ek.clone(), dm.clone()));
             }
 
+            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+            let all_states = SortedSet::from_iter(0..= _ctx.max_state_id);
+
             for (pop, edges) in by_pop {
-                // 1. Build state_to_coverage: map from a state to its full routing info for this pop.
-                // The routing info is a map from destination node to the union of tokens that can lead there.
-                let mut state_to_coverage: HashMap<usize, BTreeMap<NodeId, SortedSet>> =
-                    HashMap::new();
-                for (ek, dm) in edges {
-                    for (dest, sids) in dm {
-                        for s in sids.iter() {
-                            state_to_coverage
-                                .entry(s)
-                                .or_default()
-                                .entry(*dest)
-                                .or_default()
-                                .union_inplace(&ek.tokens);
+                // We only factor for pop > 0; keep pop<=0 as-is.
+                if pop <= 0 {
+                    for (ek, dm) in edges {
+                        let entry = new_children.entry(ek).or_default();
+                        for (dst, sids) in dm {
+                            entry.entry(dst).or_default().union_inplace(&sids);
                         }
                     }
+                    continue;
                 }
 
-                // 2. Group states by identical coverage. States with the same coverage are behaviorally
-                // equivalent from this node for this pop, and can be grouped.
-                let mut coverage_to_states: HashMap<BTreeMap<NodeId, SortedSet>, SortedSet> =
+                // Build token universe and atoms for these edges.
+                let mut universe = SortedSet::new();
+                for (ek, _) in &edges {
+                    universe.union_inplace(&ek.tokens);
+                }
+                if universe.is_empty() {
+                    // No tokens for this pop; nothing to do.
+                    continue;
+                }
+
+                let mut atoms: Vec<SortedSet> = vec![universe.clone()];
+                let mut aborted = false;
+                for (ek, _) in &edges {
+                    let toks = &ek.tokens;
+                    if toks.is_empty() {
+                        continue;
+                    }
+                    let mut next_atoms = Vec::with_capacity(atoms.len().saturating_mul(2));
+                    for b in &atoms {
+                        if !b.intersects(toks) {
+                            next_atoms.push(b.clone());
+                            continue;
+                        }
+                        let inter = b.intersect(toks);
+                        if !inter.is_empty() {
+                            next_atoms.push(inter);
+                        }
+                        let diff = b.difference(toks);
+                        if !diff.is_empty() {
+                            next_atoms.push(diff);
+                        }
+                    }
+                    if next_atoms.len() > MAX_ATOMS_PER_POP {
+                        aborted = true;
+                        break;
+                    }
+                    atoms = next_atoms;
+                }
+                if aborted {
+                    atoms = vec![universe];
+                }
+
+                // Accumulators:
+                // - For destset size >=2: per-destset intermediate and edges.
+                let mut mid_for_destset: HashMap<Vec<NodeId>, NodeId> = HashMap::new();
+                let mut tokens_for_destset_union: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
+                let mut destset_states_to_tokens: HashMap<Vec<NodeId>, HashMap<SortedSet, SortedSet>> =
                     HashMap::new();
-                for (state, coverage) in state_to_coverage {
-                    coverage_to_states
-                        .entry(coverage)
-                        .or_default()
-                        .insert(state);
-                }
+                // - For destset size == 1: keep direct edges; union tokens across atoms.
+                let mut direct_edges: HashMap<NodeId, HashMap<SortedSet, SortedSet>> = HashMap::new();
 
-                // 3. For each group of states, reconstruct the minimal set of edges.
-                for (coverage, states) in coverage_to_states {
-                    if states.is_empty() {
+                for tset in atoms {
+                    // Build dest -> union(states) map for this atom tset.
+                    let mut dest_map: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
+                    for (ek, dm) in &edges {
+                        if !tset.intersects(&ek.tokens) {
+                            continue;
+                        }
+                        for (dst, sids) in dm {
+                            dest_map.entry(*dst).or_default().union_inplace(sids);
+                        }
+                    }
+                    if dest_map.is_empty() {
                         continue;
                     }
 
-                    // Invert the coverage map to group destinations by required token set.
-                    let mut tokens_to_dests: BTreeMap<SortedSet, BTreeSet<NodeId>> =
-                        BTreeMap::new();
-                    for (dest, tokens) in coverage {
-                        if !tokens.is_empty() {
-                            tokens_to_dests.entry(tokens).or_default().insert(dest);
+                    // For this atom, compute D(s, atom) per state s.
+                    // Use a sparse mapping only for states that appear.
+                    let mut state_to_dests: HashMap<usize, Vec<NodeId>> = HashMap::new();
+                    for (dst, sids) in &dest_map {
+                        for s in sids.iter() {
+                            state_to_dests.entry(s).or_default().push(*dst);
                         }
                     }
 
-                    // Emit one edge for each distinct token set.
-                    for (tokens, dests) in tokens_to_dests {
-                        let key = EdgeKey::new(pop, tokens);
-                        let dm = new_children.entry(key).or_default();
-                        for dest in dests {
-                            dm.entry(dest).or_default().union_inplace(&states);
+                    // Group states by identical dest-set for this atom.
+                    let mut local_dset_to_states: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
+                    for (s, mut v) in state_to_dests {
+                        v.sort_unstable();
+                        v.dedup();
+                        if v.is_empty() {
+                            continue;
+                        }
+                        local_dset_to_states.entry(v).or_default().insert(s);
+                    }
+
+                    // Accumulate across atoms:
+                    for (dset, states) in local_dset_to_states {
+                        if dset.len() == 1 {
+                            // Single destination: keep direct edge (pop, tokens) -> that dest, for these states.
+                            let dst = dset[0];
+                            direct_edges
+                                .entry(dst)
+                                .or_default()
+                                .entry(states.clone())
+                                .or_default()
+                                .union_inplace(&tset);
+                        } else {
+                            // Multi-destination set: go via an intermediate for this dest-set.
+                            tokens_for_destset_union
+                                .entry(dset.clone())
+                                .or_default()
+                                .union_inplace(&tset);
+                            destset_states_to_tokens
+                                .entry(dset)
+                                .or_default()
+                                .entry(states)
+                                .or_default()
+                                .union_inplace(&tset);
+                        }
+                    }
+                }
+
+                // Emit direct edges for single-destination groups (merged across atoms).
+                for (dst, states_to_tokens) in direct_edges {
+                    for (states, toks) in states_to_tokens {
+                        if toks.is_empty() || states.is_empty() {
+                            continue;
+                        }
+                        let key = EdgeKey::new(pop, toks);
+                        new_children
+                            .entry(key)
+                            .or_default()
+                            .entry(dst)
+                            .or_default()
+                            .union_inplace(&states);
+                    }
+                }
+
+                // Emit intermediates and their edges for multi-destination sets.
+                for (dset, states_to_tokens) in destset_states_to_tokens {
+                    // Create/reuse intermediate for this dest-set
+                    let mid_id = *mid_for_destset
+                        .entry(dset.clone())
+                        .or_insert_with(|| trie.add_node(false));
+
+                    // Source -> intermediate (pop=0) for each state-group; tokens merged across atoms.
+                    for (states, toks) in states_to_tokens {
+                        if toks.is_empty() || states.is_empty() {
+                            continue;
+                        }
+                        let key = EdgeKey::new(0, toks);
+                        new_children
+                            .entry(key)
+                            .or_default()
+                            .entry(mid_id)
+                            .or_default()
+                            .union_inplace(&states);
+                    }
+
+                    // Intermediate -> destinations (pop=p), state-agnostic, tokens = union across all states for this dest-set.
+                    let toks_mid = tokens_for_destset_union
+                        .get(&dset)
+                        .cloned()
+                        .unwrap_or_else(SortedSet::new);
+                    if !toks_mid.is_empty() {
+                        for dst in dset {
+                            trie.add_edge(mid_id, EdgeKey::new(pop, toks_mid.clone()), dst, all_states.clone());
                         }
                     }
                 }
