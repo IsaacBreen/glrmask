@@ -25,6 +25,7 @@ local_system:
     - src/trie3_opt/passes/prune_dead_paths.rs
     - src/trie3_opt/passes/prune_unproductive_paths.rs
     - src/trie3_opt/passes/reorder_llm_tokens.rs
+    - src/trie3_opt/passes/aggressive_state_pop_collapse.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -4335,6 +4336,189 @@ local_system:
               ctx.max_llm_token_id = sv.internal_max_llm_token;
           }
       }
+    src/trie3_opt/passes/aggressive_state_pop_collapse.rs: |
+      use std::collections::{BTreeMap, HashMap};
+
+      use crate::trie3_opt::context::OptimizationContext;
+      use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
+      use crate::trie3_opt::passes::OptimizationPass;
+
+      /// Aggressively collapse per-(state, pop) fanout by introducing:
+      ///   - a per-(state, pop) aggregator A_{s,p} with exactly one u->A_{s,p} edge,
+      ///   - per-unique-destset canonical nodes M_D (shared across states for the same pop),
+      ///   - wiring A_{s,p} --(0, tokens_{s,D})--> M_D,
+      ///   - and M_D --(p, union_tokens_for_D)--> each v in D with state set = all_states.
+      ///
+      /// This guarantees there is at most one source-level edge for each (state, pop) pair,
+      /// while preserving exact token/state semantics.
+      pub struct AggressiveStatePopCollapsePass;
+
+      impl OptimizationPass for AggressiveStatePopCollapsePass {
+          fn name(&self) -> &'static str {
+              "AggressiveStatePopCollapse"
+          }
+
+          fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+              let all_states = SortedSet::from_iter(0..=ctx.max_state_id);
+              let node_ids: Vec<_> = trie.node_ids().collect();
+
+              for node_id in node_ids {
+                  let node = if let Some(n) = trie.get_node(node_id) { n } else { continue };
+                  if node.children().is_empty() {
+                      continue;
+                  }
+
+                  // Keep pop <= 0 edges as-is; aggressively refactor pop > 0 edges.
+                  let mut keep_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+                  let mut by_pop: BTreeMap<isize, Vec<(EdgeKey, BTreeMap<NodeId, SortedSet>)>> = BTreeMap::new();
+
+                  for (ek, dm) in node.children() {
+                      if ek.pop <= 0 {
+                          let entry = keep_children.entry(ek.clone()).or_default();
+                          for (dst, sids) in dm {
+                              entry.entry(*dst).or_default().union_inplace(sids);
+                          }
+                      } else {
+                          by_pop.entry(ek.pop).or_default().push((ek.clone(), dm.clone()));
+                      }
+                  }
+
+                  // If there are no pop>0 edges, skip.
+                  if by_pop.is_empty() {
+                      continue;
+                  }
+
+                  let mut new_children_total = keep_children;
+
+                  // Process each pop>0 independently.
+                  for (pop, edges_for_pop) in by_pop {
+                      if edges_for_pop.is_empty() {
+                          continue;
+                      }
+
+                      // dm_by_token: token -> (dest -> union(states))
+                      let mut dm_by_token: HashMap<usize, BTreeMap<NodeId, SortedSet>> = HashMap::new();
+                      for (ek, dm) in &edges_for_pop {
+                          if ek.tokens.is_empty() || dm.is_empty() {
+                              continue;
+                          }
+                          for t in ek.tokens.iter() {
+                              let entry = dm_by_token.entry(t).or_default();
+                              for (dst, sids) in dm {
+                                  entry.entry(*dst).or_default().union_inplace(sids);
+                              }
+                          }
+                      }
+                      if dm_by_token.is_empty() {
+                          continue;
+                      }
+
+                      // For each token t, compute for each state s the destination set D(s,t).
+                      // Accumulate per state s: destset -> tokens for which that exact destset appears.
+                      let mut per_state_destset_tokens: HashMap<usize, BTreeMap<Vec<NodeId>, SortedSet>> = HashMap::new();
+                      for (t, dm_t) in dm_by_token.into_iter() {
+                          // state -> Vec<dest>
+                          let mut dests_by_state: HashMap<usize, Vec<NodeId>> = HashMap::new();
+                          for (dst, sids) in dm_t.into_iter() {
+                              for s in sids.iter() {
+                                  dests_by_state.entry(s).or_default().push(dst);
+                              }
+                          }
+                          for (s, mut v) in dests_by_state {
+                              v.sort_unstable();
+                              v.dedup();
+                              if v.is_empty() {
+                                  continue;
+                              }
+                              per_state_destset_tokens
+                                  .entry(s)
+                                  .or_default()
+                                  .entry(v)
+                                  .or_default()
+                                  .insert(t);
+                          }
+                      }
+                      if per_state_destset_tokens.is_empty() {
+                          continue;
+                      }
+
+                      // Canonicalize unique dest-sets across all states (for this pop) into shared intermediates.
+                      // Also collect the union of tokens per dest-set across all states.
+                      let mut tokens_union_by_destset: BTreeMap<Vec<NodeId>, SortedSet> = BTreeMap::new();
+                      for (_s, dmap) in &per_state_destset_tokens {
+                          for (dset, toks) in dmap {
+                              tokens_union_by_destset
+                                  .entry(dset.clone())
+                                  .or_default()
+                                  .union_inplace(toks);
+                          }
+                      }
+
+                      let mut mid_for_destset: BTreeMap<Vec<NodeId>, NodeId> = BTreeMap::new();
+                      for (dset, toks_union) in &tokens_union_by_destset {
+                          if toks_union.is_empty() || dset.is_empty() {
+                              continue;
+                          }
+                          let mid_id = trie.add_node(false);
+                          mid_for_destset.insert(dset.clone(), mid_id);
+                          // M_D --(pop, union(toks for D))--> v, sids=all_states
+                          for &d in dset {
+                              trie.add_edge(
+                                  mid_id,
+                                  EdgeKey::new(pop, toks_union.clone()),
+                                  d,
+                                  all_states.clone(),
+                              );
+                          }
+                      }
+
+                      // One aggregator per (state, pop): ensure exactly one u-level edge per (state, pop).
+                      for (s, dmap) in per_state_destset_tokens {
+                          // Union over all tokens for this state at this pop
+                          let mut all_toks_for_s = SortedSet::new();
+                          for toks in dmap.values() {
+                              all_toks_for_s.union_inplace(toks);
+                          }
+                          if all_toks_for_s.is_empty() {
+                              continue;
+                          }
+                          // Build {s}
+                          let mut sset = SortedSet::new();
+                          sset.insert(s);
+
+                          // Per-(state, pop) aggregator
+                          let agg_id = trie.add_node(false);
+
+                          // u --(0, union_all_tokens_for_s)--> A_{s,p}, sids = {s}
+                          new_children_total
+                              .entry(EdgeKey::new(0, all_toks_for_s))
+                              .or_default()
+                              .entry(agg_id)
+                              .or_default()
+                              .union_inplace(&sset);
+
+                          // For each dest-set of this state: A_{s,p} --(0, toks_{s,D})--> M_D
+                          for (dset, toks_for_dset) in dmap {
+                              if toks_for_dset.is_empty() {
+                                  continue;
+                              }
+                              if let Some(&mid_id) = mid_for_destset.get(&dset) {
+                                  trie.add_edge(
+                                      agg_id,
+                                      EdgeKey::new(0, toks_for_dset.clone()),
+                                      mid_id,
+                                      all_states.clone(),
+                                  );
+                              }
+                          }
+                      }
+                  }
+
+                  // Replace u's children with the newly built set (pop <= 0 kept, pop > 0 rewritten).
+                  trie.set_children(node_id, new_children_total);
+              }
+          }
+      }
   prev_file_contents:
     src/trie3_opt/context.rs: |
       use std::cell::RefCell;
@@ -4436,6 +4620,7 @@ local_system:
           pub factor_common_destinations_min_incoming: usize,
           pub factor_root_fanout: bool,
           pub factor_root_fanout_max_atoms_per_pop: usize,
+          pub aggressive_state_pop_collapse: bool,
           pub merge_structural_max_iters: usize,
           pub merge_bisimulation_max_iters: usize,
           pub merge_global_atoms: bool,
@@ -4472,6 +4657,7 @@ local_system:
                   factor_common_destinations_min_incoming: 12,
                   factor_root_fanout: true,
                   factor_root_fanout_max_atoms_per_pop: 512,
+                  aggressive_state_pop_collapse: false,
                   merge_structural_max_iters: 4,
                   merge_bisimulation_max_iters: 1000,
                   merge_global_atoms: true,
@@ -4510,6 +4696,7 @@ local_system:
                   factor_common_destinations_min_incoming: 0,
                   factor_root_fanout: false,
                   factor_root_fanout_max_atoms_per_pop: 0,
+                  aggressive_state_pop_collapse: false,
                   merge_structural_max_iters: 0,
                   merge_bisimulation_max_iters: 0,
                   merge_global_atoms: false,
@@ -4573,6 +4760,9 @@ local_system:
               }
               if config.factor_common_destinations {
                   pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
+              }
+              if config.aggressive_state_pop_collapse {
+                  pipeline.push(Box::new(AggressiveStatePopCollapsePass));
               }
 
               // Phase 4: Edge compression and chain contraction
@@ -8460,6 +8650,7 @@ local_system:
       pub mod merge_state_agnostic;
 
       pub use canonicalize_end_nodes::CanonicalizeEndNodesPass;
+      pub mod aggressive_state_pop_collapse;
       pub use compress_edges::CompressEdgesPass;
       pub use compress_unary_chains::CompressUnaryChainsPass;
       pub use eliminate_pop0::EliminatePop0ExceptRootsPass;
@@ -8477,6 +8668,7 @@ local_system:
       pub use prune_unproductive_paths::PruneUnproductivePathsPass;
       pub use reorder_llm_tokens::ReorderLLMTokensPass;
       pub use merge_state_agnostic::MergeStateAgnosticPass;
+      pub use aggressive_state_pop_collapse::AggressiveStatePopCollapsePass;
     src/trie3_opt/passes/prune_dead_paths.rs: |
       use std::collections::BTreeMap;
 
@@ -8643,9 +8835,192 @@ local_system:
               ctx.max_llm_token_id = sv.internal_max_llm_token;
           }
       }
-  diffs_applied_this_send: false
+    src/trie3_opt/passes/aggressive_state_pop_collapse.rs: |
+      use std::collections::{BTreeMap, HashMap};
+
+      use crate::trie3_opt::context::OptimizationContext;
+      use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
+      use crate::trie3_opt::passes::OptimizationPass;
+
+      /// Aggressively collapse per-(state, pop) fanout by introducing:
+      ///   - a per-(state, pop) aggregator A_{s,p} with exactly one u->A_{s,p} edge,
+      ///   - per-unique-destset canonical nodes M_D (shared across states for the same pop),
+      ///   - wiring A_{s,p} --(0, tokens_{s,D})--> M_D,
+      ///   - and M_D --(p, union_tokens_for_D)--> each v in D with state set = all_states.
+      ///
+      /// This guarantees there is at most one source-level edge for each (state, pop) pair,
+      /// while preserving exact token/state semantics.
+      pub struct AggressiveStatePopCollapsePass;
+
+      impl OptimizationPass for AggressiveStatePopCollapsePass {
+          fn name(&self) -> &'static str {
+              "AggressiveStatePopCollapse"
+          }
+
+          fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+              let all_states = SortedSet::from_iter(0..=ctx.max_state_id);
+              let node_ids: Vec<_> = trie.node_ids().collect();
+
+              for node_id in node_ids {
+                  let node = if let Some(n) = trie.get_node(node_id) { n } else { continue };
+                  if node.children().is_empty() {
+                      continue;
+                  }
+
+                  // Keep pop <= 0 edges as-is; aggressively refactor pop > 0 edges.
+                  let mut keep_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+                  let mut by_pop: BTreeMap<isize, Vec<(EdgeKey, BTreeMap<NodeId, SortedSet>)>> = BTreeMap::new();
+
+                  for (ek, dm) in node.children() {
+                      if ek.pop <= 0 {
+                          let entry = keep_children.entry(ek.clone()).or_default();
+                          for (dst, sids) in dm {
+                              entry.entry(*dst).or_default().union_inplace(sids);
+                          }
+                      } else {
+                          by_pop.entry(ek.pop).or_default().push((ek.clone(), dm.clone()));
+                      }
+                  }
+
+                  // If there are no pop>0 edges, skip.
+                  if by_pop.is_empty() {
+                      continue;
+                  }
+
+                  let mut new_children_total = keep_children;
+
+                  // Process each pop>0 independently.
+                  for (pop, edges_for_pop) in by_pop {
+                      if edges_for_pop.is_empty() {
+                          continue;
+                      }
+
+                      // dm_by_token: token -> (dest -> union(states))
+                      let mut dm_by_token: HashMap<usize, BTreeMap<NodeId, SortedSet>> = HashMap::new();
+                      for (ek, dm) in &edges_for_pop {
+                          if ek.tokens.is_empty() || dm.is_empty() {
+                              continue;
+                          }
+                          for t in ek.tokens.iter() {
+                              let entry = dm_by_token.entry(t).or_default();
+                              for (dst, sids) in dm {
+                                  entry.entry(*dst).or_default().union_inplace(sids);
+                              }
+                          }
+                      }
+                      if dm_by_token.is_empty() {
+                          continue;
+                      }
+
+                      // For each token t, compute for each state s the destination set D(s,t).
+                      // Accumulate per state s: destset -> tokens for which that exact destset appears.
+                      let mut per_state_destset_tokens: HashMap<usize, BTreeMap<Vec<NodeId>, SortedSet>> = HashMap::new();
+                      for (t, dm_t) in dm_by_token.into_iter() {
+                          // state -> Vec<dest>
+                          let mut dests_by_state: HashMap<usize, Vec<NodeId>> = HashMap::new();
+                          for (dst, sids) in dm_t.into_iter() {
+                              for s in sids.iter() {
+                                  dests_by_state.entry(s).or_default().push(dst);
+                              }
+                          }
+                          for (s, mut v) in dests_by_state {
+                              v.sort_unstable();
+                              v.dedup();
+                              if v.is_empty() {
+                                  continue;
+                              }
+                              per_state_destset_tokens
+                                  .entry(s)
+                                  .or_default()
+                                  .entry(v)
+                                  .or_default()
+                                  .insert(t);
+                          }
+                      }
+                      if per_state_destset_tokens.is_empty() {
+                          continue;
+                      }
+
+                      // Canonicalize unique dest-sets across all states (for this pop) into shared intermediates.
+                      // Also collect the union of tokens per dest-set across all states.
+                      let mut tokens_union_by_destset: BTreeMap<Vec<NodeId>, SortedSet> = BTreeMap::new();
+                      for (_s, dmap) in &per_state_destset_tokens {
+                          for (dset, toks) in dmap {
+                              tokens_union_by_destset
+                                  .entry(dset.clone())
+                                  .or_default()
+                                  .union_inplace(toks);
+                          }
+                      }
+
+                      let mut mid_for_destset: BTreeMap<Vec<NodeId>, NodeId> = BTreeMap::new();
+                      for (dset, toks_union) in &tokens_union_by_destset {
+                          if toks_union.is_empty() || dset.is_empty() {
+                              continue;
+                          }
+                          let mid_id = trie.add_node(false);
+                          mid_for_destset.insert(dset.clone(), mid_id);
+                          // M_D --(pop, union(toks for D))--> v, sids=all_states
+                          for &d in dset {
+                              trie.add_edge(
+                                  mid_id,
+                                  EdgeKey::new(pop, toks_union.clone()),
+                                  d,
+                                  all_states.clone(),
+                              );
+                          }
+                      }
+
+                      // One aggregator per (state, pop): ensure exactly one u-level edge per (state, pop).
+                      for (s, dmap) in per_state_destset_tokens {
+                          // Union over all tokens for this state at this pop
+                          let mut all_toks_for_s = SortedSet::new();
+                          for toks in dmap.values() {
+                              all_toks_for_s.union_inplace(toks);
+                          }
+                          if all_toks_for_s.is_empty() {
+                              continue;
+                          }
+                          // Build {s}
+                          let mut sset = SortedSet::new();
+                          sset.insert(s);
+
+                          // Per-(state, pop) aggregator
+                          let agg_id = trie.add_node(false);
+
+                          // u --(0, union_all_tokens_for_s)--> A_{s,p}, sids = {s}
+                          new_children_total
+                              .entry(EdgeKey::new(0, all_toks_for_s))
+                              .or_default()
+                              .entry(agg_id)
+                              .or_default()
+                              .union_inplace(&sset);
+
+                          // For each dest-set of this state: A_{s,p} --(0, toks_{s,D})--> M_D
+                          for (dset, toks_for_dset) in dmap {
+                              if toks_for_dset.is_empty() {
+                                  continue;
+                              }
+                              if let Some(&mid_id) = mid_for_destset.get(&dset) {
+                                  trie.add_edge(
+                                      agg_id,
+                                      EdgeKey::new(0, toks_for_dset.clone()),
+                                      mid_id,
+                                      all_states.clone(),
+                                  );
+                              }
+                          }
+                      }
+                  }
+
+                  // Replace u's children with the newly built set (pop <= 0 kept, pop > 0 rewritten).
+                  trie.set_children(node_id, new_children_total);
+              }
+          }
+      }
+  diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode:
+  prev_apply_mode: git-llm
   default_end_line:
 system:
   message: |-
@@ -13138,5 +13513,332 @@ messages:
 
       (How will we deal with cycles?)
       Prove mathematically and rigorously the effectiveness and correctness of your approach.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Below are two parts:
+
+      1) Step-by-step instructions
+      2) Git diffs for the changes
+
+      Part 1 — Step-by-step instructions
+
+      1. Add a new optimization pass named AggressiveStatePopCollapsePass under src/trie3_opt/passes/aggressive_state_pop_collapse.rs. This pass implements the transformation you described:
+         - For each node and each pop > 0:
+           - Build the map (pop, state, LLM) -> {dest} by aggregating all outgoing edges whose token set includes the LLM.
+           - Canonicalize each {dest} set into a single intermediate node, shared across all states and tokens for the same pop (deduplicating “unique dest sets”).
+           - For each state s, create a per-(state, pop) aggregator node and add exactly one source-level edge for that (state, pop), ensuring at most one edge per (state ID, pop) from the original node. Tokens for s are unioned across all its token groups.
+           - Wire aggregator -> canonical dest-set node by pop=0 edges whose tokens are the exact token groups for which that state maps to that dest set.
+           - Wire canonical dest-set node -> actual destinations by a single pop=p edge labeled by the union of tokens (across all states) for that dest-set; use all_states on these edges. This keeps constraints on states correct because each per-(state, pop) aggregator is only reachable with that state.
+         - Keep existing pop <= 0 edges as-is.
+         - Replace the original node’s pop > 0 children with the newly built set of pop=0 edges to the per-(state, pop) aggregators.
+
+      2. Export the new pass:
+         - Add a new module declaration and public export in src/trie3_opt/passes/mod.rs.
+
+      3. Add a configuration flag to opt-in to this pass:
+         - Extend CoordinatorConfig in src/trie3_opt/coordinator.rs with a new boolean field aggressive_state_pop_collapse (default false and false for off()).
+         - In build_pipeline, plug this pass in Phase 3 (factoring/structural simplification), after the other factoring passes. This keeps it opt-in and under explicit user control.
+
+      4. Rigorously justify correctness (mathematical sketch you can keep with your change notes or commit message):
+         - Model: Let an original node u have outgoing transitions represented as tuples (p, L, v, S) where p is the pop amount, L is the token set, v is the destination, and S is the allowed state set on that transition. A single transition step at u with token t and state s is allowed iff there exists a tuple with t ∈ L and s ∈ S.
+         - Construction:
+           - For each p > 0, token t, and state s, define D(u, p, s, t) = {v | there exists (p, L, v, S) with t ∈ L and s ∈ S}. This exactly realizes (pop, state, LLM) -> {dest}.
+           - Deduplicate identical dest-sets across (s, t) (for a fixed p) into canonical intermediate nodes M_D (one per unique dest-set D). This ensures “only merge once” for each unique dest set.
+           - For each state s at that pop, create one “state-pop” aggregator A_{s,p}; add a single edge u --(0, T_s)--> A_{s,p} with T_s = union over t where D(u, p, s, t) is non-empty, state set {s}. This enforces exactly one u-level edge per (state, pop).
+           - For each D and state s, add A_{s,p} --(0, T_{s,D})--> M_D where T_{s,D} = {t | D(u, p, s, t) = D}. Finally add M_D --(p, U_D)--> v with U_D = union over all t and all states mapping to D, state set = all_states. Because token congruence across the 0-pop edges and the final p-pop edge requires the same t, and A_{s,p} can only be reached with state s, the set of valid executions at token t and state s is unchanged.
+         - Soundness: any two-step in the new graph corresponds to some one-step in the original. More precisely, for any u, s, t, v in the new graph, a path u --(0,t,s)--> A_{s,p} --(0,t)--> M_D --(p,t)--> v exists only if D(u, p, s, t) = D and v ∈ D in the original graph. This follows from the construction of D and the exact token groups used for wiring.
+         - Completeness: any one-step in the original graph at token t and state s from u to v is simulated by a unique path u --(0,t,s)--> A_{s,p} --(0,t)--> M_D --(p,t)--> v in the new graph by construction of A_{s,p}, M_D, and the token partitions.
+         - State correctness: A_{s,p} uses state set {s} on u -> A_{s,p}. Subsequent edges use all_states because they are constrained by the fact that only A_{s,p} is reachable for state s. Thus, we neither lose nor gain state-legal paths. Formally, in any reachable configuration arriving at A_{s,p}, the state component must equal s; hence using all_states afterwards does not permit extra configurations not present in the original.
+         - Cycle preservation: If an original edge contributes to a self-loop or a cycle, the new graph introduces an equivalent cycle via the appropriate A_{s,p} and M_D nodes. No spurious cycles are introduced: every new edge is backed by at least one original transition, and the only new reachability arises through factoring of existing choices.
+
+      5. Performance and safety notes:
+         - This pass is intentionally aggressive: it collapses all (state, pop)-fanout at the source node to exactly one edge and deduplicates identical dest-sets across states/tokens at that pop via canonical intermediates.
+         - It may substantially increase the number of intermediate nodes in adversarial cases (many states × tokens × distinct dest-sets). Keep it behind the new config flag so you can activate it only when beneficial (e.g., roots or shallow depths, or after other passes reduce variety).
+         - Downstream passes such as CompressEdgesPass and CompressUnaryChainsPass will often compress the created chains, and Merge passes can fold structurally equivalent intermediates.
+
+      Part 2 — Git diffs
+
+      Below are the patch files. Apply them in order.
+
+      diff --git a/src/trie3_opt/passes/aggressive_state_pop_collapse.rs b/src/trie3_opt/passes/aggressive_state_pop_collapse.rs
+      --- a/src/trie3_opt/passes/aggressive_state_pop_collapse.rs
+      +++ b/src/trie3_opt/passes/aggressive_state_pop_collapse.rs
+      @@ -0,0 +1,235 @@
+      +use std::collections::{BTreeMap, HashMap};
+      +
+      +use crate::trie3_opt::context::OptimizationContext;
+      +use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
+      +use crate::trie3_opt::passes::OptimizationPass;
+      +
+      +/// Aggressively collapse per-(state, pop) fanout by introducing:
+      +///   - a per-(state, pop) aggregator A_{s,p} with exactly one u->A_{s,p} edge,
+      +///   - per-unique-destset canonical nodes M_D (shared across states for the same pop),
+      +///   - wiring A_{s,p} --(0, tokens_{s,D})--> M_D,
+      +///   - and M_D --(p, union_tokens_for_D)--> each v in D with state set = all_states.
+      +///
+      +/// This guarantees there is at most one source-level edge for each (state, pop) pair,
+      +/// while preserving exact token/state semantics.
+      +pub struct AggressiveStatePopCollapsePass;
+      +
+      +impl OptimizationPass for AggressiveStatePopCollapsePass {
+      +    fn name(&self) -> &'static str {
+      +        "AggressiveStatePopCollapse"
+      +    }
+      +
+      +    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+      +        let all_states = SortedSet::from_iter(0..=ctx.max_state_id);
+      +        let node_ids: Vec<_> = trie.node_ids().collect();
+      +
+      +        for node_id in node_ids {
+      +            let node = if let Some(n) = trie.get_node(node_id) { n } else { continue };
+      +            if node.children().is_empty() {
+      +                continue;
+      +            }
+      +
+      +            // Keep pop <= 0 edges as-is; aggressively refactor pop > 0 edges.
+      +            let mut keep_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+      +            let mut by_pop: BTreeMap<isize, Vec<(EdgeKey, BTreeMap<NodeId, SortedSet>)>> = BTreeMap::new();
+      +
+      +            for (ek, dm) in node.children() {
+      +                if ek.pop <= 0 {
+      +                    let entry = keep_children.entry(ek.clone()).or_default();
+      +                    for (dst, sids) in dm {
+      +                        entry.entry(*dst).or_default().union_inplace(sids);
+      +                    }
+      +                } else {
+      +                    by_pop.entry(ek.pop).or_default().push((ek.clone(), dm.clone()));
+      +                }
+      +            }
+      +
+      +            // If there are no pop>0 edges, skip.
+      +            if by_pop.is_empty() {
+      +                continue;
+      +            }
+      +
+      +            let mut new_children_total = keep_children;
+      +
+      +            // Process each pop>0 independently.
+      +            for (pop, edges_for_pop) in by_pop {
+      +                if edges_for_pop.is_empty() {
+      +                    continue;
+      +                }
+      +
+      +                // dm_by_token: token -> (dest -> union(states))
+      +                let mut dm_by_token: HashMap<usize, BTreeMap<NodeId, SortedSet>> = HashMap::new();
+      +                for (ek, dm) in &edges_for_pop {
+      +                    if ek.tokens.is_empty() || dm.is_empty() {
+      +                        continue;
+      +                    }
+      +                    for t in ek.tokens.iter() {
+      +                        let entry = dm_by_token.entry(t).or_default();
+      +                        for (dst, sids) in dm {
+      +                            entry.entry(*dst).or_default().union_inplace(sids);
+      +                        }
+      +                    }
+      +                }
+      +                if dm_by_token.is_empty() {
+      +                    continue;
+      +                }
+      +
+      +                // For each token t, compute for each state s the destination set D(s,t).
+      +                // Accumulate per state s: destset -> tokens for which that exact destset appears.
+      +                let mut per_state_destset_tokens: HashMap<usize, BTreeMap<Vec<NodeId>, SortedSet>> = HashMap::new();
+      +                for (t, dm_t) in dm_by_token.into_iter() {
+      +                    // state -> Vec<dest>
+      +                    let mut dests_by_state: HashMap<usize, Vec<NodeId>> = HashMap::new();
+      +                    for (dst, sids) in dm_t.into_iter() {
+      +                        for s in sids.iter() {
+      +                            dests_by_state.entry(s).or_default().push(dst);
+      +                        }
+      +                    }
+      +                    for (s, mut v) in dests_by_state {
+      +                        v.sort_unstable();
+      +                        v.dedup();
+      +                        if v.is_empty() {
+      +                            continue;
+      +                        }
+      +                        per_state_destset_tokens
+      +                            .entry(s)
+      +                            .or_default()
+      +                            .entry(v)
+      +                            .or_default()
+      +                            .insert(t);
+      +                    }
+      +                }
+      +                if per_state_destset_tokens.is_empty() {
+      +                    continue;
+      +                }
+      +
+      +                // Canonicalize unique dest-sets across all states (for this pop) into shared intermediates.
+      +                // Also collect the union of tokens per dest-set across all states.
+      +                let mut tokens_union_by_destset: BTreeMap<Vec<NodeId>, SortedSet> = BTreeMap::new();
+      +                for (_s, dmap) in &per_state_destset_tokens {
+      +                    for (dset, toks) in dmap {
+      +                        tokens_union_by_destset
+      +                            .entry(dset.clone())
+      +                            .or_default()
+      +                            .union_inplace(toks);
+      +                    }
+      +                }
+      +
+      +                let mut mid_for_destset: BTreeMap<Vec<NodeId>, NodeId> = BTreeMap::new();
+      +                for (dset, toks_union) in &tokens_union_by_destset {
+      +                    if toks_union.is_empty() || dset.is_empty() {
+      +                        continue;
+      +                    }
+      +                    let mid_id = trie.add_node(false);
+      +                    mid_for_destset.insert(dset.clone(), mid_id);
+      +                    // M_D --(pop, union(toks for D))--> v, sids=all_states
+      +                    for &d in dset {
+      +                        trie.add_edge(
+      +                            mid_id,
+      +                            EdgeKey::new(pop, toks_union.clone()),
+      +                            d,
+      +                            all_states.clone(),
+      +                        );
+      +                    }
+      +                }
+      +
+      +                // One aggregator per (state, pop): ensure exactly one u-level edge per (state, pop).
+      +                for (s, dmap) in per_state_destset_tokens {
+      +                    // Union over all tokens for this state at this pop
+      +                    let mut all_toks_for_s = SortedSet::new();
+      +                    for toks in dmap.values() {
+      +                        all_toks_for_s.union_inplace(toks);
+      +                    }
+      +                    if all_toks_for_s.is_empty() {
+      +                        continue;
+      +                    }
+      +                    // Build {s}
+      +                    let mut sset = SortedSet::new();
+      +                    sset.insert(s);
+      +
+      +                    // Per-(state, pop) aggregator
+      +                    let agg_id = trie.add_node(false);
+      +
+      +                    // u --(0, union_all_tokens_for_s)--> A_{s,p}, sids = {s}
+      +                    new_children_total
+      +                        .entry(EdgeKey::new(0, all_toks_for_s))
+      +                        .or_default()
+      +                        .entry(agg_id)
+      +                        .or_default()
+      +                        .union_inplace(&sset);
+      +
+      +                    // For each dest-set of this state: A_{s,p} --(0, toks_{s,D})--> M_D
+      +                    for (dset, toks_for_dset) in dmap {
+      +                        if toks_for_dset.is_empty() {
+      +                            continue;
+      +                        }
+      +                        if let Some(&mid_id) = mid_for_destset.get(&dset) {
+      +                            trie.add_edge(
+      +                                agg_id,
+      +                                EdgeKey::new(0, toks_for_dset.clone()),
+      +                                mid_id,
+      +                                all_states.clone(),
+      +                            );
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Replace u's children with the newly built set (pop <= 0 kept, pop > 0 rewritten).
+      +            trie.set_children(node_id, new_children_total);
+      +        }
+      +    }
+      +}
+      diff --git a/src/trie3_opt/passes/mod.rs b/src/trie3_opt/passes/mod.rs
+      --- a/src/trie3_opt/passes/mod.rs
+      +++ b/src/trie3_opt/passes/mod.rs
+      @@ -38,6 +38,7 @@ pub mod reorder_llm_tokens;
+       pub mod merge_state_agnostic;
+       
+       pub use canonicalize_end_nodes::CanonicalizeEndNodesPass;
+      +pub mod aggressive_state_pop_collapse;
+       pub use compress_edges::CompressEdgesPass;
+       pub use compress_unary_chains::CompressUnaryChainsPass;
+       pub use eliminate_pop0::EliminatePop0ExceptRootsPass;
+      @@ -54,3 +55,4 @@ pub use prune_dead_paths::PruneDeadPathsPass;
+       pub use prune_unproductive_paths::PruneUnproductivePathsPass;
+       pub use reorder_llm_tokens::ReorderLLMTokensPass;
+       pub use merge_state_agnostic::MergeStateAgnosticPass;
+      +pub use aggressive_state_pop_collapse::AggressiveStatePopCollapsePass;
+      diff --git a/src/trie3_opt/coordinator.rs b/src/trie3_opt/coordinator.rs
+      --- a/src/trie3_opt/coordinator.rs
+      +++ b/src/trie3_opt/coordinator.rs
+      @@ -39,6 +39,7 @@ pub struct CoordinatorConfig {
+           pub factor_common_destinations_min_incoming: usize,
+           pub factor_root_fanout: bool,
+           pub factor_root_fanout_max_atoms_per_pop: usize,
+      +    pub aggressive_state_pop_collapse: bool,
+           pub merge_structural_max_iters: usize,
+           pub merge_bisimulation_max_iters: usize,
+           pub merge_global_atoms: bool,
+      @@ -74,6 +75,7 @@ impl Default for CoordinatorConfig {
+                   factor_common_destinations_min_incoming: 12,
+                   factor_root_fanout: true,
+                   factor_root_fanout_max_atoms_per_pop: 512,
+      +            aggressive_state_pop_collapse: false,
+                   merge_structural_max_iters: 4,
+                   merge_bisimulation_max_iters: 1000,
+                   merge_global_atoms: true,
+      @@ -116,6 +118,7 @@ impl CoordinatorConfig {
+                   factor_common_destinations_min_incoming: 0,
+                   factor_root_fanout: false,
+                   factor_root_fanout_max_atoms_per_pop: 0,
+      +            aggressive_state_pop_collapse: false,
+                   merge_structural_max_iters: 0,
+                   merge_bisimulation_max_iters: 0,
+                   merge_global_atoms: false,
+      @@ -169,6 +172,9 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>>
+               if config.factor_common_destinations {
+                   pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
+               }
+      +        if config.aggressive_state_pop_collapse {
+      +            pipeline.push(Box::new(AggressiveStatePopCollapsePass));
+      +        }
+       
+               // Phase 4: Edge compression and chain contraction
+               if config.compress_edges {
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      No ```diff blocks found. Scanning for raw, unfenced diffs...
+      Found 3 potential raw diff block(s).
+      Found 3 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/trie3_opt/passes/aggressive_state_pop_collapse.rs
+      Warning: Attempting to modify non-existent file src/trie3_opt/passes/aggressive_state_pop_collapse.rs which is not marked as new. Applying patch to empty content.
+      Applying patch to 'src/trie3_opt/passes/aggressive_state_pop_collapse.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/aggressive_state_pop_collapse.rs.
+      Warning: File src/trie3_opt/passes/aggressive_state_pop_collapse.rs was created by the patch but not marked as new.
+      Added unexpectedly created file src/trie3_opt/passes/aggressive_state_pop_collapse.rs to attached files state.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/trie3_opt/passes/mod.rs
+      Applying patch to 'src/trie3_opt/passes/mod.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/mod.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/trie3_opt/coordinator.rs
+      Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
     metadata:
 ...
