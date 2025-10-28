@@ -376,4 +376,55 @@ impl MiniTrie {
             node.parents.retain(|parent_id, _| live_nodes.contains(parent_id));
         }
     }
+
+    /// Compute the set of all LLM tokens on outgoing edges for each node.
+    pub fn live_llm_tokens(&self) -> HashMap<NodeId, SortedSet> {
+        let mut live_tokens: HashMap<NodeId, SortedSet> = HashMap::new();
+        for node in self.nodes() {
+            let mut node_live_tokens = SortedSet::new();
+            for (ek, _) in node.children() {
+                node_live_tokens.union_inplace(&ek.tokens);
+            }
+            live_tokens.insert(node.id(), node_live_tokens);
+        }
+        live_tokens
+    }
+
+    /// Compute set of LLM tokens at each node that can start a path to an END node.
+    pub fn productive_llm_tokens(&self) -> HashMap<NodeId, SortedSet> {
+        let mut productive_tokens: HashMap<NodeId, SortedSet> =
+            self.node_ids().map(|id| (id, SortedSet::new())).collect();
+        let mut productive_nodes: BTreeSet<NodeId> = BTreeSet::new();
+        let mut worklist: VecDeque<NodeId> = VecDeque::new();
+
+        for node in self.nodes() {
+            if node.is_end() {
+                worklist.push_back(node.id());
+                productive_nodes.insert(node.id());
+            }
+        }
+
+        while let Some(v_id) = worklist.pop_front() {
+            if let Some(v_node) = self.get_node(v_id) {
+                for (u_id, edges_from_u) in v_node.parents() {
+                    let u_prod = productive_tokens.get_mut(u_id).unwrap();
+                    let old_len = u_prod.len();
+
+                    for (ek, _sids) in edges_from_u {
+                        u_prod.union_inplace(&ek.tokens);
+                    }
+
+                    if u_prod.len() > old_len {
+                        // If u's productive set grew, u is now productive.
+                        // If it wasn't productive before, we need to propagate this.
+                        if productive_nodes.insert(*u_id) {
+                            worklist.push_back(*u_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        productive_tokens
+    }
 }
