@@ -1037,21 +1037,23 @@ local_system:
               let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
               let mut compiled_grammar = compiled_grammar;
 
-              if let Some(dummy_name) = &config.dummy_terminal_name {
-                  let dummy_term = Terminal::regex_name(dummy_name);
-                  let mut new_productions = compiled_grammar.glr_parser.productions.clone();
-                  for prod in &mut new_productions {
-                      let mut new_rhs = Vec::new();
-                      for sym in &prod.rhs {
-                          if let Symbol::Terminal(_) = sym {
-                              new_rhs.push(Symbol::Terminal(dummy_term.clone()));
-                          }
-                          new_rhs.push(sym.clone());
+              let mut new_config = config.clone();
+              let dummy_name = "__DUMMY_TERMINAL__".to_string();
+              new_config.dummy_terminal_name = Some(dummy_name.clone());
+
+              let dummy_term = Terminal::regex_name(&dummy_name);
+              let mut new_productions = compiled_grammar.glr_parser.productions.clone();
+              for prod in &mut new_productions {
+                  let mut new_rhs = Vec::new();
+                  for sym in &prod.rhs {
+                      if let Symbol::Terminal(_) = sym {
+                          new_rhs.push(Symbol::Terminal(dummy_term.clone()));
                       }
-                      prod.rhs = new_rhs;
+                      new_rhs.push(sym.clone());
                   }
-                  compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
+                  prod.rhs = new_rhs;
               }
+              compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
 
               Self::new_with_config_and_precompute0_cache(
                   compiled_grammar.tokenizer,
@@ -1059,7 +1061,7 @@ local_system:
                   llm_token_map,
                   compiled_grammar.definition.terminal_to_group_id().clone(),
                   max_original_llm_token_id,
-                  config,
+                  &new_config,
                   precompute0_cache,
               )
           }
@@ -8701,21 +8703,23 @@ messages:
               let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
               let mut compiled_grammar = compiled_grammar;
 
-              if let Some(dummy_name) = &config.dummy_terminal_name {
-                  let dummy_term = Terminal::regex_name(dummy_name);
-                  let mut new_productions = compiled_grammar.glr_parser.productions.clone();
-                  for prod in &mut new_productions {
-                      let mut new_rhs = Vec::new();
-                      for sym in &prod.rhs {
-                          if let Symbol::Terminal(_) = sym {
-                              new_rhs.push(Symbol::Terminal(dummy_term.clone()));
-                          }
-                          new_rhs.push(sym.clone());
+              let mut new_config = config.clone();
+              let dummy_name = "__DUMMY_TERMINAL__".to_string();
+              new_config.dummy_terminal_name = Some(dummy_name.clone());
+
+              let dummy_term = Terminal::regex_name(&dummy_name);
+              let mut new_productions = compiled_grammar.glr_parser.productions.clone();
+              for prod in &mut new_productions {
+                  let mut new_rhs = Vec::new();
+                  for sym in &prod.rhs {
+                      if let Symbol::Terminal(_) = sym {
+                          new_rhs.push(Symbol::Terminal(dummy_term.clone()));
                       }
-                      prod.rhs = new_rhs;
+                      new_rhs.push(sym.clone());
                   }
-                  compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
+                  prod.rhs = new_rhs;
               }
+              compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
 
               Self::new_with_config_and_precompute0_cache(
                   compiled_grammar.tokenizer,
@@ -8723,7 +8727,7 @@ messages:
                   llm_token_map,
                   compiled_grammar.definition.terminal_to_group_id().clone(),
                   max_original_llm_token_id,
-                  config,
+                  &new_config,
                   precompute0_cache,
               )
           }
@@ -11481,8 +11485,10 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: Modify this so that `new_from_grammar_definition` will define the dummy
-      terminals *on its own*.
+  - user: |-
+      Modify this so that `GrammarConstraintConfig`'s `dummy_terminal_name` instead is a map from dummy terminal name to a set of original terminals.
+      Ensure that no original terminal is mapped by two different dummy terminals.
+      Ensure `convert_trie1_recursive` handles this properly by inserting the correct dummy terminal ahead of the correct terminal.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -11502,96 +11508,190 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to modify the code, followed by the git diff.
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the step-by-step instructions to modify `GrammarConstraintConfig` and related functions, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      In the file `src/constraint.rs`, you will modify the `new_from_grammar_definition` function to make it responsible for creating and injecting a dummy terminal into the grammar. This change makes the process automatic and removes the need to specify the dummy terminal name in the configuration.
+      Here are the edits for `src/constraint.rs`:
 
-      1.  **Navigate to the function:** Open `src/constraint.rs` and locate the `new_from_grammar_definition` function inside the `impl GrammarConstraint` block.
+      1.  **Update `GrammarConstraintConfig` struct:**
+          In `src/constraint.rs`, find the `GrammarConstraintConfig` struct definition.
+          -   Change the field `dummy_terminal_name: Option<String>` to `dummy_terminal_map: BTreeMap<String, BTreeSet<String>>`.
 
-      2.  **Replace the conditional logic:** The function currently has a conditional block that starts with `if let Some(dummy_name) = &config.dummy_terminal_name { ... }` and a subsequent call to `Self::new_with_config_and_precompute0_cache(...)`. You will replace this entire section of code.
+      2.  **Update `GrammarConstraintConfig::default()`:**
+          In the `impl Default for GrammarConstraintConfig` block:
+          -   Change `dummy_terminal_name: None` to `dummy_terminal_map: BTreeMap::new()`.
 
-      3.  **Delete the old code:** Remove the lines from `if let Some(dummy_name) = &config.dummy_terminal_name {` down to the closing parenthesis of the `Self::new_with_config_and_precompute0_cache(...)` call.
+      3.  **Update `GrammarConstraintConfig::off()`:**
+          In the `impl GrammarConstraintConfig` block, inside the `off()` function:
+          -   Change `dummy_terminal_name: None` to `dummy_terminal_map: BTreeMap::new()`.
 
-      4.  **Insert the new logic:** In place of the deleted code, add the new implementation which does the following:
-          *   Clones the incoming `config` into a new mutable variable `new_config`.
-          *   Defines a hardcoded dummy terminal name, `__DUMMY_TERMINAL__`, and sets it on `new_config`.
-          *   Unconditionally transforms the grammar by inserting this dummy terminal before every terminal in all production rules.
-          *   Regenerates the `GLRParser` with the modified grammar.
-          *   Calls `Self::new_with_config_and_precompute0_cache`, passing a reference to the `new_config` you created.
+      4.  **Update `GrammarConstraint::new_from_grammar_definition()`:**
+          This function sets up a special configuration. We'll adapt it to use the new map structure.
+          -   Replace `new_config.dummy_terminal_name = Some(dummy_name.clone());` with logic to populate `new_config.dummy_terminal_map`. It will create one dummy terminal that maps to all original terminals from the grammar.
+          -   Remove the block of code that modifies the grammar productions by inserting dummy terminals. The insertion logic will now be handled entirely within `convert_trie1_recursive`.
 
-      This change ensures that the dummy terminal is always added when creating a `GrammarConstraint` from a `GrammarDefinition`, simplifying the configuration process.
+      5.  **Update `GrammarConstraint::new_with_config()` and `new_with_config_and_precompute0_cache()`:**
+          These two functions are very similar. The changes are the same for both.
+          -   Remove the logic that defines `dummy_terminal_id`.
+          -   Add a new block of code to validate `config.dummy_terminal_map` (ensuring no original terminal is mapped by multiple dummies) and to create a new map `original_to_dummy_map: BTreeMap<TerminalID, TerminalID>`. This map will convert the string-based configuration into `TerminalID`s for use in `precompute1`.
+          -   Update the call to `Self::precompute1` to pass `original_to_dummy_map` instead of `dummy_terminal_id`.
 
-      ### Git Diff
+      6.  **Update `GrammarConstraint::precompute1()`:**
+          -   Change the function signature to accept `original_to_dummy_map: BTreeMap<TerminalID, TerminalID>` instead of `dummy_terminal_id: Option<TerminalID>`.
+          -   Update the call to `Precomputer1::new` to pass this new map.
 
-      Here is the git diff that applies the changes described above.
+      7.  **Update `Precomputer1` struct:**
+          -   Change the field `dummy_terminal_id: Option<TerminalID>` to `original_to_dummy_map: BTreeMap<TerminalID, TerminalID>`.
+
+      8.  **Update `Precomputer1::new()`:**
+          -   Change the function signature to accept `original_to_dummy_map: BTreeMap<TerminalID, TerminalID>`.
+          -   Update the struct instantiation to store this map.
+
+      9.  **Update `Precomputer1::convert_trie1_recursive()`:**
+          This is the core of the logic change.
+          -   Remove the check for `self.dummy_terminal_id`.
+          -   Instead, check if `self.original_to_dummy_map` is not empty.
+          -   The logic for separating edges into `direct_edges` and `injected_edges` needs to be replaced. The new logic will group "injected" edges by their corresponding dummy terminal ID.
+          -   Iterate through the grouped injected edges. For each dummy terminal, create one intermediate node and connect the original node to it via an edge for the dummy terminal. Then, connect the intermediate node to the destination nodes with edges for the original terminals.
+
+      These changes will correctly implement the desired mapping from multiple dummy terminals to sets of original terminals.
+
+      ### Git Diffs
+
+      Here is the git diff for the changes.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1212,26 +1212,27 @@
+      @@ -711,7 +711,7 @@
+           pub trie3: Trie3Config,
+           pub intermediate_trie3_templates: IntermediateTrie3Config,
+           pub intermediate_trie3_main: IntermediateTrie3Config,
+      -    pub dummy_terminal_name: Option<String>,
+      +    pub dummy_terminal_map: BTreeMap<String, BTreeSet<String>>,
+       }
+       
+       impl Default for GrammarConstraintConfig {
+      @@ -724,7 +724,7 @@
+                   trie3: Trie3Config::default(),
+                   intermediate_trie3_templates: IntermediateTrie3Config::default(),
+                   intermediate_trie3_main: IntermediateTrie3Config::default(),
+      -            dummy_terminal_name: None,
+      +            dummy_terminal_map: BTreeMap::new(),
+               }
+           }
+       }
+      @@ -739,7 +739,7 @@
+                   trie3: Trie3Config::off(),
+                   intermediate_trie3_templates: IntermediateTrie3Config::off(),
+                   intermediate_trie3_main: IntermediateTrie3Config::off(),
+      -            dummy_terminal_name: None,
+      +            dummy_terminal_map: BTreeMap::new(),
+               }
+           }
+       }
+      @@ -960,27 +960,20 @@
+               config: &GrammarConstraintConfig,
+               precompute0_cache: Option<Precompute0Cache>,
            ) -> Self {
-               let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
-               let mut compiled_grammar = compiled_grammar;
+      -        let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
+      -        let mut compiled_grammar = compiled_grammar;
       -
-      -        if let Some(dummy_name) = &config.dummy_terminal_name {
-      -            let dummy_term = Terminal::regex_name(dummy_name);
-      -            let mut new_productions = compiled_grammar.glr_parser.productions.clone();
-      -            for prod in &mut new_productions {
-      -                let mut new_rhs = Vec::new();
-      -                for sym in &prod.rhs {
-      -                    if let Symbol::Terminal(_) = sym {
-      -                        new_rhs.push(Symbol::Terminal(dummy_term.clone()));
-      -                    }
-      -                    new_rhs.push(sym.clone());
-      +
-      +        let mut new_config = config.clone();
-      +        let dummy_name = "__DUMMY_TERMINAL__".to_string();
-      +        new_config.dummy_terminal_name = Some(dummy_name.clone());
-      +
-      +        let dummy_term = Terminal::regex_name(&dummy_name);
-      +        let mut new_productions = compiled_grammar.glr_parser.productions.clone();
-      +        for prod in &mut new_productions {
-      +            let mut new_rhs = Vec::new();
-      +            for sym in &prod.rhs {
-      +                if let Symbol::Terminal(_) = sym {
-      +                    new_rhs.push(Symbol::Terminal(dummy_term.clone()));
-                       }
-      -                prod.rhs = new_rhs;
+               let mut new_config = config.clone();
+               let dummy_name = "__DUMMY_TERMINAL__".to_string();
+      -        new_config.dummy_terminal_name = Some(dummy_name.clone());
+      -
+      -        let dummy_term = Terminal::regex_name(&dummy_name);
+      -        let mut new_productions = compiled_grammar.glr_parser.productions.clone();
+      -        for prod in &mut new_productions {
+      -            let mut new_rhs = Vec::new();
+      -            for sym in &prod.rhs {
+      -                if let Symbol::Terminal(_) = sym {
+      -                    new_rhs.push(Symbol::Terminal(dummy_term.clone()));
+      -                }
+      -                new_rhs.push(sym.clone());
       -            }
-      -            compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
+      -            prod.rhs = new_rhs;
       -        }
-      +                new_rhs.push(sym.clone());
-      +            }
-      +            prod.rhs = new_rhs;
-      +        }
-      +        compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
+      -        compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
+      +        
+      +        let all_terminal_names: BTreeSet<String> = grammar_definition.productions.iter()
+      +            .flat_map(|p| p.rhs.iter())
+      +            .filter_map(|sym| if let Symbol::Terminal(t) = sym { Some(t.to_string()) } else { None })
+      +            .collect();
+      +
+      +        new_config.dummy_terminal_map.insert(dummy_name.clone(), all_terminal_names);
+      +
+      +        // The grammar is NOT modified here. Instead, `convert_trie1_recursive` will insert dummy terminals.
+      +        // For this to work, the dummy terminal(s) must be part of the grammar definition so they are known to the parser.
+      +        // This function assumes `__DUMMY_TERMINAL__` is defined in the grammar.
+      +        let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
        
                Self::new_with_config_and_precompute0_cache(
                    compiled_grammar.tokenizer,
-                   compiled_grammar.glr_parser,
-                   llm_token_map,
-                   compiled_grammar.definition.terminal_to_group_id().clone(),
-                   max_original_llm_token_id,
-      -            config,
-      +            &new_config,
-                   precompute0_cache,
-               )
-           }
-
-      ```
+      @@ -1002,9 +995,6 @@
+               config: &GrammarConstraintConfig,
+           ) -> Self {
+               let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
+      -        let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
+      -        assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
+      -
+               let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &tokenizer);
+       
+       
+      @@ -1121,10 +1111,28 @@
+                   };
+               }
+       
+      -        let dummy_terminal_id = config.dummy_terminal_name.as_ref().and_then(|name| {
+      -            parser.terminal_map.get_by_left(&Terminal::regex_name(name)).copied()
+      -        });
+      -
+      +        // Check for overlapping original terminals in dummy_terminal_map
+      +        let mut seen_originals = BTreeSet::new();
+      +        for original_terminals in config.dummy_terminal_map.values() {
+      +            for term in original_terminals {
+      +                if !seen_originals.insert(term.clone()) {
+      +                    panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
+      +                }
+      +            }
+      +        }
+      +
+      +        let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
+      +        for (dummy_name, original_names) in &config.dummy_terminal_map {
+      +            let dummy_term = Terminal::regex_name(dummy_name);
+      +            if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
+      +                for original_name in original_names {
+      +                    let original_term = Terminal::regex_name(original_name);
+      +                    if let Some(&original_id) = parser.terminal_map.get_by_left(&original_term) {
+      +                        original_to_dummy_map.insert(original_id, dummy_id);
+      +                    }
+      +                }
+      +            }
+      +        }
+               let (precomputed1, trie1_god) = Self::precompute1(
+                   &tokenizer,
+                   Some(&parser),
+      @@ -1134,7 +1142,7 @@
+                   &mut precompute_vocab,
+                   &terminal_follow_map,
+                   config,
+      -            dummy_terminal_id,
+      +            original_to_dummy_map,
+               );
+       
+               // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
+      @@ -1290,10 +1298,28 @@
+                   };
+               }
+       
+      -
     metadata:
-  - user: |
+  - user: |-
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      No git diff blocks (```diff) or raw diffs found in the last assistant message.
     metadata:
-  - user: 'Changes committed with message: "constraint: Automatically inject hardcoded
-      dummy terminal in new_from_grammar_definition"'
+  - user: 'Changes committed with message: "No changes detected in the provided diff."'
     metadata:
 ...
