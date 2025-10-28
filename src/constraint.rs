@@ -1955,7 +1955,7 @@ impl GrammarConstraint {
         term_ids.sort_by_key(|t| t.0);
 
         for tid in term_ids {
-            let (start, end) = Self::build_trie3_template_for_terminal(parser, trie3_god, tid, internal_max_llm_token);
+            let (start, end) = Self::build_trie3_template_for_terminal(parser, trie3_god, tid);
             // Temporarily mark the end node as 'end' for optimization purposes
             end.write(trie3_god).unwrap().value.end = true;
             out.insert(tid, (start, end));
@@ -1998,7 +1998,6 @@ impl GrammarConstraint {
         parser: &GLRParser,
         trie3_god: &IntermediateTrie3GodWrapper,
         tid: TerminalID,
-        internal_max_llm_token: usize,
     ) -> (IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index) {
         // Create template start node
         let start = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
@@ -2014,32 +2013,46 @@ impl GrammarConstraint {
         };
         s.process_token_advanced(tid, &cfg);
 
-        // Flatten the active GSS into explicit stacks. Each is (Vec<ParseStateEdgeContent>, Acc).
+        // Flatten the active GSS into explicit stacks.
         let stacks = s.active_state.stack.inner.to_stacks();
-        let end = Self::reduce_gss_stacks_to_trie3_from_start(trie3_god, &stacks, internal_max_llm_token);
+        
+        // This new function will build the paths for the stack *below* the shifted state.
+        let (_head, final_nodes_map) = Self::reduce_gss_stacks_to_trie3_paths_from_start(trie3_god, &stacks);
+
+        // Create a single end node for all paths to converge to.
+        let end = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
+
+        // For each possible shifted state, add the final Push edge to the common end node.
+        for (shifted_state_content, path_end_node) in final_nodes_map {
+            let mut state_bv = StateIDBV::zeros();
+            state_bv.insert(shifted_state_content.state_id.0);
+            let inserter = EdgeInserter::new(
+                trie3_god,
+                path_end_node.as_arc().clone(),
+                IntermediateTrie3EdgeKey::Push(state_bv), (), |_, _| {}, |_, _| {}, |_, _| {},
+            );
+            inserter.try_destination(end.clone()).expect("Failed to insert final Push edge in template");
+        }
+
         (start, end)
     }
 
-    /// Convert GSS stacks into a Trie3 path starting from the stored trie nodes in each stack's Acc:
-    /// - For each stack:
-    ///   - Take its Acc.stored_trie_nodes (should contain the template start)
-    ///   - Create a "head" node and connect each stored node -> head with unconditional (pop=0, all tokens, EV=all states)
-    ///   - For each subsequent state in the stack (skip the first, the hallucinated state), add
-    ///     an edge (pop=-1, all tokens) with EV=singleton(state_id)
-    ///   - Accumulate the final nodes across stacks
-    /// - Converge all final nodes into a single shared `end` node by unconditional edges.
-    fn reduce_gss_stacks_to_trie3_from_start( // TODO: rename
+    /// Convert GSS stacks into Trie3 paths.
+    /// This function processes stacks that result from a shift action. Each stack is a sequence of
+    /// `ParseStateEdgeContent`. The first element (`items[0]`) is the new state after the shift.
+    /// The rest of the elements (`items[1..]`) form the stack that was present before the shift.
+    ///
+    /// This function builds a trie representing the `items[1..]` part of all stacks, with `Push`
+    /// operations for each state. It returns a map from the shifted state (`items[0]`) to the
+    /// trie node that represents the end of the corresponding pre-shift stack path.
+    fn reduce_gss_stacks_to_trie3_paths_from_start(
         trie3_god: &IntermediateTrie3GodWrapper,
         stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
-        internal_max_llm_token: usize,
-    ) -> IntermediatePrecomputeNode3Index {
-        let states_all = StateIDBV::max_ones();
+    ) -> (IntermediatePrecomputeNode3Index, BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index>) {
+        // Create a single head node to merge all starting points from Accs.
+        let head = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
 
-        let mut final_nodes: Vec<IntermediatePrecomputeNode3Index> = Vec::new();
-
-        for (items, acc) in stacks.iter() {
-            // Create a head node and hook it from all stored trie nodes in this stack's Acc
-            let head = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
+        for (_items, acc) in stacks.iter() {
             for src in acc.stored_trie_nodes().iter() {
                 let inserter = EdgeInserter::new(
                     trie3_god,
@@ -2048,10 +2061,20 @@ impl GrammarConstraint {
                 );
                 inserter.try_destination(head.clone()).expect("Failed to insert unconditional edge to template head");
             }
+        }
 
-            // Now walk the stack; items go top->bottom; first item is the hallucinated state: skip it.
+        let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
+
+        for (items, _acc) in stacks.iter() {
+            let mut items = items.clone();
+            items.reverse();
+            if items.is_empty() { continue; }
+
+            let shifted_state_content = items[0].clone();
+
+            // Walk the rest of the stack (below the shifted state)
             let mut cur = head.clone();
-            for state_content in items.iter().skip(1) {
+            for state_content in items.iter().skip(1).rev() {
                 let mut state_bv = StateIDBV::zeros();
                 state_bv.insert(state_content.state_id.0);
                 let inserter = EdgeInserter::new(
@@ -2060,25 +2083,17 @@ impl GrammarConstraint {
                     IntermediateTrie3EdgeKey::Push(state_bv), (), |_, _| {}, |_, _| {}, |_, _| {},
                 );
                 let next = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                let actual = inserter.try_destination(next.clone()).expect("Failed to insert (-1) pop edge in template chain");
+                let actual = inserter.try_destination(next.clone()).expect("Failed to insert Push edge in template chain");
                 cur = actual;
             }
 
-            final_nodes.push(cur);
+            // The current node `cur` is the end of the path for this stack configuration.
+            // Map the shifted state to this end node.
+            // If another stack has the same shifted state and stack path, it will resolve to the same `cur` node.
+            final_nodes_map.insert(shifted_state_content, cur);
         }
 
-        // Converge all final nodes into a single shared end node.
-        let end = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-        for src in final_nodes {
-            let inserter = EdgeInserter::new(
-                trie3_god,
-                src.as_arc().clone(),
-                IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-            );
-            inserter.try_destination(end.clone()).expect("Failed to insert final convergence edge to template end");
-        }
-
-        end
+        (head, final_nodes_map)
     }
 
     fn _process_and_rebuild_trie3_paths(
