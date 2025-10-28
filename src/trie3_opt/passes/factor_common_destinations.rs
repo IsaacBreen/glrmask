@@ -24,7 +24,6 @@ impl OptimizationPass for FactorCommonDestinationsPass {
             return;
         }
 
-        let all_tokens = SortedSet::from_iter(0..=ctx.max_llm_token_id);
         let all_states = SortedSet::from_iter(0..=ctx.max_state_id);
 
         // Map: dest -> { (pop, tokens) -> { states -> [sources] } }
@@ -64,13 +63,15 @@ impl OptimizationPass for FactorCommonDestinationsPass {
                             if let Some(dest_map_for_key) = src_node.children.get_mut(&edge_key) {
                                 dest_map_for_key.remove(&dest_id);
                                 if dest_map_for_key.is_empty() {
-                                    src_node.children.remove(&edge_key);
-                                }
+                                src_node.children.remove(&edge_key);
                             }
+                        }
 
-                            // Add new edge to intermediate node. This is a "None-like" edge.
-                            // pop=0, all tokens, all states.
-                            let none_like_edge_key = EdgeKey::new(0, all_tokens.clone());
+                            // Add new edge to intermediate node. Use the same token-set as the factored key
+                            // instead of "all tokens" to avoid massive token-universe expansions in the MiniTrie.
+                            // This preserves exact semantics: the original (pop, tokens)->dest is now
+                            // source --(0, tokens)--> intermediate --(pop, tokens)--> dest.
+                            let none_like_edge_key = EdgeKey::new(0, edge_key.tokens.clone());
                             trie.add_edge(
                                 *src_id,
                                 none_like_edge_key,
