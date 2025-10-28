@@ -32,6 +32,7 @@ pub struct Trie1Config {
     pub prune_nodes_not_reaching_end: bool,
     pub prune_dead_paths: bool,
     pub gc: bool,
+    pub minimize_dummy_penalty: bool,
 }
 
 impl Default for Trie1Config {
@@ -46,6 +47,7 @@ impl Default for Trie1Config {
             prune_nodes_not_reaching_end: true,
             prune_dead_paths: true,
             gc: true,
+            minimize_dummy_penalty: true,
         }
     }
 }
@@ -62,6 +64,7 @@ impl Trie1Config {
             prune_nodes_not_reaching_end: false,
             prune_dead_paths: false,
             gc: false,
+            minimize_dummy_penalty: false,
         }
     }
 }
@@ -444,6 +447,92 @@ fn merge_nodes_trie1(
     Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
 }
 
+fn minimize_dummy_penalty_trie1(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+    dummy_terminal_penalties: &BTreeMap<TerminalID, usize>,
+) {
+    crate::debug!(3, "Trie1: minimizing dummy terminal penalty by unrolling non-shared intermediates...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    // 1. Build predecessor map
+    let mut preds: HashMap<PrecomputeNode1Index, Vec<PrecomputeNode1Index>> = HashMap::new();
+    for u in &all_nodes {
+        let g = u.read(trie1_god).unwrap();
+        for (_, dm) in g.children() {
+            for (v, _) in dm {
+                preds.entry(*v).or_default().push(*u);
+            }
+        }
+    }
+
+    // 2. Identify nodes to modify and what to change
+    let mut modifications: HashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, LLMTokenBV)>> = HashMap::new();
+    let mut edges_to_remove: HashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index)>> = HashMap::new();
+
+    for u in &all_nodes {
+        let u_children = u.read(trie1_god).unwrap().children().clone();
+        for (ek, dm) in u_children {
+            if let Some(tid) = ek {
+                if dummy_terminal_penalties.contains_key(&tid) {
+                    for (i_node, bv_ui) in dm {
+                        // Check if i_node is an intermediate node with a single predecessor (u)
+                        if preds.get(&i_node).map_or(false, |p| p.len() == 1 && p[0] == *u) {
+                            // This is a candidate for unrolling.
+                            edges_to_remove.entry(*u).or_default().push((ek, i_node));
+                            
+                            let i_children = i_node.read(trie1_god).unwrap().children().clone();
+                            for (orig_ek, orig_dm) in i_children {
+                                for (v_node, bv_iv) in orig_dm {
+                                    let new_bv = bv_ui.clone() & &bv_iv;
+                                    if !new_bv.is_empty() {
+                                        modifications.entry(*u).or_default().push((orig_ek, v_node, new_bv));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if modifications.is_empty() {
+        crate::debug!(3, "Trie1: no dummy terminals to unroll.");
+        return;
+    }
+    crate::debug!(3, "Trie1: unrolling {} dummy terminal edges.", edges_to_remove.values().map(|v| v.len()).sum::<usize>());
+
+    // 3. Apply modifications
+    for (u, edges) in edges_to_remove {
+        let mut w = u.write(trie1_god).unwrap();
+        for (ek, i_node) in edges {
+            if let Some(dm) = w.children_mut().get_mut(&ek) {
+                dm.remove(&i_node);
+                if dm.is_empty() {
+                    w.children_mut().remove(&ek);
+                }
+            }
+        }
+    }
+
+    for (u, new_edges) in modifications {
+        let mut w = u.write(trie1_god).unwrap();
+        for (ek, v_node, bv) in new_edges {
+            w.children_mut().entry(ek).or_default()
+                .entry(v_node)
+                .and_modify(|e| *e |= &bv)
+                .or_insert(bv);
+        }
+    }
+}
+
+// Exact signature-based DAG minimization for Trie1:
+// Two nodes are equivalent iff:
+//   - their end flags match
+
 pub fn optimize_trie1_size(
     precomputed1: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
@@ -455,6 +544,7 @@ pub fn optimize_trie1_size(
     config: &Trie1Config,
     stage_vocab: &mut StageVocab,
     token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
+    dummy_terminal_penalties: &BTreeMap<TerminalID, usize>,
 ) {
     if !config.enabled {
         return;
@@ -489,6 +579,9 @@ pub fn optimize_trie1_size(
     // === Pass 2: Minimization and further cleanup ===
     if config.minimize_by_signature {
         merge_nodes_trie1(precomputed1, trie1_god);
+    }
+    if config.minimize_dummy_penalty {
+        minimize_dummy_penalty_trie1(precomputed1, trie1_god, dummy_terminal_penalties);
     }
     if !config.early_flatten_epsilon {
         flatten_all_none_edges_trie1(precomputed1, trie1_god);

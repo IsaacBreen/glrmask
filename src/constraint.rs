@@ -1871,6 +1871,11 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
         original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
+        let mut dummy_terminal_penalties: BTreeMap<TerminalID, usize> = BTreeMap::new();
+        for dummy_tid in original_to_dummy_map.values() {
+            *dummy_terminal_penalties.entry(*dummy_tid).or_default() += 1;
+        }
+
         let mut helper = Precomputer1::new(
             tokenizer,
             parser,
@@ -1908,6 +1913,7 @@ impl GrammarConstraint {
             &config.trie1,
             stage_vocab,
             token_name_map,
+            &dummy_terminal_penalties,
         );
 
         (precomputed1, trie1_god)
