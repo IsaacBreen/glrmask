@@ -2226,7 +2226,7 @@ impl GrammarConstraint {
         dbg!(&stacks);
 
         // This new function will build the paths for the stack *below* the shifted state.
-        let (_head, final_nodes_map) = Self::reduce_gss_stacks_to_trie3_paths_from_start(trie3_god, &stacks);
+        let final_nodes_map = Self::reduce_gss_stacks_to_trie3_paths_from_start(trie3_god, &stacks);
 
         // Create a single end node for all paths to converge to.
         let end = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
@@ -2257,24 +2257,24 @@ impl GrammarConstraint {
     fn reduce_gss_stacks_to_trie3_paths_from_start(
         trie3_god: &IntermediateTrie3GodWrapper,
         stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
-    ) -> (IntermediatePrecomputeNode3Index, BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index>) {
-        // Create a single head node to merge all starting points from Accs.
-        let head = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
+    ) -> BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> {
+        let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
-        for (_items, acc) in stacks.iter() {
+        for (items, acc) in stacks.iter() {
+            let mut cur = IntermediatePrecomputeNode3Index::new(
+                trie3_god.insert(IntermediatePrecomputeNode3::new(
+                    IntermediatePrecomputedNodeContents3::internal()
+                ))
+            );
             for src in acc.stored_trie_nodes().iter() {
                 let inserter = EdgeInserter::new(
                     trie3_god,
                     src.as_arc().clone(),
                     IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
                 );
-                inserter.try_destination(head.clone()).expect("Failed to insert unconditional edge to template head");
+                inserter.try_destination(cur.clone()).expect("Failed to insert unconditional edge to template head");
             }
-        }
 
-        let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
-
-        for (items, _acc) in stacks.iter() {
             let items = &items[1..]; // Skip first element
             if items.is_empty() {
                 continue;
@@ -2288,7 +2288,6 @@ impl GrammarConstraint {
             let pre_shift_stack = &items[..items.len() - 1];
 
             // Walk the pre-shift stack from top to bottom to build the trie path
-            let mut cur = head.clone();
             for state_content in pre_shift_stack {
                 let mut state_bv = StateIDBV::zeros();
                 state_bv.insert(state_content.state_id.0);
@@ -2313,7 +2312,7 @@ impl GrammarConstraint {
             final_nodes_map.insert(shifted_state_content, cur);
         }
 
-        (head, final_nodes_map)
+        final_nodes_map
     }
 
     fn _process_and_rebuild_trie3_paths(
