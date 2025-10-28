@@ -1114,6 +1114,9 @@ impl CompiledGrammar {
         for (val_bytes, group_id) in &definition.literal_to_group_id {
             terminal_map.insert(Terminal::Literal(val_bytes.clone()), TerminalID(*group_id));
         }
+        for (name, group_id) in &definition.external_name_to_group_id {
+            terminal_map.insert(Terminal::RegexName(name.clone()), TerminalID(*group_id));
+        }
         let glr_parser = generate_glr_parser_with_terminal_map(
             &definition.productions,
             terminal_map,
