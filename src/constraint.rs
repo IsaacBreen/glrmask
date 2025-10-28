@@ -2070,12 +2070,12 @@ impl GrammarConstraint {
                 continue;
             }
 
-            let mut item_iter = items.iter().rev();
-            let shifted_state_content = item_iter.next().unwrap().clone();
+            let shifted_state_content = items[0].clone();
+            let pre_shift_stack = &items[1..];
 
             // Walk the pre-shift stack from top to bottom to build the trie path
             let mut cur = head.clone();
-            for state_content in item_iter {
+            for state_content in pre_shift_stack.iter() {
                 let mut state_bv = StateIDBV::zeros();
                 state_bv.insert(state_content.state_id.0);
                 let inserter = EdgeInserter::new(
