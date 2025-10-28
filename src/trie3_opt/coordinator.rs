@@ -32,6 +32,10 @@ pub struct CoordinatorConfig {
     pub compress_unary_chains: bool,
     pub factor_state_fanout: bool,
     pub factor_common_destinations: bool,
+    pub factor_state_dest_sets: bool,
+    pub factor_state_dest_sets_max_depth_from_roots: usize,
+    pub factor_state_dest_sets_max_intermediates_per_pop: usize,
+    pub factor_state_dest_sets_min_out_degree: usize,
     pub factor_common_destinations_min_incoming: usize,
     pub factor_root_fanout: bool,
     pub factor_root_fanout_max_atoms_per_pop: usize,
@@ -56,6 +60,10 @@ impl Default for CoordinatorConfig {
             compress_edges: true,
             compress_unary_chains: true,
             factor_state_fanout: true,
+            factor_state_dest_sets: true,
+            factor_state_dest_sets_max_depth_from_roots: 0, // roots only by default
+            factor_state_dest_sets_max_intermediates_per_pop: 4096,
+            factor_state_dest_sets_min_out_degree: 0,
             factor_common_destinations: true,
             factor_common_destinations_min_incoming: 12,
             factor_root_fanout: true,
@@ -83,6 +91,10 @@ impl CoordinatorConfig {
             compress_edges: false,
             compress_unary_chains: false,
             factor_state_fanout: false,
+            factor_state_dest_sets: false,
+            factor_state_dest_sets_max_depth_from_roots: 0,
+            factor_state_dest_sets_max_intermediates_per_pop: 0,
+            factor_state_dest_sets_min_out_degree: 0,
             factor_common_destinations: false,
             factor_common_destinations_min_incoming: 0,
             factor_root_fanout: false,
@@ -134,6 +146,9 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
         }
         if config.factor_root_fanout {
             pipeline.push(Box::new(FactorRootFanoutPass::new(config.factor_root_fanout_max_atoms_per_pop)));
+        }
+        if config.factor_state_dest_sets {
+            pipeline.push(Box::new(FactorStateDestSetsPass::new(config.factor_state_dest_sets_max_intermediates_per_pop, config.factor_state_dest_sets_max_depth_from_roots, config.factor_state_dest_sets_min_out_degree)));
         }
         if config.factor_common_destinations {
             pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));

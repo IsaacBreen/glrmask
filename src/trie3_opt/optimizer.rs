@@ -29,6 +29,10 @@ pub fn optimize_trie3_size(
         canonicalize_end_nodes: true, // Always good practice
         compress_edges: config.compress_edges,
         compress_unary_chains: config.compress_edges,
+        factor_state_dest_sets: config.factor_state_dest_sets,
+        factor_state_dest_sets_max_depth_from_roots: config.factor_state_dest_sets_max_depth_from_roots,
+        factor_state_dest_sets_max_intermediates_per_pop: config.factor_state_dest_sets_max_intermediates_per_pop,
+        factor_state_dest_sets_min_out_degree: config.factor_state_dest_sets_min_out_degree,
         factor_state_fanout: config.factor_state_fanout,
         factor_common_destinations: config.factor_common_destinations,
         factor_common_destinations_min_incoming: config.factor_common_destinations_min_incoming,
