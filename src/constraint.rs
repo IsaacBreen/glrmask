@@ -4023,7 +4023,7 @@ impl<'a> GrammarConstraintState<'a> {
                 self.state.retain(|tokenizer_state_id, glr_state| {
                     // Fast auto-pass if tokenizer can produce all grammar terminals.
                     let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                    if accessible.len() >= self.parent.tokenizer.num_groups() {
                         return true;
                     }
 
@@ -4035,7 +4035,7 @@ impl<'a> GrammarConstraintState<'a> {
             TerminalAllowanceCheckMode::ImmediateProbe => {
                 self.state.retain(|tokenizer_state_id, glr_state| {
                     let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                    if accessible.len() >= self.parent.tokenizer.num_groups() {
                         return true;
                     }
                     for tid in &accessible {
@@ -4049,7 +4049,7 @@ impl<'a> GrammarConstraintState<'a> {
             TerminalAllowanceCheckMode::StepProbe => {
                 self.state.retain(|tokenizer_state_id, glr_state| {
                     let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                    if accessible.len() >= self.parent.tokenizer.num_groups() {
                         return true;
                     }
                     for tid in &accessible {
