@@ -376,4 +376,77 @@ impl MiniTrie {
             node.parents.retain(|parent_id, _| live_nodes.contains(parent_id));
         }
     }
+
+    /// Compute for each node, the set of LLM tokens that can appear on any path starting from it.
+    /// This is a forward reachability analysis of tokens.
+    pub fn live_tokens_at_nodes(&self) -> HashMap<NodeId, SortedSet> {
+        let mut live_tokens: HashMap<NodeId, SortedSet> =
+            self.node_ids().map(|id| (id, SortedSet::new())).collect();
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for u_id in self.node_ids() {
+                // The node is guaranteed to exist.
+                let u_node = self.nodes.get(&u_id).unwrap();
+                let mut new_live = SortedSet::new();
+                for (ek, dm) in u_node.children() {
+                    new_live.union_inplace(&ek.tokens);
+                    for v_id in dm.keys() {
+                        if let Some(live_v) = live_tokens.get(v_id) {
+                            new_live.union_inplace(live_v);
+                        }
+                    }
+                }
+
+                let current_live = live_tokens.get_mut(&u_id).unwrap();
+                if new_live.elems != current_live.elems {
+                    *current_live = new_live;
+                    changed = true;
+                }
+            }
+        }
+        live_tokens
+    }
+
+    /// Compute for each node, the set of LLM tokens that can appear on a path from it to an END node.
+    /// This is a backward reachability analysis of tokens.
+    pub fn productive_tokens_at_nodes(
+        &self,
+        universe: &SortedSet,
+    ) -> HashMap<NodeId, SortedSet> {
+        let mut worklist = VecDeque::new();
+        let mut productive_tokens: HashMap<NodeId, SortedSet> = self
+            .node_ids()
+            .map(|id| (id, SortedSet::new()))
+            .collect();
+
+        for node in self.nodes() {
+            if node.is_end() {
+                productive_tokens.insert(node.id(), universe.clone());
+                worklist.push_back(node.id());
+            }
+        }
+
+        while let Some(node_id) = worklist.pop_front() {
+            let live_at_node = productive_tokens.get(&node_id).unwrap().clone();
+            if let Some(node) = self.get_node(node_id) {
+                for (pred_id, edges) in node.parents() {
+                    for edge_key in edges.keys() {
+                        let live_from_edge = live_at_node.intersect(&edge_key.tokens);
+                        if live_from_edge.is_empty() {
+                            continue;
+                        }
+                        let pred_live = productive_tokens.get_mut(pred_id).unwrap();
+                        let old_len = pred_live.len();
+                        pred_live.union_inplace(&live_from_edge);
+                        if pred_live.len() > old_len {
+                            worklist.push_back(*pred_id);
+                        }
+                    }
+                }
+            }
+        }
+        productive_tokens
+    }
 }
