@@ -807,6 +807,7 @@ pub struct GrammarConstraint {
     pub precompute2_vocab: StageVocab,
     pub precompute3_vocab: StageVocab,
     pub special_precomputation: SpecialPrecomputation,
+    pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
 }
 
 impl GrammarConstraint {
@@ -840,6 +841,7 @@ impl GrammarConstraint {
         assert_eq!(self.state_map_by_llm, other.state_map_by_llm);
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
         assert_eq!(self.special_precomputation, other.special_precomputation);
+        assert_eq!(self.original_to_dummy_map, other.original_to_dummy_map);
     }
 }
 
@@ -869,6 +871,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("precompute_vocab".to_string(), self.precompute_vocab1.to_json());
         obj.insert("precompute2_vocab".to_string(), self.precompute2_vocab.to_json());
         obj.insert("precompute3_vocab".to_string(), self.precompute3_vocab.to_json());
+        obj.insert("original_to_dummy_map".to_string(), self.original_to_dummy_map.to_json());
         JSONNode::Object(obj)
     }
 
@@ -938,6 +941,10 @@ impl JSONConvertible for GrammarConstraint {
                     None => precompute_vocab.clone(),
 				};
 
+                let original_to_dummy_map = match obj.remove("original_to_dummy_map") {
+                    Some(n) => BTreeMap::<TerminalID, TerminalID>::from_json(n)?,
+                    None => BTreeMap::new(),
+                };
                 let mut gc = GrammarConstraint {
                     tokenizer,
                     parser,
@@ -961,6 +968,7 @@ impl JSONConvertible for GrammarConstraint {
                     precompute2_vocab,
                     precompute3_vocab,
                     special_precomputation: SpecialPrecomputation::default(),
+                    original_to_dummy_map,
                 };
                 gc.special_precomputation = gc.precompute_special();
                 Ok(gc)
@@ -1381,6 +1389,7 @@ impl GrammarConstraint {
                 precompute2_vocab,
                 precompute3_vocab,
                 special_precomputation: SpecialPrecomputation::default(),
+                original_to_dummy_map,
             };
         }
 
@@ -1421,6 +1430,7 @@ impl GrammarConstraint {
                 precompute2_vocab,
                 precompute3_vocab,
                 special_precomputation: SpecialPrecomputation::default(),
+                original_to_dummy_map,
             };
         }
 
@@ -1454,7 +1464,7 @@ impl GrammarConstraint {
             &mut precompute_vocab,
             &terminal_follow_map,
             config,
-            original_to_dummy_map,
+            original_to_dummy_map.clone(),
         );
 
         // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
@@ -1532,6 +1542,7 @@ impl GrammarConstraint {
             precompute2_vocab,
             precompute3_vocab,
             special_precomputation: SpecialPrecomputation::default(),
+            original_to_dummy_map,
         };
 
         gc.special_precomputation = gc.precompute_special();
@@ -1660,6 +1671,7 @@ impl GrammarConstraint {
                 precompute2_vocab,
                 precompute3_vocab,
                 special_precomputation: SpecialPrecomputation::default(),
+                original_to_dummy_map,
             };
         }
 
@@ -1740,6 +1752,7 @@ impl GrammarConstraint {
                 precompute2_vocab,
                 precompute3_vocab,
                 special_precomputation: SpecialPrecomputation::default(),
+                original_to_dummy_map,
             };
         }
 
@@ -1752,7 +1765,7 @@ impl GrammarConstraint {
             &mut precompute_vocab,
             &terminal_follow_map,
             config,
-            original_to_dummy_map,
+            original_to_dummy_map.clone(),
         );
 
         precompute2_vocab = precompute_vocab.clone();
@@ -1811,6 +1824,7 @@ impl GrammarConstraint {
             precompute2_vocab,
             precompute3_vocab,
             special_precomputation: SpecialPrecomputation::default(),
+            original_to_dummy_map,
         };
 
         gc.special_precomputation = gc.precompute_special();
@@ -3937,8 +3951,13 @@ impl<'a> GrammarConstraintState<'a> {
 
                 for match_info in &exec_result.matches {
                     let mut cloned_glr_s = glr_s_at_offset.clone();
+                    let terminal_id = TerminalID(match_info.id);
 
-                    cloned_glr_s.process_token(TerminalID(match_info.id));
+                    if let Some(dummy_id) = self.parent.original_to_dummy_map.get(&terminal_id) {
+                        cloned_glr_s.process_token(*dummy_id);
+                    }
+
+                    cloned_glr_s.process_token(terminal_id);
                     // cloned_glr_s.do_phase3();
 
                     if cloned_glr_s.is_ok() {
