@@ -464,32 +464,6 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
     stage_2_table
 }
 
-fn assert_lr0_invariants(stage_2_table: &Stage2Table) {
-    for (item_set, row) in stage_2_table {
-        let has_reduces = !row.reduces.is_empty();
-        let has_shifts = !row.shifts.is_empty();
-        let num_reduces = row.reduces.len();
-
-        if has_reduces && has_shifts {
-            // Shift/Reduce conflict
-            panic!(
-                "LR(0) shift/reduce conflict detected in state with kernel: {:?}.\nShifts: {:?}\nReduces: {:?}",
-                item_set,
-                row.shifts.keys().collect::<Vec<_>>(),
-                row.reduces
-            );
-        }
-
-        if num_reduces > 1 {
-            // Reduce/Reduce conflict
-            panic!(
-                "LR(0) reduce/reduce conflict detected in state with kernel: {:?}.\nReduces: {:?}",
-                item_set, row.reduces
-            );
-        }
-    }
-}
-
 fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
     let mut stage_3_table = BTreeMap::new();
 
@@ -1525,9 +1499,6 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
     let stage_2_table = stage_2(stage_1_table, &productions);
-    if matches!(LR_MODE, LRMode::LR0) {
-        assert_lr0_invariants(&stage_2_table);
-    }
     crate::debug!(6, &stage_2_table);
     crate::debug!(2, "Stage 3");
     let stage_3_table = stage_3(stage_2_table, &productions);
