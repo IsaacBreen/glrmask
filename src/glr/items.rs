@@ -97,6 +97,6 @@ pub enum LRMode {
     LR0,
 }
 
-pub const LR_MODE: LRMode = LRMode::LALR;
+pub const LR_MODE: LRMode = LRMode::LR0;
 // pub const LR_MODE: LRMode = LRMode::LALR_EX_GOTO;
 // pub const LR_MODE: LRMode = LRMode::LR1;
