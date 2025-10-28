@@ -27,7 +27,7 @@ impl OptimizationPass for CompressUnaryChainsPass {
                         let count = indegree.entry(*dst).or_default();
                         *count += 1;
                         if *count == 1 {
-                            unique_parent.insert(*dst, (node.id, ek.clone()));
+                            unique_parent.insert(*dst, (node.id(), ek.clone()));
                         } else {
                             unique_parent.remove(dst);
                         }

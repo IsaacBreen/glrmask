@@ -300,7 +300,7 @@ pub(crate) fn import_from_mini(
 
             let mut children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
 
-            for (ek, dm) in node.children.iter() {
+            for (ek, dm) in node.children().iter() {
                 // Build LLMTokenBV from tokens set
                 let mut bv = LLMTokenBV::zeros();
                 for t in ek.tokens.iter() {

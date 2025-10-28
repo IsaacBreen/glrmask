@@ -26,7 +26,7 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
             // Collect pop=0 edges by cloning to avoid borrow issues.
             let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
 
-            for node in trie.nodes.values() {
+            for node in trie.nodes().values() {
                 for (ek, dm) in &node.children {
                     if ek.pop == 0 {
                         for (dst, sids) in dm {
