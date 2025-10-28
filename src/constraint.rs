@@ -2892,14 +2892,14 @@ impl<'r> Precomputer1<'r> {
         let mut final_roots = BTreeMap::new();
         let mut node_map: HashMap<TempPrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
 
-        for (sid, temp_root) in self.roots {
+        for (sid, temp_root) in &self.roots {
             let final_root = self.convert_trie1_recursive(
-                temp_root,
+                *temp_root,
                 &self.trie1_god,
                 &final_trie1_god,
                 &mut node_map,
             );
-            final_roots.insert(sid, final_root);
+            final_roots.insert(*sid, final_root);
         }
 
         (final_roots, final_trie1_god)

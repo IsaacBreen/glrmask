@@ -98,6 +98,9 @@ impl Terminal {
     pub fn terminal(name: &str) -> Self {
         Terminal::RegexName(name.to_string())
     }
+    pub fn regex_name(name: &str) -> Self {
+        Terminal::RegexName(name.to_string())
+    }
 
     pub fn literal(bytes: Vec<u8>) -> Self {
         Terminal::Literal(bytes)
