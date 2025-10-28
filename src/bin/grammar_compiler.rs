@@ -53,11 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading grammar from: {:?}", args.grammar);
     let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
     let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
-    println!("Compiling grammar...");
-    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-    println!("Grammar compiled successfully.");
-
-    compiled_grammar.glr_parser.print_stored_cache_stats();
+    println!("Grammar loaded successfully.");
 
     // 2. Load the vocabulary.
     println!("Loading vocabulary from: {:?}", args.vocab);
@@ -77,7 +73,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Vocabulary loaded ({} tokens, max ID: {}).", llm_token_map.len(), max_original_llm_token_id);
 
     // 3. Construct the GrammarConstraint.
-    let _dummy_eof_token_id = LLMTokenID(max_original_llm_token_id + 1);
     println!("\nConstructing GrammarConstraint...");
     let mut loaded_pc0: Option<Precompute0Cache> = None;
     if let Some(path) = args.load_precompute0.as_ref() {
@@ -106,17 +101,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.precompute0_only = true;
     }
 
-    let grammar_constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
-        compiled_grammar.tokenizer,
-        compiled_grammar.glr_parser,
+    let grammar_constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
         llm_token_map,
-        compiled_grammar.definition.terminal_to_group_id().clone(),
         max_original_llm_token_id,
         &config,
         loaded_pc0,
     );
 
     println!("GrammarConstraint constructed successfully.");
+    grammar_constraint.parser.print_stored_cache_stats();
+
     if let Some(path) = args.save_precompute0.as_ref() {
         println!("Saving precompute0 cache to: {:?}", path);
         let output_file = File::create(path)?;

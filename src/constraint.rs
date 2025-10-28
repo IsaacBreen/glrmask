@@ -47,7 +47,7 @@ use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::parser::{BelowBottomCacheKey, BelowBottomReductionMode, ExpectElse, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
 use crate::glr::table::StateID;
 use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue};
-use crate::interface::CompiledGrammar;
+use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::{print_summary, print_summary_flat, reset, GSS_LOGGING_ENABLED, PROGRESS_BAR_ENABLED};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
@@ -1017,6 +1017,25 @@ impl GrammarConstraint {
         )
     }
 
+    pub fn new_from_grammar_definition(
+        grammar_definition: Arc<GrammarDefinition>,
+        llm_token_map: LLMTokenMap,
+        max_original_llm_token_id: usize,
+        config: &GrammarConstraintConfig,
+        precompute0_cache: Option<Precompute0Cache>,
+    ) -> Self {
+        let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
+        Self::new_with_config_and_precompute0_cache(
+            compiled_grammar.tokenizer,
+            compiled_grammar.glr_parser,
+            llm_token_map,
+            compiled_grammar.definition.terminal_to_group_id().clone(),
+            max_original_llm_token_id,
+            config,
+            precompute0_cache,
+        )
+    }
+
     pub fn new_with_config(
         tokenizer:        Regex,
         parser:           GLRParser,
@@ -1028,6 +1047,7 @@ impl GrammarConstraint {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
+
         let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &tokenizer);
 
 
