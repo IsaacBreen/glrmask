@@ -1120,7 +1120,7 @@ impl GrammarConstraint {
         let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
 
         // Group terminals by the similarity of their template trie's features.
-        const SIMILARITY_THRESHOLD: f64 = 10000.0;
+        const SIMILARITY_THRESHOLD: f64 = 0.5;
 
         let mut template_features = BTreeMap::new();
         for (tid, (start, _end)) in &templates {
@@ -1137,6 +1137,7 @@ impl GrammarConstraint {
         for tid in sorted_tids {
             let features = template_features.get(&tid).unwrap();
             let complexity = features.num_nodes; // Use num_nodes as complexity metric
+            let terminal_name = parser.terminal_map.get_by_right(&tid).unwrap();
 
             let mut best_group: Option<(usize, f64)> = None;
 
@@ -1150,13 +1151,29 @@ impl GrammarConstraint {
             if let Some((best_idx, best_dist)) = best_group {
                 if best_dist <= SIMILARITY_THRESHOLD {
                     // Add to existing similar group.
+                    let best_group_tid = groups[best_idx].1[0];
+                    let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
+                    crate::debug!(2, "Grouping terminal '{}' with group represented by '{}' (distance: {:.2})", terminal_name, best_group_terminal_name, best_dist);
                     groups[best_idx].1.push(tid);
                 } else {
                     // No group is similar enough, create a new one.
+                    let best_group_tid = groups[best_idx].1[0];
+                    let best_group_terminal_name = parser.terminal_map.get_by_right(&best_group_tid).unwrap();
+                    crate::debug!(
+                        2,
+                        "Creating new group for terminal '{}'. Closest group (rep by '{}') has distance {:.2} > threshold {}.",
+                        terminal_name,
+                        best_group_terminal_name,
+                        best_dist,
+                        SIMILARITY_THRESHOLD
+                    );
+                    crate::debug!(3, "  - Features for '{}': {:?}", terminal_name, features);
+                    crate::debug!(3, "  - Features for group '{}': {:?}", best_group_terminal_name, &groups[best_idx].0);
                     groups.push((features.clone(), vec![tid], complexity));
                 }
             } else {
                 // This is the first group.
+                crate::debug!(2, "Creating first group for terminal '{}'", terminal_name);
                 groups.push((features.clone(), vec![tid], complexity));
             }
         }
