@@ -2067,6 +2067,7 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
         original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
+        let original_to_dummy_map_clone = original_to_dummy_map.clone();
         let mut dummy_terminal_penalties: BTreeMap<TerminalID, usize> = BTreeMap::new();
         if !config.dummy_terminal_penalties.is_empty() {
             if let Some(p) = parser {
@@ -2122,6 +2123,13 @@ impl GrammarConstraint {
             token_name_map,
             &dummy_terminal_penalties,
         );
+
+        // Important: after optimization, the dummy layer may be flattened away.
+        // Reinstate the dummy terminals so Trie1 edges reflect the required structure:
+        // dummy -> original terminal.
+        if !original_to_dummy_map_clone.is_empty() {
+            Self::enforce_dummy_edges_in_trie1(&mut precomputed1, &trie1_god, &original_to_dummy_map_clone);
+        }
 
         (precomputed1, trie1_god)
     }
@@ -3511,6 +3519,118 @@ impl<'r> Precomputer1<'r> {
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
+            }
+        }
+    }
+}
+
+impl GrammarConstraint {
+    /// Ensure that, in Trie1, every edge whose key is an "original" terminal that belongs to a dummy group
+    /// is wrapped under a dummy edge. After this rewrite, each source node will have, for each dummy D,
+    /// a single edge (Some(D)) to a fresh intermediate node, and that intermediate node will contain
+    /// the original terminal edges that were previously directly attached to the source node.
+    ///
+    /// This post-pass is applied after the Trie1 optimizer, which may flatten or remove dummy layers;
+    /// we re-establish the invariant that dummy terminals precede their grouped terminals.
+    fn enforce_dummy_edges_in_trie1(
+        precomputed1: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+        trie1_god: &Trie1GodWrapper,
+        original_to_dummy_map: &BTreeMap<TerminalID, TerminalID>,
+    ) {
+        if original_to_dummy_map.is_empty() {
+            return;
+        }
+
+        // Collect all reachable nodes from Trie1 roots
+        let roots: Vec<_> = precomputed1.values().cloned().collect();
+        let nodes = PrecomputeNode1::all_nodes(trie1_god, &roots);
+
+        for idx in nodes {
+            // Snapshot children to work with (we'll rebuild the adjacency)
+            let children_snapshot = if let Some(g) = idx.read(trie1_god) {
+                g.children().clone()
+            } else {
+                continue;
+            };
+
+            // Group all original-terminal edges that should be wrapped by their dummy-id.
+            // Key: dummy_tid -> Vec of (orig_tid, dest_idx, bv)
+            let mut groups: BTreeMap<TerminalID, Vec<(TerminalID, PrecomputeNode1Index, LLMTokenBV)>> = BTreeMap::new();
+            let mut used_dummy_tids: BTreeSet<TerminalID> = BTreeSet::new();
+            let mut wrapped_orig_tids: BTreeSet<TerminalID> = BTreeSet::new();
+
+            for (ek, dest_map) in children_snapshot.iter() {
+                if let Some(orig_tid) = ek {
+                    if let Some(dummy_tid) = original_to_dummy_map.get(orig_tid) {
+                        used_dummy_tids.insert(*dummy_tid);
+                        wrapped_orig_tids.insert(*orig_tid);
+                        let entry = groups.entry(*dummy_tid).or_default();
+                        for (dst, bv) in dest_map.iter() {
+                            entry.push((*orig_tid, *dst, bv.clone()));
+                        }
+                    }
+                }
+            }
+
+            if groups.is_empty() {
+                continue; // Nothing to rewrite at this node.
+            }
+
+            // For each dummy group, create a single intermediate node and wire original edges under it.
+            // Record the (dummy_tid, inter_idx, total_bv) so we can add a single dummy edge to this inter node.
+            let mut replacement_entries: Vec<(TerminalID, PrecomputeNode1Index, LLMTokenBV)> = Vec::new();
+            for (dummy_tid, triples) in groups.iter() {
+                // Create intermediate node
+                let inter_idx = PrecomputeNode1Index::new(
+                    trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal()))
+                );
+                let mut total_bv = LLMTokenBV::zeros();
+                // Add original edges under the intermediate
+                for (orig_tid, dst, bv) in triples.iter() {
+                    total_bv |= bv;
+                    trie1_god.insert_edge_simple(inter_idx, *dst, Some(*orig_tid), bv.clone());
+                }
+                // Set inter node's live_tokens (union of all bitsets)
+                if let Some(mut w_inter) = inter_idx.write(trie1_god) {
+                    w_inter.value.live_tokens |= &total_bv;
+                }
+                replacement_entries.push((*dummy_tid, inter_idx, total_bv));
+            }
+
+            // Rebuild the children map for 'idx':
+            // - Drop all original edges that were wrapped (i.e., keys in wrapped_orig_tids).
+            // - Drop any preexisting dummy edges for dummy tids we used (we will replace them).
+            // - Keep all other edges as-is.
+            let mut new_children: BTreeMap<Option<TerminalID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
+            for (ek, dest_map) in children_snapshot.into_iter() {
+                match ek {
+                    Some(tid) => {
+                        if wrapped_orig_tids.contains(&tid) {
+                            // This original terminal is now redirected under its dummy; skip.
+                            continue;
+                        }
+                        if used_dummy_tids.contains(&tid) {
+                            // We will replace any existing dummy edges with a canonical single inter-node.
+                            continue;
+                        }
+                        new_children.insert(Some(tid), dest_map);
+                    }
+                    None => {
+                        new_children.insert(None, dest_map);
+                    }
+                }
+            }
+
+            // Add our new dummy edges (one per dummy_tid): idx --[dummy_tid, total_bv]--> inter_idx
+            for (dummy_tid, inter_idx, total_bv) in replacement_entries {
+                let mut dm: OrderedHashMap<PrecomputeNode1Index, LLMTokenBV> = OrderedHashMap::new();
+                dm.insert(inter_idx, total_bv);
+                new_children.insert(Some(dummy_tid), dm);
+            }
+
+            // Write the rebuilt children back to 'idx'
+            if let Some(mut w) = idx.write(trie1_god) {
+                *w.children_mut() = new_children;
             }
         }
     }
