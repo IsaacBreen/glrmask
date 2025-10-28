@@ -100,6 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.precompute0_only {
         config.precompute0_only = true;
     }
+    config.dummy_terminal_name = "DUMMY".to_string();
 
     let grammar_constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
