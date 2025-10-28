@@ -2070,8 +2070,11 @@ impl GrammarConstraint {
                 continue;
             }
 
-            let shifted_state_content = items[0].clone();
-            let pre_shift_stack = &items[1..];
+            // The first item is hallucinated state. Ingore it.
+            // The last is the shift shifted_state_content. Set it aside.
+            // The middle items are pre_shift_stack
+            let shifted_state_content = *items.last().unwrap();
+            let pre_shift_stack = &items[0..items.len() - 1];
 
             // Walk the pre-shift stack from top to bottom to build the trie path
             let mut cur = head.clone();
