@@ -153,6 +153,10 @@ impl GrammarDefinition {
             let terminal = Terminal::Literal(literal.clone());
             terminal_to_group_id.insert(terminal, *group_id);
         }
+        for (name, group_id) in &self.external_name_to_group_id {
+            let terminal = Terminal::RegexName(name.clone());
+            terminal_to_group_id.insert(terminal, *group_id);
+        }
         terminal_to_group_id
     }
 }
