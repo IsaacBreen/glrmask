@@ -1233,9 +1233,8 @@ impl GrammarConstraint {
             crate::debug!(1, "Recompiling grammar with {} new dummy terminals.", new_dummy_terminals.len());
             let mut final_grammar_def = (*grammar_definition).clone();
             final_grammar_def.productions = final_productions;
-            // Add new dummy terminals to the definition's terminal set
-            for term in new_dummy_terminals {
-                // final_grammar_def.terminal_to_group_id().insert(term); // UNNECESSARY
+            for dummy_tid in new_dummy_terminals {
+                final_grammar_def.add_external_terminal(&format!("__DUMMY_TERMINAL_{}__", dummy_tid));
             }
             CompiledGrammar::from_definition(Arc::new(final_grammar_def))
         } else {

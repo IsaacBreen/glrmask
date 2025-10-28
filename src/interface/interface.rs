@@ -365,8 +365,8 @@ impl GrammarDefinition {
             panic!("External terminal name '{}' conflicts with an existing terminal in the grammar.", name);
         }
 
-        let all_gids: BTreeSet<usize> = self.regex_expr_to_group_id.values().copied()
-            .chain(self.external_name_to_group_id.values().copied())
+        let all_gids: BTreeSet<usize> = self.regex_expr_to_group_id.right_values().copied()
+            .chain(self.external_name_to_group_id.right_values().copied())
             .collect();
 
         let new_group_id = all_gids.iter().max().map(|max_id| max_id + 1).unwrap_or(0);

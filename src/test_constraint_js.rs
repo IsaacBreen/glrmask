@@ -1136,6 +1136,7 @@ fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Err
         regex_name_to_group_id: full_grammar_def.regex_name_to_group_id.clone(),
         regex_expr_to_group_id: full_grammar_def.regex_expr_to_group_id.clone(),
         ignore_terminal_id: full_grammar_def.ignore_terminal_id,
+        external_name_to_group_id: Default::default(),
     };
     println!("\n--- Minimized Grammar ---");
     println!("{}", minimized_def);
