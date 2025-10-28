@@ -1108,11 +1108,11 @@ impl GrammarConstraint {
         // This function assumes dummy terminals (e.g., `__DUMMY_TERMINAL_.*__`) are defined in the grammar.
         // It will group real terminals under these dummies based on the structural similarity of their
         // corresponding Trie3 templates.
-        let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
-        let parser = &compiled_grammar.glr_parser;
+        let initial_compiled_grammar = CompiledGrammar::from_definition(grammar_definition.clone());
+        let parser = &initial_compiled_grammar.glr_parser;
 
         // We need internal_max_llm_token to build templates, so we compute it early.
-        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &compiled_grammar.tokenizer);
+        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &initial_compiled_grammar.tokenizer);
         let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
 
         // Build templates for all terminals to assess similarity.
@@ -1193,30 +1193,20 @@ impl GrammarConstraint {
             }
 
             let dummy_name = format!("__DUMMY_TERMINAL_{}__", dummy_idx);
-            let dummy_term = Terminal::regex_name(&dummy_name);
-
-            if parser.terminal_map.get_by_left(&dummy_term).is_some() {
-                // Dummy terminal exists, create the group.
-                let original_names: BTreeSet<String> = tids.iter()
-                    .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
-                    .collect();
-                new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
-                new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
-            } else {
-                // Dummy terminal does not exist. Don't create the group and print a message.
-                let original_names: Vec<String> = tids.iter()
-                    .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
-                    .collect();
-                crate::debug!(1, "Skipping group for {{{}}} because dummy terminal '{}' is not defined in the grammar.", original_names.join(", "), dummy_name);
-            }
+            let original_names: BTreeSet<String> = tids.iter()
+                .map(|tid| match parser.terminal_map.get_by_right(tid).unwrap() {
+                    Terminal::RegexName(name) => name.clone(),
+                    Terminal::Literal(bytes) => String::from_utf8_lossy(bytes).to_string(),
+                })
+                .collect();
+            new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
+            new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
             dummy_idx += 1;
         }
 
         println!("\n--- Dummy Terminal Groups ---");
         if new_config.dummy_terminal_map.is_empty() {
-            println!("No dummy groups were created. This may be because no terminals were similar enough to be grouped,");
-            println!("or because the required dummy terminals (e.g., '__DUMMY_TERMINAL_0__') are not defined in the grammar.");
-            println!("See debug logs (level 1) for details on skipped groups.");
+            println!("No dummy groups were created. This may be because no terminals were similar enough to be grouped.");
         } else {
             let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
             sorted_dummies.sort_by_key(|(k, _)| *k);
@@ -1233,11 +1223,30 @@ impl GrammarConstraint {
         }
         println!("---------------------------\n");
 
+        // --- RECOMPILATION STEP ---
+        let (final_productions, new_dummy_terminals) = crate::glr::analyze::rewrite_productions_with_dummies(
+            &grammar_definition.productions,
+            &new_config.dummy_terminal_map,
+        );
+
+        let final_compiled_grammar = if !new_dummy_terminals.is_empty() {
+            crate::debug!(1, "Recompiling grammar with {} new dummy terminals.", new_dummy_terminals.len());
+            let mut final_grammar_def = (*grammar_definition).clone();
+            final_grammar_def.productions = final_productions;
+            // Add new dummy terminals to the definition's terminal set
+            for term in new_dummy_terminals {
+                final_grammar_def.terminals.insert(term);
+            }
+            CompiledGrammar::from_definition(Arc::new(final_grammar_def))
+        } else {
+            initial_compiled_grammar
+        };
+
         Self::new_with_config_and_precompute0_cache(
-            compiled_grammar.tokenizer,
-            compiled_grammar.glr_parser,
+            final_compiled_grammar.tokenizer,
+            final_compiled_grammar.glr_parser,
             llm_token_map,
-            compiled_grammar.definition.terminal_to_group_id().clone(),
+            final_compiled_grammar.definition.terminal_to_group_id().clone(),
             max_original_llm_token_id,
             &new_config,
             precompute0_cache,
