@@ -67,6 +67,7 @@ use std::io::{Read, Write};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
+use crate::glr::grammar::TerminalID;
 use crate::trie3_opt::{optimize_trie3_size, Trie3Config};
 
 #[derive(Default, Debug)]
@@ -715,6 +716,7 @@ struct TrieFeatures {
     check_llm_count: usize,
     no_op_count: usize,
     end_node_count: usize,
+    terminal_hash: u64,
 }
 
 impl TrieFeatures {
@@ -722,6 +724,10 @@ impl TrieFeatures {
     /// Returns a value between 0.0 (identical) and some upper bound. Lower is more similar.
     fn distance(&self, other: &Self) -> f64 {
         let mut dist_sq = 0.0;
+
+        if self.terminal_hash != other.terminal_hash {
+            return 1000.0;
+        }
 
         dist_sq += Self::feat_dist_sq(self.num_nodes, other.num_nodes);
         dist_sq += Self::feat_dist_sq(self.num_edges, other.num_edges);
@@ -750,6 +756,7 @@ impl TrieFeatures {
 fn compute_trie_features(
     arena: &IntermediateTrie3GodWrapper,
     root: IntermediatePrecomputeNode3Index,
+    tid: TerminalID,
 ) -> TrieFeatures {
     let nodes = IntermediatePrecomputeNode3::all_nodes(arena, &[root]);
     let num_nodes = nodes.len();
@@ -778,7 +785,11 @@ fn compute_trie_features(
         }
     }
 
-    TrieFeatures { num_nodes, num_edges, pop_count, push_count, check_llm_count, no_op_count, end_node_count }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tid.hash(&mut hasher);
+    let terminal_hash = hasher.finish();
+
+    TrieFeatures { num_nodes, num_edges, pop_count, push_count, check_llm_count, no_op_count, end_node_count, terminal_hash }
 }
 
 #[derive(Debug, Clone)]
@@ -1121,7 +1132,7 @@ impl GrammarConstraint {
 
         let mut template_features = BTreeMap::new();
         for (tid, (start, _end)) in &templates {
-            let features = compute_trie_features(&intermediate_trie3_god, *start);
+            let features = compute_trie_features(&intermediate_trie3_god, *start, *tid);
             template_features.insert(*tid, features);
         }
 
