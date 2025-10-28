@@ -1030,21 +1030,23 @@ impl GrammarConstraint {
         let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
         let mut compiled_grammar = compiled_grammar;
 
-        if let Some(dummy_name) = &config.dummy_terminal_name {
-            let dummy_term = Terminal::regex_name(dummy_name);
-            let mut new_productions = compiled_grammar.glr_parser.productions.clone();
-            for prod in &mut new_productions {
-                let mut new_rhs = Vec::new();
-                for sym in &prod.rhs {
-                    if let Symbol::Terminal(_) = sym {
-                        new_rhs.push(Symbol::Terminal(dummy_term.clone()));
-                    }
-                    new_rhs.push(sym.clone());
+        let mut new_config = config.clone();
+        let dummy_name = "__DUMMY_TERMINAL__".to_string();
+        new_config.dummy_terminal_name = Some(dummy_name.clone());
+
+        let dummy_term = Terminal::regex_name(&dummy_name);
+        let mut new_productions = compiled_grammar.glr_parser.productions.clone();
+        for prod in &mut new_productions {
+            let mut new_rhs = Vec::new();
+            for sym in &prod.rhs {
+                if let Symbol::Terminal(_) = sym {
+                    new_rhs.push(Symbol::Terminal(dummy_term.clone()));
                 }
-                prod.rhs = new_rhs;
+                new_rhs.push(sym.clone());
             }
-            compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
+            prod.rhs = new_rhs;
         }
+        compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
 
         Self::new_with_config_and_precompute0_cache(
             compiled_grammar.tokenizer,
@@ -1052,7 +1054,7 @@ impl GrammarConstraint {
             llm_token_map,
             compiled_grammar.definition.terminal_to_group_id().clone(),
             max_original_llm_token_id,
-            config,
+            &new_config,
             precompute0_cache,
         )
     }
