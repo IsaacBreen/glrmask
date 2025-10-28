@@ -706,6 +706,81 @@ impl GrammarConstraintConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct TrieFeatures {
+    num_nodes: usize,
+    num_edges: usize,
+    pop_count: usize,
+    push_count: usize,
+    check_llm_count: usize,
+    no_op_count: usize,
+    end_node_count: usize,
+}
+
+impl TrieFeatures {
+    /// Calculates the distance to another feature vector.
+    /// Returns a value between 0.0 (identical) and some upper bound. Lower is more similar.
+    fn distance(&self, other: &Self) -> f64 {
+        let mut dist_sq = 0.0;
+
+        dist_sq += Self::feat_dist_sq(self.num_nodes, other.num_nodes);
+        dist_sq += Self::feat_dist_sq(self.num_edges, other.num_edges);
+        dist_sq += Self::feat_dist_sq(self.pop_count, other.pop_count);
+        dist_sq += Self::feat_dist_sq(self.push_count, other.push_count);
+        dist_sq += Self::feat_dist_sq(self.check_llm_count, other.check_llm_count);
+        dist_sq += Self::feat_dist_sq(self.no_op_count, other.no_op_count);
+        dist_sq += Self::feat_dist_sq(self.end_node_count, other.end_node_count);
+
+        dist_sq.sqrt()
+    }
+
+    /// Helper for normalized squared distance for a single feature.
+    fn feat_dist_sq(v1: usize, v2: usize) -> f64 {
+        if v1 == v2 {
+            return 0.0;
+        }
+        let diff = (v1 as f64) - (v2 as f64);
+        // Normalize by the max value to get a relative difference.
+        let norm = (v1.max(v2) as f64).max(1.0);
+        (diff / norm).powi(2)
+    }
+}
+
+/// Computes a feature vector for a given trie template.
+fn compute_trie_features(
+    arena: &IntermediateTrie3GodWrapper,
+    root: IntermediatePrecomputeNode3Index,
+) -> TrieFeatures {
+    let nodes = IntermediatePrecomputeNode3::all_nodes(arena, &[root]);
+    let num_nodes = nodes.len();
+    let mut num_edges = 0;
+    let mut pop_count = 0;
+    let mut push_count = 0;
+    let mut check_llm_count = 0;
+    let mut no_op_count = 0;
+    let mut end_node_count = 0;
+
+    for node_idx in &nodes {
+        if let Some(guard) = node_idx.read(arena) {
+            if guard.value.end {
+                end_node_count += 1;
+            }
+            for (ek, dest_map) in guard.children() {
+                let edge_count = dest_map.len();
+                num_edges += edge_count;
+                match ek {
+                    IntermediateTrie3EdgeKey::Pop(_, _) => pop_count += edge_count,
+                    IntermediateTrie3EdgeKey::Push(_) => push_count += edge_count,
+                    IntermediateTrie3EdgeKey::CheckLLM(_) => check_llm_count += edge_count,
+                    IntermediateTrie3EdgeKey::NoOp => no_op_count += edge_count,
+                }
+            }
+        }
+    }
+
+    TrieFeatures { num_nodes, num_edges, pop_count, push_count, check_llm_count, no_op_count, end_node_count }
+}
+
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint {
     pub tokenizer:        Regex,
@@ -1044,26 +1119,45 @@ impl GrammarConstraint {
         let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
         let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
 
-        // Group terminals by the canonical string representation of their template trie.
-        // Group terminals by template graph isomorphism.
-        let mut groups: Vec<(IntermediatePrecomputeNode3Index, Vec<TerminalID>, usize)> = Vec::new();
+        // Group terminals by the similarity of their template trie's features.
+        const SIMILARITY_THRESHOLD: f64 = 0.1;
+
+        let mut template_features = BTreeMap::new();
+        for (tid, (start, _end)) in &templates {
+            let features = compute_trie_features(&intermediate_trie3_god, *start);
+            template_features.insert(*tid, features);
+        }
+
+        let mut groups: Vec<(TrieFeatures, Vec<TerminalID>, usize)> = Vec::new();
 
         // Sort templates by terminal ID for deterministic group formation.
-        let mut sorted_templates: Vec<_> = templates.iter().collect();
-        sorted_templates.sort_by_key(|(tid, _)| *tid);
+        let mut sorted_tids: Vec<_> = templates.keys().copied().collect();
+        sorted_tids.sort();
 
-        for (tid, (start, _end)) in sorted_templates {
-            let complexity = Trie::all_nodes(&intermediate_trie3_god, &[*start]).len();
-            let mut found_group = false;
-            for (representative_start, tids_in_group, _complexity) in &mut groups {
-                if IntermediatePrecomputeNode3::are_graphs_equal(&intermediate_trie3_god, *start, &intermediate_trie3_god, *representative_start) {
-                    tids_in_group.push(*tid);
-                    found_group = true;
-                    break;
+        for tid in sorted_tids {
+            let features = template_features.get(&tid).unwrap();
+            let complexity = features.num_nodes; // Use num_nodes as complexity metric
+
+            let mut best_group: Option<(usize, f64)> = None;
+
+            for (i, (group_features, _, _)) in groups.iter().enumerate() {
+                let dist = features.distance(group_features);
+                if best_group.is_none() || dist < best_group.as_ref().unwrap().1 {
+                    best_group = Some((i, dist));
                 }
             }
-            if !found_group {
-                groups.push((*start, vec![*tid], complexity));
+
+            if let Some((best_idx, best_dist)) = best_group {
+                if best_dist <= SIMILARITY_THRESHOLD {
+                    // Add to existing similar group.
+                    groups[best_idx].1.push(tid);
+                } else {
+                    // No group is similar enough, create a new one.
+                    groups.push((features.clone(), vec![tid], complexity));
+                }
+            } else {
+                // This is the first group.
+                groups.push((features.clone(), vec![tid], complexity));
             }
         }
 
