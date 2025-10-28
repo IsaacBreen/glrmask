@@ -1244,7 +1244,7 @@ impl GrammarConstraint {
             initial_compiled_grammar
         };
 
-        println!("{}", &final_compiled_grammar.glr_parser);
+        // println!("{}", &final_compiled_grammar.glr_parser);
 
         Self::new_with_config_and_precompute0_cache(
             final_compiled_grammar.tokenizer,
