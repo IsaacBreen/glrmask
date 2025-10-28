@@ -725,10 +725,12 @@ fn prune_unproductive_paths_intermediate_trie3(
     let total_nodes = all_nodes.len();
     let productive_nodes = productive.len();
     let prunable = total_nodes.saturating_sub(productive_nodes);
-    println!(
-        "[optimize_intermediate_trie3] End-reachability: total={}, productive={}, prunable={}",
-        total_nodes, productive_nodes, prunable
-    );
+    if config.verbose {
+        println!(
+            "[optimize_intermediate_trie3] End-reachability: total={}, productive={}, prunable={}",
+            total_nodes, productive_nodes, prunable
+        );
+    }
     if prunable == 0 {
         return;
     }

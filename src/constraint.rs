@@ -3228,12 +3228,12 @@ impl<'r> Precomputer1<'r> {
                 let inter_idx = PrecomputeNode1Index::new(final_god.insert(inter_node));
                 let mut total_inter_bitset = HybridBitset::zeros();
 
-                for (original_ek, dest_map) in edges {
+                for (_original_ek, dest_map) in edges {
                     for (temp_child_idx, rs_blaze) in dest_map {
                         let final_child_idx = self.convert_trie1_recursive(temp_child_idx, temp_god, final_god, node_map);
                         let hybrid_bitset = HybridBitset { inner: crate::datastructures::cache::intern_l1(rs_blaze) };
                         total_inter_bitset |= &hybrid_bitset;
-                        final_god.insert_edge_simple(inter_idx, final_child_idx, original_ek, hybrid_bitset);
+                        final_god.insert_edge_simple(inter_idx, final_child_idx, None, hybrid_bitset);
                     }
                 }
                 final_god.insert_edge_simple(final_idx, inter_idx, Some(dummy_tid), total_inter_bitset);
