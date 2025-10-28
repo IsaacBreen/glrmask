@@ -2074,7 +2074,7 @@ impl GrammarConstraint {
 
             // Walk the rest of the stack (below the shifted state)
             let mut cur = head.clone();
-            for state_content in items.iter().skip(1) {
+            for state_content in items.iter().skip(1).rev() {
                 let mut state_bv = StateIDBV::zeros();
                 state_bv.insert(state_content.state_id.0);
                 let inserter = EdgeInserter::new(
