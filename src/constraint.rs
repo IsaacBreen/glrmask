@@ -1365,6 +1365,28 @@ impl GrammarConstraint {
         let mut precompute2_vocab = precompute_vocab.clone();
         let mut precompute3_vocab = precompute_vocab.clone();
 
+        // Check for overlapping original terminals in dummy_terminal_map
+        let mut seen_originals = BTreeSet::new();
+        for original_terminals in config.dummy_terminal_map.values() { // This is BTreeSet<Terminal> now
+            for term in original_terminals {
+                if !seen_originals.insert(term.clone()) {
+                    panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
+                }
+            }
+        }
+
+        let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
+        for (dummy_name, original_terminals) in &config.dummy_terminal_map {
+            let dummy_term = Terminal::regex_name(dummy_name);
+            if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
+                for original_terminal in original_terminals {
+                    if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
+                        original_to_dummy_map.insert(original_id, dummy_id);
+                    }
+                }
+            }
+        }
+
         if config.skip_precomputation {
             return Self {
                 tokenizer,
@@ -1434,27 +1456,6 @@ impl GrammarConstraint {
             };
         }
 
-        // Check for overlapping original terminals in dummy_terminal_map
-        let mut seen_originals = BTreeSet::new();
-        for original_terminals in config.dummy_terminal_map.values() { // This is BTreeSet<Terminal> now
-            for term in original_terminals {
-                if !seen_originals.insert(term.clone()) {
-                    panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
-                }
-            }
-        }
-
-        let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
-        for (dummy_name, original_terminals) in &config.dummy_terminal_map {
-            let dummy_term = Terminal::regex_name(dummy_name);
-            if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
-                for original_terminal in original_terminals {
-                    if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
-                        original_to_dummy_map.insert(original_id, dummy_id);
-                    }
-                }
-            }
-        }
         let (precomputed1, trie1_god) = Self::precompute1(
             &tokenizer,
             Some(&parser),
@@ -1647,6 +1648,28 @@ impl GrammarConstraint {
         let mut precompute2_vocab = precompute_vocab.clone();
         let mut precompute3_vocab = precompute_vocab.clone();
 
+        // Check for overlapping original terminals in dummy_terminal_map
+        let mut seen_originals = BTreeSet::new();
+        for original_terminals in config.dummy_terminal_map.values() { // BTreeSet<Terminal>
+            for term in original_terminals {
+                if !seen_originals.insert(term.clone()) {
+                    panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
+                }
+            }
+        }
+
+        let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
+        for (dummy_name, original_terminals) in &config.dummy_terminal_map {
+            let dummy_term = Terminal::regex_name(dummy_name);
+            if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
+                for original_terminal in original_terminals {
+                    if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
+                        original_to_dummy_map.insert(original_id, dummy_id);
+                    }
+                }
+            }
+        }
+
         if config.skip_precomputation {
             return Self {
                 tokenizer,
@@ -1675,27 +1698,6 @@ impl GrammarConstraint {
             };
         }
 
-        // Check for overlapping original terminals in dummy_terminal_map
-        let mut seen_originals = BTreeSet::new();
-        for original_terminals in config.dummy_terminal_map.values() { // BTreeSet<Terminal>
-            for term in original_terminals {
-                if !seen_originals.insert(term.clone()) {
-                    panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
-                }
-            }
-        }
-
-        let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
-        for (dummy_name, original_terminals) in &config.dummy_terminal_map {
-            let dummy_term = Terminal::regex_name(dummy_name);
-            if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
-                for original_terminal in original_terminals {
-                    if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
-                        original_to_dummy_map.insert(original_id, dummy_id);
-                    }
-                }
-            }
-        }
         // Maybe reuse precompute0 from cache
         let mut precomputed0_opt: Option<(Precomputed0, Trie0GodWrapper)> = None;
         if let Some(cache) = precompute0_cache {
