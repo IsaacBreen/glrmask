@@ -42,7 +42,7 @@ use crate::datastructures::EntryApi;
 use crate::equivalence_analysis_finite_automata;
 use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
-use crate::glr::grammar::Terminal;
+use crate::glr::grammar::{Symbol, Terminal};
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::parser::{BelowBottomCacheKey, BelowBottomReductionMode, ExpectElse, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
 use crate::glr::table::StateID;
@@ -668,6 +668,7 @@ pub struct GrammarConstraintConfig {
     pub trie3: Trie3Config,
     pub intermediate_trie3_templates: IntermediateTrie3Config,
     pub intermediate_trie3_main: IntermediateTrie3Config,
+    pub dummy_terminal_name: Option<String>,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -681,6 +682,7 @@ impl Default for GrammarConstraintConfig {
             trie3: Trie3Config::default(),
             intermediate_trie3_templates: IntermediateTrie3Config::default(),
             intermediate_trie3_main: IntermediateTrie3Config::default(),
+            dummy_terminal_name: None,
         }
     }
 }
@@ -696,6 +698,7 @@ impl GrammarConstraintConfig {
             trie3: Trie3Config::off(),
             intermediate_trie3_templates: IntermediateTrie3Config::off(),
             intermediate_trie3_main: IntermediateTrie3Config::off(),
+            dummy_terminal_name: None,
         }
     }
 }
@@ -1025,6 +1028,24 @@ impl GrammarConstraint {
         precompute0_cache: Option<Precompute0Cache>,
     ) -> Self {
         let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
+        let mut compiled_grammar = compiled_grammar;
+
+        if let Some(dummy_name) = &config.dummy_terminal_name {
+            let dummy_term = Terminal::regex_name(dummy_name);
+            let mut new_productions = compiled_grammar.glr_parser.productions.clone();
+            for prod in &mut new_productions {
+                let mut new_rhs = Vec::new();
+                for sym in &prod.rhs {
+                    if let Symbol::Terminal(_) = sym {
+                        new_rhs.push(Symbol::Terminal(dummy_term.clone()));
+                    }
+                    new_rhs.push(sym.clone());
+                }
+                prod.rhs = new_rhs;
+            }
+            compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
+        }
+
         Self::new_with_config_and_precompute0_cache(
             compiled_grammar.tokenizer,
             compiled_grammar.glr_parser,
@@ -1212,6 +1233,10 @@ impl GrammarConstraint {
             };
         }
 
+        let dummy_terminal_id = config.dummy_terminal_name.as_ref().and_then(|name| {
+            parser.terminal_map.get_by_left(&Terminal::regex_name(name)).copied()
+        });
+
         let (precomputed1, trie1_god) = Self::precompute1(
             &tokenizer,
             Some(&parser),
@@ -1221,6 +1246,7 @@ impl GrammarConstraint {
             &mut precompute_vocab,
             &terminal_follow_map,
             config,
+            dummy_terminal_id,
         );
 
         // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
@@ -1429,6 +1455,10 @@ impl GrammarConstraint {
             };
         }
 
+        let dummy_terminal_id = config.dummy_terminal_name.as_ref().and_then(|name| {
+            parser.terminal_map.get_by_left(&Terminal::regex_name(name)).copied()
+        });
+
         // Maybe reuse precompute0 from cache
         let mut precomputed0_opt: Option<(Precomputed0, Trie0GodWrapper)> = None;
         if let Some(cache) = precompute0_cache {
@@ -1497,6 +1527,7 @@ impl GrammarConstraint {
             &mut precompute_vocab,
             &terminal_follow_map,
             config,
+            dummy_terminal_id,
         );
 
         precompute2_vocab = precompute_vocab.clone();
@@ -1809,6 +1840,7 @@ impl GrammarConstraint {
         stage_vocab: &mut StageVocab,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         config: &GrammarConstraintConfig,
+        dummy_terminal_id: Option<TerminalID>,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
         let mut helper = Precomputer1::new(
             tokenizer,
@@ -1820,6 +1852,7 @@ impl GrammarConstraint {
             terminal_follow_map,
             parser.and_then(|p| p.ignore_terminal_id),
             token_name_map,
+            dummy_terminal_id,
         );
 
         helper.run_dfs();
@@ -2776,6 +2809,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) leaf_node:        TempPrecomputeNode1Index,
     pub(crate) dfs_stats:        DfsStats,
     pub(crate) trie1_god:        TempTrie1GodWrapper,
+    pub(crate) dummy_terminal_id: Option<TerminalID>,
 }
 
 impl<'r> Precomputer0<'r> {}
@@ -2790,6 +2824,7 @@ impl<'r> Precomputer1<'r> {
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         token_name_map: &'r BiBTreeMap<Terminal, usize>,
+        dummy_terminal_id: Option<TerminalID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -2844,6 +2879,7 @@ impl<'r> Precomputer1<'r> {
             leaf_node,
             dfs_stats: DfsStats::default(),
             trie1_god,
+            dummy_terminal_id,
         }
     }
 
@@ -2857,7 +2893,7 @@ impl<'r> Precomputer1<'r> {
         let mut node_map: HashMap<TempPrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
 
         for (sid, temp_root) in self.roots {
-            let final_root = Self::convert_trie1_recursive(
+            let final_root = self.convert_trie1_recursive(
                 temp_root,
                 &self.trie1_god,
                 &final_trie1_god,
@@ -2870,6 +2906,7 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn convert_trie1_recursive(
+        &self,
         temp_idx: TempPrecomputeNode1Index,
         temp_god: &TempTrie1GodWrapper,
         final_god: &Trie1GodWrapper,
@@ -2891,12 +2928,47 @@ impl<'r> Precomputer1<'r> {
         let children_to_copy = temp_guard.children().clone();
         drop(temp_guard);
 
-        for (ek, dest_map) in children_to_copy {
+        let mut direct_edges = Vec::new();
+        let mut injected_edges = Vec::new();
+
+        if let Some(dummy_tid) = self.dummy_terminal_id {
+            for (ek, dest_map) in children_to_copy {
+                if let Some(tid) = ek {
+                    if tid != dummy_tid {
+                        injected_edges.push((Some(tid), dest_map));
+                        continue;
+                    }
+                }
+                direct_edges.push((ek, dest_map));
+            }
+        } else {
+            for (ek, dest_map) in children_to_copy {
+                direct_edges.push((ek, dest_map));
+            }
+        }
+
+        for (ek, dest_map) in direct_edges {
             for (temp_child_idx, rs_blaze) in dest_map {
-                let final_child_idx = Self::convert_trie1_recursive(temp_child_idx, temp_god, final_god, node_map);
+                let final_child_idx = self.convert_trie1_recursive(temp_child_idx, temp_god, final_god, node_map);
                 let hybrid_bitset = HybridBitset { inner: crate::datastructures::cache::intern_l1(rs_blaze) };
                 final_god.insert_edge_simple(final_idx, final_child_idx, ek.clone(), hybrid_bitset);
             }
+        }
+
+        if !injected_edges.is_empty() {
+            let dummy_tid = self.dummy_terminal_id.unwrap();
+            let inter_node = PrecomputeNode1::new(PrecomputedNodeContents::internal());
+            let inter_idx = PrecomputeNode1Index::new(final_god.insert(inter_node));
+            let mut total_inter_bitset = HybridBitset::zeros();
+            for (ek, dest_map) in injected_edges {
+                for (temp_child_idx, rs_blaze) in dest_map {
+                    let final_child_idx = self.convert_trie1_recursive(temp_child_idx, temp_god, final_god, node_map);
+                    let hybrid_bitset = HybridBitset { inner: crate::datastructures::cache::intern_l1(rs_blaze) };
+                    total_inter_bitset |= &hybrid_bitset;
+                    final_god.insert_edge_simple(inter_idx, final_child_idx, ek.clone(), hybrid_bitset);
+                }
+            }
+            final_god.insert_edge_simple(final_idx, inter_idx, Some(dummy_tid), total_inter_bitset);
         }
 
         final_idx
