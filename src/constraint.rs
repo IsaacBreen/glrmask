@@ -1258,6 +1258,8 @@ impl GrammarConstraint {
         new_config.dummy_terminal_map.clear();
         new_config.dummy_terminal_penalties.clear();
 
+        let compiled_grammar = initial_compiled_grammar.clone();
+
         Self::new_with_config_and_precompute0_cache(
             initial_compiled_grammar.tokenizer,
             final_parser, // Use the potentially new parser
