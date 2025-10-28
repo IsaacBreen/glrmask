@@ -598,7 +598,6 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
         compiled_grammar.clone(),
         llm_token_map.clone(),
-        LLMTokenID(dummy_eof_placeholder),
         max_original_llm_token_id_val,
         &GrammarConstraintConfig::default(),
         // &GrammarConstraintConfig::off(),
@@ -813,7 +812,6 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
     let constraint = GrammarConstraint::from_compiled_grammar(
         compiled_grammar,
         llm_token_map.clone(),
-        LLMTokenID(max_token_id + 1),
         max_token_id,
     );
 
@@ -916,7 +914,6 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
     let constraint = GrammarConstraint::from_compiled_grammar(
         compiled_grammar,
         llm_token_map.clone(),
-        LLMTokenID(max_token_id + 1),
         max_token_id,
     );
 
@@ -1017,7 +1014,6 @@ fn test_template_from_minimized_ebnf_for_constraint_28_jul_2025() -> Result<(), 
     let constraint = GrammarConstraint::from_compiled_grammar(
         compiled_grammar,
         llm_token_map.clone(),
-        LLMTokenID(max_token_id + 1),
         max_token_id,
     );
 

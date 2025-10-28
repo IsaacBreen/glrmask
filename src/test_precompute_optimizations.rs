@@ -118,8 +118,7 @@ fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn E
     let no_opt_config = GrammarConstraintConfig::off();
     let gc = GrammarConstraint::from_compiled_grammar_with_config(
         compiled,
-        llm_token_map,
-        LLMTokenID(0), // dummy EOF placeholder
+        llm_token_map, // dummy EOF placeholder
         max_original_llm_token_id,
         &no_opt_config,
     );
@@ -226,7 +225,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
         (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_reader(decompressor)?;
         // This path is problematic as the cached version is likely optimized.
         // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
-        let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
+        let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), max_original_llm_token_id_val);
         llm_vocab = gc_for_vocab.precompute_vocab1;
         println!("Successfully loaded Precomputed2 from cache.");
     } else {
@@ -234,8 +233,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
         let no_opt_config = GrammarConstraintConfig::off();
         let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
             compiled_grammar.clone(),
-            llm_token_map.clone(),
-            LLMTokenID(0), // dummy_eof_placeholder
+            llm_token_map.clone(), // dummy_eof_placeholder
             max_original_llm_token_id_val,
             &no_opt_config,
         );

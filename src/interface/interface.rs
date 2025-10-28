@@ -1568,7 +1568,6 @@ mod tests {
         let grammar_constraint = GrammarConstraint::from_compiled_grammar(
             compiled_grammar, // compiled_grammar is moved
             llm_token_map.clone(),
-            LLMTokenID(eof_llm_token_id),
             max_llm_token_id, // This is the capacity for the bitset (num_tokens including EOF)
         );
 
@@ -1723,8 +1722,7 @@ mod tests {
         println!("Creating constraint for sentence test...");
         let grammar_constraint = GrammarConstraint::from_compiled_grammar(
             compiled_grammar,
-            llm_token_map.clone(),
-            eof_llm_token_id, // Pass the usize value for the old eof_llm_token_id param
+            llm_token_map.clone(), // Pass the usize value for the old eof_llm_token_id param
             max_original_llm_token_id,
         );
 
@@ -1826,8 +1824,7 @@ mod tests {
         println!("Creating constraint for sentence test...");
         let grammar_constraint = GrammarConstraint::from_compiled_grammar(
             compiled_grammar,
-            llm_token_map.clone(),
-            eof_llm_token_id, // Pass the usize value for the old eof_llm_token_id param
+            llm_token_map.clone(), // Pass the usize value for the old eof_llm_token_id param
             max_original_llm_token_id,
         );
 
@@ -1874,7 +1871,6 @@ mod tests {
         let grammar_constraint = GrammarConstraint::from_compiled_grammar(
             compiled_grammar,
             llm_token_map.clone(),
-            LLMTokenID(dummy_eof_placeholder),
             max_original_llm_token_id,
         );
         let mut state = grammar_constraint.init();
