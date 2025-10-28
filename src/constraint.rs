@@ -4047,6 +4047,12 @@ impl<'a> GrammarConstraintState<'a> {
                         return true;
                     }
                     for tid in &accessible {
+                        let mut glr_state = glr_state.clone();
+                        if let Some(dummy_id) = self.parent.original_to_dummy_map.get(tid) {
+                            crate::debug!(5, "Processing dummy token {:?}", dummy_id);
+                            glr_state.process_token(*dummy_id);
+                        }
+
                         if glr_state.allows_terminal(*tid) {
                             return true;
                         }
