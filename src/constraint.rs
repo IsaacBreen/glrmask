@@ -680,7 +680,7 @@ impl Default for GrammarConstraintConfig {
             trie0: Trie0Config::off(),
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
-            trie3: Trie3Config::off(),
+            trie3: Trie3Config::default(),
             intermediate_trie3_templates: IntermediateTrie3Config::off(),
             intermediate_trie3_main: IntermediateTrie3Config::off(),
             dummy_terminal_map: BTreeMap::new(),
