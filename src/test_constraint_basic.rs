@@ -1058,6 +1058,9 @@ fn test_constraint_expression_no_parens() {
         token_name_map,
         3,
     );
+    println!("parser: {}", constraint.parser);
+    constraint.dump_precomputed1();
+    constraint.dump_precomputed3();
 
     // Initial state and step
     let mut state = constraint.init();
