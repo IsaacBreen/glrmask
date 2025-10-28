@@ -181,7 +181,7 @@ pub struct MiniTrie {
 impl MiniTrie {
     pub fn new() -> Self {
         Self {
-            nodes: Vec::new(),
+            nodes: BTreeMap::new(),
             root_ids: BTreeSet::new(),
             next_node_id: 0,
         }
@@ -253,7 +253,7 @@ impl MiniTrie {
             if let Some(v_node) = self.nodes.get(&v_id) {
                 for &u_id in v_node.parents.keys() {
                     if productive.insert(u_id) {
-                        q.push_back(u);
+                        q.push_back(u_id);
                     }
                 }
             }
