@@ -2066,18 +2066,13 @@ impl GrammarConstraint {
         let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
         for (items, _acc) in stacks.iter() {
-            let mut items = items.clone();
-            items.remove(0);
             if items.is_empty() {
                 continue;
             }
-
-            let shifted_state_content = *items.last().unwrap();
-            let pre_shift_stack = &items[0..items.len() - 1];
+            let (shifted_state_content, pre_shift_stack) = items.split_first().unwrap();
 
             // Walk the pre-shift stack from top to bottom to build the trie path
-            let mut cur = head.clone();
-            for state_content in pre_shift_stack.iter() {
+            let path_end_node = pre_shift_stack.iter().fold(head.clone(), |cur, state_content| {
                 let mut state_bv = StateIDBV::zeros();
                 state_bv.insert(state_content.state_id.0);
                 let inserter = EdgeInserter::new(
@@ -2086,13 +2081,11 @@ impl GrammarConstraint {
                     IntermediateTrie3EdgeKey::Push(state_bv), (), |_, _| {}, |_, _| {}, |_, _| {},
                 );
                 let next = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                let actual = inserter.try_destination(next.clone()).expect("Failed to insert Push edge in template chain");
-                cur = actual;
-            }
+                inserter.try_destination(next).expect("Failed to insert Push edge in template chain")
+            });
 
-            // The current node `cur` is the end of the path for this stack configuration.
-            // Map the shifted state to this end node.
-            final_nodes_map.insert(shifted_state_content, cur);
+            // Map the shifted state to the end of its corresponding pre-shift stack path.
+            final_nodes_map.insert(*shifted_state_content, path_end_node);
         }
 
         (head, final_nodes_map)
