@@ -676,6 +676,7 @@ local_system:
           pub intermediate_trie3_templates: IntermediateTrie3Config,
           pub intermediate_trie3_main: IntermediateTrie3Config,
           pub dummy_terminal_map: BTreeMap<String, BTreeSet<String>>,
+          pub dummy_terminal_penalties: BTreeMap<String, usize>,
       }
 
       impl Default for GrammarConstraintConfig {
@@ -690,6 +691,7 @@ local_system:
                   intermediate_trie3_templates: IntermediateTrie3Config::default(),
                   intermediate_trie3_main: IntermediateTrie3Config::default(),
                   dummy_terminal_map: BTreeMap::new(),
+                  dummy_terminal_penalties: BTreeMap::new(),
               }
           }
       }
@@ -706,6 +708,7 @@ local_system:
                   intermediate_trie3_templates: IntermediateTrie3Config::off(),
                   intermediate_trie3_main: IntermediateTrie3Config::off(),
                   dummy_terminal_map: BTreeMap::new(),
+                  dummy_terminal_penalties: BTreeMap::new(),
               }
           }
       }
@@ -1034,20 +1037,61 @@ local_system:
               config: &GrammarConstraintConfig,
               precompute0_cache: Option<Precompute0Cache>,
           ) -> Self {
-              let mut new_config = config.clone();
-              let dummy_name = "__DUMMY_TERMINAL__".to_string();
-              
-              let all_terminal_names: BTreeSet<String> = grammar_definition.productions.iter()
-                  .flat_map(|p| p.rhs.iter())
-                  .filter_map(|sym| if let Symbol::Terminal(t) = sym { Some(t.to_string()) } else { None })
-                  .collect();
-
-              new_config.dummy_terminal_map.insert(dummy_name.clone(), all_terminal_names);
-
-              // The grammar is NOT modified here. Instead, `convert_trie1_recursive` will insert dummy terminals.
-              // For this to work, the dummy terminal(s) must be part of the grammar definition so they are known to the parser.
-              // This function assumes `__DUMMY_TERMINAL__` is defined in the grammar.
+              // This function assumes dummy terminals (e.g., `__DUMMY_TERMINAL_.*__`) are defined in the grammar.
+              // It will group real terminals under these dummies based on the structural similarity of their
+              // corresponding Trie3 templates.
               let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
+              let parser = &compiled_grammar.glr_parser;
+
+              // We need internal_max_llm_token to build templates, so we compute it early.
+              let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &compiled_grammar.tokenizer);
+              let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
+
+              // Build templates for all terminals to assess similarity.
+              let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
+              let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
+
+              // Group terminals by the canonical string representation of their template trie.
+              let mut groups_by_repr: BTreeMap<String, (Vec<TerminalID>, usize)> = BTreeMap::new();
+              let print_options = PrettyPrintOptions::default().display_edge_keys_only().display_nodes().omit_depth();
+              for (tid, (start, _end)) in &templates {
+                  let repr = Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &print_options);
+                  let complexity = Trie::all_nodes(&intermediate_trie3_god, &[*start]).len();
+                  let entry = groups_by_repr.entry(repr).or_insert_with(|| (Vec::new(), complexity));
+                  entry.0.push(*tid);
+              }
+
+              // Find available dummy terminals defined in the grammar.
+              let mut available_dummy_terminals: Vec<String> = parser.terminal_map.left_values()
+                  .filter(|term| term.to_string().starts_with("__DUMMY_TERMINAL_"))
+                  .map(|term| term.to_string())
+                  .collect();
+              available_dummy_terminals.sort(); // For determinism
+
+              let mut new_config = config.clone();
+              new_config.dummy_terminal_map.clear();
+              new_config.dummy_terminal_penalties.clear();
+
+              let mut sorted_groups: Vec<_> = groups_by_repr.into_values().collect();
+              // Assign larger groups first to the available dummy terminals.
+              sorted_groups.sort_by_key(|(tids, _complexity)| std::cmp::Reverse(tids.len()));
+
+              let mut dummy_iter = available_dummy_terminals.iter();
+              for (tids, complexity) in sorted_groups {
+                  if tids.len() <= 1 { // Don't group single-terminal groups
+                      continue;
+                  }
+                  if let Some(dummy_name) = dummy_iter.next() {
+                      let original_names: BTreeSet<String> = tids.iter()
+                          .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
+                          .collect();
+                      new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
+                      new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
+                  } else {
+                      crate::debug!(1, "Warning: Ran out of dummy terminals for grouping. Some groups will not be grouped.");
+                      break;
+                  }
+              }
 
               Self::new_with_config_and_precompute0_cache(
                   compiled_grammar.tokenizer,
@@ -1879,8 +1923,19 @@ local_system:
               original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
               let mut dummy_terminal_penalties: BTreeMap<TerminalID, usize> = BTreeMap::new();
-              for dummy_tid in original_to_dummy_map.values() {
-                  *dummy_terminal_penalties.entry(*dummy_tid).or_default() += 1;
+              if !config.dummy_terminal_penalties.is_empty() {
+                  if let Some(p) = parser {
+                      for (dummy_name, penalty) in &config.dummy_terminal_penalties {
+                          let dummy_term = Terminal::regex_name(dummy_name);
+                          if let Some(&dummy_id) = p.terminal_map.get_by_left(&dummy_term) {
+                              dummy_terminal_penalties.insert(dummy_id, *penalty);
+                          }
+                      }
+                  }
+              } else {
+                  for dummy_tid in original_to_dummy_map.values() {
+                      *dummy_terminal_penalties.entry(*dummy_tid).or_default() += 1;
+                  }
               }
 
               let mut helper = Precomputer1::new(
@@ -2073,26 +2128,38 @@ local_system:
               let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
               for (items, _acc) in stacks.iter() {
+                  let items = &items[1..]; // Skip first element
                   if items.is_empty() {
                       continue;
                   }
-                  let (shifted_state_content, pre_shift_stack) = items.split_first().unwrap();
+
+                  let shifted_state_content = *items.last().unwrap();
+                  let pre_shift_stack = &items[..items.len() - 1];
 
                   // Walk the pre-shift stack from top to bottom to build the trie path
-                  let path_end_node = pre_shift_stack.iter().fold(head.clone(), |cur, state_content| {
+                  let mut cur = head.clone();
+                  for state_content in pre_shift_stack {
                       let mut state_bv = StateIDBV::zeros();
                       state_bv.insert(state_content.state_id.0);
                       let inserter = EdgeInserter::new(
                           trie3_god,
                           cur.as_arc().clone(),
-                          IntermediateTrie3EdgeKey::Push(state_bv), (), |_, _| {}, |_, _| {}, |_, _| {},
+                          IntermediateTrie3EdgeKey::Push(state_bv),
+                          (),
+                          |_, _| {},
+                          |_, _| {},
+                          |_, _| {},
                       );
-                      let next = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                      inserter.try_destination(next).expect("Failed to insert Push edge in template chain")
-                  });
+                      let next = IntermediatePrecomputeNode3Index::new(
+                          trie3_god.insert(IntermediatePrecomputeNode3::new(
+                              IntermediatePrecomputedNodeContents3::internal()
+                          ))
+                      );
+                      cur = inserter.try_destination(next)
+                          .expect("Failed to insert Push edge in template chain");
+                  }
 
-                  // Map the shifted state to the end of its corresponding pre-shift stack path.
-                  final_nodes_map.insert(*shifted_state_content, path_end_node);
+                  final_nodes_map.insert(shifted_state_content, cur);
               }
 
               (head, final_nodes_map)
@@ -4922,7 +4989,7 @@ local_system:
               }
 
               // Find available dummy terminals defined in the grammar.
-              let mut available_dummy_terminals: Vec<String> = parser.terminal_map.keys()
+              let mut available_dummy_terminals: Vec<String> = parser.terminal_map.left_values()
                   .filter(|term| term.to_string().starts_with("__DUMMY_TERMINAL_"))
                   .map(|term| term.to_string())
                   .collect();
@@ -4952,6 +5019,25 @@ local_system:
                       break;
                   }
               }
+
+              println!("\n--- Dummy Terminal Groups ---");
+              if new_config.dummy_terminal_map.is_empty() {
+                  println!("No dummy groups were created.");
+              } else {
+                  let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
+                  sorted_dummies.sort_by_key(|(k, _)| *k);
+
+                  for (dummy_name, original_names) in sorted_dummies {
+                      let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
+                      println!("- {}: (penalty: {})", dummy_name, penalty);
+                      let mut sorted_originals: Vec<_> = original_names.iter().collect();
+                      sorted_originals.sort();
+                      for name in sorted_originals {
+                          println!("  - {}", name);
+                      }
+                  }
+              }
+              println!("---------------------------\n");
 
               Self::new_with_config_and_precompute0_cache(
                   compiled_grammar.tokenizer,
@@ -8505,6 +8591,7 @@ messages:
           pub intermediate_trie3_templates: IntermediateTrie3Config,
           pub intermediate_trie3_main: IntermediateTrie3Config,
           pub dummy_terminal_map: BTreeMap<String, BTreeSet<String>>,
+          pub dummy_terminal_penalties: BTreeMap<String, usize>,
       }
 
       impl Default for GrammarConstraintConfig {
@@ -8519,6 +8606,7 @@ messages:
                   intermediate_trie3_templates: IntermediateTrie3Config::default(),
                   intermediate_trie3_main: IntermediateTrie3Config::default(),
                   dummy_terminal_map: BTreeMap::new(),
+                  dummy_terminal_penalties: BTreeMap::new(),
               }
           }
       }
@@ -8535,6 +8623,7 @@ messages:
                   intermediate_trie3_templates: IntermediateTrie3Config::off(),
                   intermediate_trie3_main: IntermediateTrie3Config::off(),
                   dummy_terminal_map: BTreeMap::new(),
+                  dummy_terminal_penalties: BTreeMap::new(),
               }
           }
       }
@@ -8863,20 +8952,61 @@ messages:
               config: &GrammarConstraintConfig,
               precompute0_cache: Option<Precompute0Cache>,
           ) -> Self {
-              let mut new_config = config.clone();
-              let dummy_name = "__DUMMY_TERMINAL__".to_string();
-              
-              let all_terminal_names: BTreeSet<String> = grammar_definition.productions.iter()
-                  .flat_map(|p| p.rhs.iter())
-                  .filter_map(|sym| if let Symbol::Terminal(t) = sym { Some(t.to_string()) } else { None })
-                  .collect();
-
-              new_config.dummy_terminal_map.insert(dummy_name.clone(), all_terminal_names);
-
-              // The grammar is NOT modified here. Instead, `convert_trie1_recursive` will insert dummy terminals.
-              // For this to work, the dummy terminal(s) must be part of the grammar definition so they are known to the parser.
-              // This function assumes `__DUMMY_TERMINAL__` is defined in the grammar.
+              // This function assumes dummy terminals (e.g., `__DUMMY_TERMINAL_.*__`) are defined in the grammar.
+              // It will group real terminals under these dummies based on the structural similarity of their
+              // corresponding Trie3 templates.
               let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
+              let parser = &compiled_grammar.glr_parser;
+
+              // We need internal_max_llm_token to build templates, so we compute it early.
+              let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &compiled_grammar.tokenizer);
+              let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
+
+              // Build templates for all terminals to assess similarity.
+              let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
+              let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
+
+              // Group terminals by the canonical string representation of their template trie.
+              let mut groups_by_repr: BTreeMap<String, (Vec<TerminalID>, usize)> = BTreeMap::new();
+              let print_options = PrettyPrintOptions::default().display_edge_keys_only().display_nodes().omit_depth();
+              for (tid, (start, _end)) in &templates {
+                  let repr = Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &print_options);
+                  let complexity = Trie::all_nodes(&intermediate_trie3_god, &[*start]).len();
+                  let entry = groups_by_repr.entry(repr).or_insert_with(|| (Vec::new(), complexity));
+                  entry.0.push(*tid);
+              }
+
+              // Find available dummy terminals defined in the grammar.
+              let mut available_dummy_terminals: Vec<String> = parser.terminal_map.left_values()
+                  .filter(|term| term.to_string().starts_with("__DUMMY_TERMINAL_"))
+                  .map(|term| term.to_string())
+                  .collect();
+              available_dummy_terminals.sort(); // For determinism
+
+              let mut new_config = config.clone();
+              new_config.dummy_terminal_map.clear();
+              new_config.dummy_terminal_penalties.clear();
+
+              let mut sorted_groups: Vec<_> = groups_by_repr.into_values().collect();
+              // Assign larger groups first to the available dummy terminals.
+              sorted_groups.sort_by_key(|(tids, _complexity)| std::cmp::Reverse(tids.len()));
+
+              let mut dummy_iter = available_dummy_terminals.iter();
+              for (tids, complexity) in sorted_groups {
+                  if tids.len() <= 1 { // Don't group single-terminal groups
+                      continue;
+                  }
+                  if let Some(dummy_name) = dummy_iter.next() {
+                      let original_names: BTreeSet<String> = tids.iter()
+                          .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
+                          .collect();
+                      new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
+                      new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
+                  } else {
+                      crate::debug!(1, "Warning: Ran out of dummy terminals for grouping. Some groups will not be grouped.");
+                      break;
+                  }
+              }
 
               Self::new_with_config_and_precompute0_cache(
                   compiled_grammar.tokenizer,
@@ -9708,8 +9838,19 @@ messages:
               original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
               let mut dummy_terminal_penalties: BTreeMap<TerminalID, usize> = BTreeMap::new();
-              for dummy_tid in original_to_dummy_map.values() {
-                  *dummy_terminal_penalties.entry(*dummy_tid).or_default() += 1;
+              if !config.dummy_terminal_penalties.is_empty() {
+                  if let Some(p) = parser {
+                      for (dummy_name, penalty) in &config.dummy_terminal_penalties {
+                          let dummy_term = Terminal::regex_name(dummy_name);
+                          if let Some(&dummy_id) = p.terminal_map.get_by_left(&dummy_term) {
+                              dummy_terminal_penalties.insert(dummy_id, *penalty);
+                          }
+                      }
+                  }
+              } else {
+                  for dummy_tid in original_to_dummy_map.values() {
+                      *dummy_terminal_penalties.entry(*dummy_tid).or_default() += 1;
+                  }
               }
 
               let mut helper = Precomputer1::new(
@@ -9902,26 +10043,38 @@ messages:
               let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
               for (items, _acc) in stacks.iter() {
+                  let items = &items[1..]; // Skip first element
                   if items.is_empty() {
                       continue;
                   }
-                  let (shifted_state_content, pre_shift_stack) = items.split_first().unwrap();
+
+                  let shifted_state_content = *items.last().unwrap();
+                  let pre_shift_stack = &items[..items.len() - 1];
 
                   // Walk the pre-shift stack from top to bottom to build the trie path
-                  let path_end_node = pre_shift_stack.iter().fold(head.clone(), |cur, state_content| {
+                  let mut cur = head.clone();
+                  for state_content in pre_shift_stack {
                       let mut state_bv = StateIDBV::zeros();
                       state_bv.insert(state_content.state_id.0);
                       let inserter = EdgeInserter::new(
                           trie3_god,
                           cur.as_arc().clone(),
-                          IntermediateTrie3EdgeKey::Push(state_bv), (), |_, _| {}, |_, _| {}, |_, _| {},
+                          IntermediateTrie3EdgeKey::Push(state_bv),
+                          (),
+                          |_, _| {},
+                          |_, _| {},
+                          |_, _| {},
                       );
-                      let next = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                      inserter.try_destination(next).expect("Failed to insert Push edge in template chain")
-                  });
+                      let next = IntermediatePrecomputeNode3Index::new(
+                          trie3_god.insert(IntermediatePrecomputeNode3::new(
+                              IntermediatePrecomputedNodeContents3::internal()
+                          ))
+                      );
+                      cur = inserter.try_destination(next)
+                          .expect("Failed to insert Push edge in template chain");
+                  }
 
-                  // Map the shifted state to the end of its corresponding pre-shift stack path.
-                  final_nodes_map.insert(*shifted_state_content, path_end_node);
+                  final_nodes_map.insert(shifted_state_content, cur);
               }
 
               (head, final_nodes_map)
@@ -11696,15 +11849,7 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: |-
-      We want to be more careful about how we assign dummy terminals.
-      Let's build intermediate terminal 3 tries in `new_from_grammar_definition`.
-      Define some notion of similarity between tries.
-      Group terminals by how similar their template tries are.
-      That's it.
-      Now for the weights/penalties passed to the optimizer. Make the penalty of each dummy group proportional to the complexity of the template trie.
-    metadata:
-  - user: Simplify this chunk of code
+  - user: Print the dummy groups.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -11724,161 +11869,88 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the requested changes, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to print the dummy terminal groups, followed by the corresponding git diff.
 
-      ### Step-by-step Instructions
+      ### Instructions
 
-      1.  **File: `src/constraint.rs`**
-          *   **Modify `GrammarConstraintConfig`:**
-              *   In the `GrammarConstraintConfig` struct definition (around line 818), add a new public field: `pub dummy_terminal_penalties: BTreeMap<String, usize>,`.
-              *   In the `impl Default for GrammarConstraintConfig` block (around line 830), initialize the new field: `dummy_terminal_penalties: BTreeMap::new(),`.
-              *   In the `GrammarConstraintConfig::off` method (around line 846), initialize the new field as well: `dummy_terminal_penalties: BTreeMap::new(),`.
+      I will add code to print the dummy terminal groups that are automatically created based on template similarity. This will provide visibility into how terminals are being grouped.
 
-          *   **Update `new_from_grammar_definition`:**
-              *   Locate the `new_from_grammar_definition` function (around line 1018).
-              *   Replace its entire body with the new implementation. The new logic will:
-                  1.  Compile the grammar to get a parser.
-                  2.  Build intermediate Trie3 templates for each terminal to analyze their structure.
-                  3.  Group terminals based on the structural similarity of their templates.
-                  4.  Identify available dummy terminals (e.g., `__DUMMY_TERMINAL_...`) from the grammar definition.
-                  5.  Assign groups of similar terminals to the available dummy terminals.
-                  6.  Calculate a complexity "penalty" for each group based on its template size.
-                  7.  Populate a new `GrammarConstraintConfig` with this grouping information and penalties.
-                  8.  Proceed with `GrammarConstraint` creation using this new, more intelligent configuration.
+      1.  **Open `src/constraint.rs`**.
+      2.  Navigate to the `new_from_grammar_definition` function.
+      3.  Find the loop that iterates through `sorted_groups` and populates `new_config.dummy_terminal_map`. It looks like this:
+          ```rust
+                  let mut dummy_iter = available_dummy_terminals.iter();
+                  for (tids, complexity) in sorted_groups {
+                      if tids.len() <= 1 { // Don't group single-terminal groups
+                          continue;
+                      }
+                      if let Some(dummy_name) = dummy_iter.next() {
+                          let original_names: BTreeSet<String> = tids.iter()
+                              .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
+                              .collect();
+                          new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
+                          new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
+                      } else {
+                          crate::debug!(1, "Warning: Ran out of dummy terminals for grouping. Some groups will not be grouped.");
+                          break;
+                      }
+                  }
+          ```
+      4.  Immediately after this loop, insert the following code block to print the generated groups:
+          ```rust
+                  println!("\n--- Dummy Terminal Groups ---");
+                  if new_config.dummy_terminal_map.is_empty() {
+                      println!("No dummy groups were created.");
+                  } else {
+                      let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
+                      sorted_dummies.sort_by_key(|(k, _)| *k);
+          
+                      for (dummy_name, original_names) in sorted_dummies {
+                          let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
+                          println!("- {}: (penalty: {})", dummy_name, penalty);
+                          let mut sorted_originals: Vec<_> = original_names.iter().collect();
+                          sorted_originals.sort();
+                          for name in sorted_originals {
+                              println!("  - {}", name);
+                          }
+                      }
+                  }
+                  println!("---------------------------\n");
+          ```
 
-          *   **Update `precompute1`:**
-              *   In the `precompute1` function (around line 1780), find the block that calculates `dummy_terminal_penalties`.
-              *   Replace the existing logic, which simply counts the number of terminals in each dummy group, with a new implementation that first tries to use the complexity-based penalties from the configuration. If those are not provided, it will fall back to the original counting method for backward compatibility.
+      ### Git Diff
 
-      ### Git Diffs
-
-      Here are the git diffs to apply the changes:
+      Here is the git diff to apply the changes:
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -825,6 +825,7 @@
-           pub intermediate_trie3_templates: IntermediateTrie3Config,
-           pub intermediate_trie3_main: IntermediateTrie3Config,
-           pub dummy_terminal_map: BTreeMap<String, BTreeSet<String>>,
-      +    pub dummy_terminal_penalties: BTreeMap<String, usize>,
-       }
-       
-       impl Default for GrammarConstraintConfig {
-      @@ -838,6 +839,7 @@
-                   intermediate_trie3_templates: IntermediateTrie3Config::default(),
-                   intermediate_trie3_main: IntermediateTrie3Config::default(),
-                   dummy_terminal_map: BTreeMap::new(),
-      +            dummy_terminal_penalties: BTreeMap::new(),
+      @@ -1382,6 +1382,26 @@
+                   }
                }
-           }
-       }
-      @@ -853,6 +855,7 @@
-                   intermediate_trie3_templates: IntermediateTrie3Config::off(),
-                   intermediate_trie3_main: IntermediateTrie3Config::off(),
-                   dummy_terminal_map: BTreeMap::new(),
-      +            dummy_terminal_penalties: BTreeMap::new(),
-               }
-           }
-       }
-      @@ -1022,26 +1025,61 @@
-               config: &GrammarConstraintConfig,
-               precompute0_cache: Option<Precompute0Cache>,
-           ) -> Self {
-      -        let mut new_config = config.clone();
-      -        let dummy_name = "__DUMMY_TERMINAL__".to_string();
-      -        
-      -        let all_terminal_names: BTreeSet<String> = grammar_definition.productions.iter()
-      -            .flat_map(|p| p.rhs.iter())
-      -            .filter_map(|sym| if let Symbol::Terminal(t) = sym { Some(t.to_string()) } else { None })
-      -            .collect();
-      -
-      -        new_config.dummy_terminal_map.insert(dummy_name.clone(), all_terminal_names);
-      -
-      -        // The grammar is NOT modified here. Instead, `convert_trie1_recursive` will insert dummy terminals.
-      -        // For this to work, the dummy terminal(s) must be part of the grammar definition so they are known to the parser.
-      -        // This function assumes `__DUMMY_TERMINAL__` is defined in the grammar.
-      +        // This function assumes dummy terminals (e.g., `__DUMMY_TERMINAL_.*__`) are defined in the grammar.
-      +        // It will group real terminals under these dummies based on the structural similarity of their
-      +        // corresponding Trie3 templates.
-               let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
-      +        let parser = &compiled_grammar.glr_parser;
-      +
-      +        // We need internal_max_llm_token to build templates, so we compute it early.
-      +        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &compiled_grammar.tokenizer);
-      +        let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
-      +
-      +        // Build templates for all terminals to assess similarity.
-      +        let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
-      +        let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
-      +
-      +        // Group terminals by the canonical string representation of their template trie.
-      +        let mut groups_by_repr: BTreeMap<String, (Vec<TerminalID>, usize)> = BTreeMap::new();
-      +        let print_options = PrettyPrintOptions::default().display_edge_keys_only().display_nodes().omit_depth();
-      +        for (tid, (start, _end)) in &templates {
-      +            let repr = Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &print_options);
-      +            let complexity = Trie::all_nodes(&intermediate_trie3_god, &[*start]).len();
-      +            let entry = groups_by_repr.entry(repr).or_insert_with(|| (Vec::new(), complexity));
-      +            entry.0.push(*tid);
-      +        }
-      +
-      +        // Find available dummy terminals defined in the grammar.
-      +        let mut available_dummy_terminals: Vec<String> = parser.terminal_map.keys()
-      +            .filter(|term| term.to_string().starts_with("__DUMMY_TERMINAL_"))
-      +            .map(|term| term.to_string())
-      +            .collect();
-      +        available_dummy_terminals.sort(); // For determinism
-      +
-      +        let mut new_config = config.clone();
-      +        new_config.dummy_terminal_map.clear();
-      +        new_config.dummy_terminal_penalties.clear();
-      +
-      +        let mut sorted_groups: Vec<_> = groups_by_repr.into_values().collect();
-      +        // Assign larger groups first to the available dummy terminals.
-      +        sorted_groups.sort_by_key(|(tids, _complexity)| std::cmp::Reverse(tids.len()));
-      +
-      +        let mut dummy_iter = available_dummy_terminals.iter();
-      +        for (tids, complexity) in sorted_groups {
-      +            if tids.len() <= 1 { // Don't group single-terminal groups
-      +                continue;
-      +            }
-      +            if let Some(dummy_name) = dummy_iter.next() {
-      +                let original_names: BTreeSet<String> = tids.iter()
-      +                    .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().to_string())
-      +                    .collect();
-      +                new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
-      +                new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
-      +            } else {
-      +                crate::debug!(1, "Warning: Ran out of dummy terminals for grouping. Some groups will not be grouped.");
-      +                break;
-      +            }
-      +        }
        
-               Self::new_with_config_and_precompute0_cache(
-                   compiled_grammar.tokenizer,
-      @@ -1781,9 +1819,19 @@
-               config: &GrammarConstraintConfig,
-               original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
-           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
-               let mut dummy_terminal_penalties: BTreeMap<TerminalID, usize> = BTreeMap::new();
-      -        for dummy_tid in original_to_dummy_map.values() {
-      -            *dummy_terminal_penalties.entry(*dummy_tid).or_default() += 1;
-      +        if !config.dummy_terminal_penalties.is_empty() {
-      +            if let Some(p) = parser {
-      +                for (dummy_name, penalty) in &config.dummy_terminal_penalties {
-      +                    let dummy_term = Terminal::regex_name(dummy_name);
-      +                    if let Some(&dummy_id) = p.terminal_map.get_by_left(&dummy_term) {
-      +                        dummy_terminal_penalties.insert(dummy_id, *penalty);
-      +                    }
+      +        println!("\n--- Dummy Terminal Groups ---");
+      +        if new_config.dummy_terminal_map.is_empty() {
+      +            println!("No dummy groups were created.");
+      +        } else {
+      +            let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
+      +            sorted_dummies.sort_by_key(|(k, _)| *k);
+      +
+      +            for (dummy_name, original_names) in sorted_dummies {
+      +                let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
+      +                println!("- {}: (penalty: {})", dummy_name, penalty);
+      +                let mut sorted_originals: Vec<_> = original_names.iter().collect();
+      +                sorted_originals.sort();
+      +                for name in sorted_originals {
+      +                    println!("  - {}", name);
       +                }
       +            }
-      +        } else {
-      +            for dummy_tid in original_to_dummy_map.values() {
-      +                *dummy_terminal_penalties.entry(*dummy_tid).or_default() += 1;
-      +            }
-               }
-       
-               let mut helper = Precomputer1::new(
+      +        }
+      +        println!("---------------------------\n");
+      +
+               Self::new_with_config_and_precompute0_cache(
+                   compiled_grammar.tokenizer,
+                   compiled_grammar.glr_parser,
 
       ```
     metadata:
@@ -11891,7 +11963,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor dummy terminal assignment to
-      group terminals by Trie3 template similarity and use complexity-based penalties"'
+  - user: 'Changes committed with message: "feat(constraint): Print dummy terminal
+      groups after creation"'
     metadata:
 ...

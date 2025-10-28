@@ -1086,6 +1086,25 @@ impl GrammarConstraint {
             }
         }
 
+        println!("\n--- Dummy Terminal Groups ---");
+        if new_config.dummy_terminal_map.is_empty() {
+            println!("No dummy groups were created.");
+        } else {
+            let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
+            sorted_dummies.sort_by_key(|(k, _)| *k);
+
+            for (dummy_name, original_names) in sorted_dummies {
+                let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
+                println!("- {}: (penalty: {})", dummy_name, penalty);
+                let mut sorted_originals: Vec<_> = original_names.iter().collect();
+                sorted_originals.sort();
+                for name in sorted_originals {
+                    println!("  - {}", name);
+                }
+            }
+        }
+        println!("---------------------------\n");
+
         Self::new_with_config_and_precompute0_cache(
             compiled_grammar.tokenizer,
             compiled_grammar.glr_parser,
