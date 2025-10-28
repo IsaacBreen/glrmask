@@ -94,6 +94,7 @@ pub enum LRMode {
     LALR,
     LALR_EX_SHIFT_STATES,
     LR1,
+    LR0,
 }
 
 pub const LR_MODE: LRMode = LRMode::LALR;

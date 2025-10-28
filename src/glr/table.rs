@@ -375,7 +375,10 @@ fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BT
 
 #[time_it]
 fn stage_1(productions: &[Production]) -> Stage1Result {
-    assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
+    assert!(
+        matches!(LR_MODE, LRMode::LALR | LRMode::LR0),
+        "Only LALR and LR0 modes are supported by the table builder"
+    );
     let start_production_id = 0;
     let initial_item = Item {
         production: Arc::new(productions[start_production_id].clone()),
@@ -459,33 +462,53 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
 }
 
 fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-    // Compute FOLLOW sets (including EOF as None)
-    let first_sets = compute_first_sets_for_nonterminals(productions);
-    let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-
     let mut stage_3_table = BTreeMap::new();
 
-    for (item_set, row) in stage_2_table {
-        let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
+    match LR_MODE {
+        LRMode::LR0 => {
+            let all_terminals: BTreeSet<Terminal> = productions
+                .iter()
+                .flat_map(|p| {
+                    p.rhs.iter().filter_map(|s| match s {
+                        Symbol::Terminal(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                })
+                .collect();
 
-        for item in &row.reduces {
-            let lhs = &item.production.lhs;
-            if let Some(follows) = follow_sets.get(lhs) {
-                for look in follows {
-                    reduces.entry(look.clone()).or_default().insert(item.clone());
+            for (item_set, row) in stage_2_table {
+                let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
+                if !row.reduces.is_empty() {
+                    // For LR(0), a reduce item means reduce on ANY lookahead.
+                    for terminal in &all_terminals {
+                        reduces.entry(Some(terminal.clone())).or_default().extend(row.reduces.iter().cloned());
+                    }
+                    // Also for EOF (represented as None)
+                    reduces.entry(None).or_default().extend(row.reduces.iter().cloned());
                 }
+                stage_3_table.insert(item_set, Stage3Row { shifts: row.shifts, gotos: row.gotos, reduces });
             }
         }
+        LRMode::LALR | LRMode::LALR_EX_SHIFT_STATES | LRMode::LR1 => {
+            // Compute FOLLOW sets (including EOF as None) for LALR
+            let first_sets = compute_first_sets_for_nonterminals(productions);
+            let nullable_nonterminals = compute_nullable_nonterminals(productions);
+            let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
-        stage_3_table.insert(
-            item_set,
-            Stage3Row {
-                shifts: row.shifts,
-                gotos: row.gotos,
-                reduces,
-            },
-        );
+            for (item_set, row) in stage_2_table {
+                let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
+
+                for item in &row.reduces {
+                    let lhs = &item.production.lhs;
+                    if let Some(follows) = follow_sets.get(lhs) {
+                        for look in follows {
+                            reduces.entry(look.clone()).or_default().insert(item.clone());
+                        }
+                    }
+                }
+                stage_3_table.insert(item_set, Stage3Row { shifts: row.shifts, gotos: row.gotos, reduces });
+            }
+        }
     }
     stage_3_table
 }
@@ -1409,7 +1432,10 @@ fn merge_compatible_states(
 
 #[time_it]
 pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
-    assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
+    assert!(
+        matches!(LR_MODE, LRMode::LALR | LRMode::LR0),
+        "Only LALR and LR0 modes are supported by the table builder"
+    );
     crate::debug!(2, "Validating initial grammar");
     validate(productions).expect("Initial grammar validation failed");
 
