@@ -668,6 +668,7 @@ pub struct GrammarConstraintConfig {
     pub trie3: Trie3Config,
     pub intermediate_trie3_templates: IntermediateTrie3Config,
     pub intermediate_trie3_main: IntermediateTrie3Config,
+    pub dummy_terminal_name: Option<String>,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -681,6 +682,7 @@ impl Default for GrammarConstraintConfig {
             trie3: Trie3Config::default(),
             intermediate_trie3_templates: IntermediateTrie3Config::default(),
             intermediate_trie3_main: IntermediateTrie3Config::default(),
+            dummy_terminal_name: None,
         }
     }
 }
@@ -696,6 +698,7 @@ impl GrammarConstraintConfig {
             trie3: Trie3Config::off(),
             intermediate_trie3_templates: IntermediateTrie3Config::off(),
             intermediate_trie3_main: IntermediateTrie3Config::off(),
+            dummy_terminal_name: None,
         }
     }
 }
@@ -1025,7 +1028,34 @@ impl GrammarConstraint {
         precompute0_cache: Option<Precompute0Cache>,
     ) -> Self {
         let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
-        Self::new_with_config_and_precompute0_cache(
+        let mut grammar_definition_for_compilation = grammar_definition;
+        if let Some(dummy_name) = &config.dummy_terminal_name {
+            let mut gd = (*grammar_definition_for_compilation).clone(); // Clone to make it mutable without affecting caller's Arc
+            let dummy_terminal = Terminal::RegexName(dummy_name.clone());
+
+            if !gd.terminal_to_group_id.contains_left(&dummy_terminal) {
+                let next_id = gd.terminal_to_group_id.values().max().map_or(0, |v| v + 1);
+                gd.terminal_to_group_id.insert(dummy_terminal.clone(), next_id);
+            }
+
+            let mut new_productions = Vec::new();
+            for prod in &gd.productions {
+                let mut new_rhs = Vec::new();
+                for symbol in &prod.rhs {
+                    if let Symbol::Terminal(t) = symbol {
+                        if *t != dummy_terminal {
+                            new_rhs.push(Symbol::Terminal(dummy_terminal.clone()));
+                        }
+                    }
+                    new_rhs.push(symbol.clone());
+                }
+                new_productions.push(Production { lhs: prod.lhs.clone(), rhs: new_rhs });
+            }
+            gd.productions = new_productions;
+            grammar_definition_for_compilation = Arc::new(gd);
+        }
+
+        let compiled_grammar = CompiledGrammar::from_definition(grammar_definition_for_compilation); Self::new_with_config_and_precompute0_cache(
             compiled_grammar.tokenizer,
             compiled_grammar.glr_parser,
             llm_token_map,
@@ -1810,6 +1840,12 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         config: &GrammarConstraintConfig,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
+        let dummy_terminal_id = if let Some(parser) = parser {
+            config.dummy_terminal_name.as_ref().and_then(|name| parser.terminal_map.get_by_left(&Terminal::RegexName(name.clone())).copied())
+        } else {
+            None
+        };
+
         let mut helper = Precomputer1::new(
             tokenizer,
             parser,
@@ -1820,9 +1856,15 @@ impl GrammarConstraint {
             terminal_follow_map,
             parser.and_then(|p| p.ignore_terminal_id),
             token_name_map,
+            dummy_terminal_id,
         );
 
         helper.run_dfs();
+
+        if helper.dummy_terminal_id.is_some() {
+            helper.insert_dummy_terminal_edges();
+        }
+
         let roots_before: Vec<_> = helper.roots.values().cloned().collect();
         Self::has_llm_compatible_cycle_temp(&helper.trie1_god, &roots_before, stage_vocab.internal_max_llm_token);
 
@@ -2777,6 +2819,25 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) dfs_stats:        DfsStats,
     pub(crate) trie1_god:        TempTrie1GodWrapper,
 }
+pub(crate) struct Precomputer1<'r> {
+    pub(crate) tokenizer:        &'r Regex,
+    pub(crate) parser:           Option<&'r GLRParser>,
+    pub(crate) llm_vocab:        Option<Arc<LLMVocab>>,
+    pub(crate) vocab:            VocabPrefixTree, // This will be moved out during dfs
+    pub(crate) roots:            BTreeMap<TokenizerStateID, TempPrecomputeNode1Index>,
+    pub(crate) possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
+    pub(crate) all_llm_tokens:   RangeSetBlaze<usize>,
+    pub(crate) merge_threshold:  usize,
+    pub(crate) pb:               ProgressBar,
+    pub(crate) stats:            PrecomputeStats,
+    pub(crate) terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+    pub(crate) ignore_terminal_id: Option<TerminalID>,
+    pub(crate) token_name_map:   &'r BiBTreeMap<Terminal, usize>,
+    pub(crate) leaf_node:        TempPrecomputeNode1Index,
+    pub(crate) dfs_stats:        DfsStats,
+    pub(crate) trie1_god:        TempTrie1GodWrapper,
+    pub(crate) dummy_terminal_id: Option<TerminalID>,
+}
 
 impl<'r> Precomputer0<'r> {}
 impl<'r> Precomputer1<'r> {
@@ -2790,6 +2851,7 @@ impl<'r> Precomputer1<'r> {
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         token_name_map: &'r BiBTreeMap<Terminal, usize>,
+        dummy_terminal_id: Option<TerminalID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -2844,6 +2906,25 @@ impl<'r> Precomputer1<'r> {
             leaf_node,
             dfs_stats: DfsStats::default(),
             trie1_god,
+        }
+        Self {
+            tokenizer,
+            parser,
+            llm_vocab,
+            vocab,
+            roots,
+            possible_matches: RefCell::new(BTreeMap::new()), // This is for grammar tokens, not LLM tokens
+            all_llm_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token),
+            merge_threshold,
+            pb,
+            stats: PrecomputeStats::default(),
+            terminal_follow_map,
+            ignore_terminal_id,
+            token_name_map,
+            leaf_node,
+            dfs_stats: DfsStats::default(),
+            trie1_god,
+            dummy_terminal_id,
         }
     }
 
@@ -3170,6 +3251,59 @@ impl<'r> Precomputer1<'r> {
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
+            }
+        }
+    }
+
+    fn insert_dummy_terminal_edges(&mut self) {
+        let dummy_id = self.dummy_terminal_id.unwrap();
+        // We need to collect all nodes first because we'll be adding new ones.
+        let all_nodes: Vec<_> = Trie::all_nodes(&self.trie1_god, &self.roots.values().cloned().collect::<Vec<_>>());
+
+        for node_idx in all_nodes {
+            let mut edges_to_modify = Vec::new();
+            if let Some(guard) = node_idx.read(&self.trie1_god) {
+                for (edge_key, dest_map) in guard.children() {
+                    // We only care about non-None edges, which are Some(Some(TerminalID))
+                    if let Some(Some(terminal_id)) = edge_key {
+                        if *terminal_id != dummy_id {
+                            edges_to_modify.push((edge_key.clone(), dest_map.clone()));
+                        }
+                    }
+                }
+            }
+
+            if edges_to_modify.is_empty() {
+                continue;
+            }
+
+            // Now, for this node, apply modifications.
+            if let Some(mut guard) = node_idx.write(&self.trie1_god) {
+                for (edge_key, dest_map) in edges_to_modify {
+                    // Remove the original terminal edge
+                    guard.children_mut().remove(&edge_key);
+
+                    // For each original destination, create a new path
+                    for (dest_idx, edge_bv) in dest_map {
+                        // Create intermediate node
+                        let intermediate_node = TempPrecomputeNode1::new(TempPrecomputedNodeContents::internal());
+                        let intermediate_idx = TempPrecomputeNode1Index::new(self.trie1_god.insert(intermediate_node));
+
+                        // Add edge from current node to intermediate with dummy terminal
+                        guard.children_mut().entry(Some(Some(dummy_id))).or_default().entry(intermediate_idx).or_insert_with(RangeSetBlaze::new).bitor_assign(&edge_bv);
+
+                        // Add edge from intermediate to original destination with original terminal
+                        if let Some(mut inter_guard) = intermediate_idx.write(&self.trie1_god) {
+                            inter_guard
+                                .children_mut()
+                                .entry(edge_key.clone())
+                                .or_default()
+                                .entry(dest_idx)
+                                .or_insert_with(RangeSetBlaze::new)
+                                .bitor_assign(&edge_bv);
+                        }
+                    }
+                }
             }
         }
     }
