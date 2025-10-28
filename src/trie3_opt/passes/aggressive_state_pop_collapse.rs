@@ -103,10 +103,18 @@ impl OptimizationPass for AggressiveStatePopCollapsePass {
                     continue;
                 }
 
+                // Group states by identical behavior (behavior = destset->tokens map).
+                // behavior_to_states: (destset->tokens map) -> {states}
+                let mut behavior_to_states: BTreeMap<BTreeMap<Vec<NodeId>, SortedSet>, SortedSet> =
+                    BTreeMap::new();
+                for (s, dmap) in per_state_destset_tokens {
+                    behavior_to_states.entry(dmap).or_default().insert(s);
+                }
+
                 // Canonicalize unique dest-sets across all states (for this pop) into shared intermediates.
                 // Also collect the union of tokens per dest-set across all states.
                 let mut tokens_union_by_destset: BTreeMap<Vec<NodeId>, SortedSet> = BTreeMap::new();
-                for (_s, dmap) in &per_state_destset_tokens {
+                for (dmap, _states) in &behavior_to_states {
                     for (dset, toks) in dmap {
                         tokens_union_by_destset
                             .entry(dset.clone())
@@ -133,43 +141,39 @@ impl OptimizationPass for AggressiveStatePopCollapsePass {
                     }
                 }
 
-                // One aggregator per (state, pop): ensure exactly one u-level edge per (state, pop).
-                for (s, dmap) in per_state_destset_tokens {
-                    // Union over all tokens for this state at this pop
-                    let mut all_toks_for_s = SortedSet::new();
-                    for toks in dmap.values() {
-                        all_toks_for_s.union_inplace(toks);
-                    }
-                    if all_toks_for_s.is_empty() {
+                // One aggregator per BEHAVIOR group, not per state.
+                for (dmap, states) in behavior_to_states {
+                    if states.is_empty() {
                         continue;
                     }
-                    // Build {s}
-                    let mut sset = SortedSet::new();
-                    sset.insert(s);
+                    // Union over all tokens for this behavior
+                    let mut all_toks_for_behavior = SortedSet::new();
+                    for toks in dmap.values() {
+                        all_toks_for_behavior.union_inplace(toks);
+                    }
+                    if all_toks_for_behavior.is_empty() {
+                        continue;
+                    }
 
-                    // Per-(state, pop) aggregator
+                    // Per-behavior aggregator
                     let agg_id = trie.add_node(false);
 
-                    // u --(0, union_all_tokens_for_s)--> A_{s,p}, sids = {s}
+                    // u --(0, union_all_tokens_for_behavior)--> A_{behavior,p}, sids = {states}
                     new_children_total
-                        .entry(EdgeKey::new(0, all_toks_for_s))
+                        .entry(EdgeKey::new(0, all_toks_for_behavior))
                         .or_default()
                         .entry(agg_id)
                         .or_default()
-                        .union_inplace(&sset);
+                        .union_inplace(&states);
 
-                    // For each dest-set of this state: A_{s,p} --(0, toks_{s,D})--> M_D
+                    // For each dest-set of this behavior: A_{behavior,p} --(0, toks_{behavior,D})--> M_D
                     for (dset, toks_for_dset) in dmap {
                         if toks_for_dset.is_empty() {
                             continue;
                         }
                         if let Some(&mid_id) = mid_for_destset.get(&dset) {
-                            trie.add_edge(
-                                agg_id,
-                                EdgeKey::new(0, toks_for_dset.clone()),
-                                mid_id,
-                                all_states.clone(),
-                            );
+                            let key = EdgeKey::new(0, toks_for_dset.clone());
+                            trie.add_edge(agg_id, key, mid_id, all_states.clone());
                         }
                     }
                 }
