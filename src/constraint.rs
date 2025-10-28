@@ -668,7 +668,7 @@ pub struct GrammarConstraintConfig {
     pub trie3: Trie3Config,
     pub intermediate_trie3_templates: IntermediateTrie3Config,
     pub intermediate_trie3_main: IntermediateTrie3Config,
-    pub dummy_terminal_name: Option<String>,
+    pub dummy_terminal_map: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -682,7 +682,7 @@ impl Default for GrammarConstraintConfig {
             trie3: Trie3Config::default(),
             intermediate_trie3_templates: IntermediateTrie3Config::default(),
             intermediate_trie3_main: IntermediateTrie3Config::default(),
-            dummy_terminal_name: None,
+            dummy_terminal_map: BTreeMap::new(),
         }
     }
 }
@@ -698,7 +698,7 @@ impl GrammarConstraintConfig {
             trie3: Trie3Config::off(),
             intermediate_trie3_templates: IntermediateTrie3Config::off(),
             intermediate_trie3_main: IntermediateTrie3Config::off(),
-            dummy_terminal_name: None,
+            dummy_terminal_map: BTreeMap::new(),
         }
     }
 }
@@ -1027,26 +1027,20 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
         precompute0_cache: Option<Precompute0Cache>,
     ) -> Self {
-        let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
-        let mut compiled_grammar = compiled_grammar;
-
         let mut new_config = config.clone();
         let dummy_name = "__DUMMY_TERMINAL__".to_string();
-        new_config.dummy_terminal_name = Some(dummy_name.clone());
+        
+        let all_terminal_names: BTreeSet<String> = grammar_definition.productions.iter()
+            .flat_map(|p| p.rhs.iter())
+            .filter_map(|sym| if let Symbol::Terminal(t) = sym { Some(t.to_string()) } else { None })
+            .collect();
 
-        let dummy_term = Terminal::regex_name(&dummy_name);
-        let mut new_productions = compiled_grammar.glr_parser.productions.clone();
-        for prod in &mut new_productions {
-            let mut new_rhs = Vec::new();
-            for sym in &prod.rhs {
-                if let Symbol::Terminal(_) = sym {
-                    new_rhs.push(Symbol::Terminal(dummy_term.clone()));
-                }
-                new_rhs.push(sym.clone());
-            }
-            prod.rhs = new_rhs;
-        }
-        compiled_grammar.glr_parser = crate::glr::table::generate_glr_parser(&new_productions, compiled_grammar.glr_parser.ignore_terminal_id);
+        new_config.dummy_terminal_map.insert(dummy_name.clone(), all_terminal_names);
+
+        // The grammar is NOT modified here. Instead, `convert_trie1_recursive` will insert dummy terminals.
+        // For this to work, the dummy terminal(s) must be part of the grammar definition so they are known to the parser.
+        // This function assumes `__DUMMY_TERMINAL__` is defined in the grammar.
+        let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
 
         Self::new_with_config_and_precompute0_cache(
             compiled_grammar.tokenizer,
@@ -1068,9 +1062,6 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
     ) -> Self {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
-        let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
-        assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
-
         let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map, &tokenizer);
 
 
@@ -1235,10 +1226,28 @@ impl GrammarConstraint {
             };
         }
 
-        let dummy_terminal_id = config.dummy_terminal_name.as_ref().and_then(|name| {
-            parser.terminal_map.get_by_left(&Terminal::regex_name(name)).copied()
-        });
+        // Check for overlapping original terminals in dummy_terminal_map
+        let mut seen_originals = BTreeSet::new();
+        for original_terminals in config.dummy_terminal_map.values() {
+            for term in original_terminals {
+                if !seen_originals.insert(term.clone()) {
+                    panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
+                }
+            }
+        }
 
+        let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
+        for (dummy_name, original_names) in &config.dummy_terminal_map {
+            let dummy_term = Terminal::regex_name(dummy_name);
+            if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
+                for original_name in original_names {
+                    let original_term = Terminal::regex_name(original_name);
+                    if let Some(&original_id) = parser.terminal_map.get_by_left(&original_term) {
+                        original_to_dummy_map.insert(original_id, dummy_id);
+                    }
+                }
+            }
+        }
         let (precomputed1, trie1_god) = Self::precompute1(
             &tokenizer,
             Some(&parser),
@@ -1248,7 +1257,7 @@ impl GrammarConstraint {
             &mut precompute_vocab,
             &terminal_follow_map,
             config,
-            dummy_terminal_id,
+            original_to_dummy_map,
         );
 
         // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
@@ -1457,10 +1466,28 @@ impl GrammarConstraint {
             };
         }
 
-        let dummy_terminal_id = config.dummy_terminal_name.as_ref().and_then(|name| {
-            parser.terminal_map.get_by_left(&Terminal::regex_name(name)).copied()
-        });
+        // Check for overlapping original terminals in dummy_terminal_map
+        let mut seen_originals = BTreeSet::new();
+        for original_terminals in config.dummy_terminal_map.values() {
+            for term in original_terminals {
+                if !seen_originals.insert(term.clone()) {
+                    panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
+                }
+            }
+        }
 
+        let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
+        for (dummy_name, original_names) in &config.dummy_terminal_map {
+            let dummy_term = Terminal::regex_name(dummy_name);
+            if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
+                for original_name in original_names {
+                    let original_term = Terminal::regex_name(original_name);
+                    if let Some(&original_id) = parser.terminal_map.get_by_left(&original_term) {
+                        original_to_dummy_map.insert(original_id, dummy_id);
+                    }
+                }
+            }
+        }
         // Maybe reuse precompute0 from cache
         let mut precomputed0_opt: Option<(Precomputed0, Trie0GodWrapper)> = None;
         if let Some(cache) = precompute0_cache {
@@ -1529,7 +1556,7 @@ impl GrammarConstraint {
             &mut precompute_vocab,
             &terminal_follow_map,
             config,
-            dummy_terminal_id,
+            original_to_dummy_map,
         );
 
         precompute2_vocab = precompute_vocab.clone();
@@ -1842,7 +1869,7 @@ impl GrammarConstraint {
         stage_vocab: &mut StageVocab,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         config: &GrammarConstraintConfig,
-        dummy_terminal_id: Option<TerminalID>,
+        original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
         let mut helper = Precomputer1::new(
             tokenizer,
@@ -1854,7 +1881,7 @@ impl GrammarConstraint {
             terminal_follow_map,
             parser.and_then(|p| p.ignore_terminal_id),
             token_name_map,
-            dummy_terminal_id,
+            original_to_dummy_map,
         );
 
         helper.run_dfs();
@@ -2811,7 +2838,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) leaf_node:        TempPrecomputeNode1Index,
     pub(crate) dfs_stats:        DfsStats,
     pub(crate) trie1_god:        TempTrie1GodWrapper,
-    pub(crate) dummy_terminal_id: Option<TerminalID>,
+    pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
 }
 
 impl<'r> Precomputer0<'r> {}
@@ -2826,7 +2853,7 @@ impl<'r> Precomputer1<'r> {
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         token_name_map: &'r BiBTreeMap<Terminal, usize>,
-        dummy_terminal_id: Option<TerminalID>,
+        original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -2881,7 +2908,7 @@ impl<'r> Precomputer1<'r> {
             leaf_node,
             dfs_stats: DfsStats::default(),
             trie1_god,
-            dummy_terminal_id,
+            original_to_dummy_map,
         }
     }
 
@@ -2930,47 +2957,52 @@ impl<'r> Precomputer1<'r> {
         let children_to_copy = temp_guard.children().clone();
         drop(temp_guard);
 
-        let mut direct_edges = Vec::new();
-        let mut injected_edges = Vec::new();
+        if self.original_to_dummy_map.is_empty() {
+            for (ek, dest_map) in children_to_copy {
+                for (temp_child_idx, rs_blaze) in dest_map {
+                    let final_child_idx = self.convert_trie1_recursive(temp_child_idx, temp_god, final_god, node_map);
+                    let hybrid_bitset = HybridBitset { inner: crate::datastructures::cache::intern_l1(rs_blaze) };
+                    final_god.insert_edge_simple(final_idx, final_child_idx, ek.clone(), hybrid_bitset);
+                }
+            }
+        } else {
+            let mut direct_edges = Vec::new();
+            // Group injected edges by their dummy terminal ID.
+            let mut injected_edges_by_dummy: BTreeMap<TerminalID, Vec<(Option<TerminalID>, BTreeMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>)>> = BTreeMap::new();
 
-        if let Some(dummy_tid) = self.dummy_terminal_id {
             for (ek, dest_map) in children_to_copy {
                 if let Some(tid) = ek {
-                    if tid != dummy_tid {
-                        injected_edges.push((Some(tid), dest_map));
+                    if let Some(dummy_tid) = self.original_to_dummy_map.get(&tid) {
+                        injected_edges_by_dummy.entry(*dummy_tid).or_default().push((Some(tid), dest_map));
                         continue;
                     }
                 }
                 direct_edges.push((ek, dest_map));
             }
-        } else {
-            for (ek, dest_map) in children_to_copy {
-                direct_edges.push((ek, dest_map));
-            }
-        }
 
-        for (ek, dest_map) in direct_edges {
-            for (temp_child_idx, rs_blaze) in dest_map {
-                let final_child_idx = self.convert_trie1_recursive(temp_child_idx, temp_god, final_god, node_map);
-                let hybrid_bitset = HybridBitset { inner: crate::datastructures::cache::intern_l1(rs_blaze) };
-                final_god.insert_edge_simple(final_idx, final_child_idx, ek.clone(), hybrid_bitset);
-            }
-        }
-
-        if !injected_edges.is_empty() {
-            let dummy_tid = self.dummy_terminal_id.unwrap();
-            let inter_node = PrecomputeNode1::new(PrecomputedNodeContents::internal());
-            let inter_idx = PrecomputeNode1Index::new(final_god.insert(inter_node));
-            let mut total_inter_bitset = HybridBitset::zeros();
-            for (ek, dest_map) in injected_edges {
+            for (ek, dest_map) in direct_edges {
                 for (temp_child_idx, rs_blaze) in dest_map {
                     let final_child_idx = self.convert_trie1_recursive(temp_child_idx, temp_god, final_god, node_map);
                     let hybrid_bitset = HybridBitset { inner: crate::datastructures::cache::intern_l1(rs_blaze) };
-                    total_inter_bitset |= &hybrid_bitset;
-                    final_god.insert_edge_simple(inter_idx, final_child_idx, ek.clone(), hybrid_bitset);
+                    final_god.insert_edge_simple(final_idx, final_child_idx, ek.clone(), hybrid_bitset);
                 }
             }
-            final_god.insert_edge_simple(final_idx, inter_idx, Some(dummy_tid), total_inter_bitset);
+
+            for (dummy_tid, edges) in injected_edges_by_dummy {
+                let inter_node = PrecomputeNode1::new(PrecomputedNodeContents::internal());
+                let inter_idx = PrecomputeNode1Index::new(final_god.insert(inter_node));
+                let mut total_inter_bitset = HybridBitset::zeros();
+
+                for (original_ek, dest_map) in edges {
+                    for (temp_child_idx, rs_blaze) in dest_map {
+                        let final_child_idx = self.convert_trie1_recursive(temp_child_idx, temp_god, final_god, node_map);
+                        let hybrid_bitset = HybridBitset { inner: crate::datastructures::cache::intern_l1(rs_blaze) };
+                        total_inter_bitset |= &hybrid_bitset;
+                        final_god.insert_edge_simple(inter_idx, final_child_idx, original_ek, hybrid_bitset);
+                    }
+                }
+                final_god.insert_edge_simple(final_idx, inter_idx, Some(dummy_tid), total_inter_bitset);
+            }
         }
 
         final_idx
