@@ -15,12 +15,14 @@ impl OptimizationPass for CompressEdgesPass {
     }
 
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-        for n in trie.nodes.values_mut() {
-            if n.children.is_empty() {
+        let node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in node_ids {
+            let n = trie.get_node(node_id).unwrap();
+            if n.children().is_empty() {
                 continue;
             }
 
-            let old_children = n.children.clone();
+            let old_children = n.children().clone();
             // Cost metric: sum of token set sizes and destination map sizes.
             let old_cost: usize = old_children
                 .iter()
@@ -79,7 +81,7 @@ impl OptimizationPass for CompressEdgesPass {
                 .sum();
 
             if new_cost < old_cost {
-                n.children = new_children;
+                trie.set_children(node_id, new_children);
             }
         }
     }

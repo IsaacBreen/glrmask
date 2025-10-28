@@ -23,8 +23,8 @@ impl OptimizationPass for GeneralizeSidsPass {
 
         let one_step_back_map = parser.build_one_step_back_map();
         let mut max_pop = 0;
-        for node in trie.nodes.values() {
-            for (ek, _) in &node.children {
+        for node in trie.nodes() {
+            for (ek, _) in node.children() {
                 if ek.pop > 0 {
                     max_pop = max_pop.max(ek.pop as usize);
                 }
@@ -94,8 +94,8 @@ impl OptimizationPass for GeneralizeSidsPass {
             if s_u.is_empty() {
                 continue;
             }
-            let u_node = trie.nodes.get(&u_id).unwrap();
-            for (ek, dm) in &u_node.children {
+            let u_node = trie.get_node(u_id).unwrap();
+            for (ek, dm) in u_node.children() {
                 let s_u_popped = if ek.pop > 0 {
                     apply_n_step_back(&s_u, ek.pop as usize)
                 } else {
@@ -119,8 +119,12 @@ impl OptimizationPass for GeneralizeSidsPass {
             }
         }
 
-        for node in trie.nodes.values_mut() {
-            for (_ek, dm) in &mut node.children {
+        let node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in node_ids {
+            let node = trie.get_node(node_id).unwrap();
+            let mut new_children = node.children().clone();
+
+            for (_ek, dm) in &mut new_children {
                 dm.retain(|v_id, sids| {
                     if let Some(s_v) = possible_states.get(v_id) {
                         let intersection = sids.intersect(s_v);
@@ -136,7 +140,8 @@ impl OptimizationPass for GeneralizeSidsPass {
                     }
                 });
             }
-            node.children.retain(|_, dm| !dm.is_empty());
+            new_children.retain(|_, dm| !dm.is_empty());
+            trie.set_children(node_id, new_children);
         }
     }
 }

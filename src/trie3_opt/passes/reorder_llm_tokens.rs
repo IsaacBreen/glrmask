@@ -18,8 +18,8 @@ impl OptimizationPass for ReorderLLMTokensPass {
 
         let max_tok = ctx.max_llm_token_id;
         let mut freq: Vec<usize> = vec![0; max_tok + 1];
-        for node in trie.nodes.values() {
-            for (ek, _) in &node.children {
+        for node in trie.nodes() {
+            for (ek, _) in node.children() {
                 for t in ek.tokens.iter() {
                     if t <= max_tok {
                         freq[t] += 1;
@@ -47,16 +47,18 @@ impl OptimizationPass for ReorderLLMTokensPass {
             SortedSet::from_iter(new_elems)
         };
 
-        for node in trie.nodes.values_mut() {
+        let node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in node_ids {
+            let node = trie.get_node(node_id).unwrap();
             let mut new_children = BTreeMap::new();
-            for (mut ek, dm) in std::mem::take(&mut node.children) {
+            for (mut ek, dm) in node.children().clone() {
                 ek.tokens = remap_sorted_set(&ek.tokens);
                 let entry: &mut BTreeMap<NodeId, SortedSet> = new_children.entry(ek).or_default();
                 for (dst, sids) in dm {
                     entry.entry(dst).or_default().union_inplace(&sids);
                 }
             }
-            node.children = new_children;
+            trie.set_children(node_id, new_children);
         }
 
         let mut sv_ref = sv_rc.borrow_mut();

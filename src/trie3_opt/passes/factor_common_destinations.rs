@@ -30,8 +30,8 @@ impl OptimizationPass for FactorCommonDestinationsPass {
         let mut incoming_map: HashMap<NodeId, HashMap<EdgeKey, HashMap<SortedSet, Vec<NodeId>>>> =
             HashMap::new();
 
-        for src_node in trie.nodes.values() {
-            for (edge_key, dest_map) in &src_node.children {
+        for src_node in trie.nodes() {
+            for (edge_key, dest_map) in src_node.children() {
                 for (dest_id, sids) in dest_map {
                     incoming_map
                         .entry(*dest_id)
@@ -40,7 +40,7 @@ impl OptimizationPass for FactorCommonDestinationsPass {
                         .or_default()
                         .entry(sids.clone())
                         .or_default()
-                        .push(src_node.id);
+                        .push(src_node.id());
                 }
             }
         }
@@ -57,15 +57,7 @@ impl OptimizationPass for FactorCommonDestinationsPass {
 
                         // Reroute sources to point to intermediate node
                         for src_id in &sources {
-                            let src_node = trie.nodes.get_mut(src_id).unwrap();
-
-                            // Remove old edge
-                            if let Some(dest_map_for_key) = src_node.children.get_mut(&edge_key) {
-                                dest_map_for_key.remove(&dest_id);
-                                if dest_map_for_key.is_empty() {
-                                src_node.children.remove(&edge_key);
-                            }
-                        }
+                            trie.remove_edge_dest(*src_id, &edge_key, dest_id);
 
                             // Add new edge to intermediate node. Use the same token-set as the factored key
                             // instead of "all tokens" to avoid massive token-universe expansions in the MiniTrie.

@@ -13,17 +13,21 @@ impl OptimizationPass for PruneUnproductivePathsPass {
 
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
         let productive: BTreeSet<NodeId> = trie.can_reach_end();
-        if productive.len() == trie.nodes.len() {
+        if productive.len() == trie.num_nodes() {
             return;
         }
-        for node in trie.nodes.values_mut() {
-            if !productive.contains(&node.id) {
-                node.children.clear();
+        let node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in node_ids {
+            if !productive.contains(&node_id) {
+                trie.clear_children(node_id);
             } else {
-                node.children.retain(|_, dm| {
+                let node = trie.get_node(node_id).unwrap();
+                let mut new_children = node.children().clone();
+                new_children.retain(|_, dm| {
                     dm.retain(|dst, _| productive.contains(dst));
                     !dm.is_empty()
                 });
+                trie.set_children(node_id, new_children);
             }
         }
     }

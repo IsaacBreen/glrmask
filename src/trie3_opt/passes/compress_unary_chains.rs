@@ -20,8 +20,9 @@ impl OptimizationPass for CompressUnaryChainsPass {
             let mut out_info: HashMap<NodeId, (EdgeKey, NodeId, crate::trie3_opt::core::SortedSet)> =
                 HashMap::new();
 
-            for node in trie.nodes.values() {
-                for (ek, dm) in &node.children {
+            for node in trie.nodes() {
+                let node_id = node.id();
+                for (ek, dm) in node.children() {
                     for (dst, _) in dm {
                         let count = indegree.entry(*dst).or_default();
                         *count += 1;
@@ -32,12 +33,12 @@ impl OptimizationPass for CompressUnaryChainsPass {
                         }
                     }
                 }
-                if node.end {
+                if node.is_end() {
                     continue;
                 }
                 let mut total_dests = 0;
                 let mut only_edge = None;
-                for (ek, dm) in &node.children {
+                for (ek, dm) in node.children() {
                     for (dst, sids) in dm {
                         total_dests += 1;
                         if total_dests == 1 {
@@ -47,12 +48,12 @@ impl OptimizationPass for CompressUnaryChainsPass {
                 }
                 if total_dests == 1 {
                     let (ek, dst, sids) = only_edge.unwrap();
-                    out_info.insert(node.id, (ek, dst, sids));
+                    out_info.insert(node_id, (ek, dst, sids));
                 }
             }
 
             let mut rewrites = vec![];
-            for u_id in trie.nodes.keys().cloned() {
+            for u_id in trie.node_ids() {
                 if roots_set.contains(&u_id) {
                     continue;
                 }
@@ -71,17 +72,10 @@ impl OptimizationPass for CompressUnaryChainsPass {
             }
 
             for (p_id, u_id, v_id, key, s_uv) in rewrites {
-                let p_node = trie.nodes.get_mut(&p_id).unwrap();
-                if let std::collections::btree_map::Entry::Occupied(mut entry) = p_node.children.entry(key) {
-                    let dm = entry.get_mut();
-                    if let Some(s_pu) = dm.remove(&u_id) {
-                        let s_comp = s_pu.intersect(&s_uv);
-                        if !s_comp.is_empty() {
-                            dm.entry(v_id).or_default().union_inplace(&s_comp);
-                        }
-                    }
-                    if entry.get().is_empty() {
-                        entry.remove();
+                if let Some(s_pu) = trie.remove_edge_dest(p_id, &key, u_id) {
+                    let s_comp = s_pu.intersect(&s_uv);
+                    if !s_comp.is_empty() {
+                        trie.add_edge(p_id, key, v_id, s_comp);
                     }
                 }
             }

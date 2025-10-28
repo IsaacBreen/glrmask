@@ -19,18 +19,18 @@ impl OptimizationPass for PruneDeadPathsPass {
         let mut live: HashMap<NodeId, SortedSet> = HashMap::new();
         let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
 
-        for node in trie.nodes.values() {
-            live.insert(node.id, SortedSet::new());
-            if node.end {
-                live.insert(node.id, universe.clone());
-                worklist.push_back(node.id);
+        for node in trie.nodes() {
+            live.insert(node.id(), SortedSet::new());
+            if node.is_end() {
+                live.insert(node.id(), universe.clone());
+                worklist.push_back(node.id());
             }
         }
 
         while let Some(node_id) = worklist.pop_front() {
             let live_at_node = live.get(&node_id).unwrap().clone();
-            if let Some(node) = trie.nodes.get(&node_id) {
-                for (pred_id, edges) in &node.parents {
+            if let Some(node) = trie.get_node(node_id) {
+                for (pred_id, edges) in node.parents() {
                     for edge_key in edges.keys() {
                         let live_from_edge = live_at_node.intersect(&edge_key.tokens);
                         if live_from_edge.is_empty() {
@@ -47,9 +47,11 @@ impl OptimizationPass for PruneDeadPathsPass {
             }
         }
 
-        for node in trie.nodes.values_mut() {
+        let node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in node_ids {
+            let node = trie.get_node(node_id).unwrap();
             let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-            for (ek, dm) in &node.children {
+            for (ek, dm) in node.children() {
                 for (dst, sids) in dm {
                     let live_from_child = live.get(dst).unwrap();
                     let live_on_edge = ek.tokens.intersect(live_from_child);
@@ -65,7 +67,7 @@ impl OptimizationPass for PruneDeadPathsPass {
                     }
                 }
             }
-            node.children = new_children;
+            trie.set_children(node_id, new_children);
         }
     }
 }

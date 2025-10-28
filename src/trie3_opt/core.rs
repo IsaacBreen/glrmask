@@ -144,12 +144,12 @@ impl EdgeKey {
 /// A node in the mini trie.
 #[derive(Clone, Debug)]
 pub struct Node {
-    pub id: NodeId,
-    pub end: bool,
+    id: NodeId,
+    end: bool,
     // key: (pop, tokens) -> dest map: dest node -> state-set
-    pub children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>,
+    children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>,
     // src map: src node -> (key: (pop, tokens) -> state-set)
-    pub parents: BTreeMap<NodeId, BTreeMap<EdgeKey, SortedSet>>,
+    parents: BTreeMap<NodeId, BTreeMap<EdgeKey, SortedSet>>,
 }
 
 impl Node {
@@ -160,6 +160,18 @@ impl Node {
             children: BTreeMap::new(),
             parents: BTreeMap::new(),
         }
+    }
+    pub fn id(&self) -> NodeId {
+        self.id
+    }
+    pub fn is_end(&self) -> bool {
+        self.end
+    }
+    pub fn children(&self) -> &BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> {
+        &self.children
+    }
+    pub fn parents(&self) -> &BTreeMap<NodeId, BTreeMap<EdgeKey, SortedSet>> {
+        &self.parents
     }
     pub fn out_degree(&self) -> usize {
         self.children.values().map(|m| m.len()).sum()
@@ -172,7 +184,7 @@ impl Node {
 /// A compact, no-generics mini trie for precompute3 optimization.
 #[derive(Clone, Debug)]
 pub struct MiniTrie {
-    pub nodes: BTreeMap<NodeId, Node>,
+    nodes: BTreeMap<NodeId, Node>,
     pub root_ids: BTreeSet<NodeId>,
     /// Counter to generate unique node IDs.
     next_node_id: NodeId,
@@ -219,6 +231,86 @@ impl MiniTrie {
         self.root_ids.insert(id);
     }
 
+    pub fn get_node(&self, id: NodeId) -> Option<&Node> {
+        self.nodes.get(&id)
+    }
+
+    pub fn nodes(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.values()
+    }
+
+    pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.nodes.keys().copied()
+    }
+
+    pub fn num_nodes(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn set_end(&mut self, node_id: NodeId, is_end: bool) {
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.end = is_end;
+        }
+    }
+
+    /// Removes a specific destination from an edge. Returns the state set of the removed edge destination.
+    pub fn remove_edge_dest(&mut self, src: NodeId, key: &EdgeKey, dst: NodeId) -> Option<SortedSet> {
+        let removed_sids;
+        if let Some(src_node) = self.nodes.get_mut(&src) {
+            if let Some(dm) = src_node.children.get_mut(key) {
+                removed_sids = dm.remove(&dst);
+                if dm.is_empty() {
+                    src_node.children.remove(key);
+                }
+            } else {
+                removed_sids = None;
+            }
+        } else {
+            removed_sids = None;
+        }
+
+        if removed_sids.is_some() {
+            if let Some(dst_node) = self.nodes.get_mut(&dst) {
+                if let Some(parent_edges) = dst_node.parents.get_mut(&src) {
+                    parent_edges.remove(key);
+                    if parent_edges.is_empty() {
+                        dst_node.parents.remove(&src);
+                    }
+                }
+            }
+        }
+        removed_sids
+    }
+
+    /// Removes all outgoing edges from a node.
+    pub fn clear_children(&mut self, node_id: NodeId) {
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            let old_children = std::mem::take(&mut node.children);
+            for (ek, dm) in old_children {
+                for (dst, _sids) in dm {
+                    if let Some(dst_node) = self.nodes.get_mut(&dst) {
+                        if let Some(parent_edges) = dst_node.parents.get_mut(&node_id) {
+                            parent_edges.remove(&ek);
+                            if parent_edges.is_empty() {
+                                dst_node.parents.remove(&node_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Replaces all outgoing edges for a node.
+    pub fn set_children(&mut self, node_id: NodeId, new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>) {
+        self.clear_children(node_id);
+        for (ek, dm) in new_children {
+            for (dst, sids) in dm {
+                self.add_edge(node_id, ek.clone(), dst, sids);
+            }
+        }
+    }
+
     /// Compute set of nodes reachable from any root.
     pub fn reachable_from_roots(&self) -> BTreeSet<NodeId> {
         let mut seen: BTreeSet<NodeId> = BTreeSet::new();
@@ -243,10 +335,10 @@ impl MiniTrie {
     pub fn can_reach_end(&self) -> BTreeSet<NodeId> {
         let mut productive: BTreeSet<NodeId> = BTreeSet::new();
         let mut q: VecDeque<NodeId> = VecDeque::new();
-        for n in self.nodes.values() {
-            if n.end {
-                productive.insert(n.id);
-                q.push_back(n.id);
+        for n in self.nodes() {
+            if n.is_end() {
+                productive.insert(n.id());
+                q.push_back(n.id());
             }
         }
         while let Some(v_id) = q.pop_front() {
@@ -259,29 +351,5 @@ impl MiniTrie {
             }
         }
         productive
-    }
-
-    /// Rebuilds all parent pointers from scratch by scanning all children.
-    /// This is useful after complex transformations that modify `children` directly.
-    pub fn rebuild_parents(&mut self) {
-        for node in self.nodes.values_mut() {
-            node.parents.clear();
-        }
-        // Collect children first to avoid borrow checker issues.
-        let all_children: Vec<(NodeId, BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>>)> = self
-            .nodes
-            .values()
-            .map(|n| (n.id, n.children.clone()))
-            .collect();
-
-        for (src_id, children) in all_children {
-            for (ek, dm) in children {
-                for (dst_id, sids) in dm {
-                    if let Some(dst_node) = self.nodes.get_mut(&dst_id) {
-                        dst_node.parents.entry(src_id).or_default().entry(ek.clone()).or_default().union_inplace(&sids);
-                    }
-                }
-            }
-        }
     }
 }

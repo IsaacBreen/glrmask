@@ -287,16 +287,16 @@ pub(crate) fn import_from_mini(
 ) {
     // Create all nodes first, and map MiniTrie NodeId to new PrecomputeNode3Index
     let mut id_map: BTreeMap<NodeId, PrecomputeNode3Index> = BTreeMap::new();
-    for &node_id in mini.nodes.keys() {
+    for node_id in mini.node_ids() {
         let idx = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::internal())));
         id_map.insert(node_id, idx);
     }
 
     // Fill end flags and edges
-    for node in mini.nodes.values() {
-        let idx = *id_map.get(&node.id).unwrap();
+    for node in mini.nodes() {
+        let idx = *id_map.get(&node.id()).unwrap();
         if let Some(mut w) = idx.write(trie3_god) {
-            w.value.end = node.end;
+            w.value.end = node.is_end();
 
             let mut children: BTreeMap<(isize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
 
@@ -312,7 +312,7 @@ pub(crate) fn import_from_mini(
                     continue;
                 }
 
-                let entry = children.entry((ek.pop, bv.clone())).or_insert_with(OrderedHashMap::new);
+                let entry = children.entry((ek.pop, bv)).or_insert_with(OrderedHashMap::new);
                 for (dst, sset) in dm {
                     let mut sbv = StateIDBV::zeros();
                     for s in sset.iter() {
@@ -398,7 +398,6 @@ pub fn run_pipeline_on_precompute3<'a>(
             crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
         }
         pass.run(&mut mini, &mut ctx);
-        mini.rebuild_parents();
         if ctx.debug_level > 0 {
             let metrics = run_all_metrics(&mini);
             crate::debug!(

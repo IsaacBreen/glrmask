@@ -22,8 +22,10 @@ impl OptimizationPass for FactorStateFanoutPass {
     }
 
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-        for node in trie.nodes.values_mut() {
-            if node.children.is_empty() {
+        let node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in node_ids {
+            let node = trie.get_node(node_id).unwrap();
+            if node.children().is_empty() {
                 continue;
             }
 
@@ -31,7 +33,7 @@ impl OptimizationPass for FactorStateFanoutPass {
             let mut by_pop_dest_state: HashMap<isize, HashMap<NodeId, HashMap<usize, SortedSet>>> =
                 HashMap::new();
 
-            for (ek, dm) in &node.children {
+            for (ek, dm) in node.children() {
                 let pop = ek.pop;
                 let tokens = &ek.tokens;
                 let dest_map = by_pop_dest_state.entry(pop).or_default();
@@ -76,7 +78,7 @@ impl OptimizationPass for FactorStateFanoutPass {
                 }
             }
 
-            node.children = new_children;
+            trie.set_children(node_id, new_children);
         }
     }
 }

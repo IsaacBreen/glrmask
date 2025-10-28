@@ -24,7 +24,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
     }
 
     fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-        let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
+        let node_ids: Vec<_> = trie.node_ids().collect();
         let id_to_idx: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let n = node_ids.len();
         if n == 0 {
@@ -32,8 +32,8 @@ impl OptimizationPass for MergeGlobalAtomsPass {
         }
 
         let mut by_pop_masks: BTreeMap<isize, HashSet<SortedSet>> = BTreeMap::new();
-        for node in trie.nodes.values() {
-            for (ek, _) in &node.children {
+        for node in trie.nodes() {
+            for (ek, _) in node.children() {
                 if !ek.tokens.is_empty() {
                     by_pop_masks.entry(ek.pop).or_default().insert(ek.tokens.clone());
                 }
@@ -139,13 +139,13 @@ impl OptimizationPass for MergeGlobalAtomsPass {
         let mut pop0_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
         let mut pop0_rev_adj: Vec<Vec<NodeId>> = vec![vec![]; n];
         let mut pop0_out_degree = vec![0; n];
-        for u_node in trie.nodes.values() {
-            let u_idx = id_to_idx[&u_node.id];
-            for (ek, dm) in &u_node.children {
+        for u_node in trie.nodes() {
+            let u_idx = id_to_idx[&u_node.id()];
+            for (ek, dm) in u_node.children() {
                 if ek.pop == 0 {
                     for v_id in dm.keys() {
                         pop0_adj[u_idx].push(*v_id);
-                        pop0_rev_adj[id_to_idx[v_id]].push(u_node.id);
+                        pop0_rev_adj[id_to_idx[v_id]].push(u_node.id());
                         pop0_out_degree[u_idx] += 1;
                     }
                 }
@@ -195,8 +195,8 @@ impl OptimizationPass for MergeGlobalAtomsPass {
         let mut class_map: HashMap<(bool, usize), usize> = HashMap::new();
         let mut next_class_id = 0;
         for (i, id) in node_ids.iter().enumerate() {
-            let node = trie.nodes.get(id).unwrap();
-            let key = (node.end, dist[id_to_idx[&node.id]]);
+            let node = trie.get_node(*id).unwrap();
+            let key = (node.is_end(), dist[id_to_idx[id]]);
             let class_id = *class_map.entry(key).or_insert_with(|| {
                 let id = next_class_id;
                 next_class_id += 1;
@@ -213,9 +213,9 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             let mut changes = 0;
 
             for (u_idx, u_id) in node_ids.iter().enumerate() {
-                let u_node = trie.nodes.get(u_id).unwrap();
+                let u_node = trie.get_node(*u_id).unwrap();
                 let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
-                for (ek, dm) in &u_node.children {
+                for (ek, dm) in u_node.children() {
                     if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
                         if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
                             if let Some(atom_idxs) = pop_map.get(*token_set_id) {
@@ -231,7 +231,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                     }
                 }
                 let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
-                let sig = (u_node.end, sig_entries);
+                let sig = (u_node.is_end(), sig_entries);
                 let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
                 new_class[u_idx] = cid;
                 if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
@@ -259,11 +259,11 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             if let Some(rep_id) = representatives[class_id] {
                 let exemplar_idx = final_partition.iter().position(|&c| c == class_id).unwrap();
                 let exemplar_id = node_ids[exemplar_idx];
-                let exemplar_node = trie.nodes.get(&exemplar_id).unwrap().clone();
+                let exemplar_node = trie.get_node(exemplar_id).unwrap().clone();
 
                 // Aggregate by (pop, tokens, dest_class) -> union of sids
                 let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
-                for (ek, dm) in &exemplar_node.children {
+                for (ek, dm) in exemplar_node.children() {
                     for (v_id, sids) in dm {
                         let v_class = final_partition[id_to_idx[v_id]];
                         aggr.entry((ek.pop, ek.tokens.clone(), v_class))
@@ -280,16 +280,17 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                         new_children.entry(key).or_default().insert(dest_rep, sids);
                     }
                 }
-                trie.nodes.get_mut(&rep_id).unwrap().children = new_children;
+                trie.set_children(rep_id, new_children);
             }
         }
 
         // Clear children of non-representatives.
         let rep_set: HashSet<NodeId> = representatives.iter().filter_map(|&x| x).collect();
-        for node in trie.nodes.values_mut() {
-            if !rep_set.contains(&node.id) {
-                node.children.clear();
-                node.end = false; // Non-reps are effectively deleted.
+        let all_node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in all_node_ids {
+            if !rep_set.contains(&node_id) {
+                trie.clear_children(node_id);
+                trie.set_end(node_id, false); // Non-reps are effectively deleted.
             }
         }
 

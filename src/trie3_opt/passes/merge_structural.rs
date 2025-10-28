@@ -25,7 +25,7 @@ impl OptimizationPass for MergeStructuralPass {
     }
 
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-        let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
+        let node_ids: Vec<_> = trie.node_ids().collect();
         let dense_of: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let n = node_ids.len();
         if n == 0 {
@@ -37,8 +37,8 @@ impl OptimizationPass for MergeStructuralPass {
         let mut class_map: HashMap<(bool, usize), usize> = HashMap::new();
         let mut next_class = 0usize;
         for (i, node_id) in node_ids.iter().enumerate() {
-            let node = trie.nodes.get(node_id).unwrap();
-            let key = (node.end, node.out_degree());
+            let node = trie.get_node(*node_id).unwrap();
+            let key = (node.is_end(), node.out_degree());
             let cid = *class_map.entry(key).or_insert_with(|| {
                 let v = next_class;
                 next_class += 1;
@@ -63,10 +63,10 @@ impl OptimizationPass for MergeStructuralPass {
             let mut changes = 0usize;
 
             for (i, node_id) in node_ids.iter().enumerate() {
-                let node = trie.nodes.get(node_id).unwrap();
+                let node = trie.get_node(*node_id).unwrap();
                 // Aggregate by (pop, tokens) -> dest_class -> union of states
                 let mut per_key: BTreeMap<(isize, SortedSet), BTreeMap<usize, SortedSet>> = BTreeMap::new();
-                for (ek, dm) in &node.children {
+                for (ek, dm) in node.children() {
                     let inner = per_key.entry((ek.pop, ek.tokens.clone())).or_default();
                     for (dst, sids) in dm.iter() {
                         let d_dense = *dense_of.get(dst).unwrap();
@@ -93,7 +93,7 @@ impl OptimizationPass for MergeStructuralPass {
                         dest: dest_vec,
                     });
                 }
-                let sig: NodeSig = (node.end, esigs);
+                let sig: NodeSig = (node.is_end(), esigs);
 
                 let cid = *sig_to_id.entry(sig).or_insert_with(|| {
                     let v = next;
@@ -128,11 +128,11 @@ impl OptimizationPass for MergeStructuralPass {
         for (cid, rep_id_opt) in rep_of_class.iter().enumerate() {
             if let Some(rep_id) = rep_id_opt {
                 let exemplar_idx = prev_class.iter().position(|&c| c == cid).unwrap();
-                let exemplar_node = trie.nodes.get(&node_ids[exemplar_idx]).unwrap().clone();
+                let exemplar_node = trie.get_node(node_ids[exemplar_idx]).unwrap().clone();
 
                 let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
                     BTreeMap::new();
-                for (ek, dm) in &exemplar_node.children {
+                for (ek, dm) in exemplar_node.children() {
                     let mut new_dm: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
                     for (dst, sids) in dm {
                         let rep = *rep_of_node.get(dst).unwrap();
@@ -142,16 +142,17 @@ impl OptimizationPass for MergeStructuralPass {
                         new_children.insert(ek.clone(), new_dm);
                     }
                 }
-                trie.nodes.get_mut(rep_id).unwrap().children = new_children;
+                trie.set_children(*rep_id, new_children);
             }
         }
 
         let rep_set: std::collections::HashSet<NodeId> =
             rep_of_class.iter().filter_map(|&x| x).collect();
-        for node in trie.nodes.values_mut() {
-            if !rep_set.contains(&node.id) {
-                node.children.clear();
-                node.end = false;
+        let all_node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in all_node_ids {
+            if !rep_set.contains(&node_id) {
+                trie.clear_children(node_id);
+                trie.set_end(node_id, false);
             }
         }
 

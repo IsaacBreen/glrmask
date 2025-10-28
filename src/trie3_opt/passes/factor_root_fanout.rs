@@ -24,8 +24,8 @@ impl OptimizationPass for FactorRootFanoutPass {
         let root_ids: Vec<_> = trie.root_ids.iter().cloned().collect();
 
         for root_id in root_ids {
-            let root_node = trie.nodes.get(&root_id).unwrap().clone();
-            if root_node.children.is_empty() {
+            let root_node = trie.get_node(root_id).unwrap();
+            if root_node.children().is_empty() {
                 continue;
             }
 
@@ -33,8 +33,7 @@ impl OptimizationPass for FactorRootFanoutPass {
             let mut by_pop: BTreeMap<isize, Vec<(SortedSet, BTreeMap<NodeId, SortedSet>)>> =
                 BTreeMap::new();
             let mut any_p_gt_0 = false;
-
-            for (ek, dm) in root_node.children {
+            for (ek, dm) in root_node.children().clone() {
                 if ek.pop <= 0 {
                     keep_children.insert(ek, dm);
                 } else {
@@ -99,8 +98,7 @@ impl OptimizationPass for FactorRootFanoutPass {
                     }
 
                     let mid_id = trie.add_node(false);
-                    let mid_node = trie.nodes.get_mut(&mid_id).unwrap();
-                    mid_node.children.insert(EdgeKey::new(pop, b.clone()), dest_agg);
+                    trie.add_edge(mid_id, EdgeKey::new(pop, b.clone()), dest_agg.keys().next().unwrap().clone(), dest_agg.values().next().unwrap().clone());
 
                     new_children
                         .entry(EdgeKey::new(0, b))
@@ -111,7 +109,7 @@ impl OptimizationPass for FactorRootFanoutPass {
             }
 
             if made_progress {
-                trie.nodes.get_mut(&root_id).unwrap().children = new_children;
+                trie.set_children(root_id, new_children);
             }
         }
     }

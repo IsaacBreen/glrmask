@@ -103,14 +103,14 @@ pub trait Metric {
 pub struct NumNodesMetric;
 impl Metric for NumNodesMetric {
     fn name(&self) -> &'static str { "num_nodes" }
-    fn compute(&self, trie: &MiniTrie) -> String { trie.nodes.len().to_string() }
+    fn compute(&self, trie: &MiniTrie) -> String { trie.num_nodes().to_string() }
 }
 
 pub struct NumEdgesMetric;
 impl Metric for NumEdgesMetric {
     fn name(&self) -> &'static str { "num_edges" }
     fn compute(&self, trie: &MiniTrie) -> String {
-        trie.nodes.values().map(|n| n.out_degree()).sum::<usize>().to_string()
+        trie.nodes().map(|n| n.out_degree()).sum::<usize>().to_string()
     }
 }
 
@@ -124,7 +124,7 @@ pub struct NumEndNodesMetric;
 impl Metric for NumEndNodesMetric {
     fn name(&self) -> &'static str { "num_end_nodes" }
     fn compute(&self, trie: &MiniTrie) -> String {
-        trie.nodes.values().filter(|n| n.end).count().to_string()
+        trie.nodes().filter(|n| n.is_end()).count().to_string()
     }
 }
 
@@ -145,8 +145,8 @@ impl Metric for RootFanoutMetric {
     fn name(&self) -> &'static str { "root_fanout" }
     fn compute(&self, trie: &MiniTrie) -> String {
         let fanouts: Vec<f64> = trie
-            .nodes.values()
-            .filter(|n| trie.root_ids.contains(&n.id))
+            .nodes()
+            .filter(|n| trie.root_ids.contains(&n.id()))
             .map(|n| n.out_degree() as f64)
             .collect();
         NumericStats::from_samples(&fanouts).to_pretty_string()
@@ -158,8 +158,8 @@ impl Metric for NonRootFanoutMetric {
     fn name(&self) -> &'static str { "non_root_fanout" }
     fn compute(&self, trie: &MiniTrie) -> String {
         let fanouts: Vec<f64> = trie
-            .nodes.values()
-            .filter(|n| !trie.root_ids.contains(&n.id))
+            .nodes()
+            .filter(|n| !trie.root_ids.contains(&n.id()))
             .map(|n| n.out_degree() as f64)
             .collect();
         NumericStats::from_samples(&fanouts).to_pretty_string()
@@ -171,7 +171,7 @@ impl Metric for AllFanoutMetric {
     fn name(&self) -> &'static str { "all_fanout" }
     fn compute(&self, trie: &MiniTrie) -> String {
         let fanouts: Vec<f64> = trie
-            .nodes.values()
+            .nodes()
             .map(|n| n.out_degree() as f64)
             .collect();
         NumericStats::from_samples(&fanouts).to_pretty_string()
@@ -187,7 +187,7 @@ fn compute_edge_overlap_for_node(node: &crate::trie3_opt::core::Node) -> f64 {
 
     // Group destination maps by pop
     let mut by_pop: BTreeMap<isize, Vec<&BTreeMap<NodeId, SortedSet>>> = BTreeMap::new();
-    for (ek, dm) in &node.children {
+    for (ek, dm) in node.children() {
         by_pop.entry(ek.pop).or_default().push(dm);
     }
 
@@ -222,14 +222,14 @@ impl Metric for EdgeOverlapMetric {
         let mut scores: Vec<f64> = Vec::new();
         #[cfg(not(rustrover))]
         let it = tqdm!(
-            trie.nodes.values(),
+            trie.nodes(),
             desc = "Metric: EdgeOverlap",
-            total = trie.nodes.len(),
+            total = trie.num_nodes(),
             disable = !PROGRESS_BAR_ENABLED,
             leave = false
         );
         #[cfg(rustrover)]
-        let it = trie.nodes.values();
+        let it = trie.nodes();
 
         for node in it {
             let node_score = compute_edge_overlap_for_node(node);
@@ -247,8 +247,8 @@ impl Metric for RootEdgeOverlapMetric {
     fn compute(&self, trie: &MiniTrie) -> String {
         let mut scores: Vec<f64> = Vec::new();
         let root_nodes: Vec<_> = trie
-            .nodes.values()
-            .filter(|n| trie.root_ids.contains(&n.id))
+            .nodes()
+            .filter(|n| trie.root_ids.contains(&n.id()))
             .collect();
 
         #[cfg(not(rustrover))]
@@ -278,8 +278,8 @@ impl Metric for NonRootEdgeOverlapMetric {
     fn compute(&self, trie: &MiniTrie) -> String {
         let mut scores: Vec<f64> = Vec::new();
         let non_root_nodes: Vec<_> = trie
-            .nodes.values()
-            .filter(|n| !trie.root_ids.contains(&n.id))
+            .nodes()
+            .filter(|n| !trie.root_ids.contains(&n.id()))
             .collect();
 
         #[cfg(not(rustrover))]
@@ -314,7 +314,7 @@ fn compute_state_fanout_for_node_into(
     // For this node, build: pop -> (state_id -> count of outgoing transitions)
     let mut by_pop: HashMap<isize, HashMap<usize, usize>> = HashMap::new();
 
-    for (edge_key, dest_map) in &node.children {
+    for (edge_key, dest_map) in node.children() {
         let pop = edge_key.pop;
         let state_counts = by_pop.entry(pop).or_default();
         for (_dest, state_set) in dest_map {
@@ -340,14 +340,14 @@ impl Metric for StateFanoutMetric {
 
         #[cfg(not(rustrover))]
         let it = tqdm!(
-            trie.nodes.values(),
+            trie.nodes(),
             desc = "Metric: StateFanout",
-            total = trie.nodes.len(),
+            total = trie.num_nodes(),
             disable = !PROGRESS_BAR_ENABLED,
             leave = false
         );
         #[cfg(rustrover)]
-        let it = trie.nodes.values();
+        let it = trie.nodes();
 
         for node in it {
             compute_state_fanout_for_node_into(node, &mut stats);
@@ -363,8 +363,8 @@ impl Metric for RootStateFanoutMetric {
     fn compute(&self, trie: &MiniTrie) -> String {
         let mut stats = NumericStats::new();
         let root_nodes: Vec<_> = trie
-            .nodes.values()
-            .filter(|n| trie.root_ids.contains(&n.id))
+            .nodes()
+            .filter(|n| trie.root_ids.contains(&n.id()))
             .collect();
 
         #[cfg(not(rustrover))]
@@ -391,8 +391,8 @@ impl Metric for NonRootStateFanoutMetric {
     fn compute(&self, trie: &MiniTrie) -> String {
         let mut stats = NumericStats::new();
         let non_root_nodes: Vec<_> = trie
-            .nodes.values()
-            .filter(|n| !trie.root_ids.contains(&n.id))
+            .nodes()
+            .filter(|n| !trie.root_ids.contains(&n.id()))
             .collect();
 
         #[cfg(not(rustrover))]

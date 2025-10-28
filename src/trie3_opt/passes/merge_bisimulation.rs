@@ -20,7 +20,7 @@ impl OptimizationPass for MergeBisimulationPass {
     }
 
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-        let node_ids: Vec<_> = trie.nodes.keys().cloned().collect();
+        let node_ids: Vec<_> = trie.node_ids().collect();
         let id_to_idx: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let n = node_ids.len();
         if n == 0 {
@@ -29,8 +29,8 @@ impl OptimizationPass for MergeBisimulationPass {
 
         let mut prev_class: Vec<usize> = vec![0; n];
         for (i, id) in node_ids.iter().enumerate() {
-            let node = trie.nodes.get(id).unwrap();
-            prev_class[i] = if node.end { 1 } else { 0 };
+            let node = trie.get_node(*id).unwrap();
+            prev_class[i] = if node.is_end() { 1 } else { 0 };
         }
 
         for _ in 0..self.max_iters {
@@ -42,16 +42,16 @@ impl OptimizationPass for MergeBisimulationPass {
             let mut changes = 0;
 
             for (u_idx, u_id) in node_ids.iter().enumerate() {
-                let u_node = trie.nodes.get(u_id).unwrap();
+                let u_node = trie.get_node(*u_id).unwrap();
                 let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
-                for (ek, dm) in &u_node.children {
+                for (ek, dm) in u_node.children() {
                     for (v_id, sids) in dm {
                         let dest_class = prev_class[id_to_idx[v_id]];
                         let key = (ek.pop, ek.tokens.clone(), dest_class);
                         aggr.entry(key).or_default().union_inplace(sids);
                     }
                 }
-                let sig = (u_node.end, aggr.into_iter().collect());
+                let sig = (u_node.is_end(), aggr.into_iter().collect());
                 let cid = *sig_to_id.entry(sig).or_insert_with(|| {
                     let id = next_id;
                     next_id += 1;
@@ -83,10 +83,10 @@ impl OptimizationPass for MergeBisimulationPass {
         for (class_id, rep_id_opt) in representatives.iter().enumerate() {
             if let Some(rep_id) = rep_id_opt {
                 let exemplar_idx = prev_class.iter().position(|&c| c == class_id).unwrap();
-                let exemplar_node = trie.nodes.get(&node_ids[exemplar_idx]).unwrap().clone();
+                let exemplar_node = trie.get_node(node_ids[exemplar_idx]).unwrap().clone();
 
                 let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
-                for (ek, dm) in &exemplar_node.children {
+                for (ek, dm) in exemplar_node.children() {
                     for (v_id, sids) in dm {
                         let v_class = prev_class[id_to_idx[v_id]];
                         aggr.entry((ek.pop, ek.tokens.clone(), v_class))
@@ -103,16 +103,17 @@ impl OptimizationPass for MergeBisimulationPass {
                         new_children.entry(key).or_default().insert(dest_rep, sids);
                     }
                 }
-                trie.nodes.get_mut(rep_id).unwrap().children = new_children;
+                trie.set_children(*rep_id, new_children);
             }
         }
 
         let rep_set: std::collections::HashSet<NodeId> =
             representatives.iter().filter_map(|&x| x).collect();
-        for node in trie.nodes.values_mut() {
-            if !rep_set.contains(&node.id) {
-                node.children.clear();
-                node.end = false;
+        let all_node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in all_node_ids {
+            if !rep_set.contains(&node_id) {
+                trie.clear_children(node_id);
+                trie.set_end(node_id, false);
             }
         }
 

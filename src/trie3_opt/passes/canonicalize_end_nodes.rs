@@ -18,10 +18,9 @@ impl OptimizationPass for CanonicalizeEndNodesPass {
     fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
         // Collect end nodes
         let mut ends: Vec<NodeId> = trie
-            .nodes
-            .values()
-            .filter(|n| n.end)
-            .map(|n| n.id)
+            .nodes()
+            .filter(|n| n.is_end())
+            .map(|n| n.id())
             .collect();
         if ends.len() <= 1 {
             return;
@@ -30,18 +29,17 @@ impl OptimizationPass for CanonicalizeEndNodesPass {
         let canonical = ends[0];
 
         // Ensure canonical has no outgoing edges
-        {
-            let cnode = trie.nodes.get_mut(&canonical).unwrap();
-            cnode.children.clear();
-            cnode.end = true;
-        }
+        trie.clear_children(canonical);
+        trie.set_end(canonical, true);
 
         // Rewire all edges to target canonical if they target any end
         let end_set: std::collections::BTreeSet<NodeId> = ends.into_iter().collect();
+        let node_ids: Vec<_> = trie.node_ids().collect();
 
-        for node in trie.nodes.values_mut() {
+        for node_id in node_ids {
+            let node = trie.get_node(node_id).unwrap();
             let mut new_children: BTreeMap<_, _> = BTreeMap::new();
-            for (ek, dm) in node.children.clone() {
+            for (ek, dm) in node.children().clone() {
                 let mut dm2: BTreeMap<NodeId, _> = BTreeMap::new();
                 for (dst, sids) in dm {
                     let new_dst = if end_set.contains(&dst) { canonical } else { dst };
@@ -53,7 +51,7 @@ impl OptimizationPass for CanonicalizeEndNodesPass {
                     new_children.insert(ek, dm2);
                 }
             }
-            node.children = new_children;
+            trie.set_children(node_id, new_children);
         }
     }
 }
