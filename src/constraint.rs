@@ -2066,13 +2066,12 @@ impl GrammarConstraint {
         let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
         for (items, _acc) in stacks.iter() {
+            let mut items = items.clone();
+            items.remove(0);
             if items.is_empty() {
                 continue;
             }
 
-            // The first item is hallucinated state. Ingore it.
-            // The last is the shift shifted_state_content. Set it aside.
-            // The middle items are pre_shift_stack
             let shifted_state_content = *items.last().unwrap();
             let pre_shift_stack = &items[0..items.len() - 1];
 
