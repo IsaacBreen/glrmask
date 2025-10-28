@@ -1563,26 +1563,7 @@ pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Optio
     generate_glr_parser_with_terminal_map(productions, terminal_map, ignore_terminal_id)
 }
 
-pub fn generate_glr_parser_with_terminal_map(productions: &[Production], mut terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
-    // Defensively scan productions for any terminals not in the map and add them.
-    // This can happen if productions are modified after the initial map is created,
-    // e.g., by adding dummy terminals.
-    let all_gids: BTreeSet<usize> = terminal_map.right_values().map(|tid| tid.0).collect();
-    let mut next_terminal_id = all_gids.iter().max().map(|max_id| max_id + 1).unwrap_or(0);
-
-    for p in productions {
-        for symbol in &p.rhs {
-            if let Symbol::Terminal(t) = symbol {
-                if !terminal_map.contains_left(t) {
-                    let new_id = TerminalID(next_terminal_id);
-                    terminal_map.insert(t.clone(), new_id);
-                    next_terminal_id += 1;
-                    crate::debug!(1, "Warning: Terminal {:?} was found in productions but not in the provided terminal_map. It has been added with new ID {}.", t, new_id.0);
-                }
-            }
-        }
-    }
-
+pub fn generate_glr_parser_with_terminal_map(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     let non_terminal_map = assign_non_terminal_ids(productions);
     generate_glr_parser_with_maps(productions, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
 }
