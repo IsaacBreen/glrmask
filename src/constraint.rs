@@ -2066,26 +2066,38 @@ impl GrammarConstraint {
         let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
         for (items, _acc) in stacks.iter() {
+            let items = &items[1..]; // Skip first element
             if items.is_empty() {
                 continue;
             }
-            let (shifted_state_content, pre_shift_stack) = items.split_first().unwrap();
+
+            let shifted_state_content = *items.last().unwrap();
+            let pre_shift_stack = &items[..items.len() - 1];
 
             // Walk the pre-shift stack from top to bottom to build the trie path
-            let path_end_node = pre_shift_stack.iter().fold(head.clone(), |cur, state_content| {
+            let mut cur = head.clone();
+            for state_content in pre_shift_stack {
                 let mut state_bv = StateIDBV::zeros();
                 state_bv.insert(state_content.state_id.0);
                 let inserter = EdgeInserter::new(
                     trie3_god,
                     cur.as_arc().clone(),
-                    IntermediateTrie3EdgeKey::Push(state_bv), (), |_, _| {}, |_, _| {}, |_, _| {},
+                    IntermediateTrie3EdgeKey::Push(state_bv),
+                    (),
+                    |_, _| {},
+                    |_, _| {},
+                    |_, _| {},
                 );
-                let next = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                inserter.try_destination(next).expect("Failed to insert Push edge in template chain")
-            });
+                let next = IntermediatePrecomputeNode3Index::new(
+                    trie3_god.insert(IntermediatePrecomputeNode3::new(
+                        IntermediatePrecomputedNodeContents3::internal()
+                    ))
+                );
+                cur = inserter.try_destination(next)
+                    .expect("Failed to insert Push edge in template chain");
+            }
 
-            // Map the shifted state to the end of its corresponding pre-shift stack path.
-            final_nodes_map.insert(*shifted_state_content, path_end_node);
+            final_nodes_map.insert(shifted_state_content, cur);
         }
 
         (head, final_nodes_map)
