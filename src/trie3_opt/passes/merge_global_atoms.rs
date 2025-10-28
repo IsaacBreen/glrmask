@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::collections::hash_map::Entry;
 
+use kdam::{BarExt, tqdm};
+use crate::profiler::PROGRESS_BAR_ENABLED;
+
 use crate::trie3_opt::{
     context::OptimizationContext,
     core::{EdgeKey, MiniTrie, NodeId, SortedSet},
@@ -58,7 +61,18 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
             let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
             let mut aborted = false;
-            for m in masks {
+            #[cfg(not(rustrover))]
+            let it_masks = tqdm!(
+                masks.iter(),
+                desc = &format!("MergeGlobalAtoms: BuildAtoms(pop={})", pop),
+                total = masks.len(),
+                disable = !PROGRESS_BAR_ENABLED,
+                leave = false
+            );
+            #[cfg(rustrover)]
+            let it_masks = masks.iter();
+
+            for m in it_masks {
                 if blocks.is_empty() {
                     break;
                 }
@@ -205,14 +219,30 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             prev_class[i] = class_id;
         }
 
-        for _ in 0..self.max_iters {
-            type SigKey = (bool, Vec<((isize, usize), Vec<(usize, SortedSet)>)>);
-            let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
+        for iter_num in 0..self.max_iters {
+            type InternedEdgeSig = Vec<(usize, usize)>; // (dest_class, sset_id)
+            type InternedNodeSig = (bool, Vec<((isize, usize), InternedEdgeSig)>); // (is_end, [((pop, atom_idx), edge_sig)])
+
+            let mut sset_interner: HashMap<SortedSet, usize> = HashMap::new();
+            let mut next_sset_id = 0;
+
+            let mut sig_to_id: HashMap<InternedNodeSig, usize> = HashMap::new();
             let mut next_id = 0;
             let mut new_class = vec![0; n];
             let mut changes = 0;
 
-            for (u_idx, u_id) in node_ids.iter().enumerate() {
+            #[cfg(not(rustrover))]
+            let it_nodes = tqdm!(
+                node_ids.iter().enumerate(),
+                desc = &format!("MergeGlobalAtoms: Refine iter {}", iter_num + 1),
+                total = node_ids.len(),
+                disable = !PROGRESS_BAR_ENABLED,
+                leave = false
+            );
+            #[cfg(rustrover)]
+            let it_nodes = node_ids.iter().enumerate();
+
+            for (u_idx, u_id) in it_nodes {
                 let u_node = trie.get_node(*u_id).unwrap();
                 let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                 for (ek, dm) in u_node.children() {
@@ -230,8 +260,17 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                         }
                     }
                 }
-                let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
-                let sig = (u_node.is_end(), sig_entries);
+                let mut sig_entries_interned: Vec<((isize, usize), InternedEdgeSig)> = Vec::with_capacity(per_atom_aggr.len());
+                for ((pop, atom_idx), dm) in per_atom_aggr {
+                    let mut dest_vec: InternedEdgeSig = Vec::with_capacity(dm.len());
+                    for (dest_class, sids) in dm {
+                        let sset_id = *sset_interner.entry(sids).or_insert_with(|| { let id = next_sset_id; next_sset_id += 1; id });
+                        dest_vec.push((dest_class, sset_id));
+                    }
+                    sig_entries_interned.push(((pop, atom_idx), dest_vec));
+                }
+
+                let sig: InternedNodeSig = (u_node.is_end(), sig_entries_interned);
                 let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
                 new_class[u_idx] = cid;
                 if new_class[u_idx] != prev_class[u_idx] { changes += 1; }

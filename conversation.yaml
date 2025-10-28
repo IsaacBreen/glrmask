@@ -479,6 +479,31 @@ local_system:
                   crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
               }
               pass.run(&mut mini, &mut ctx);
+
+              // After certain passes that are known to create garbage, run GC.
+              let pass_name = pass.name();
+              if pass_name == "PruneDeadPaths"
+                  || pass_name == "PruneUnproductivePaths"
+                  || pass_name == "MergeStructural"
+                  || pass_name == "MergeBisimulation"
+                  || pass_name == "MergeGlobalAtoms"
+                  || pass_name == "EliminatePop0ExceptRoots"
+                  || pass_name == "CompressUnaryChains"
+              {
+                  let before = mini.num_nodes();
+                  mini.gc();
+                  let after = mini.num_nodes();
+                  if before != after && ctx.debug_level > 0 {
+                      crate::debug!(
+                          1,
+                          "[Trie3 Opt] GC after '{}': nodes {} -> {}",
+                          pass.name(),
+                          before,
+                          after
+                      );
+                  }
+              }
+
               if ctx.debug_level > 0 {
                   let metrics = run_all_metrics(&mini);
                   crate::debug!(
@@ -920,6 +945,30 @@ local_system:
                   }
               }
               productive
+          }
+
+          /// Removes nodes not reachable from any root.
+          pub fn gc(&mut self) {
+              let live_nodes = self.reachable_from_roots();
+
+              if live_nodes.len() == self.nodes.len() {
+                  return;
+              }
+
+              // Remove dead nodes from the main nodes map.
+              self.nodes.retain(|id, _| live_nodes.contains(id));
+
+              // Clean up edges in remaining live nodes to not point to dead nodes.
+              for node in self.nodes.values_mut() {
+                  // Clean children: remove destinations that are not live.
+                  for (_ek, dm) in node.children.iter_mut() {
+                      dm.retain(|dst, _| live_nodes.contains(dst));
+                  }
+                  node.children.retain(|_ek, dm| !dm.is_empty());
+
+                  // Clean parents: remove parents that are not live.
+                  node.parents.retain(|parent_id, _| live_nodes.contains(parent_id));
+              }
           }
       }
     src/trie3_opt/metrics.rs: |+
@@ -5598,6 +5647,9 @@ local_system:
       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
       use std::collections::hash_map::Entry;
 
+      use kdam::{BarExt, tqdm};
+      use crate::profiler::PROGRESS_BAR_ENABLED;
+
       use crate::trie3_opt::{
           context::OptimizationContext,
           core::{EdgeKey, MiniTrie, NodeId, SortedSet},
@@ -5655,7 +5707,18 @@ local_system:
                   let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
                   let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
                   let mut aborted = false;
-                  for m in masks {
+                  #[cfg(not(rustrover))]
+                  let it_masks = tqdm!(
+                      masks.iter(),
+                      desc = &format!("MergeGlobalAtoms: BuildAtoms(pop={})", pop),
+                      total = masks.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = false
+                  );
+                  #[cfg(rustrover)]
+                  let it_masks = masks.iter();
+
+                  for m in it_masks {
                       if blocks.is_empty() {
                           break;
                       }
@@ -5802,14 +5865,30 @@ local_system:
                   prev_class[i] = class_id;
               }
 
-              for _ in 0..self.max_iters {
-                  type SigKey = (bool, Vec<((isize, usize), Vec<(usize, SortedSet)>)>);
-                  let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
+              for iter_num in 0..self.max_iters {
+                  type InternedEdgeSig = Vec<(usize, usize)>; // (dest_class, sset_id)
+                  type InternedNodeSig = (bool, Vec<((isize, usize), InternedEdgeSig)>); // (is_end, [((pop, atom_idx), edge_sig)])
+
+                  let mut sset_interner: HashMap<SortedSet, usize> = HashMap::new();
+                  let mut next_sset_id = 0;
+
+                  let mut sig_to_id: HashMap<InternedNodeSig, usize> = HashMap::new();
                   let mut next_id = 0;
                   let mut new_class = vec![0; n];
                   let mut changes = 0;
 
-                  for (u_idx, u_id) in node_ids.iter().enumerate() {
+                  #[cfg(not(rustrover))]
+                  let it_nodes = tqdm!(
+                      node_ids.iter().enumerate(),
+                      desc = &format!("MergeGlobalAtoms: Refine iter {}", iter_num + 1),
+                      total = node_ids.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = false
+                  );
+                  #[cfg(rustrover)]
+                  let it_nodes = node_ids.iter().enumerate();
+
+                  for (u_idx, u_id) in it_nodes {
                       let u_node = trie.get_node(*u_id).unwrap();
                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                       for (ek, dm) in u_node.children() {
@@ -5827,8 +5906,17 @@ local_system:
                               }
                           }
                       }
-                      let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
-                      let sig = (u_node.is_end(), sig_entries);
+                      let mut sig_entries_interned: Vec<((isize, usize), InternedEdgeSig)> = Vec::with_capacity(per_atom_aggr.len());
+                      for ((pop, atom_idx), dm) in per_atom_aggr {
+                          let mut dest_vec: InternedEdgeSig = Vec::with_capacity(dm.len());
+                          for (dest_class, sids) in dm {
+                              let sset_id = *sset_interner.entry(sids).or_insert_with(|| { let id = next_sset_id; next_sset_id += 1; id });
+                              dest_vec.push((dest_class, sset_id));
+                          }
+                          sig_entries_interned.push(((pop, atom_idx), dest_vec));
+                      }
+
+                      let sig: InternedNodeSig = (u_node.is_end(), sig_entries_interned);
                       let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
                       new_class[u_idx] = cid;
                       if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
@@ -6799,6 +6887,31 @@ messages:
                   crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
               }
               pass.run(&mut mini, &mut ctx);
+
+              // After certain passes that are known to create garbage, run GC.
+              let pass_name = pass.name();
+              if pass_name == "PruneDeadPaths"
+                  || pass_name == "PruneUnproductivePaths"
+                  || pass_name == "MergeStructural"
+                  || pass_name == "MergeBisimulation"
+                  || pass_name == "MergeGlobalAtoms"
+                  || pass_name == "EliminatePop0ExceptRoots"
+                  || pass_name == "CompressUnaryChains"
+              {
+                  let before = mini.num_nodes();
+                  mini.gc();
+                  let after = mini.num_nodes();
+                  if before != after && ctx.debug_level > 0 {
+                      crate::debug!(
+                          1,
+                          "[Trie3 Opt] GC after '{}': nodes {} -> {}",
+                          pass.name(),
+                          before,
+                          after
+                      );
+                  }
+              }
+
               if ctx.debug_level > 0 {
                   let metrics = run_all_metrics(&mini);
                   crate::debug!(
@@ -7245,6 +7358,30 @@ messages:
                   }
               }
               productive
+          }
+
+          /// Removes nodes not reachable from any root.
+          pub fn gc(&mut self) {
+              let live_nodes = self.reachable_from_roots();
+
+              if live_nodes.len() == self.nodes.len() {
+                  return;
+              }
+
+              // Remove dead nodes from the main nodes map.
+              self.nodes.retain(|id, _| live_nodes.contains(id));
+
+              // Clean up edges in remaining live nodes to not point to dead nodes.
+              for node in self.nodes.values_mut() {
+                  // Clean children: remove destinations that are not live.
+                  for (_ek, dm) in node.children.iter_mut() {
+                      dm.retain(|dst, _| live_nodes.contains(dst));
+                  }
+                  node.children.retain(|_ek, dm| !dm.is_empty());
+
+                  // Clean parents: remove parents that are not live.
+                  node.parents.retain(|parent_id, _| live_nodes.contains(parent_id));
+              }
           }
       }
 
@@ -9560,8 +9697,8 @@ messages:
       ```
     metadata:
       filename: src/trie3_opt/passes/reorder_llm_tokens.rs
-  - user: Implement garbage collection for `MiniTrie`, i.e. remove nodes not reachable
-      via roots. Call it at appropriate points during optimization.
+  - user: '`MergeGlobalAtoms` just keeps consuming more and more memory and never
+      seems to finish. Fix it. Also, add a progress bar to it.'
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9581,226 +9718,253 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement garbage collection for `MiniTrie` and then the corresponding git diffs.
+      Of course. Dealing with performance bottlenecks in complex algorithms like graph optimization is crucial. The memory usage and performance issues in `MergeGlobalAtoms` likely stem from using large, complex data structures as keys in hashmaps during the partition refinement step.
+
+      Here are the step-by-step instructions to fix the issue and add progress bars for better visibility, followed by the git diffs.
 
       ### Step-by-step Instructions
 
-      **1. Implement `MiniTrie::gc()` in `src/trie3_opt/core.rs`**
+      #### File: `src/trie3_opt/passes/merge_global_atoms.rs`
 
-      First, we'll add a garbage collection method to the `MiniTrie` struct. This method will find all nodes reachable from the roots and remove any that are not.
+      1.  **Add Imports for Progress Bar:**
+          At the top of the file, add the following `use` statements to import the `kdam` progress bar library and the global enabled flag:
 
-      In `src/trie3_opt/core.rs`, add the following `gc` method inside the `impl MiniTrie` block. A good location is after the `can_reach_end` method.
+          ```rust
+          use kdam::{BarExt, tqdm};
+          use crate::profiler::PROGRESS_BAR_ENABLED;
+          ```
 
-      ```rust
-          /// Removes nodes not reachable from any root.
-          pub fn gc(&mut self) {
-              let live_nodes = self.reachable_from_roots();
+      2.  **Add Progress Bar to Atom Generation:**
+          In the `run` method, find the loop that iterates over token masks to build atoms (`for m in masks`). Wrap this iterator with `tqdm!` to show progress for each pop value.
 
-              if live_nodes.len() == self.nodes.len() {
-                  return;
-              }
-
-              // Remove dead nodes from the main nodes map.
-              self.nodes.retain(|id, _| live_nodes.contains(id));
-
-              // Clean up edges in remaining live nodes to not point to dead nodes.
-              for node in self.nodes.values_mut() {
-                  // Clean children: remove destinations that are not live.
-                  for (_ek, dm) in node.children.iter_mut() {
-                      dm.retain(|dst, _| live_nodes.contains(dst));
-                  }
-                  node.children.retain(|_ek, dm| !dm.is_empty());
-
-                  // Clean parents: remove parents that are not live.
-                  node.parents.retain(|parent_id, _| live_nodes.contains(parent_id));
-              }
-          }
-      ```
-
-      **2. Call `gc()` at appropriate points in `src/trie3_opt/coordinator.rs`**
-
-      Next, we'll call the new `gc()` method from the optimization pipeline coordinator. We'll run it after passes that are known to potentially create unreachable nodes, such as pruning and merging passes.
-
-      In `src/trie3_opt/coordinator.rs`, find the `run_pipeline_on_precompute3` function and modify the main pass execution loop.
-
-      Replace this block of code:
-
-      ```rust
-          // Run passes
-          for pass in pipeline.iter() {
-              if ctx.debug_level > 0 {
-                  crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
-              }
-              pass.run(&mut mini, &mut ctx);
-              if ctx.debug_level > 0 {
-                  let metrics = run_all_metrics(&mini);
-                  crate::debug!(
-                      1,
-                      "[Trie3 Opt] Metrics after '{}': {}",
-                      pass.name(),
-                      crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics)
+          *   **Locate this code block:**
+              ```rust
+              // ...
+              for (pop, masks) in &by_pop_masks {
+                  let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
+                  let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
+                  let mut aborted = false;
+                  for m in masks {
+                      if blocks.is_empty() {
+              // ...
+              ```
+          *   **Modify it to add the progress bar:**
+              ```rust
+              // ...
+              for (pop, masks) in &by_pop_masks {
+                  let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
+                  let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
+                  let mut aborted = false;
+                  #[cfg(not(rustrover))]
+                  let it_masks = tqdm!(
+                      masks.iter(),
+                      desc = &format!("MergeGlobalAtoms: BuildAtoms(pop={})", pop),
+                      total = masks.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = false
                   );
-              }
-          }
-      ```
+                  #[cfg(rustrover)]
+                  let it_masks = masks.iter();
+                  for m in it_masks {
+                      if blocks.is_empty() {
+              // ...
+              ```
 
-      with this updated version, which checks the pass name and runs garbage collection when appropriate:
+      3.  **Optimize Partition Refinement and Add Progress Bar:**
+          This is the most critical change. You will refactor the main refinement loop to avoid using large `SortedSet` objects in `HashMap` keys. This is done by "interning" them—replacing each unique `SortedSet` with a simple integer ID.
 
-      ```rust
-          // Run passes
-          for pass in pipeline.iter() {
-              if ctx.debug_level > 0 {
-                  crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
-              }
-              pass.run(&mut mini, &mut ctx);
+          *   **Locate the partition refinement loop:**
+              ```rust
+              for _ in 0..self.max_iters {
+                  type SigKey = (bool, Vec<((isize, usize), Vec<(usize, SortedSet)>)>);
+                  let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
+                  // ...
+              ```
+          *   **Replace the entire loop** with the following optimized version. This new version introduces `sset_interner` to manage `SortedSet` IDs, defines a more efficient signature type (`InternedNodeSig`), and adds a progress bar for each refinement iteration.
 
-              // After certain passes that are known to create garbage, run GC.
-              let pass_name = pass.name();
-              if pass_name == "PruneDeadPaths"
-                  || pass_name == "PruneUnproductivePaths"
-                  || pass_name == "MergeStructural"
-                  || pass_name == "MergeBisimulation"
-                  || pass_name == "MergeGlobalAtoms"
-                  || pass_name == "EliminatePop0ExceptRoots"
-                  || pass_name == "CompressUnaryChains"
-              {
-                  let before = mini.num_nodes();
-                  mini.gc();
-                  let after = mini.num_nodes();
-                  if before != after && ctx.debug_level > 0 {
-                      crate::debug!(
-                          1,
-                          "[Trie3 Opt] GC after '{}': nodes {} -> {}",
-                          pass.name(),
-                          before,
-                          after
-                      );
-                  }
-              }
+              ```rust
+              for iter_num in 0..self.max_iters {
+                  type InternedEdgeSig = Vec<(usize, usize)>; // (dest_class, sset_id)
+                  type InternedNodeSig = (bool, Vec<((isize, usize), InternedEdgeSig)>); // (is_end, [((pop, atom_idx), edge_sig)])
 
-              if ctx.debug_level > 0 {
-                  let metrics = run_all_metrics(&mini);
-                  crate::debug!(
-                      1,
-                      "[Trie3 Opt] Metrics after '{}': {}",
-                      pass.name(),
-                      crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics)
+                  let mut sset_interner: HashMap<SortedSet, usize> = HashMap::new();
+                  let mut next_sset_id = 0;
+
+                  let mut sig_to_id: HashMap<InternedNodeSig, usize> = HashMap::new();
+                  let mut next_id = 0;
+                  let mut new_class = vec![0; n];
+                  let mut changes = 0;
+
+                  #[cfg(not(rustrover))]
+                  let it_nodes = tqdm!(
+                      node_ids.iter().enumerate(),
+                      desc = &format!("MergeGlobalAtoms: Refine iter {}", iter_num + 1),
+                      total = node_ids.len(),
+                      disable = !PROGRESS_BAR_ENABLED,
+                      leave = false
                   );
+                  #[cfg(rustrover)]
+                  let it_nodes = node_ids.iter().enumerate();
+
+                  for (u_idx, u_id) in it_nodes {
+                      let u_node = trie.get_node(*u_id).unwrap();
+                      let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
+                      for (ek, dm) in u_node.children() {
+                          if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                              if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+                                  if let Some(atom_idxs) = pop_map.get(*token_set_id) {
+                                      for &atom_idx in atom_idxs {
+                                          let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+                                          for (v_id, sids) in dm {
+                                              let dest_class = prev_class[id_to_idx[v_id]];
+                                              entry.entry(dest_class).or_default().union_inplace(sids);
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      
+                      let mut sig_entries_interned: Vec<((isize, usize), InternedEdgeSig)> = Vec::with_capacity(per_atom_aggr.len());
+                      for ((pop, atom_idx), dm) in per_atom_aggr {
+                          let mut dest_vec: InternedEdgeSig = Vec::with_capacity(dm.len());
+                          for (dest_class, sids) in dm {
+                              let sset_id = *sset_interner.entry(sids).or_insert_with(|| { let id = next_sset_id; next_sset_id += 1; id });
+                              dest_vec.push((dest_class, sset_id));
+                          }
+                          sig_entries_interned.push(((pop, atom_idx), dest_vec));
+                      }
+
+                      let sig: InternedNodeSig = (u_node.is_end(), sig_entries_interned);
+                      let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
+                      new_class[u_idx] = cid;
+                      if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
+                  }
+                  prev_class = new_class;
+                  if changes == 0 { break; }
               }
-          }
-      ```
+              ```
 
       ### Git Diffs
 
-      Here are the git diffs corresponding to the changes described above.
+      Here are the git diffs to apply the changes.
 
       ```diff
-      diff --git a/src/trie3_opt/core.rs b/src/trie3_opt/core.rs
-      index 6211141..111111c 100644
-      --- a/src/trie3_opt/core.rs
-      +++ b/src/trie3_opt/core.rs
-      @@ -443,4 +443,28 @@
-               }
-               productive
-           }
+      --- a/src/trie3_opt/passes/merge_global_atoms.rs
+      +++ b/src/trie3_opt/passes/merge_global_atoms.rs
+      @@ -1,5 +1,8 @@
+       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+       use std::collections::hash_map::Entry;
       +
-      +    /// Removes nodes not reachable from any root.
-      +    pub fn gc(&mut self) {
-      +        let live_nodes = self.reachable_from_roots();
-      +
-      +        if live_nodes.len() == self.nodes.len() {
-      +            return;
-      +        }
-      +
-      +        // Remove dead nodes from the main nodes map.
-      +        self.nodes.retain(|id, _| live_nodes.contains(id));
-      +
-      +        // Clean up edges in remaining live nodes to not point to dead nodes.
-      +        for node in self.nodes.values_mut() {
-      +            // Clean children: remove destinations that are not live.
-      +            for (_ek, dm) in node.children.iter_mut() {
-      +                dm.retain(|dst, _| live_nodes.contains(dst));
-      +            }
-      +            node.children.retain(|_ek, dm| !dm.is_empty());
-      +
-      +            // Clean parents: remove parents that are not live.
-      +            node.parents.retain(|parent_id, _| live_nodes.contains(parent_id));
-      +        }
-      +    }
-       }
-
-      ```
-
-      ```diff
-      diff --git a/src/trie3_opt/coordinator.rs b/src/trie3_opt/coordinator.rs
-      index 211111b..111111c 100644
-      --- a/src/trie3_opt/coordinator.rs
-      +++ b/src/trie3_opt/coordinator.rs
-      @@ -448,18 +448,41 @@
+      +use kdam::{BarExt, tqdm};
+      +use crate::profiler::PROGRESS_BAR_ENABLED;
        
-           let pipeline = build_pipeline(&config);
-       
-           // Run passes
-           for pass in pipeline.iter() {
-               if ctx.debug_level > 0 {
-                   crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
-               }
-               pass.run(&mut mini, &mut ctx);
+       use crate::trie3_opt::{
+           context::OptimizationContext,
+      @@ -50,7 +53,18 @@
+                   let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
+                   let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
+                   let mut aborted = false;
+      -            for m in masks {
+      +            #[cfg(not(rustrover))]
+      +            let it_masks = tqdm!(
+      +                masks.iter(),
+      +                desc = &format!("MergeGlobalAtoms: BuildAtoms(pop={})", pop),
+      +                total = masks.len(),
+      +                disable = !PROGRESS_BAR_ENABLED,
+      +                leave = false
+      +            );
+      +            #[cfg(rustrover)]
+      +            let it_masks = masks.iter();
       +
-      +        // After certain passes that are known to create garbage, run GC.
-      +        let pass_name = pass.name();
-      +        if pass_name == "PruneDeadPaths"
-      +            || pass_name == "PruneUnproductivePaths"
-      +            || pass_name == "MergeStructural"
-      +            || pass_name == "MergeBisimulation"
-      +            || pass_name == "MergeGlobalAtoms"
-      +            || pass_name == "EliminatePop0ExceptRoots"
-      +            || pass_name == "CompressUnaryChains"
-      +        {
-      +            let before = mini.num_nodes();
-      +            mini.gc();
-      +            let after = mini.num_nodes();
-      +            if before != after && ctx.debug_level > 0 {
-      +                crate::debug!(
-      +                    1,
-      +                    "[Trie3 Opt] GC after '{}': nodes {} -> {}",
-      +                    pass.name(),
-      +                    before,
-      +                    after
-      +                );
-      +            }
-      +        }
-      +
-               if ctx.debug_level > 0 {
-                   let metrics = run_all_metrics(&mini);
-                   crate::debug!(
-                       1,
-                       "[Trie3 Opt] Metrics after '{}': {}",
-                       pass.name(),
-                       crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics)
-                   );
+      +            for m in it_masks {
+                       if blocks.is_empty() {
+                           break;
+                       }
+      @@ -218,39 +232,60 @@
+                   prev_class[i] = class_id;
                }
-           }
        
-           // Run final metrics
+      -        for _ in 0..self.max_iters {
+      -            type SigKey = (bool, Vec<((isize, usize), Vec<(usize, SortedSet)>)>);
+      -            let mut sig_to_id: HashMap<SigKey, usize> = HashMap::new();
+      +        for iter_num in 0..self.max_iters {
+      +            type InternedEdgeSig = Vec<(usize, usize)>; // (dest_class, sset_id)
+      +            type InternedNodeSig = (bool, Vec<((isize, usize), InternedEdgeSig)>); // (is_end, [((pop, atom_idx), edge_sig)])
+      +
+      +            let mut sset_interner: HashMap<SortedSet, usize> = HashMap::new();
+      +            let mut next_sset_id = 0;
+      +
+      +            let mut sig_to_id: HashMap<InternedNodeSig, usize> = HashMap::new();
+                   let mut next_id = 0;
+                   let mut new_class = vec![0; n];
+                   let mut changes = 0;
+       
+      -            for (u_idx, u_id) in node_ids.iter().enumerate() {
+      +            #[cfg(not(rustrover))]
+      +            let it_nodes = tqdm!(
+      +                node_ids.iter().enumerate(),
+      +                desc = &format!("MergeGlobalAtoms: Refine iter {}", iter_num + 1),
+      +                total = node_ids.len(),
+      +                disable = !PROGRESS_BAR_ENABLED,
+      +                leave = false
+      +            );
+      +            #[cfg(rustrover)]
+      +            let it_nodes = node_ids.iter().enumerate();
+      +
+      +            for (u_idx, u_id) in it_nodes {
+                       let u_node = trie.get_node(*u_id).unwrap();
+                       let mut per_atom_aggr: BTreeMap<(isize, usize), BTreeMap<usize, SortedSet>> = BTreeMap::new();
+                       for (ek, dm) in u_node.children() {
+                           if let Some(pop_map) = atom_idxs_by_pop_token_set_id.get(&ek.pop) {
+                               if let Some(token_set_id) = unique_token_sets.get(&ek.tokens) {
+                                   if let Some(atom_idxs) = pop_map.get(*token_set_id) {
+                                       for &atom_idx in atom_idxs {
+                                           let entry = per_atom_aggr.entry((ek.pop, atom_idx)).or_default();
+                                           for (v_id, sids) in dm {
+                                               let dest_class = prev_class[id_to_idx[v_id]];
+                                               entry.entry(dest_class).or_default().union_inplace(sids);
+                                           }
+                                       }
+                                   }
+                               }
+                           }
+                       }
+      -                let sig_entries = per_atom_aggr.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+      -                let sig = (u_node.is_end(), sig_entries);
+      +                let mut sig_entries_interned: Vec<((isize, usize), InternedEdgeSig)> = Vec::with_capacity(per_atom_aggr.len());
+      +                for ((pop, atom_idx), dm) in per_atom_aggr {
+      +                    let mut dest_vec: InternedEdgeSig = Vec::with_capacity(dm.len());
+      +                    for (dest_class, sids) in dm {
+      +                        let sset_id = *sset_interner.entry(sids).or_insert_with(|| { let id = next_sset_id; next_sset_id += 1; id });
+      +                        dest_vec.push((dest_class, sset_id));
+      +                    }
+      +                    sig_entries_interned.push(((pop, atom_idx), dest_vec));
+      +                }
+      +
+      +                let sig: InternedNodeSig = (u_node.is_end(), sig_entries_interned);
+                       let cid = *sig_to_id.entry(sig).or_insert_with(|| { let id = next_id; next_id += 1; id });
+                       new_class[u_idx] = cid;
+                       if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
+                   }
+                   prev_class = new_class;
+                   if changes == 0 { break; }
+               }
+       
+               // Rewire and rebuild.
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/core.rs
-      Applying patch to 'src/trie3_opt/core.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/core.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/trie3_opt/coordinator.rs
-      Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
+      Identified target file: src/trie3_opt/passes/merge_global_atoms.rs
+      Applying patch to 'src/trie3_opt/passes/merge_global_atoms.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/merge_global_atoms.rs.
     metadata:
-  - user: 'Changes committed with message: "feat(trie3_opt): Implement MiniTrie garbage
-      collection and run after structural passes"'
+  - user: 'Changes committed with message: "MergeGlobalAtoms: Add progress bars and
+      intern signature components to fix performance/memory issues"'
     metadata:
 ...
