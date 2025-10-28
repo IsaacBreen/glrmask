@@ -1218,14 +1218,19 @@ impl GrammarConstraint {
         println!("---------------------------\n");
 
         // --- RECOMPILATION STEP ---
-        let final_compiled_grammar = if !new_config.dummy_terminal_map.is_empty() {
-            crate::debug!(1, "Recompiling grammar with {} new dummy terminals.", new_config.dummy_terminal_map.len());
+        let (final_productions, new_dummy_terminals) = crate::glr::analyze::rewrite_productions_with_dummies(
+            &grammar_definition.productions,
+            &new_config.dummy_terminal_map,
+        );
+
+        let final_compiled_grammar = if !new_dummy_terminals.is_empty() {
+            crate::debug!(1, "Recompiling grammar with {} new dummy terminals.", new_dummy_terminals.len());
             let mut final_grammar_def = (*grammar_definition).clone();
-            for dummy_name in new_config.dummy_terminal_map.keys() {
-                // The dummy terminal must be added to the grammar definition so it gets a terminal ID.
-                // However, we do NOT rewrite the productions to use it. The dummy terminal is only
-                // used during precomputation to group original terminals.
-                final_grammar_def.add_external_terminal(dummy_name);
+            final_grammar_def.productions = final_productions;
+            for dummy_terminal in new_dummy_terminals {
+                if let crate::glr::grammar::Terminal::RegexName(name) = dummy_terminal {
+                    final_grammar_def.add_external_terminal(&name);
+                }
             }
             println!("{}", &final_grammar_def);
             CompiledGrammar::from_definition(Arc::new(final_grammar_def))
