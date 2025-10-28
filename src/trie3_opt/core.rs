@@ -352,4 +352,28 @@ impl MiniTrie {
         }
         productive
     }
+
+    /// Removes nodes not reachable from any root.
+    pub fn gc(&mut self) {
+        let live_nodes = self.reachable_from_roots();
+
+        if live_nodes.len() == self.nodes.len() {
+            return;
+        }
+
+        // Remove dead nodes from the main nodes map.
+        self.nodes.retain(|id, _| live_nodes.contains(id));
+
+        // Clean up edges in remaining live nodes to not point to dead nodes.
+        for node in self.nodes.values_mut() {
+            // Clean children: remove destinations that are not live.
+            for (_ek, dm) in node.children.iter_mut() {
+                dm.retain(|dst, _| live_nodes.contains(dst));
+            }
+            node.children.retain(|_ek, dm| !dm.is_empty());
+
+            // Clean parents: remove parents that are not live.
+            node.parents.retain(|parent_id, _| live_nodes.contains(parent_id));
+        }
+    }
 }

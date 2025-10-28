@@ -398,6 +398,31 @@ pub fn run_pipeline_on_precompute3<'a>(
             crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
         }
         pass.run(&mut mini, &mut ctx);
+
+        // After certain passes that are known to create garbage, run GC.
+        let pass_name = pass.name();
+        if pass_name == "PruneDeadPaths"
+            || pass_name == "PruneUnproductivePaths"
+            || pass_name == "MergeStructural"
+            || pass_name == "MergeBisimulation"
+            || pass_name == "MergeGlobalAtoms"
+            || pass_name == "EliminatePop0ExceptRoots"
+            || pass_name == "CompressUnaryChains"
+        {
+            let before = mini.num_nodes();
+            mini.gc();
+            let after = mini.num_nodes();
+            if before != after && ctx.debug_level > 0 {
+                crate::debug!(
+                    1,
+                    "[Trie3 Opt] GC after '{}': nodes {} -> {}",
+                    pass.name(),
+                    before,
+                    after
+                );
+            }
+        }
+
         if ctx.debug_level > 0 {
             let metrics = run_all_metrics(&mini);
             crate::debug!(
