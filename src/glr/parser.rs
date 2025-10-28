@@ -2301,6 +2301,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Some(llm_tokens)
             }
             LRMode::LALR => None,
+            LRMode::LR0 => None,
         }
     }
 
