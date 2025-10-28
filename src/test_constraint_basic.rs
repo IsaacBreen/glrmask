@@ -55,6 +55,7 @@ fn test_trivial() {
         &GrammarConstraintConfig::default(),
         None,
     );
+    println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed0();
     constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
