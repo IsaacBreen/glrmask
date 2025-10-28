@@ -1255,13 +1255,18 @@ local_system:
                   crate::debug!(1, "Recompiling grammar with {} new dummy terminals.", new_dummy_terminals.len());
                   let mut final_grammar_def = (*grammar_definition).clone();
                   final_grammar_def.productions = final_productions;
-                  for dummy_tid in new_dummy_terminals {
-                      final_grammar_def.add_external_terminal(&format!("__DUMMY_TERMINAL_{}__", dummy_tid));
+                  for dummy_terminal in new_dummy_terminals {
+                      if let crate::glr::grammar::Terminal::RegexName(name) = dummy_terminal {
+                          final_grammar_def.add_external_terminal(&name);
+                      }
                   }
+                  println!("{}", &final_grammar_def);
                   CompiledGrammar::from_definition(Arc::new(final_grammar_def))
               } else {
                   initial_compiled_grammar
               };
+
+              // println!("{}", &final_compiled_grammar.glr_parser);
 
               Self::new_with_config_and_precompute0_cache(
                   final_compiled_grammar.tokenizer,
@@ -15862,7 +15867,7 @@ local_system:
           pub trie3: Trie3Config,
           pub intermediate_trie3_templates: IntermediateTrie3Config,
           pub intermediate_trie3_main: IntermediateTrie3Config,
-          pub dummy_terminal_map: BTreeMap<String, BTreeSet<String>>,
+          pub dummy_terminal_map: BTreeMap<String, BTreeSet<Terminal>>,
           pub dummy_terminal_penalties: BTreeMap<String, usize>,
       }
 
@@ -16387,13 +16392,10 @@ local_system:
                   }
 
                   let dummy_name = format!("__DUMMY_TERMINAL_{}__", dummy_idx);
-                  let original_names: BTreeSet<String> = tids.iter()
-                      .map(|tid| match parser.terminal_map.get_by_right(tid).unwrap() {
-                          Terminal::RegexName(name) => name.clone(),
-                          Terminal::Literal(bytes) => String::from_utf8_lossy(bytes).to_string(),
-                      })
+                  let original_terminals: BTreeSet<Terminal> = tids.iter()
+                      .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().clone())
                       .collect();
-                  new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
+                  new_config.dummy_terminal_map.insert(dummy_name.clone(), original_terminals);
                   new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
                   dummy_idx += 1;
               }
@@ -16405,13 +16407,13 @@ local_system:
                   let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
                   sorted_dummies.sort_by_key(|(k, _)| *k);
 
-                  for (dummy_name, original_names) in sorted_dummies {
+                  for (dummy_name, original_terminals) in sorted_dummies {
                       let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
                       println!("- {}: (penalty: {})", dummy_name, penalty);
-                      let mut sorted_originals: Vec<_> = original_names.iter().collect();
+                      let mut sorted_originals: Vec<_> = original_terminals.iter().collect();
                       sorted_originals.sort();
-                      for name in sorted_originals {
-                          println!("  - {}", name);
+                      for terminal in sorted_originals {
+                          println!("  - {}", terminal);
                       }
                   }
               }
@@ -16432,10 +16434,13 @@ local_system:
                           final_grammar_def.add_external_terminal(&name);
                       }
                   }
+                  println!("{}", &final_grammar_def);
                   CompiledGrammar::from_definition(Arc::new(final_grammar_def))
               } else {
                   initial_compiled_grammar
               };
+
+              // println!("{}", &final_compiled_grammar.glr_parser);
 
               Self::new_with_config_and_precompute0_cache(
                   final_compiled_grammar.tokenizer,
@@ -16623,7 +16628,7 @@ local_system:
 
               // Check for overlapping original terminals in dummy_terminal_map
               let mut seen_originals = BTreeSet::new();
-              for original_terminals in config.dummy_terminal_map.values() {
+              for original_terminals in config.dummy_terminal_map.values() { // This is BTreeSet<Terminal> now
                   for term in original_terminals {
                       if !seen_originals.insert(term.clone()) {
                           panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
@@ -16632,12 +16637,11 @@ local_system:
               }
 
               let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
-              for (dummy_name, original_names) in &config.dummy_terminal_map {
+              for (dummy_name, original_terminals) in &config.dummy_terminal_map {
                   let dummy_term = Terminal::regex_name(dummy_name);
                   if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
-                      for original_name in original_names {
-                          let original_term = Terminal::regex_name(original_name);
-                          if let Some(&original_id) = parser.terminal_map.get_by_left(&original_term) {
+                      for original_terminal in original_terminals {
+                          if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
                               original_to_dummy_map.insert(original_id, dummy_id);
                           }
                       }
@@ -16863,7 +16867,7 @@ local_system:
 
               // Check for overlapping original terminals in dummy_terminal_map
               let mut seen_originals = BTreeSet::new();
-              for original_terminals in config.dummy_terminal_map.values() {
+              for original_terminals in config.dummy_terminal_map.values() { // BTreeSet<Terminal>
                   for term in original_terminals {
                       if !seen_originals.insert(term.clone()) {
                           panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
@@ -16872,12 +16876,11 @@ local_system:
               }
 
               let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
-              for (dummy_name, original_names) in &config.dummy_terminal_map {
+              for (dummy_name, original_terminals) in &config.dummy_terminal_map {
                   let dummy_term = Terminal::regex_name(dummy_name);
                   if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
-                      for original_name in original_names {
-                          let original_term = Terminal::regex_name(original_name);
-                          if let Some(&original_id) = parser.terminal_map.get_by_left(&original_term) {
+                      for original_terminal in original_terminals {
+                          if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
                               original_to_dummy_map.insert(original_id, dummy_id);
                           }
                       }
@@ -20101,16 +20104,16 @@ local_system:
       /// Rewrites productions by inserting dummy terminals before their grouped original terminals.
       pub fn rewrite_productions_with_dummies(
           original_productions: &[Production],
-          dummy_map: &BTreeMap<String, BTreeSet<String>>,
+          dummy_map: &BTreeMap<String, BTreeSet<Terminal>>,
       ) -> (Vec<Production>, BTreeSet<Terminal>) {
           if dummy_map.is_empty() {
               return (original_productions.to_vec(), BTreeSet::new());
           }
 
-          let mut original_to_dummy: BTreeMap<String, String> = BTreeMap::new();
+          let mut original_to_dummy: BTreeMap<Terminal, String> = BTreeMap::new();
           for (dummy_name, originals) in dummy_map {
-              for original_name in originals {
-                  original_to_dummy.insert(original_name.clone(), dummy_name.clone());
+              for original_terminal in originals {
+                  original_to_dummy.insert(original_terminal.clone(), dummy_name.clone());
               }
           }
 
@@ -20121,12 +20124,10 @@ local_system:
               let mut new_rhs = Vec::new();
               for symbol in &prod.rhs {
                   if let Symbol::Terminal(t) = symbol {
-                      if let Terminal::RegexName(name) = t {
-                          if let Some(dummy_name) = original_to_dummy.get(name) {
-                              let dummy_terminal = Terminal::RegexName(dummy_name.clone());
-                              new_rhs.push(Symbol::Terminal(dummy_terminal.clone()));
-                              new_dummy_terminals.insert(dummy_terminal);
-                          }
+                      if let Some(dummy_name) = original_to_dummy.get(t) {
+                          let dummy_terminal = Terminal::RegexName(dummy_name.clone());
+                          new_rhs.push(Symbol::Terminal(dummy_terminal.clone()));
+                          new_dummy_terminals.insert(dummy_terminal);
                       }
                   }
                   new_rhs.push(symbol.clone());
@@ -31643,13 +31644,18 @@ messages:
                   crate::debug!(1, "Recompiling grammar with {} new dummy terminals.", new_dummy_terminals.len());
                   let mut final_grammar_def = (*grammar_definition).clone();
                   final_grammar_def.productions = final_productions;
-                  for dummy_tid in new_dummy_terminals {
-                      final_grammar_def.add_external_terminal(&format!("__DUMMY_TERMINAL_{}__", dummy_tid));
+                  for dummy_terminal in new_dummy_terminals {
+                      if let crate::glr::grammar::Terminal::RegexName(name) = dummy_terminal {
+                          final_grammar_def.add_external_terminal(&name);
+                      }
                   }
+                  println!("{}", &final_grammar_def);
                   CompiledGrammar::from_definition(Arc::new(final_grammar_def))
               } else {
                   initial_compiled_grammar
               };
+
+              // println!("{}", &final_compiled_grammar.glr_parser);
 
               Self::new_with_config_and_precompute0_cache(
                   final_compiled_grammar.tokenizer,
@@ -45656,201 +45662,10 @@ messages:
       ```
     metadata:
       filename: src/interface/tokenizer_combinators.rs
-  - user: |-
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''{'' with group represented by 'IDENTIFIER' (distance: 0.34)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''}''. Closest group (rep by '';'') has distance 0.95 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''var'' with group represented by 'EOF' (distance: 0.02)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''let'' with group represented by 'EOF' (distance: 0.02)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''const'' with group represented by 'EOF' (distance: 0.02)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal '',''. Closest group (rep by 'IDENTIFIER') has distance 1.11 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''=''. Closest group (rep by '';'') has distance 1.45 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal '':''. Closest group (rep by 'NUMERIC_LITERAL') has distance 1.03 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''[''. Closest group (rep by 'IDENTIFIER') has distance 0.89 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal '']''. Closest group (rep by 'IDENTIFIER') has distance 0.86 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''if'' with group represented by 'EOF' (distance: 0.33)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''('' with group represented by ''['' (distance: 0.42)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal '')''. Closest group (rep by ''}'') has distance 0.67 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''else''. Closest group (rep by 'NUMERIC_LITERAL') has distance 0.76 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''while'' with group represented by 'EOF' (distance: 0.25)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''do'' with group represented by 'EOF' (distance: 0.33)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''for'' with group represented by 'EOF' (distance: 0.33)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''in''. Closest group (rep by ''='') has distance 0.79 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''of'' with group represented by 'TEMPLATE_CHARS' (distance: 0.39)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''switch'' with group represented by 'EOF' (distance: 0.33)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''case'' with group represented by 'EOF' (distance: 0.36)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''default'' with group represented by 'EOF' (distance: 0.34)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''try'' with group represented by 'EOF' (distance: 0.33)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''catch''. Closest group (rep by 'TEMPLATE_CHARS') has distance 0.77 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''finally'' with group represented by 'TEMPLATE_CHARS' (distance: 0.13)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''function'' with group represented by 'NUMERIC_LITERAL' (distance: 0.01)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''return'' with group represented by 'EOF' (distance: 0.33)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''break'' with group represented by 'EOF' (distance: 0.33)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''continue'' with group represented by 'EOF' (distance: 0.33)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''class'' with group represented by 'EOF' (distance: 0.33)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''extends''. Closest group (rep by ''catch'') has distance 1.35 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''+=''. Closest group (rep by ''='') has distance 0.81 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''-='' with group represented by ''+='' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''*='' with group represented by ''+='' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''/='' with group represented by ''+='' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''%='' with group represented by ''+='' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''**='' with group represented by ''+='' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''=>'' with group represented by ''catch'' (distance: 0.34)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''?''. Closest group (rep by ''in'') has distance 0.64 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''||'' with group represented by ''in'' (distance: 0.37)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''&&'' with group represented by ''in'' (distance: 0.20)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''=='' with group represented by ''?'' (distance: 0.42)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''!='' with group represented by ''?'' (distance: 0.42)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''==='' with group represented by ''?'' (distance: 0.42)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''!=='' with group represented by ''?'' (distance: 0.42)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''<''. Closest group (rep by ''in'') has distance 0.56 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''>'' with group represented by ''<'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''<='' with group represented by ''<'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''>='' with group represented by ''<'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''instanceof'' with group represented by ''<'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''+''. Closest group (rep by ''['') has distance 0.70 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''-'' with group represented by ''+'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''*'' with group represented by ''<'' (distance: 0.47)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''/'' with group represented by ''<'' (distance: 0.47)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''%'' with group represented by ''<'' (distance: 0.47)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''**'' with group represented by ''+='' (distance: 0.25)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''delete''. Closest group (rep by 'NUMERIC_LITERAL') has distance 0.50 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''typeof'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''void'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''++'' with group represented by ''+'' (distance: 0.31)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''--'' with group represented by ''+'' (distance: 0.31)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''~'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''!'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''.''. Closest group (rep by ''+='') has distance 1.12 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1162: Creating new group for terminal ''...''. Closest group (rep by ''extends'') has distance 0.87 > threshold 0.5.
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''new'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''this'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''super'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''null'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''true'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''false'' with group represented by ''delete'' (distance: 0.00)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''`'' with group represented by 'NUMERIC_LITERAL' (distance: 0.21)
-      [DEBUG] 2] src/constraint.rs:1156: Grouping terminal ''${'' with group represented by 'TEMPLATE_CHARS' (distance: 0.00)
-
-      --- Dummy Terminal Groups ---
-      - __DUMMY_TERMINAL_0__: (penalty: 144)
-        - EOF
-        - break
-        - case
-        - class
-        - const
-        - continue
-        - default
-        - do
-        - for
-        - if
-        - let
-        - return
-        - switch
-        - try
-        - var
-        - while
-      - __DUMMY_TERMINAL_10__: (penalty: 180)
-        - (
-        - [
-      - __DUMMY_TERMINAL_11__: (penalty: 7)
-        - =>
-        - catch
-      - __DUMMY_TERMINAL_1__: (penalty: 165)
-        - !
-        - delete
-        - false
-        - new
-        - null
-        - super
-        - this
-        - true
-        - typeof
-        - void
-        - ~
-      - __DUMMY_TERMINAL_2__: (penalty: 51)
-        - %
-        - *
-        - /
-        - <
-        - <=
-        - >
-        - >=
-        - instanceof
-      - __DUMMY_TERMINAL_3__: (penalty: 25)
-        - %=
-        - **
-        - **=
-        - *=
-        - +=
-        - -=
-        - /=
-      - __DUMMY_TERMINAL_4__: (penalty: 75)
-        - !=
-        - !==
-        - ==
-        - ===
-        - ?
-      - __DUMMY_TERMINAL_5__: (penalty: 165)
-        - NUMERIC_LITERAL
-        - STRING_LITERAL
-        - `
-        - function
-      - __DUMMY_TERMINAL_6__: (penalty: 10)
-        - ${
-        - TEMPLATE_CHARS
-        - finally
-        - of
-      - __DUMMY_TERMINAL_7__: (penalty: 167)
-        - +
-        - ++
-        - -
-        - --
-      - __DUMMY_TERMINAL_8__: (penalty: 59)
-        - &&
-        - in
-        - ||
-      - __DUMMY_TERMINAL_9__: (penalty: 184)
-        - IDENTIFIER
-        - {
-      ---------------------------
-
-      [DEBUG] 1] src/constraint.rs:1233: Recompiling grammar with 4 new dummy terminals.
-      [DEBUG] 2] src/interface/interface.rs:1107: Building tokenizer from definition
-      [DEBUG] 2] src/interface/interface.rs:1112: Building GLR parser from definition
-      [DEBUG] 2] src/glr/table.rs:1455: Validating initial grammar
-      [DEBUG] 2] src/glr/table.rs:1461: Removing productions with undefined non-terminals
-      [DEBUG] 2] src/glr/analyze.rs:728: Resolving direct right-recursion for 'assignment_expression', creating new non-terminal 'assignment_expression_rr'
-      [DEBUG] 2] src/glr/analyze.rs:736:   Transforming non-recursive rule 'assignment_expression -> arrow_function' -> 'assignment_expression -> assignment_expression_rr arrow_function'
-      [DEBUG] 2] src/glr/analyze.rs:736:   Transforming non-recursive rule 'assignment_expression -> conditional_expression' -> 'assignment_expression -> assignment_expression_rr conditional_expression'
-      [DEBUG] 2] src/glr/analyze.rs:746:   Transforming recursive rule 'assignment_expression -> left_hand_side_expression assignment_expression[0] assignment_expression' -> 'assignment_expression_rr -> assignment_expression_rr left_hand_side_expression assignment_expression[0]'
-      [DEBUG] 2] src/glr/analyze.rs:750:   Adding new epsilon rule: 'assignment_expression_rr ->'
-      [DEBUG] 2] src/glr/analyze.rs:728: Resolving direct right-recursion for 'unary_expression', creating new non-terminal 'unary_expression_rr'
-      [DEBUG] 2] src/glr/analyze.rs:736:   Transforming non-recursive rule 'unary_expression -> postfix_expression' -> 'unary_expression -> unary_expression_rr postfix_expression'
-      [DEBUG] 2] src/glr/analyze.rs:746:   Transforming recursive rule 'unary_expression -> unary_expression[0] unary_expression' -> 'unary_expression_rr -> unary_expression_rr unary_expression[0]'
-      [DEBUG] 2] src/glr/analyze.rs:750:   Adding new epsilon rule: 'unary_expression_rr ->'
-      [DEBUG] 2] src/glr/table.rs:1497: Stage 1
-      [DEBUG] 2] src/glr/table.rs:1500: Stage 2
-      [DEBUG] 2] src/glr/table.rs:1503: Stage 3
-      [DEBUG] 2] src/glr/table.rs:1506: Stage 4
-      [DEBUG] 2] src/glr/table.rs:1509: Stage 5
-      [DEBUG] 2] src/glr/table.rs:1512: Stage 6
-      [DEBUG] 2] src/glr/table.rs:1515: Stage 7
-
-      thread 'main' (28929723) panicked at src/glr/table.rs:669:67:
-      Terminal __DUMMY_TERMINAL_0__ not found in terminal map
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-         1: core::panicking::panic_fmt
-         2: sep1::glr::table::generate_glr_parser_with_maps
-         3: sep1::interface::interface::CompiledGrammar::from_definition
-         4: sep1::constraint::GrammarConstraint::new_from_grammar_definition
-         5: grammar_compiler::main
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-      Grammar compilation failed with exit code 101
-      Cleaned up temporary vocabulary file.
-    metadata:
-  - user: 'Fix this. Note: The dummy terminals are indeed supposed to be inserted
-      before every occurence of their original terminals in the grammar.'
+  - user: Fix `rewrite_productions_with_dummies` and `new_from_grammar_definition`.
+      Currently, they only work for original terminals that are `RegexName`. Make
+      them work for both. e.g. make `dummy_terminal_map` be type `BTreeMap<String,
+      BTreeSet<Terminal>>` instead of `BTreeMap<String, BTreeSet<String>>`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -45870,69 +45685,207 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the panic you're encountering during grammar compilation. The issue stems from an incorrect loop when adding the newly created dummy terminals to the grammar definition before recompilation. The terminal names were being formatted incorrectly, leading to a mismatch between the terminals used in the rewritten productions and the terminals known to the parser generator.
-
-      Here are the step-by-step instructions to fix the issue, followed by the corresponding git diff.
+      Here are the step-by-step instructions to apply the changes, followed by the git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/constraint.rs`**.
+      #### 1. Modify `src/constraint.rs`
 
-      2.  **Locate the `new_from_grammar_definition` function**. Inside this function, find the grammar recompilation block, which starts around line 1232.
+      -   **In the `GrammarConstraintConfig` struct:**
+          -   Change the type of the `dummy_terminal_map` field from `BTreeMap<String, BTreeSet<String>>` to `BTreeMap<String, BTreeSet<Terminal>>`.
 
-      3.  **Identify the incorrect loop**. You will see the following code that iterates over `new_dummy_terminals`:
-          ```rust
-                  for dummy_tid in new_dummy_terminals {
-                      final_grammar_def.add_external_terminal(&format!("__DUMMY_TERMINAL_{}__", dummy_tid));
-                  }
-          ```
+      -   **In the `GrammarConstraint::new_from_grammar_definition` function:**
+          -   Find the line that defines `original_names`. Rename this variable to `original_terminals` and change its type to `BTreeSet<Terminal>`.
+          -   Update its initialization to collect `Terminal` objects directly from the parser's terminal map:
+              ```rust
+              let original_terminals: BTreeSet<Terminal> = tids.iter()
+                  .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().clone())
+                  .collect();
+              ```
+          -   Update the following line to insert `original_terminals` into the map.
+          -   In the logging section that prints the dummy groups, update the loop variables to iterate over `original_terminals` (a `BTreeSet<Terminal>`) and `terminal` (a `&Terminal`). The `Display` implementation for `Terminal` will handle the printing.
 
-      4.  **Replace the incorrect loop**. The `dummy_tid` variable is a `Terminal` enum, not an integer, and the `format!` macro is creating a malformed terminal name. Replace the entire loop with the following code, which correctly extracts the name from the `Terminal` enum before adding it to the grammar definition:
-          ```rust
-                  for dummy_terminal in new_dummy_terminals {
-                      if let crate::glr::grammar::Terminal::RegexName(name) = dummy_terminal {
-                          final_grammar_def.add_external_terminal(&name);
-                      }
-                  }
-          ```
+      -   **In the `GrammarConstraint::new_with_config` and `GrammarConstraint::new_with_config_and_precompute0_cache` functions:**
+          -   In both functions, locate the loop that builds the `original_to_dummy_map`.
+          -   Change the loop variables from `original_names` to `original_terminals` and `original_name` to `original_terminal`.
+          -   Remove the line `let original_term = Terminal::regex_name(original_name);`.
+          -   Update the call to `parser.terminal_map.get_by_left(...)` to pass `original_terminal` directly.
+          -   Similarly, update the loop that checks for overlapping original terminals to iterate over `&Terminal` objects.
 
-      This change ensures that the dummy terminals are correctly registered in the grammar definition before the final parser is generated, which will resolve the panic.
+      #### 2. Modify `src/glr/analyze.rs`
 
-      ### Git Diff
+      -   **In the `rewrite_productions_with_dummies` function:**
+          -   Change the type of the `dummy_map` parameter in the function signature to `&BTreeMap<String, BTreeSet<Terminal>>`.
+          -   Change the type of the local variable `original_to_dummy` to `BTreeMap<Terminal, String>`.
+          -   Update the loop that populates `original_to_dummy` to iterate over `Terminal` objects and insert them as keys.
+          -   Simplify the main loop that builds `new_rhs`. Instead of matching on `Terminal::RegexName`, directly look up the `Symbol::Terminal(t)` in the `original_to_dummy` map.
 
-      Here is the git diff for the change described above.
+      ### Git Diffs
+
+      Here are the git diffs corresponding to the changes described above.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1234,8 +1234,10 @@
-                   crate::debug!(1, "Recompiling grammar with {} new dummy terminals.", new_dummy_terminals.len());
-                   let mut final_grammar_def = (*grammar_definition).clone();
-                   final_grammar_def.productions = final_productions;
-      -            for dummy_tid in new_dummy_terminals {
-      -                final_grammar_def.add_external_terminal(&format!("__DUMMY_TERMINAL_{}__", dummy_tid));
-      +            for dummy_terminal in new_dummy_terminals {
-      +                if let crate::glr::grammar::Terminal::RegexName(name) = dummy_terminal {
-      +                    final_grammar_def.add_external_terminal(&name);
-      +                }
+      @@ -780,7 +780,7 @@
+           pub trie3: Trie3Config,
+           pub intermediate_trie3_templates: IntermediateTrie3Config,
+           pub intermediate_trie3_main: IntermediateTrie3Config,
+      -    pub dummy_terminal_map: BTreeMap<String, BTreeSet<String>>,
+      +    pub dummy_terminal_map: BTreeMap<String, BTreeSet<Terminal>>,
+           pub dummy_terminal_penalties: BTreeMap<String, usize>,
+       }
+       
+      @@ -1210,12 +1210,9 @@
                    }
-                   CompiledGrammar::from_definition(Arc::new(final_grammar_def))
-               } else {
+       
+                   let dummy_name = format!("__DUMMY_TERMINAL_{}__", dummy_idx);
+      -            let original_names: BTreeSet<String> = tids.iter()
+      -                .map(|tid| match parser.terminal_map.get_by_right(tid).unwrap() {
+      -                    Terminal::RegexName(name) => name.clone(),
+      -                    Terminal::Literal(bytes) => String::from_utf8_lossy(bytes).to_string(),
+      -                })
+      +            let original_terminals: BTreeSet<Terminal> = tids.iter()
+      +                .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().clone())
+                       .collect();
+      -            new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
+      +            new_config.dummy_terminal_map.insert(dummy_name.clone(), original_terminals);
+                   new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
+                   dummy_idx += 1;
+               }
+      @@ -1228,12 +1225,12 @@
+                   let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
+                   sorted_dummies.sort_by_key(|(k, _)| *k);
+       
+      -            for (dummy_name, original_names) in sorted_dummies {
+      +            for (dummy_name, original_terminals) in sorted_dummies {
+                       let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
+                       println!("- {}: (penalty: {})", dummy_name, penalty);
+      -                let mut sorted_originals: Vec<_> = original_names.iter().collect();
+      +                let mut sorted_originals: Vec<_> = original_terminals.iter().collect();
+                       sorted_originals.sort();
+      -                for name in sorted_originals {
+      -                    println!("  - {}", name);
+      +                for terminal in sorted_originals {
+      +                    println!("  - {}", terminal);
+                       }
+                   }
+               }
+      @@ -1368,7 +1365,7 @@
+       
+               // Check for overlapping original terminals in dummy_terminal_map
+               let mut seen_originals = BTreeSet::new();
+      -        for original_terminals in config.dummy_terminal_map.values() {
+      +        for original_terminals in config.dummy_terminal_map.values() { // This is BTreeSet<Terminal> now
+                   for term in original_terminals {
+                       if !seen_originals.insert(term.clone()) {
+                           panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
+      @@ -1377,12 +1374,11 @@
+               }
+       
+               let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
+      -        for (dummy_name, original_names) in &config.dummy_terminal_map {
+      +        for (dummy_name, original_terminals) in &config.dummy_terminal_map {
+                   let dummy_term = Terminal::regex_name(dummy_name);
+                   if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
+      -                for original_name in original_names {
+      -                    let original_term = Terminal::regex_name(original_name);
+      -                    if let Some(&original_id) = parser.terminal_map.get_by_left(&original_term) {
+      +                for original_terminal in original_terminals {
+      +                    if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
+                               original_to_dummy_map.insert(original_id, dummy_id);
+                           }
+                       }
+      @@ -1550,7 +1546,7 @@
+       
+               // Check for overlapping original terminals in dummy_terminal_map
+               let mut seen_originals = BTreeSet::new();
+      -        for original_terminals in config.dummy_terminal_map.values() {
+      +        for original_terminals in config.dummy_terminal_map.values() { // BTreeSet<Terminal>
+                   for term in original_terminals {
+                       if !seen_originals.insert(term.clone()) {
+                           panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
+      @@ -1559,12 +1555,11 @@
+               }
+       
+               let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
+      -        for (dummy_name, original_names) in &config.dummy_terminal_map {
+      +        for (dummy_name, original_terminals) in &config.dummy_terminal_map {
+                   let dummy_term = Terminal::regex_name(dummy_name);
+                   if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
+      -                for original_name in original_names {
+      -                    let original_term = Terminal::regex_name(original_name);
+      -                    if let Some(&original_id) = parser.terminal_map.get_by_left(&original_term) {
+      +                for original_terminal in original_terminals {
+      +                    if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
+                               original_to_dummy_map.insert(original_id, dummy_id);
+                           }
+                       }
 
       ```
 
-      After applying this change, the grammar compilation should proceed without the panic. Let me know if you have any other questions
+      ```diff
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -480,29 +480,27 @@
+       /// Rewrites productions by inserting dummy terminals before their grouped original terminals.
+       pub fn rewrite_productions_with_dummies(
+           original_productions: &[Production],
+      -    dummy_map: &BTreeMap<String, BTreeSet<String>>,
+      +    dummy_map: &BTreeMap<String, BTreeSet<Terminal>>,
+       ) -> (Vec<Production>, BTreeSet<Terminal>) {
+           if dummy_map.is_empty() {
+               return (original_productions.to_vec(), BTreeSet::new());
+           }
+       
+      -    let mut original_to_dummy: BTreeMap<String, String> = BTreeMap::new();
+      +    let mut original_to_dummy: BTreeMap<Terminal, String> = BTreeMap::new();
+           for (dummy_name, originals) in dummy_map {
+      -        for original_name in originals {
+      -            original_to_dummy.insert(original_name.clone(), dummy_name.clone());
+      +        for original_terminal in originals {
+      +            original_to_dummy.insert(original_terminal.clone(), dummy_name.clone());
+               }
+           }
+       
+           let mut new_productions = Vec::new();
+           let mut new_dummy_terminals = BTreeSet::new();
+       
+           for prod in original_productions {
+               let mut new_rhs = Vec::new();
+               for symbol in &prod.rhs {
+                   if let Symbol::Terminal(t) = symbol {
+      -                if let Terminal::RegexName(name) = t {
+      -                    if let Some(dummy_name) = original_to_dummy.get(name) {
+      -                        let dummy_terminal = Terminal::RegexName(dummy_name.clone());
+      -                        new_rhs.push(Symbol::Terminal(dummy_terminal.clone()));
+      -                        new_dummy_terminals.insert(dummy_terminal);
+      -                    }
+      +                if let Some(dummy_name) = original_to_dummy.get(t) {
+      +                    let dummy_terminal = Terminal::RegexName(dummy_name.clone());
+      +                    new_rhs.push(Symbol::Terminal(dummy_terminal.clone()));
+      +                    new_dummy_terminals.insert(dummy_terminal);
+                       }
+                   }
+                   new_rhs.push(symbol.clone());
+
+      ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly register dummy terminals
-      during grammar recompilation in constraint"'
+  - user: 'Changes committed with message: "Refactor constraint dummy terminal mapping
+      to support all Terminal variants (Literal and RegexName)"'
     metadata:
 ...

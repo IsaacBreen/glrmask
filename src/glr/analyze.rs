@@ -824,16 +824,16 @@ pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
 /// Rewrites productions by inserting dummy terminals before their grouped original terminals.
 pub fn rewrite_productions_with_dummies(
     original_productions: &[Production],
-    dummy_map: &BTreeMap<String, BTreeSet<String>>,
+    dummy_map: &BTreeMap<String, BTreeSet<Terminal>>,
 ) -> (Vec<Production>, BTreeSet<Terminal>) {
     if dummy_map.is_empty() {
         return (original_productions.to_vec(), BTreeSet::new());
     }
 
-    let mut original_to_dummy: BTreeMap<String, String> = BTreeMap::new();
+    let mut original_to_dummy: BTreeMap<Terminal, String> = BTreeMap::new();
     for (dummy_name, originals) in dummy_map {
-        for original_name in originals {
-            original_to_dummy.insert(original_name.clone(), dummy_name.clone());
+        for original_terminal in originals {
+            original_to_dummy.insert(original_terminal.clone(), dummy_name.clone());
         }
     }
 
@@ -844,12 +844,10 @@ pub fn rewrite_productions_with_dummies(
         let mut new_rhs = Vec::new();
         for symbol in &prod.rhs {
             if let Symbol::Terminal(t) = symbol {
-                if let Terminal::RegexName(name) = t {
-                    if let Some(dummy_name) = original_to_dummy.get(name) {
-                        let dummy_terminal = Terminal::RegexName(dummy_name.clone());
-                        new_rhs.push(Symbol::Terminal(dummy_terminal.clone()));
-                        new_dummy_terminals.insert(dummy_terminal);
-                    }
+                if let Some(dummy_name) = original_to_dummy.get(t) {
+                    let dummy_terminal = Terminal::RegexName(dummy_name.clone());
+                    new_rhs.push(Symbol::Terminal(dummy_terminal.clone()));
+                    new_dummy_terminals.insert(dummy_terminal);
                 }
             }
             new_rhs.push(symbol.clone());

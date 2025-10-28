@@ -668,7 +668,7 @@ pub struct GrammarConstraintConfig {
     pub trie3: Trie3Config,
     pub intermediate_trie3_templates: IntermediateTrie3Config,
     pub intermediate_trie3_main: IntermediateTrie3Config,
-    pub dummy_terminal_map: BTreeMap<String, BTreeSet<String>>,
+    pub dummy_terminal_map: BTreeMap<String, BTreeSet<Terminal>>,
     pub dummy_terminal_penalties: BTreeMap<String, usize>,
 }
 
@@ -1193,13 +1193,10 @@ impl GrammarConstraint {
             }
 
             let dummy_name = format!("__DUMMY_TERMINAL_{}__", dummy_idx);
-            let original_names: BTreeSet<String> = tids.iter()
-                .map(|tid| match parser.terminal_map.get_by_right(tid).unwrap() {
-                    Terminal::RegexName(name) => name.clone(),
-                    Terminal::Literal(bytes) => String::from_utf8_lossy(bytes).to_string(),
-                })
+            let original_terminals: BTreeSet<Terminal> = tids.iter()
+                .map(|tid| parser.terminal_map.get_by_right(tid).unwrap().clone())
                 .collect();
-            new_config.dummy_terminal_map.insert(dummy_name.clone(), original_names);
+            new_config.dummy_terminal_map.insert(dummy_name.clone(), original_terminals);
             new_config.dummy_terminal_penalties.insert(dummy_name.clone(), complexity);
             dummy_idx += 1;
         }
@@ -1211,13 +1208,13 @@ impl GrammarConstraint {
             let mut sorted_dummies: Vec<_> = new_config.dummy_terminal_map.iter().collect();
             sorted_dummies.sort_by_key(|(k, _)| *k);
 
-            for (dummy_name, original_names) in sorted_dummies {
+            for (dummy_name, original_terminals) in sorted_dummies {
                 let penalty = new_config.dummy_terminal_penalties.get(dummy_name).unwrap_or(&0);
                 println!("- {}: (penalty: {})", dummy_name, penalty);
-                let mut sorted_originals: Vec<_> = original_names.iter().collect();
+                let mut sorted_originals: Vec<_> = original_terminals.iter().collect();
                 sorted_originals.sort();
-                for name in sorted_originals {
-                    println!("  - {}", name);
+                for terminal in sorted_originals {
+                    println!("  - {}", terminal);
                 }
             }
         }
@@ -1432,7 +1429,7 @@ impl GrammarConstraint {
 
         // Check for overlapping original terminals in dummy_terminal_map
         let mut seen_originals = BTreeSet::new();
-        for original_terminals in config.dummy_terminal_map.values() {
+        for original_terminals in config.dummy_terminal_map.values() { // This is BTreeSet<Terminal> now
             for term in original_terminals {
                 if !seen_originals.insert(term.clone()) {
                     panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
@@ -1441,12 +1438,11 @@ impl GrammarConstraint {
         }
 
         let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
-        for (dummy_name, original_names) in &config.dummy_terminal_map {
+        for (dummy_name, original_terminals) in &config.dummy_terminal_map {
             let dummy_term = Terminal::regex_name(dummy_name);
             if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
-                for original_name in original_names {
-                    let original_term = Terminal::regex_name(original_name);
-                    if let Some(&original_id) = parser.terminal_map.get_by_left(&original_term) {
+                for original_terminal in original_terminals {
+                    if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
                         original_to_dummy_map.insert(original_id, dummy_id);
                     }
                 }
@@ -1672,7 +1668,7 @@ impl GrammarConstraint {
 
         // Check for overlapping original terminals in dummy_terminal_map
         let mut seen_originals = BTreeSet::new();
-        for original_terminals in config.dummy_terminal_map.values() {
+        for original_terminals in config.dummy_terminal_map.values() { // BTreeSet<Terminal>
             for term in original_terminals {
                 if !seen_originals.insert(term.clone()) {
                     panic!("Original terminal '{}' is mapped by multiple dummy terminals.", term);
@@ -1681,12 +1677,11 @@ impl GrammarConstraint {
         }
 
         let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
-        for (dummy_name, original_names) in &config.dummy_terminal_map {
+        for (dummy_name, original_terminals) in &config.dummy_terminal_map {
             let dummy_term = Terminal::regex_name(dummy_name);
             if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
-                for original_name in original_names {
-                    let original_term = Terminal::regex_name(original_name);
-                    if let Some(&original_id) = parser.terminal_map.get_by_left(&original_term) {
+                for original_terminal in original_terminals {
+                    if let Some(&original_id) = parser.terminal_map.get_by_left(original_terminal) {
                         original_to_dummy_map.insert(original_id, dummy_id);
                     }
                 }
