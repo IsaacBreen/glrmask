@@ -1232,27 +1232,6 @@ impl GrammarConstraint {
         }
         println!("---------------------------\n");
 
-        let final_parser = if !original_to_dummy_nt.is_empty() {
-            let mut modified_productions = initial_parser.productions.clone();
-            for p in &mut modified_productions {
-                for s in &mut p.rhs {
-                    if let Symbol::Terminal(t) = s {
-                        if let Some(tid) = initial_parser.terminal_map.get_by_left(t) {
-                            if let Some(dummy_nt) = original_to_dummy_nt.get(tid) {
-                                *s = Symbol::NonTerminal(dummy_nt.clone());
-                            }
-                        }
-                    }
-                }
-            }
-            let final_prods = [modified_productions, new_dummy_productions].concat();
-
-            crate::debug!(1, "Re-compiling grammar with {} dummy non-terminal groups.", dummy_groups.len());
-            crate::glr::table::generate_glr_parser(&final_prods, initial_parser.ignore_terminal_id)
-        } else {
-            initial_parser.clone()
-        };
-
         // We now use the final_parser. The config for dummy terminals is no longer needed.
         let mut new_config = config.clone();
         new_config.dummy_terminal_map.clear();
@@ -1261,8 +1240,8 @@ impl GrammarConstraint {
         let compiled_grammar = initial_compiled_grammar.clone();
 
         Self::new_with_config_and_precompute0_cache(
-            initial_compiled_grammar.tokenizer,
-            final_parser, // Use the potentially new parser
+            compiled_grammar.tokenizer,
+            compiled_grammar.glr_parser,
             llm_token_map,
             compiled_grammar.definition.terminal_to_group_id().clone(),
             max_original_llm_token_id,
