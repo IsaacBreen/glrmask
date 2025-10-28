@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - src/constraint.rs
     - src/test_constraint_basic.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/constraint.rs: |
@@ -13417,7 +13417,7 @@ local_system:
 
           Ok(())
       }
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
   core_guidance_inserted: true
   prev_apply_mode: git-llm
   default_end_line:
@@ -21101,5 +21101,1453 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor basic constraint tests to use
       `GrammarConstraint::new_from_grammar_definition`"'
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --package sep1 --lib test_constraint_basic --profile test
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0425]: cannot find value `compiled_grammar` in this scope
+          --> src/test_constraint_basic.rs:1469:28
+           |
+      1469 |     println!("Parser: {}", compiled_grammar.glr_parser);
+           |                            ^^^^^^^^^^^^^^^^ not found in this scope
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:50:22
+           |
+        50 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+        53 |         LLMTokenID(2), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+        52 -         llm_token_map,
+        53 -         LLMTokenID(2), // dummy EOF
+        52 +         llm_token_map, // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:108:22
+           |
+       108 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       111 |         LLMTokenID(3), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+       110 -         llm_token_map.clone(),
+       111 -         LLMTokenID(3), // dummy EOF
+       110 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:198:22
+           |
+       198 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       201 |         LLMTokenID(2), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+       200 -         llm_token_map.clone(),
+       201 -         LLMTokenID(2), // dummy EOF
+       200 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:275:22
+           |
+       275 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       278 |         LLMTokenID(7), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+       277 -         llm_token_map.clone(),
+       278 -         LLMTokenID(7), // dummy EOF
+       277 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:455:22
+           |
+       455 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       458 |         LLMTokenID(3), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+       457 -         llm_token_map.clone(),
+       458 -         LLMTokenID(3), // dummy EOF
+       457 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:521:22
+           |
+       521 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       524 |         LLMTokenID(3), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+       523 -         llm_token_map.clone(),
+       524 -         LLMTokenID(3), // dummy EOF
+       523 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:602:22
+           |
+       602 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       605 |         LLMTokenID(2), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+       604 -         llm_token_map.clone(),
+       605 -         LLMTokenID(2), // dummy EOF
+       604 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:661:22
+           |
+       661 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       664 |         LLMTokenID(4), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+       663 -         llm_token_map,
+       664 -         LLMTokenID(4), // dummy EOF
+       663 +         llm_token_map, // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:708:22
+           |
+       708 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       711 |         LLMTokenID(1), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+       710 -         llm_token_map.clone(),
+       711 -         LLMTokenID(1), // dummy EOF
+       710 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:755:22
+           |
+       755 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       758 |         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+           |         ----------------------------------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+       757 -         llm_token_map.clone(), // Original LLMTokenID map
+       758 -         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+       757 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:1413:22
+           |
+      1413 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      1416 |         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+           |         ----------------------------------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      1415 -         llm_token_map,
+      1416 -         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+      1415 +         llm_token_map, // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:1480:22
+           |
+      1480 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      1483 |         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+           |         ----------------------------------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      1482 -         llm_token_map,
+      1483 -         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+      1482 +         llm_token_map, // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:1538:22
+           |
+      1538 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      1541 |         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+           |         ----------------------------------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      1540 -         llm_token_map,
+      1541 -         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+      1540 +         llm_token_map, // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:1835:22
+           |
+      1835 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      1838 |         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+           |         ----------------------------------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      1837 -         llm_token_map,
+      1838 -         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+      1837 +         llm_token_map, // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:1884:22
+           |
+      1884 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      1887 |         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+           |         ----------------------------------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      1886 -         llm_token_map,
+      1887 -         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+      1886 +         llm_token_map, // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:1994:22
+           |
+      1994 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      1997 |         LLMTokenID(max_id + 1), // dummy EOF
+           |         ---------------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      1996 -         llm_token_map.clone(),
+      1997 -         LLMTokenID(max_id + 1), // dummy EOF
+      1996 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:2122:22
+           |
+      2122 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      2125 |         LLMTokenID(max_id + 1), // dummy EOF
+           |         ---------------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      2124 -         llm_token_map.clone(),
+      2125 -         LLMTokenID(max_id + 1), // dummy EOF
+      2124 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:2310:22
+           |
+      2310 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      2313 |         LLMTokenID(3), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      2312 -         llm_token_map.clone(),
+      2313 -         LLMTokenID(3), // dummy EOF
+      2312 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:2354:22
+           |
+      2354 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      2357 |         LLMTokenID(1), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      2356 -         llm_token_map.clone(),
+      2357 -         LLMTokenID(1), // dummy EOF
+      2356 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:2399:22
+           |
+      2399 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      2402 |         LLMTokenID(2), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      2401 -         llm_token_map.clone(),
+      2402 -         LLMTokenID(2), // dummy EOF
+      2401 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:2443:22
+           |
+      2443 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      2446 |         LLMTokenID(4), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      2445 -         llm_token_map.clone(),
+      2446 -         LLMTokenID(4), // dummy EOF
+      2445 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:2492:22
+           |
+      2492 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      2495 |         LLMTokenID(4), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      2494 -         llm_token_map.clone(),
+      2495 -         LLMTokenID(4), // dummy EOF
+      2494 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+          --> src/test_constraint_basic.rs:2542:22
+           |
+      2542 |     let constraint = GrammarConstraint::new_from_grammar_definition(
+           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      2545 |         LLMTokenID(4), // dummy EOF
+           |         ------------- unexpected argument #3 of type `tokenizer::LLMTokenID`
+           |
+      note: associated function defined here
+          --> src/constraint.rs:1101:12
+           |
+      1101 |     pub fn new_from_grammar_definition(
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      help: remove the extra argument
+           |
+      2544 -         llm_token_map.clone(),
+      2545 -         LLMTokenID(4), // dummy EOF
+      2544 +         llm_token_map.clone(), // dummy EOF
+           |
+
+      Some errors have detailed explanations: E0061, E0425.
+      For more information about an error, try `rustc --explain E0061`.
+      error: could not compile `sep1` (lib test) due to 24 previous errors
+      Process finished with exit code 101
+    metadata:
+  - assistant: |-
+      It looks like there were two main issues in the previous changes:
+      1.  The function `new_from_grammar_definition` was called with an extra `LLMTokenID` argument for a dummy EOF, which it doesn't accept.
+      2.  One of the tests still had a reference to a `compiled_grammar` variable that was removed.
+
+      I will correct the function calls by removing the extra argument and fix the broken `println!` statement. I'll also remove the unused `_eof_token_id` parameter from `from_compiled_grammar` and `from_compiled_grammar_with_config` to make the API more consistent.
+
+      ### Step-by-step Instructions
+
+      #### 1. Update `src/constraint.rs`
+
+      *   **File:** `src/constraint.rs`
+      *   **Action:** Remove the unused `_eof_token_id` parameter from two functions.
+
+      1.  In the function `from_compiled_grammar`, remove the `_eof_token_id: LLMTokenID,` parameter and the corresponding argument in the call to `from_compiled_grammar_with_config`.
+          *   **From:**
+              ```rust
+              pub fn from_compiled_grammar(
+                  compiled_grammar: CompiledGrammar,
+                  llm_token_map: LLMTokenMap,
+                  _eof_token_id: LLMTokenID,
+                  max_original_llm_token_id: usize,
+              ) -> Self {
+                  Self::from_compiled_grammar_with_config(
+                      compiled_grammar,
+                      llm_token_map,
+                      _eof_token_id,
+                      max_original_llm_token_id,
+                      &GrammarConstraintConfig::default(),
+                  )
+              }
+              ```
+          *   **To:**
+              ```rust
+              pub fn from_compiled_grammar(
+                  compiled_grammar: CompiledGrammar,
+                  llm_token_map: LLMTokenMap,
+                  max_original_llm_token_id: usize,
+              ) -> Self {
+                  Self::from_compiled_grammar_with_config(
+                      compiled_grammar,
+                      llm_token_map,
+                      max_original_llm_token_id,
+                      &GrammarConstraintConfig::default(),
+                  )
+              }
+              ```
+
+      2.  In the function `from_compiled_grammar_with_config`, remove the `_eof_token_id: LLMTokenID,` parameter.
+          *   **From:**
+              ```rust
+              pub fn from_compiled_grammar_with_config(
+                  compiled_grammar: CompiledGrammar,
+                  llm_token_map: LLMTokenMap,
+                  _eof_token_id: LLMTokenID,
+                  max_original_llm_token_id: usize,
+                  config: &GrammarConstraintConfig,
+              ) -> Self {
+              ```
+          *   **To:**
+              ```rust
+              pub fn from_compiled_grammar_with_config(
+                  compiled_grammar: CompiledGrammar,
+                  llm_token_map: LLMTokenMap,
+                  max_original_llm_token_id: usize,
+                  config: &GrammarConstraintConfig,
+              ) -> Self {
+              ```
+
+      #### 2. Update `src/test_constraint_basic.rs`
+
+      *   **File:** `src/test_constraint_basic.rs`
+      *   **Action:** Remove the extra argument from all calls to `new_from_grammar_definition` and fix one `println!` statement.
+
+      1.  **For every test function that was changed in the previous step**, locate the call to `GrammarConstraint::new_from_grammar_definition`. Remove the `LLMTokenID(...)` argument. For example:
+          *   **From:**
+              ```rust
+              let constraint = GrammarConstraint::new_from_grammar_definition(
+                  Arc::new(grammar_definition),
+                  llm_token_map,
+                  LLMTokenID(2), // dummy EOF
+                  1, // max_original_llm_token_id
+                  &GrammarConstraintConfig::default(),
+                  None,
+              );
+              ```
+          *   **To:**
+              ```rust
+              let constraint = GrammarConstraint::new_from_grammar_definition(
+                  Arc::new(grammar_definition),
+                  llm_token_map,
+                  1, // max_original_llm_token_id
+                  &GrammarConstraintConfig::default(),
+                  None,
+              );
+              ```
+          *   Apply this change to all affected tests.
+
+      2.  In the test `test_js_like_grammar_initial_mask`, find the line `println!("Parser: {}", compiled_grammar.glr_parser);` and change it to `println!("Parser: {}", constraint.parser);`.
+
+      ### Git Diffs
+
+      Here are the git diffs corresponding to the changes described above.
+
+      ```diff
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1078,14 +1078,12 @@
+           pub fn from_compiled_grammar(
+               compiled_grammar: CompiledGrammar,
+               llm_token_map: LLMTokenMap,
+      -        _eof_token_id: LLMTokenID,
+               max_original_llm_token_id: usize,
+           ) -> Self {
+               Self::from_compiled_grammar_with_config(
+                   compiled_grammar,
+                   llm_token_map,
+      -            _eof_token_id,
+                   max_original_llm_token_id,
+                   &GrammarConstraintConfig::default(),
+               )
+      @@ -1094,7 +1092,6 @@
+           pub fn from_compiled_grammar_with_config(
+               compiled_grammar: CompiledGrammar,
+               llm_token_map: LLMTokenMap,
+      -        _eof_token_id: LLMTokenID,
+               max_original_llm_token_id: usize,
+               config: &GrammarConstraintConfig,
+           ) -> Self {
+
+      ```
+      ```diff
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -47,10 +47,9 @@
+       
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(2), // dummy EOF
+               1, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+      @@ -95,10 +94,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(3), // dummy EOF
+               2, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           constraint.dump_precomputed1();
+      @@ -153,10 +151,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(2), // dummy EOF
+               1, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           // constraint.dump_precomputed1();
+      @@ -211,10 +208,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(7), // dummy EOF
+               6, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           // constraint.dump_precomputed1(); // Commented out dump for cleaner test output
+      @@ -353,10 +349,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(3), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           println!("Vocab: {:?}", constraint.llm_vocab);
+      @@ -416,10 +411,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(3), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           constraint.dump_precomputed1();
+      @@ -496,10 +490,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(2), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           constraint.dump_precomputed0();
+      @@ -536,10 +529,9 @@
+       
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(4), // dummy EOF
+               3, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           // constraint.dump_precomputed1();
+      @@ -575,10 +567,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(1), // dummy EOF
+               0,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+       
+      @@ -615,10 +606,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(), // Original LLMTokenID map
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+       
+      @@ -658,10 +648,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           // println!("Tokenizer: {}", constraint.tokenizer);
+      @@ -701,16 +690,15 @@
+           // 2. Parse and compile the grammar
+           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
+           println!("Grammar: {}", grammar_definition);
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -    println!("Parser: {}", compiled_grammar.glr_parser);
+      +    let _compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
+      +    println!("Parser: {}", _compiled_grammar.glr_parser);
+       
+           // 3. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+      @@ -722,10 +710,9 @@
+       
+           // 4. Create the GrammarConstraint
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+      -        compiled_grammar,
+      +        Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+      @@ -765,7 +752,6 @@
+       
+           // 2. Parse and compile the grammar
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 3. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+      @@ -776,11 +762,10 @@
+           let max_original_llm_token_id = 1;
+       
+           // 4. Create the GrammarConstraint
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+      -        compiled_grammar,
+      +        Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+      @@ -812,14 +797,13 @@
+       
+           // 2. Parse and compile the grammar
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 3. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+           let space_token_id = LLMTokenID(0);
+           let at_token_id = LLMTokenID(1);
+           llm_token_map.insert(b" ".to_vec(), space_token_id);
+           llm_token_map.insert(b"@".to_vec(), at_token_id);
+           let max_original_llm_token_id = 1;
+       
+           // 4. Create the GrammarConstraint
+      -    let constraint = GrammarConstraint::from_compiled_grammar_with_config(
+      -        compiled_grammar,
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::off(),
+      +        None,
+           );
+           println!("Tokenizer: {}", constraint.tokenizer);
+           println!("Parser: {}", constraint.parser);
+      @@ -848,7 +832,6 @@
+       
+           // 2. Parse and compile the grammar
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 3. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+      @@ -859,12 +842,11 @@
+           let max_original_llm_token_id = 1;
+       
+           // 4. Create the GrammarConstraint
+      -    let constraint = GrammarConstraint::from_compiled_grammar_with_config(
+      -        compiled_grammar,
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::off(),
+      +        None,
+           );
+           println!("Tokenizer: {}", constraint.tokenizer);
+           println!("Parser: {}", constraint.parser);
+      @@ -910,7 +892,6 @@
+               N_T ::= 'n';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 2. LLM Vocabulary with shared prefixes
+           let mut llm_token_map = LLMTokenMap::new();
+      @@ -922,12 +903,12 @@
+           // We expect this to fail with a panic until the bug is fixed.
+           // The test asserts that it *should not* panic.
+           // let result = std::panic::catch_unwind(|| {
+      -    //     let _ = GrammarConstraint::from_compiled_grammar(
+      -    //         compiled_grammar,
+      +    //     let _ = GrammarConstraint::new_from_grammar_definition(
+      +    //         Arc::new(grammar_definition),
+           //         llm_token_map,
+      -    //         LLMTokenID(max_original_llm_token_id + 1),
+      -    //         max_original_llm_token_id
+      +    //         max_original_llm_token_id,
+      +    //         &GrammarConstraintConfig::default(),
+      +    //         None,
+           //     );
+           // });
+           //
+      @@ -942,7 +923,6 @@
+           println!("--- Setting up for Full JS Grammar GSS Explosion Test ---");
+           let js_grammar_ebnf = fs::read_to_string("src/js.ebnf")?;
+           let grammar_definition = GrammarDefinition::from_ebnf(&js_grammar_ebnf)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+           println!("Full JS grammar compiled successfully.");
+       
+           // LLM vocab: single-byte tokens to compose the repeating chunk.
+      @@ -960,12 +940,12 @@
+           let mut config = crate::constraint::GrammarConstraintConfig::default();
+           config.skip_precomputation = true;
+       
+      -    let constraint = GrammarConstraint::from_compiled_grammar_with_config(
+      -        compiled_grammar.clone(),
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(max_id + 1), // dummy EOF
+               max_id,
+               &config,
+      +        None,
+           );
+           println!("GrammarConstraint constructed successfully.");
+           constraint.dump_precomputed3();
+      @@ -1041,7 +1021,6 @@
+               IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+           println!("Grammar compiled successfully.");
+       
+           // Minimal LLM vocab: single-byte tokens that compose "ifa{"
+      @@ -1053,11 +1032,12 @@
+               max_id = i;
+           }
+       
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar.clone(),
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(max_id + 1), // dummy EOF
+               max_id,
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           println!("GrammarConstraint constructed successfully.");
+           println!("{}", constraint.parser);
+      @@ -1200,14 +1180,15 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(3), // dummy EOF
+      -        2 // max_original_llm_token_id
+      +        2, // max_original_llm_token_id
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           constraint.dump_precomputed1();
+           constraint.dump_precomputed3();
+      @@ -1240,14 +1221,15 @@
+               A ::= 'a';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(1), // dummy EOF
+      -        0 // max_original_llm_token_id
+      +        0, // max_original_llm_token_id
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           // constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+      @@ -1282,14 +1264,15 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(2), // dummy EOF
+      -        1 // max_original_llm_token_id
+      +        1, // max_original_llm_token_id
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           // constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+      @@ -1321,13 +1304,14 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(4), // dummy EOF
+      -        3
+      +        3,
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           // constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+      @@ -1361,13 +1345,14 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(4), // dummy EOF
+      -        3
+      +        3,
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           // constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+      @@ -1401,13 +1386,14 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(4), // dummy EOF
+      -        3
+      +        3,
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -47,10 +47,9 @@
+       
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(2), // dummy EOF
+               1, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+      @@ -95,10 +94,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(3), // dummy EOF
+               2, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           constraint.dump_precomputed1();
+      @@ -153,10 +151,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(2), // dummy EOF
+               1, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           // constraint.dump_precomputed1();
+      @@ -211,10 +208,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(7), // dummy EOF
+               6, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           // constraint.dump_precomputed1(); // Commented out dump for cleaner test output
+      @@ -353,10 +349,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(3), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           println!("Vocab: {:?}", constraint.llm_vocab);
+      @@ -416,10 +411,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(3), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           constraint.dump_precomputed1();
+      @@ -496,10 +490,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(2), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           constraint.dump_precomputed0();
+      @@ -536,10 +529,9 @@
+       
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(4), // dummy EOF
+               3, // max_original_llm_token_id
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           // constraint.dump_precomputed1();
+      @@ -575,10 +567,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(1), // dummy EOF
+               0,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+       
+      @@ -615,10 +606,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map.clone(), // Original LLMTokenID map
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+       
+      @@ -658,10 +648,9 @@
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+           // println!("Tokenizer: {}", constraint.tokenizer);
+      @@ -1454,8 +1454,8 @@
+           // 2. Parse and compile the grammar
+           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
+           println!("Grammar: {}", grammar_definition);
+      -    println!("Parser: {}", compiled_grammar.glr_parser);
+      +    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
+      +    println!("Parser: {}", compiled_grammar.glr_parser);
+       
+           // 3. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+      @@ -1469,9 +1469,8 @@
+           // 4. Create the GrammarConstraint
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+               Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+      @@ -1512,4 +1512,3 @@
+           // 2. Parse and compile the grammar
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 3. Define the LLM vocabulary
+      @@ -776,11 +762,10 @@
+           let max_original_llm_token_id = 1;
+       
+           // 4. Create the GrammarConstraint
+           let constraint = GrammarConstraint::new_from_grammar_definition(
+      -        compiled_grammar,
+      +        Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::default(),
+               None,
+           );
+      @@ -812,14 +797,13 @@
+       
+           // 2. Parse and compile the grammar
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 3. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+           let space_token_id = LLMTokenID(0);
+           let at_token_id = LLMTokenID(1);
+           llm_token_map.insert(b" ".to_vec(), space_token_id);
+           llm_token_map.insert(b"@".to_vec(), at_token_id);
+           let max_original_llm_token_id = 1;
+       
+           // 4. Create the GrammarConstraint
+      -    let constraint = GrammarConstraint::from_compiled_grammar_with_config(
+      -        compiled_grammar,
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::off(),
+      +        None,
+           );
+           println!("Tokenizer: {}", constraint.tokenizer);
+           println!("Parser: {}", constraint.parser);
+      @@ -848,7 +832,6 @@
+       
+           // 2. Parse and compile the grammar
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 3. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+      @@ -859,12 +842,11 @@
+           let max_original_llm_token_id = 1;
+       
+           // 4. Create the GrammarConstraint
+      -    let constraint = GrammarConstraint::from_compiled_grammar_with_config(
+      -        compiled_grammar,
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+               &GrammarConstraintConfig::off(),
+      +        None,
+           );
+           println!("Tokenizer: {}", constraint.tokenizer);
+           println!("Parser: {}", constraint.parser);
+      @@ -910,7 +892,6 @@
+               N_T ::= 'n';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 2. LLM Vocabulary with shared prefixes
+           let mut llm_token_map = LLMTokenMap::new();
+      @@ -922,12 +903,12 @@
+           // We expect this to fail with a panic until the bug is fixed.
+           // The test asserts that it *should not* panic.
+           // let result = std::panic::catch_unwind(|| {
+      -    //     let _ = GrammarConstraint::from_compiled_grammar(
+      -    //         compiled_grammar,
+      +    //     let _ = GrammarConstraint::new_from_grammar_definition(
+      +    //         Arc::new(grammar_definition),
+           //         llm_token_map,
+      -    //         LLMTokenID(max_original_llm_token_id + 1),
+      -    //         max_original_llm_token_id
+      +    //         max_original_llm_token_id,
+      +    //         &GrammarConstraintConfig::default(),
+      +    //         None,
+           //     );
+           // });
+           //
+      @@ -942,7 +923,6 @@
+           println!("--- Setting up for Full JS Grammar GSS Explosion Test ---");
+           let js_grammar_ebnf = fs::read_to_string("src/js.ebnf")?;
+           let grammar_definition = GrammarDefinition::from_ebnf(&js_grammar_ebnf)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+           println!("Full JS grammar compiled successfully.");
+       
+           // LLM vocab: single-byte tokens to compose the repeating chunk.
+      @@ -960,12 +940,12 @@
+           let mut config = crate::constraint::GrammarConstraintConfig::default();
+           config.skip_precomputation = true;
+       
+      -    let constraint = GrammarConstraint::from_compiled_grammar_with_config(
+      -        compiled_grammar.clone(),
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(max_id + 1), // dummy EOF
+               max_id,
+               &config,
+      +        None,
+           );
+           println!("GrammarConstraint constructed successfully.");
+           constraint.dump_precomputed3();
+      @@ -1041,7 +1021,6 @@
+               IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+           println!("Grammar compiled successfully.");
+       
+           // Minimal LLM vocab: single-byte tokens that compose "ifa{"
+      @@ -1053,11 +1032,12 @@
+               max_id = i;
+           }
+       
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar.clone(),
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(max_id + 1), // dummy EOF
+               max_id,
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           println!("GrammarConstraint constructed successfully.");
+           println!("{}", constraint.parser);
+      @@ -1200,14 +1180,15 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(3), // dummy EOF
+      -        2 // max_original_llm_token_id
+      +        2, // max_original_llm_token_id
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           constraint.dump_precomputed1();
+           constraint.dump_precomputed3();
+      @@ -1240,14 +1221,15 @@
+               A ::= 'a';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(1), // dummy EOF
+      -        0 // max_original_llm_token_id
+      +        0, // max_original_llm_token_id
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           // constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+      @@ -1282,14 +1264,15 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(2), // dummy EOF
+      -        1 // max_original_llm_token_id
+      +        1, // max_original_llm_token_id
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           // constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+      @@ -1321,13 +1304,14 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(4), // dummy EOF
+      -        3
+      +        3,
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           // constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+      @@ -1361,13 +1345,14 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(4), // dummy EOF
+      -        3
+      +        3,
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           // constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+      @@ -1401,13 +1386,14 @@
+               EOF ::= '$';
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+      -    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+      -
+      -    let constraint = GrammarConstraint::from_compiled_grammar(
+      -        compiled_grammar,
+      +
+      +    let constraint = GrammarConstraint::new_from_grammar_definition(
+      +        Arc::new(grammar_definition),
+               llm_token_map.clone(),
+      -        LLMTokenID(4), // dummy EOF
+      -        3
+      +        3,
+      +        &GrammarConstraintConfig::default(),
+      +        None,
+           );
+           constraint.dump_precomputed1();
+           // constraint.dump_precomputed2();
+
+      ```
     metadata:
 ...

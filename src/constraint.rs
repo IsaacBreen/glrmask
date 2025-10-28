@@ -977,13 +977,11 @@ impl GrammarConstraint {
     pub fn from_compiled_grammar(
         compiled_grammar: CompiledGrammar,
         llm_token_map: LLMTokenMap,
-        _eof_token_id: LLMTokenID,
         max_original_llm_token_id: usize,
     ) -> Self {
         Self::from_compiled_grammar_with_config(
             compiled_grammar,
             llm_token_map,
-            _eof_token_id,
             max_original_llm_token_id,
             &GrammarConstraintConfig::default(),
         )
@@ -992,7 +990,6 @@ impl GrammarConstraint {
     pub fn from_compiled_grammar_with_config(
         compiled_grammar: CompiledGrammar,
         llm_token_map: LLMTokenMap,
-        _eof_token_id: LLMTokenID,
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
     ) -> Self {

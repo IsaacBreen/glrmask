@@ -1,3 +1,4 @@
+// src/test_constraint_basic.rs
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::finite_automata::{eat_u8, rep1};
 use crate::glr::grammar::{nt, prod, regex_name, t, Terminal};
@@ -50,7 +51,6 @@ fn test_trivial() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
-        LLMTokenID(2), // dummy EOF
         1, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
         None,
@@ -108,7 +108,6 @@ fn test_constraint_simple() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(3), // dummy EOF
         2, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
         None,
@@ -198,7 +197,6 @@ fn test_constraint_simple_simplified() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(2), // dummy EOF
         1, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
         None,
@@ -275,7 +273,6 @@ fn test_constraint_expression() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(7), // dummy EOF
         6, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
         None,
@@ -455,7 +452,6 @@ fn test_aborted_tokenizer_restart_equivalence() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(3), // dummy EOF
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
         None,
@@ -521,7 +517,6 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(3), // dummy EOF
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
         None,
@@ -602,7 +597,6 @@ fn test_a_plus_commit_equivalence() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(2), // dummy EOF
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
         None,
@@ -661,7 +655,6 @@ fn test_ignore_token() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
-        LLMTokenID(4), // dummy EOF
         3, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
         None,
@@ -708,7 +701,6 @@ fn test_hideous_ambiguity() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(1), // dummy EOF
         0,
         &GrammarConstraintConfig::default(),
         None,
@@ -755,7 +747,6 @@ fn test_simple_def_match_non_zero_llm_id() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(), // Original LLMTokenID map
-        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
         None,
@@ -1413,7 +1404,6 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
-        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
         None,
@@ -1466,7 +1456,8 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     // 2. Parse and compile the grammar
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
     println!("Grammar: {}", grammar_definition);
-    println!("Parser: {}", compiled_grammar.glr_parser);
+    let _compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
+    println!("Parser: {}", _compiled_grammar.glr_parser);
 
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
@@ -1480,7 +1471,6 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
-        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
         None,
@@ -1538,7 +1528,6 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
-        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
         None,
@@ -1835,7 +1824,6 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
-        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
         &GrammarConstraintConfig::off(),
         None,
@@ -1884,7 +1872,6 @@ fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::er
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
-        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
         &GrammarConstraintConfig::off(),
         None,
@@ -1952,8 +1939,7 @@ fn test_precompute_self_loop_from_shared_states() {
     //     let _ = GrammarConstraint::new_from_grammar_definition(
     //         Arc::new(grammar_definition),
     //         llm_token_map,
-    //         LLMTokenID(max_original_llm_token_id + 1),
-    //         max_original_llm_token_id
+    //         max_original_llm_token_id,
     //         &GrammarConstraintConfig::default(),
     //         None,
     //     );
@@ -1994,7 +1980,6 @@ fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(max_id + 1), // dummy EOF
         max_id,
         &config,
         None,
@@ -2122,7 +2107,6 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(max_id + 1), // dummy EOF
         max_id,
         &GrammarConstraintConfig::default(),
         None,
@@ -2310,7 +2294,6 @@ fn test_constraint_indirect_recursion_simplified() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(3), // dummy EOF
         2, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
         None,
@@ -2354,7 +2337,6 @@ fn test_constraint_repetition_a() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(1), // dummy EOF
         0, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
         None,
@@ -2399,7 +2381,6 @@ fn test_constraint_expression_split_token() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(2), // dummy EOF
         1, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
         None,
@@ -2443,7 +2424,6 @@ fn test_constraint_expression_trivial_indirect() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(4), // dummy EOF
         3,
         &GrammarConstraintConfig::default(),
         None,
@@ -2492,7 +2472,6 @@ fn test_constraint_expression_trivial_direct() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(4), // dummy EOF
         3,
         &GrammarConstraintConfig::default(),
         None,
@@ -2542,7 +2521,6 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
-        LLMTokenID(4), // dummy EOF
         3,
         &GrammarConstraintConfig::default(),
         None,
