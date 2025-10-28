@@ -67,7 +67,6 @@ use std::io::{Read, Write};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, Sub};
 use rustc_hash::FxHashMap;
-use crate::glr::grammar::TerminalID;
 use crate::trie3_opt::{optimize_trie3_size, Trie3Config};
 
 #[derive(Default, Debug)]
@@ -716,7 +715,6 @@ struct TrieFeatures {
     check_llm_count: usize,
     no_op_count: usize,
     end_node_count: usize,
-    terminal_hash: u64,
 }
 
 impl TrieFeatures {
@@ -724,10 +722,6 @@ impl TrieFeatures {
     /// Returns a value between 0.0 (identical) and some upper bound. Lower is more similar.
     fn distance(&self, other: &Self) -> f64 {
         let mut dist_sq = 0.0;
-
-        if self.terminal_hash != other.terminal_hash {
-            return 1000.0;
-        }
 
         dist_sq += Self::feat_dist_sq(self.num_nodes, other.num_nodes);
         dist_sq += Self::feat_dist_sq(self.num_edges, other.num_edges);
@@ -756,7 +750,6 @@ impl TrieFeatures {
 fn compute_trie_features(
     arena: &IntermediateTrie3GodWrapper,
     root: IntermediatePrecomputeNode3Index,
-    tid: TerminalID,
 ) -> TrieFeatures {
     let nodes = IntermediatePrecomputeNode3::all_nodes(arena, &[root]);
     let num_nodes = nodes.len();
@@ -785,11 +778,7 @@ fn compute_trie_features(
         }
     }
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    tid.hash(&mut hasher);
-    let terminal_hash = hasher.finish();
-
-    TrieFeatures { num_nodes, num_edges, pop_count, push_count, check_llm_count, no_op_count, end_node_count, terminal_hash }
+    TrieFeatures { num_nodes, num_edges, pop_count, push_count, check_llm_count, no_op_count, end_node_count }
 }
 
 #[derive(Debug, Clone)]
@@ -1132,7 +1121,7 @@ impl GrammarConstraint {
 
         let mut template_features = BTreeMap::new();
         for (tid, (start, _end)) in &templates {
-            let features = compute_trie_features(&intermediate_trie3_god, *start, *tid);
+            let features = compute_trie_features(&intermediate_trie3_god, *start);
             template_features.insert(*tid, features);
         }
 
@@ -3239,12 +3228,12 @@ impl<'r> Precomputer1<'r> {
                 let inter_idx = PrecomputeNode1Index::new(final_god.insert(inter_node));
                 let mut total_inter_bitset = HybridBitset::zeros();
 
-                for (_original_ek, dest_map) in edges {
+                for (original_ek, dest_map) in edges {
                     for (temp_child_idx, rs_blaze) in dest_map {
                         let final_child_idx = self.convert_trie1_recursive(temp_child_idx, temp_god, final_god, node_map);
                         let hybrid_bitset = HybridBitset { inner: crate::datastructures::cache::intern_l1(rs_blaze) };
                         total_inter_bitset |= &hybrid_bitset;
-                        final_god.insert_edge_simple(inter_idx, final_child_idx, None, hybrid_bitset);
+                        final_god.insert_edge_simple(inter_idx, final_child_idx, original_ek, hybrid_bitset);
                     }
                 }
                 final_god.insert_edge_simple(final_idx, inter_idx, Some(dummy_tid), total_inter_bitset);
