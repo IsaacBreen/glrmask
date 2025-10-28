@@ -48,6 +48,8 @@ pub fn optimize_trie3_size(
         merge_global_atoms: config.merge_global_atoms,
         merge_global_atoms_max_iters: config.merge_global_atoms_max_iters,
         merge_global_atoms_max_atoms_per_pop: config.merge_global_atoms_max_atoms_per_pop,
+        merge_state_agnostic: config.merge_state_agnostic,
+        merge_state_agnostic_max_iters: config.merge_state_agnostic_max_iters,
         eliminate_pop0_except_roots: config.eliminate_pop0_except_roots,
         merge_equivalent_llm_tokens: config.merge_equivalent_llm_tokens,
         reorder_llm_tokens: config.reorder_llm_tokens,

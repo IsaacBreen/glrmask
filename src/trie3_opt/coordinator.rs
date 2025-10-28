@@ -49,6 +49,8 @@ pub struct CoordinatorConfig {
     pub merge_global_atoms: bool,
     pub merge_global_atoms_max_iters: usize,
     pub merge_global_atoms_max_atoms_per_pop: usize,
+    pub merge_state_agnostic: bool,
+    pub merge_state_agnostic_max_iters: usize,
     pub eliminate_pop0_except_roots: bool,
     pub merge_equivalent_llm_tokens: bool,
     pub reorder_llm_tokens: bool,
@@ -83,6 +85,8 @@ impl Default for CoordinatorConfig {
             merge_global_atoms: true,
             merge_global_atoms_max_iters: 2,
             merge_global_atoms_max_atoms_per_pop: 4096,
+            merge_state_agnostic: true,
+            merge_state_agnostic_max_iters: 8,
             eliminate_pop0_except_roots: true,
             merge_equivalent_llm_tokens: true,
             reorder_llm_tokens: true,
@@ -119,6 +123,8 @@ impl CoordinatorConfig {
             merge_global_atoms: false,
             merge_global_atoms_max_iters: 0,
             merge_global_atoms_max_atoms_per_pop: 0,
+            merge_state_agnostic: false,
+            merge_state_agnostic_max_iters: 0,
             eliminate_pop0_except_roots: false,
             merge_equivalent_llm_tokens: false,
             reorder_llm_tokens: false,
@@ -194,6 +200,11 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
         }
         if config.merge_structural_max_iters > 0 {
             pipeline.push(Box::new(MergeStructuralPass::new(config.merge_structural_max_iters)));
+        }
+        if config.merge_state_agnostic && config.merge_state_agnostic_max_iters > 0 {
+            pipeline.push(Box::new(MergeStateAgnosticPass::new(
+                config.merge_state_agnostic_max_iters,
+            )));
         }
         if pass_num == config.num_passes - 1 && config.merge_bisimulation_max_iters > 0 {
              pipeline.push(Box::new(MergeBisimulationPass::new(config.merge_bisimulation_max_iters)));
@@ -444,6 +455,7 @@ pub fn run_pipeline_on_precompute3<'a>(
             || pass_name == "MergeStructural"
             || pass_name == "MergeBisimulation"
             || pass_name == "MergeGlobalAtoms"
+            || pass_name == "MergeStateAgnostic"
             || pass_name == "EliminatePop0ExceptRoots"
             || pass_name == "CompressUnaryChains"
         {

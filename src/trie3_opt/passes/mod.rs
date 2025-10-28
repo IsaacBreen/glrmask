@@ -24,6 +24,7 @@ pub mod merge_structural;
 pub mod prune_dead_paths;
 pub mod prune_unproductive_paths;
 pub mod reorder_llm_tokens;
+pub mod merge_state_agnostic;
 
 pub use canonicalize_end_nodes::CanonicalizeEndNodesPass;
 pub use compress_edges::CompressEdgesPass;
@@ -42,3 +43,4 @@ pub use merge_structural::MergeStructuralPass;
 pub use prune_dead_paths::PruneDeadPathsPass;
 pub use prune_unproductive_paths::PruneUnproductivePathsPass;
 pub use reorder_llm_tokens::ReorderLLMTokensPass;
+pub use merge_state_agnostic::MergeStateAgnosticPass;
