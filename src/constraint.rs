@@ -3956,9 +3956,11 @@ impl<'a> GrammarConstraintState<'a> {
                     let terminal_id = TerminalID(match_info.id);
 
                     if let Some(dummy_id) = self.parent.original_to_dummy_map.get(&terminal_id) {
+                        crate::debug!(5, "Processing dummy token {:?}", dummy_id);
                         cloned_glr_s.process_token(*dummy_id);
                     }
 
+                    crate::debug!(5, "Processing terminal token {:?}", terminal_id);
                     cloned_glr_s.process_token(terminal_id);
                     // cloned_glr_s.do_phase3();
 
