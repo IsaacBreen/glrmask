@@ -2127,6 +2127,55 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // 5. Return the trimmed trie
         (new_arena, new_roots)
     }
+
+    /// Returns a set of all nodes that are part of any cycle in the graph reachable from `roots`.
+    pub fn nodes_in_cycles(
+        arena: &Arena<Self>,
+        roots: &[Trie2Index],
+    ) -> HashSet<Trie2Index> {
+        let traversal_data = match Self::compute_traversal_data(arena, roots) {
+            Some(data) => data,
+            None => return HashSet::new(),
+        };
+
+        // Build adj list to check for self-loops in single-node SCCs.
+        // This is duplicated from compute_traversal_data because adj is not returned from it.
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); traversal_data.nodes.len()];
+        for (i, idx) in traversal_data.nodes.iter().enumerate() {
+            if let Some(g) = idx.read(arena) {
+                for dest_map in g.children.values() {
+                    for (child_idx, _) in dest_map.iter() {
+                        if let Some(&j) = traversal_data.pos_of_u.get(&child_idx.as_usize()) {
+                            adj[i].push(j);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut cyclic_nodes = HashSet::new();
+
+        // An SCC is part of a cycle if it has more than one node, or if a single-node SCC has a self-loop.
+        for scc_id in 0..traversal_data.sccs.len() {
+            let scc_nodes_pos = &traversal_data.sccs[scc_id];
+            if scc_nodes_pos.len() > 1 {
+                for &pos in scc_nodes_pos {
+                    cyclic_nodes.insert(traversal_data.nodes[pos]);
+                }
+            } else if scc_nodes_pos.len() == 1 {
+                // Check for self-loop
+                let pos = scc_nodes_pos[0];
+                for &neighbor_pos in &adj[pos] {
+                    if neighbor_pos == pos {
+                        cyclic_nodes.insert(traversal_data.nodes[pos]);
+                        break;
+                    }
+                }
+            }
+        }
+
+        cyclic_nodes
+    }
 }
 
 /// The result of comparing two paths in a Trie.

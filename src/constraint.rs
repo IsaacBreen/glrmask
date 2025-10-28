@@ -2046,8 +2046,8 @@ impl GrammarConstraint {
 
         if is_debug_level_enabled(2) {
             println!("\n--- Intermediate Trie3 Template Statistics ---");
-            println!("{:<25} {:<5} {:>10} {:>10}", "Terminal Name", "ID", "Nodes", "Edges");
-            println!("{:-<25} {:-<5} {:-<10} {:-<10}", "", "", "", "");
+            println!("{:<25} {:<5} {:>10} {:>10} {:>12}", "Terminal Name", "ID", "Nodes", "Edges", "Cyclic Nodes");
+            println!("{:-<25} {:-<5} {:-<10} {:-<10} {:-<12}", "", "", "", "", "");
 
             let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
             sorted_templates.sort_by_key(|(tid, _)| *tid);
@@ -2060,15 +2060,24 @@ impl GrammarConstraint {
                     &intermediate_trie3_god,
                 );
                 let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
+
+                let cyclic_nodes = IntermediatePrecomputeNode3::nodes_in_cycles(&intermediate_trie3_god, &[*start_node]);
+                let cyclic_info = if cyclic_nodes.is_empty() {
+                    "No".to_string()
+                } else {
+                    format!("Yes ({})", cyclic_nodes.len())
+                };
+
                 println!(
-                    "{:<25} {:<5} {:>10} {:>10}",
+                    "{:<25} {:<5} {:>10} {:>10} {:>12}",
                     format!("'{}'", terminal_name),
                     tid.0,
                     stats.final_unique_nodes_count,
-                    stats.final_edges_count
+                    stats.final_edges_count,
+                    cyclic_info
                 );
             }
-            println!("--------------------------------------------\n");
+            println!("-----------------------------------------------------------------\n");
 
             // Aggregate stats across all templates: union nodes/edges and shared nodes count
             {
