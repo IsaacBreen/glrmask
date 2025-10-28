@@ -158,6 +158,9 @@ fn test_constraint_simple() {
         let mut parser_state = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
         for grammar_token in grammar_tokens {
             let grammar_token_id = grammar_token_map.get_by_left(&regex_name(grammar_token)).unwrap();
+            if let Some(dummy_id) = constraint.original_to_dummy_map.get(grammar_token_id) {
+                parser_state.process_token(*dummy_id);
+            }
             parser_state.step(*grammar_token_id);
         }
         parser_state_for_comp.merge_with(parser_state);
