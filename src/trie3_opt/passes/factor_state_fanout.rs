@@ -1,19 +1,20 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
 use crate::trie3_opt::EdgeKey;
 use crate::trie3_opt::passes::OptimizationPass;
 
-/// Aggressively reduces state fanout by factoring per-state token coverage.
-/// For each node and for each (pop, dest):
-///   - For every state s that appears on any outgoing edge to `dest`, compute U_s,
-///     the union of token sets across all such edges.
-///   - States that share the same U_s are grouped together and emitted as a single
-///     edge with key (pop, U_s) and dest -> {grouped states}.
-/// This guarantees that, for a fixed (node, pop, dest, state), the state appears
-/// in at most one outgoing transition from the node, often cutting state fanout
-/// dramatically while preserving exact semantics.
+/// Aggressively reduces state fanout by grouping states with identical transition behaviors.
+/// For each node and for each pop:
+///   - For every state `s`, compute its "behavior": a map from each destination `d` it can
+///     transition to, to the union of token sets on edges that permit the `s->d` transition.
+///   - States that share an identical behavior map are grouped together.
+///   - New edges are created for each group. The behavior map is inverted to group destinations
+///     by their required token sets, forming new `(tokens -> dests)` edges. The grouped states
+///     are assigned to these new edges.
+/// This is a powerful optimization for reducing the number of distinct edges and state fanout,
+/// especially when many states have similar transition patterns.
 pub struct FactorStateFanoutPass;
 
 impl OptimizationPass for FactorStateFanoutPass {
@@ -29,51 +30,61 @@ impl OptimizationPass for FactorStateFanoutPass {
                 continue;
             }
 
-            // Build: pop -> dest -> (state -> unioned tokens)
-            let mut by_pop_dest_state: HashMap<isize, HashMap<NodeId, HashMap<usize, SortedSet>>> =
+            // Build: pop -> state -> (dest -> unioned tokens)
+            let mut by_pop_state: HashMap<isize, HashMap<usize, BTreeMap<NodeId, SortedSet>>> =
                 HashMap::new();
 
             for (ek, dm) in node.children() {
                 let pop = ek.pop;
                 let tokens = &ek.tokens;
-                let dest_map = by_pop_dest_state.entry(pop).or_default();
+                let state_map = by_pop_state.entry(pop).or_default();
                 for (dest, states) in dm {
-                    let s2t = dest_map.entry(*dest).or_default();
                     for s in states.iter() {
-                        s2t.entry(s)
-                            .or_insert_with(SortedSet::new)
+                        state_map
+                            .entry(s)
+                            .or_default()
+                            .entry(*dest)
+                            .or_default()
                             .union_inplace(tokens);
                     }
                 }
             }
 
-            // Reconstruct children from the per-state coverage, grouping states by identical token sets.
-            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+            // Reconstruct children by grouping states with identical behavior.
+            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
+                BTreeMap::new();
 
-            for (pop, dest_map) in by_pop_dest_state {
-                for (dest, s2toks) in dest_map {
-                    if s2toks.is_empty() {
+            for (pop, state_map) in by_pop_state {
+                // Invert: state -> behavior  to  behavior -> states
+                // Behavior is a map from destination to the union of tokens required to get there.
+                let mut behavior_to_states: HashMap<BTreeMap<NodeId, SortedSet>, SortedSet> =
+                    HashMap::new();
+                for (state, behavior) in state_map {
+                    if !behavior.is_empty() {
+                        behavior_to_states.entry(behavior).or_default().insert(state);
+                    }
+                }
+
+                for (behavior, states) in behavior_to_states {
+                    if states.is_empty() {
                         continue;
                     }
 
-                    // tokens -> states
-                    let mut tokens_to_states: HashMap<SortedSet, SortedSet> = HashMap::new();
-                    for (state, toks) in s2toks {
-                        if toks.is_empty() {
-                            continue;
+                    // Invert behavior: dest -> tokens  to  tokens -> dests
+                    let mut tokens_to_dests: BTreeMap<SortedSet, BTreeSet<NodeId>> =
+                        BTreeMap::new();
+                    for (dest, tokens) in behavior {
+                        if !tokens.is_empty() {
+                            tokens_to_dests.entry(tokens).or_default().insert(dest);
                         }
-                        tokens_to_states
-                            .entry(toks)
-                            .or_insert_with(SortedSet::new)
-                            .insert(state);
                     }
 
-                    for (tokens, states) in tokens_to_states {
-                        if tokens.is_empty() || states.is_empty() {
-                            continue;
-                        }
+                    for (tokens, dests) in tokens_to_dests {
                         let key = crate::trie3_opt::core::EdgeKey::new(pop, tokens);
-                        new_children.entry(key).or_default().insert(dest, states);
+                        let dm = new_children.entry(key).or_default();
+                        for dest in dests {
+                            dm.insert(dest, states.clone());
+                        }
                     }
                 }
             }
