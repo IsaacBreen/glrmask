@@ -1235,7 +1235,7 @@ impl GrammarConstraint {
             final_grammar_def.productions = final_productions;
             // Add new dummy terminals to the definition's terminal set
             for term in new_dummy_terminals {
-                final_grammar_def.terminals.insert(term);
+                // final_grammar_def.terminal_to_group_id().insert(term); // UNNECESSARY
             }
             CompiledGrammar::from_definition(Arc::new(final_grammar_def))
         } else {
