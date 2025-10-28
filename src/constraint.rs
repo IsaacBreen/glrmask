@@ -2968,7 +2968,7 @@ impl<'r> Precomputer1<'r> {
         } else {
             let mut direct_edges = Vec::new();
             // Group injected edges by their dummy terminal ID.
-            let mut injected_edges_by_dummy: BTreeMap<TerminalID, Vec<(Option<TerminalID>, BTreeMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>)>> = BTreeMap::new();
+            let mut injected_edges_by_dummy: BTreeMap<TerminalID, Vec<(Option<TerminalID>, OrderedHashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>)>> = BTreeMap::new();
 
             for (ek, dest_map) in children_to_copy {
                 if let Some(tid) = ek {
