@@ -1238,12 +1238,11 @@ impl GrammarConstraint {
                     final_grammar_def.add_external_terminal(&name);
                 }
             }
+            println!("{}", &final_grammar_def);
             CompiledGrammar::from_definition(Arc::new(final_grammar_def))
         } else {
             initial_compiled_grammar
         };
-        
-        println!("{}", &final_compiled_grammar);
 
         Self::new_with_config_and_precompute0_cache(
             final_compiled_grammar.tokenizer,
