@@ -1045,13 +1045,26 @@ impl GrammarConstraint {
         let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
 
         // Group terminals by the canonical string representation of their template trie.
-        let mut groups_by_repr: BTreeMap<String, (Vec<TerminalID>, usize)> = BTreeMap::new();
-        let print_options = PrettyPrintOptions::default().display_edge_keys_only().display_nodes().omit_depth();
-        for (tid, (start, _end)) in &templates {
-            let repr = Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &print_options);
+        // Group terminals by template graph isomorphism.
+        let mut groups: Vec<(IntermediatePrecomputeNode3Index, Vec<TerminalID>, usize)> = Vec::new();
+
+        // Sort templates by terminal ID for deterministic group formation.
+        let mut sorted_templates: Vec<_> = templates.iter().collect();
+        sorted_templates.sort_by_key(|(tid, _)| *tid);
+
+        for (tid, (start, _end)) in sorted_templates {
             let complexity = Trie::all_nodes(&intermediate_trie3_god, &[*start]).len();
-            let entry = groups_by_repr.entry(repr).or_insert_with(|| (Vec::new(), complexity));
-            entry.0.push(*tid);
+            let mut found_group = false;
+            for (representative_start, tids_in_group, _complexity) in &mut groups {
+                if IntermediatePrecomputeNode3::are_graphs_equal(&intermediate_trie3_god, *start, &intermediate_trie3_god, *representative_start) {
+                    tids_in_group.push(*tid);
+                    found_group = true;
+                    break;
+                }
+            }
+            if !found_group {
+                groups.push((*start, vec![*tid], complexity));
+            }
         }
 
         // Find available dummy terminals defined in the grammar.
@@ -1065,7 +1078,7 @@ impl GrammarConstraint {
         new_config.dummy_terminal_map.clear();
         new_config.dummy_terminal_penalties.clear();
 
-        let mut sorted_groups: Vec<_> = groups_by_repr.into_values().collect();
+        let mut sorted_groups: Vec<_> = groups.into_iter().map(|(_, tids, complexity)| (tids, complexity)).collect();
         // Assign larger groups first to the available dummy terminals.
         sorted_groups.sort_by_key(|(tids, _complexity)| std::cmp::Reverse(tids.len()));
 
