@@ -2207,6 +2207,7 @@ impl GrammarConstraint {
         tid: TerminalID,
     ) -> (IntermediatePrecomputeNode3Index, IntermediatePrecomputeNode3Index) {
         // Create template start node
+        println!("reduce_gss_stacks_to_trie3_paths_from_start: {:?}", tid);
         let start = IntermediatePrecomputeNode3Index::new(trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
 
         // Seed hallucinated GLR state with this start node in Acc
@@ -2222,7 +2223,7 @@ impl GrammarConstraint {
 
         // Flatten the active GSS into explicit stacks.
         let stacks = s.active_state.stack.inner.to_stacks();
-        
+
         // This new function will build the paths for the stack *below* the shifted state.
         let (_head, final_nodes_map) = Self::reduce_gss_stacks_to_trie3_paths_from_start(trie3_god, &stacks);
 
@@ -2276,6 +2277,10 @@ impl GrammarConstraint {
             let items = &items[1..]; // Skip first element
             if items.is_empty() {
                 continue;
+            }
+
+            if items.len() > 0 {
+                println!("ITEMS: {:?}", items);
             }
 
             let shifted_state_content = *items.last().unwrap();
@@ -2349,17 +2354,17 @@ impl GrammarConstraint {
 
         // Build per-terminal template subgraphs once in this arena.
         let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
-        // for (tid, (start, end)) in &terminal_templates {
-        //     let terminal = token_name_map.get_by_right(&tid.0).unwrap();
-        //     println!("\n--- Intermediate Trie3 Template for terminal {}: ---", terminal);
-        //     println!("End node: {:?}", end);
-        //     let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-        //         .display_edge_keys_only()
-        //         .display_nodes()
-        //         .omit_depth()
-        //         ;
-        //     println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &options));
-        // }
+        for (tid, (start, end)) in &terminal_templates {
+            let terminal = token_name_map.get_by_right(&tid.0).unwrap();
+            println!("\n--- Intermediate Trie3 Template for terminal {}: ---", terminal);
+            println!("End node: {:?}", end);
+            let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+                .display_edge_keys_only()
+                .display_nodes()
+                .omit_depth()
+                ;
+            println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &options));
+        }
 
         if is_debug_level_enabled(2) {
             println!("\n--- Intermediate Trie3 Template Statistics ---");
