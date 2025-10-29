@@ -340,7 +340,12 @@ class BruteForceModel(GraphProvider):
         for tsid, gss in merged.items():
             possible_terminals = self.tokenizer.states[tsid].possible_future_group_ids
             for terminal_id in possible_terminals:
-                if not self._process_token(gss, terminal_id).is_empty():
+                proc_gss = gss
+                dummy_id = self.original_to_dummy_map.get(terminal_id)
+                if dummy_id is not None:
+                    proc_gss = self._process_token(proc_gss, dummy_id)
+                proc_gss = self._process_token(proc_gss, terminal_id)
+                if not proc_gss.is_empty():
                     # Found a viable path, so the state after commit is valid.
                     return merged
 
