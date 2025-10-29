@@ -51,7 +51,7 @@ impl Default for CoordinatorConfig {
             num_passes: 3,
             prune_dead_paths: true,
             prune_unproductive_paths: true,
-            canonicalize_end_nodes: true,
+            canonicalize_end_nodes: false,
             compress_edges: true,
             compress_unary_chains: true,
             factor_state_fanout: true,
@@ -59,13 +59,13 @@ impl Default for CoordinatorConfig {
             factor_common_destinations_min_incoming: 12,
             merge_structural_max_iters: 4,
             merge_bisimulation_max_iters: 1000,
-            merge_global_atoms: true,
+            merge_global_atoms: false,
             merge_global_atoms_max_iters: 2,
             merge_global_atoms_max_atoms_per_pop: 4096,
-            eliminate_pop0_except_roots: true,
+            eliminate_pop0_except_roots: false,
             merge_equivalent_llm_tokens: true,
-            reorder_llm_tokens: true,
-            generalize_sids: true,
+            reorder_llm_tokens: false,
+            generalize_sids: false,
         }
     }
 }
