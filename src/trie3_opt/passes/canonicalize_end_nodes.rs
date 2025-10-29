@@ -63,16 +63,13 @@ impl OptimizationPass for CanonicalizeEndNodesPass {
 
         // Remap roots if any of them were end nodes that are not the canonical one.
         let mut new_roots = Vec::with_capacity(trie.root_ids.len());
-        let mut root_set = BTreeSet::new();
         for root_id in &trie.root_ids {
             let new_root = if other_ends.contains(root_id) {
                 canonical
             } else {
                 *root_id
             };
-            if root_set.insert(new_root) {
-                new_roots.push(new_root);
-            }
+            new_roots.push(new_root);
         }
         trie.root_ids = new_roots;
     }
