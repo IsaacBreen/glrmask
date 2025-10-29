@@ -59,7 +59,7 @@ impl Default for CoordinatorConfig {
             factor_common_destinations_min_incoming: 12,
             merge_structural: true,
             merge_structural_max_iters: 4,
-            merge_bisimulation: true,
+            merge_bisimulation: false,
             merge_bisimulation_max_iters: 1000,
             merge_global_atoms: false,
             merge_global_atoms_max_iters: 2,
