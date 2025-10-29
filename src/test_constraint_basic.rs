@@ -318,6 +318,9 @@ fn test_constraint_expression() {
 
     let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
     for grammar_token_id in grammar_token_ids {
+        if let Some(dummy_id) = constraint.original_to_dummy_map.get(grammar_token_id) {
+            parser_state_for_comp.process_token(*dummy_id);
+        }
         parser_state_for_comp.step(*grammar_token_id);
     }
 
