@@ -3,7 +3,7 @@ set -o pipefail
 
 # --- Configuration ---
 # Number of parallel jobs to run
-MAX_JOBS=3
+MAX_JOBS=5
 
 # List of optimization flags to test
 OPTS=(
