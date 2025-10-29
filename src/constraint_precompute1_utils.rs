@@ -478,8 +478,9 @@ fn minimize_dummy_penalty_trie1(
             if let Some(tid) = ek {
                 if dummy_terminal_penalties.contains_key(&tid) {
                     for (i_node, bv_ui) in dm {
+                        let i_is_end = i_node.read(trie1_god).unwrap().value.end;
                         // Check if i_node is an intermediate node with a single predecessor (u)
-                        if preds.get(&i_node).map_or(false, |p| p.len() == 1 && p[0] == *u) {
+                        if !i_is_end && preds.get(&i_node).map_or(false, |p| p.len() == 1 && p[0] == *u) {
                             // This is a candidate for unrolling.
                             edges_to_remove.entry(*u).or_default().push((ek, i_node));
                             
@@ -488,7 +489,10 @@ fn minimize_dummy_penalty_trie1(
                                 for (v_node, bv_iv) in orig_dm {
                                     let new_bv = bv_ui.clone() & &bv_iv;
                                     if !new_bv.is_empty() {
-                                        modifications.entry(*u).or_default().push((orig_ek, v_node, new_bv));
+                                        // If the original edge from the intermediate node was a None edge,
+                                        // the new edge from the parent should be keyed by the dummy terminal.
+                                        let final_ek = orig_ek.or(Some(tid));
+                                        modifications.entry(*u).or_default().push((final_ek, v_node, new_bv));
                                     }
                                 }
                             }
