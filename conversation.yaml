@@ -10811,7 +10811,9 @@ local_system:
               s.process_token_advanced(tid, &cfg);
 
               // Flatten the active GSS into explicit stacks.
-              let stacks = s.active_state.stack.inner.to_stacks();
+              let mut stacks = s.active_state.stack.inner.to_stacks();
+              // Sort stacks to ensure deterministic behavior when multiple paths lead to the same shifted state.
+              stacks.sort();
               
               // This new function will build the paths for the stack *below* the shifted state.
               let final_nodes_map = Self::reduce_gss_stacks_to_trie3_paths_from_start(trie3_god, &stacks);
@@ -10844,21 +10846,18 @@ local_system:
           /// trie node that represents the end of the corresponding pre-shift stack path.
           fn reduce_gss_stacks_to_trie3_paths_from_start(
               trie3_god: &IntermediateTrie3GodWrapper,
-              stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
+              stacks: &[(Vec<ParseStateEdgeContent>, Acc)], // This is sorted for determinism.
           ) -> BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> {
               let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
-              // A BTreeMap is used here to ensure deterministic iteration order.
-              let mut grouped_paths: BTreeMap<ParseStateEdgeContent, Vec<IntermediatePrecomputeNode3Index>> = BTreeMap::new();
 
               for (items, acc) in stacks.iter() {
                   if items.is_empty() {
                       continue;
                   }
-                  // Per the function's documentation, items[0] is the new state after the shift.
                   let shifted_state_content = items[0];
-                  // The rest of the items form the stack that existed *before* the shift.
                   let pre_shift_stack = &items[1..];
 
+                  // Create a new head node for this specific path.
                   let mut cur = IntermediatePrecomputeNode3Index::new(
                       trie3_god.insert(IntermediatePrecomputeNode3::new(
                           IntermediatePrecomputedNodeContents3::internal()
@@ -10895,30 +10894,23 @@ local_system:
                           .expect("Failed to insert Push edge in template chain");
                   }
 
-                  // Group the final node of the generated path by the shifted state.
-                  grouped_paths.entry(shifted_state_content).or_default().push(cur);
-              }
-
-              for (shifted_state_content, path_end_nodes) in grouped_paths {
-                  // If multiple paths lead to the same shifted state, merge them into a single node.
-                  if path_end_nodes.len() == 1 {
-                      final_nodes_map.insert(shifted_state_content, path_end_nodes.into_iter().next().unwrap());
-                  } else {
-                      let merged_node = IntermediatePrecomputeNode3Index::new(
+                  // Get or create the single merge node for this shifted state. All paths
+                  // that result in the same `shifted_state_content` will converge here.
+                  let merge_node = final_nodes_map.entry(shifted_state_content).or_insert_with(|| {
+                      IntermediatePrecomputeNode3Index::new(
                           trie3_god.insert(IntermediatePrecomputeNode3::new(
                               IntermediatePrecomputedNodeContents3::internal()
                           ))
-                      );
-                      for node in path_end_nodes {
-                          let inserter = EdgeInserter::new(
-                              trie3_god,
-                              node.as_arc().clone(),
-                              IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                          );
-                          inserter.try_destination(merged_node.clone()).expect("Failed to merge path ends");
-                      }
-                      final_nodes_map.insert(shifted_state_content, merged_node);
-                  }
+                      )
+                  });
+
+                  // Connect the end of the current path (`cur`) to the merge node.
+                  let inserter = EdgeInserter::new(
+                      trie3_god,
+                      cur.as_arc().clone(),
+                      IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+                  );
+                  inserter.try_destination(merge_node.clone()).expect("Failed to connect path end to merge node");
               }
 
               final_nodes_map
@@ -25823,50 +25815,59 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! I've analyzed the nondeterminism you're encountering. The root cause appears to be a combination of two factors:
+      Hello! As a helpful assistant, I've analyzed the non-determinism issue you're facing. The root cause appears to be a combination of incorrect logic and reliance on unstable iteration order within the `reduce_gss_stacks_to_trie3_paths_from_start` function in `src/constraint.rs`.
 
-      1.  **Nondeterministic Stack Order:** The `to_stacks()` method on the GSS does not guarantee a deterministic order for the returned stack paths.
-      2.  **Overwriting Logic:** The `reduce_gss_stacks_to_trie3_paths_from_start` function iterates through these stacks and uses a `BTreeMap::insert()` call that overwrites previous results for the same shifted state. When multiple stack histories lead to the same state after a shift, the path that gets stored in the final map depends on which stack was processed last, which is nondeterministic.
+      Here's a breakdown of the problems and the step-by-step guide to fix them:
 
-      Additionally, the logic within `reduce_gss_stacks_to_trie3_paths_from_start` for parsing the stack structure is confusing and appears to be incorrect based on the function's documentation. It incorrectly identifies the "shifted state" and the "pre-shift stack".
+      ### Analysis of the Problem
 
-      I will provide a patch that corrects both issues. The new implementation will:
-      1.  Correctly parse the stack structure, assuming `items[0]` is the new state on top of the stack (post-shift) and `items[1..]` is the stack before the shift.
-      2.  Group all generated trie paths by their corresponding shifted state.
-      3.  Merge the paths for each group into a single, shared trie node, ensuring that the final result is deterministic regardless of the initial stack order.
+      1.  **Incorrect Stack Interpretation**: The function `reduce_gss_stacks_to_trie3_paths_from_start` incorrectly processes the stack paths returned by `to_stacks()`. The comment indicates that `items[0]` is the new state after a shift, and `items[1..]` is the stack before the shift. However, the implementation was using `items.last()` to determine the shifted state, which is incorrect and leads to unpredictable behavior.
+      2.  **Path Overwriting and Non-Determinism**: The function uses a `BTreeMap` (`final_nodes_map`) to store the end node of a trie path for each shifted state. When multiple different pre-shift stacks lead to the same shifted state, the code would simply overwrite the entry in the map. Since the order of stacks from `to_stacks()` is not guaranteed to be stable, which path "wins" becomes non-deterministic. This is the direct cause of the different outputs you're seeing. The correct behavior is to represent all valid pre-shift stacks.
+      3.  **Incorrect Stack Traversal**: The logic for slicing the `pre_shift_stack` was also flawed, causing it to miss elements and build incorrect trie paths.
 
-      Here are the step-by-step instructions to apply the fix.
+      The fix involves correcting the stack processing logic and ensuring that all paths for a given shifted state are preserved and merged correctly, which will also resolve the non-determinism.
 
       ### Step-by-step Instructions
 
-      1.  **Open `src/constraint.rs`**.
-      2.  **Locate the function `reduce_gss_stacks_to_trie3_paths_from_start`**. It starts around line 2000.
-      3.  **Replace the entire body of this function** with the new, corrected implementation below.
+      Here are the edits to apply to `src/constraint.rs`:
 
-      ```rust
-      // src/constraint.rs
+      1.  **In `src/constraint.rs`, locate the function `build_trie3_template_for_terminal`**.
+          -   Find the line `let stacks = s.active_state.stack.inner.to_stacks();`.
+          -   Modify it to sort the stacks. This is a crucial step to ensure deterministic behavior by providing a stable order for processing.
 
+          ```rust
+          // Around line 2011 in src/constraint.rs
+          // Flatten the active GSS into explicit stacks.
+          let mut stacks = s.active_state.stack.inner.to_stacks();
+          stacks.sort();
+          ```
+
+      2.  **In `src/constraint.rs`, locate the function `reduce_gss_stacks_to_trie3_paths_from_start`**.
+          -   This function needs to be almost completely rewritten to correctly interpret the stack and merge paths for the same shifted state.
+          -   Replace the entire body of the function with the corrected version below. The new version correctly identifies the shifted state and pre-shift stack, and it uses the `BTreeMap::entry` API to create a single "merge node" for all paths that result in the same shifted state.
+
+          ```rust
+          // Around line 2033 in src/constraint.rs
           fn reduce_gss_stacks_to_trie3_paths_from_start(
               trie3_god: &IntermediateTrie3GodWrapper,
               stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
           ) -> BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> {
-              // A BTreeMap is used here to ensure deterministic iteration order.
-              let mut grouped_paths: BTreeMap<ParseStateEdgeContent, Vec<IntermediatePrecomputeNode3Index>> = BTreeMap::new();
+              let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
               for (items, acc) in stacks.iter() {
                   if items.is_empty() {
                       continue;
                   }
-                  // Per the function's documentation, items[0] is the new state after the shift.
                   let shifted_state_content = items[0];
-                  // The rest of the items form the stack that existed *before* the shift.
                   let pre_shift_stack = &items[1..];
 
+                  // Create a new head node for this specific path.
                   let mut cur = IntermediatePrecomputeNode3Index::new(
                       trie3_god.insert(IntermediatePrecomputeNode3::new(
                           IntermediatePrecomputedNodeContents3::internal()
                       ))
                   );
+                  // Connect the GSS's `stored_trie_nodes` to this path's head.
                   for src in acc.stored_trie_nodes().iter() {
                       let inserter = EdgeInserter::new(
                           trie3_god,
@@ -25898,74 +25899,72 @@ messages:
                           .expect("Failed to insert Push edge in template chain");
                   }
 
-                  // Group the final node of the generated path by the shifted state.
-                  grouped_paths.entry(shifted_state_content).or_default().push(cur);
-              }
-
-              let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
-              for (shifted_state_content, path_end_nodes) in grouped_paths {
-                  // If multiple paths lead to the same shifted state, merge them into a single node.
-                  if path_end_nodes.len() == 1 {
-                      final_nodes_map.insert(shifted_state_content, path_end_nodes.into_iter().next().unwrap());
-                  } else {
-                      let merged_node = IntermediatePrecomputeNode3Index::new(
+                  // Get or create the single merge node for this shifted state.
+                  let merge_node = final_nodes_map.entry(shifted_state_content).or_insert_with(|| {
+                      IntermediatePrecomputeNode3Index::new(
                           trie3_god.insert(IntermediatePrecomputeNode3::new(
                               IntermediatePrecomputedNodeContents3::internal()
                           ))
-                      );
-                      for node in path_end_nodes {
-                          let inserter = EdgeInserter::new(
-                              trie3_god,
-                              node.as_arc().clone(),
-                              IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                          );
-                          inserter.try_destination(merged_node.clone()).expect("Failed to merge path ends");
-                      }
-                      final_nodes_map.insert(shifted_state_content, merged_node);
-                  }
+                      )
+                  });
+
+                  // Connect the end of the current path (`cur`) to the merge node.
+                  let inserter = EdgeInserter::new(
+                      trie3_god,
+                      cur.as_arc().clone(),
+                      IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+                  );
+                  inserter.try_destination(merge_node.clone()).expect("Failed to connect path end to merge node");
               }
 
               final_nodes_map
           }
-      ```
+          ```
 
-      This change corrects the faulty logic and ensures that the template generation process is deterministic.
+      These changes will ensure that your template generation is both correct (it considers all valid parse paths) and deterministic.
 
       ### Git Diffs
 
-      Here is the change in `git diff` format for you to apply.
+      Here are the changes in `git diff` format for you to apply.
 
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -2008,53 +2008,68 @@
-               stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
+      @@ -2008,7 +2008,9 @@
+               s.process_token_advanced(tid, &cfg);
+       
+               // Flatten the active GSS into explicit stacks.
+      -        let stacks = s.active_state.stack.inner.to_stacks();
+      +        let mut stacks = s.active_state.stack.inner.to_stacks();
+      +        // Sort stacks to ensure deterministic behavior when multiple paths lead to the same shifted state.
+      +        stacks.sort();
+               
+               // This new function will build the paths for the stack *below* the shifted state.
+               let final_nodes_map = Self::reduce_gss_stacks_to_trie3_paths_from_start(trie3_god, &stacks);
+      @@ -2036,12 +2038,21 @@
+           /// trie node that represents the end of the corresponding pre-shift stack path.
+           fn reduce_gss_stacks_to_trie3_paths_from_start(
+               trie3_god: &IntermediateTrie3GodWrapper,
+      -        stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
+      +        stacks: &[(Vec<ParseStateEdgeContent>, Acc)], // This is sorted for determinism.
            ) -> BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> {
                let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
-      +        // A BTreeMap is used here to ensure deterministic iteration order.
-      +        let mut grouped_paths: BTreeMap<ParseStateEdgeContent, Vec<IntermediatePrecomputeNode3Index>> = BTreeMap::new();
        
                for (items, acc) in stacks.iter() {
+      -            let mut cur = IntermediatePrecomputeNode3Index::new(
       +            if items.is_empty() {
       +                continue;
       +            }
-      +            // Per the function's documentation, items[0] is the new state after the shift.
       +            let shifted_state_content = items[0];
-      +            // The rest of the items form the stack that existed *before* the shift.
       +            let pre_shift_stack = &items[1..];
       +
-                   let mut cur = IntermediatePrecomputeNode3Index::new(
+      +            // Create a new head node for this specific path.
+      +            let mut cur = IntermediatePrecomputeNode3Index::new(
                        trie3_god.insert(IntermediatePrecomputeNode3::new(
                            IntermediatePrecomputedNodeContents3::internal()
                        ))
-                   );
-                   for src in acc.stored_trie_nodes().iter() {
-                       let inserter = EdgeInserter::new(
-                           trie3_god,
-                           src.as_arc().clone(),
-                           IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                       );
+      @@ -2054,15 +2065,8 @@
                        inserter.try_destination(cur.clone()).expect("Failed to insert unconditional edge to template head");
                    }
        
@@ -25978,52 +25977,33 @@ messages:
       -            let pre_shift_stack = &items[..items.len() - 1];
       -
                    // Walk the pre-shift stack from top to bottom to build the trie path
-                   for state_content in pre_shift_stack {
+      -            for state_content in pre_shift_stack {
+      +            for state_content in pre_shift_stack {
                        let mut state_bv = StateIDBV::zeros();
                        state_bv.insert(state_content.state_id.0);
                        let inserter = EdgeInserter::new(
-                           trie3_god,
-                           cur.as_arc().clone(),
-                           IntermediateTrie3EdgeKey::Push(state_bv),
-                           (),
-                           |_, _| {},
-                           |_, _| {},
-                           |_, _| {},
-                       );
-                       let next = IntermediatePrecomputeNode3Index::new(
-                           trie3_god.insert(IntermediatePrecomputeNode3::new(
-                               IntermediatePrecomputedNodeContents3::internal()
-                           ))
-                       );
-                       cur = inserter.try_destination(next)
+      @@ -2082,7 +2086,22 @@
                            .expect("Failed to insert Push edge in template chain");
                    }
        
       -            final_nodes_map.insert(shifted_state_content, cur);
-      +            // Group the final node of the generated path by the shifted state.
-      +            grouped_paths.entry(shifted_state_content).or_default().push(cur);
-      +        }
-      +
-      +        for (shifted_state_content, path_end_nodes) in grouped_paths {
-      +            // If multiple paths lead to the same shifted state, merge them into a single node.
-      +            if path_end_nodes.len() == 1 {
-      +                final_nodes_map.insert(shifted_state_content, path_end_nodes.into_iter().next().unwrap());
-      +            } else {
-      +                let merged_node = IntermediatePrecomputeNode3Index::new(
+      +            // Get or create the single merge node for this shifted state. All paths
+      +            // that result in the same `shifted_state_content` will converge here.
+      +            let merge_node = final_nodes_map.entry(shifted_state_content).or_insert_with(|| {
+      +                IntermediatePrecomputeNode3Index::new(
       +                    trie3_god.insert(IntermediatePrecomputeNode3::new(
       +                        IntermediatePrecomputedNodeContents3::internal()
       +                    ))
-      +                );
-      +                for node in path_end_nodes {
-      +                    let inserter = EdgeInserter::new(
-      +                        trie3_god,
-      +                        node.as_arc().clone(),
-      +                        IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-      +                    );
-      +                    inserter.try_destination(merged_node.clone()).expect("Failed to merge path ends");
-      +                }
-      +                final_nodes_map.insert(shifted_state_content, merged_node);
-      +            }
+      +                )
+      +            });
+      +
+      +            // Connect the end of the current path (`cur`) to the merge node.
+      +            let inserter = EdgeInserter::new(
+      +                trie3_god,
+      +                cur.as_arc().clone(),
+      +                IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+      +            );
+      +            inserter.try_destination(merge_node.clone()).expect("Failed to connect path end to merge node");
                }
        
                final_nodes_map
@@ -26039,7 +26019,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Ensure deterministic template generation
-      by grouping and merging GSS stack paths"'
+  - user: 'Changes committed with message: "Fix: Ensure deterministic trie template
+      generation by sorting GSS stacks and correcting stack reduction logic in build_trie3_template_for_terminal"'
     metadata:
 ...
