@@ -77,12 +77,10 @@ run_test() {
     fi
 
     # --- MODIFIED SECTION ---
-    # This is the robust parsing logic.
-    # 1. Find the "get_mask() Timings" block.
-    # 2. From that block, find the "rust_model" line.
-    # 3. Extract the 3rd column (the mismatch count).
+    # Use -e to specify the pattern, preventing grep from interpreting
+    # the leading '---' as an option.
     local mismatch_count
-    mismatch_count=$(grep -A 5 '--- get_mask() Timings ---' "$log_file" | grep '^[[:space:]]*rust_model' | awk '{print $3}')
+    mismatch_count=$(grep -A 5 -e '--- get_mask() Timings ---' "$log_file" | grep '^[[:space:]]*rust_model' | awk '{print $3}')
     # --- END MODIFIED SECTION ---
 
     # Robustly check the result
