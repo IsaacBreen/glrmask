@@ -63,7 +63,7 @@ fn get_default_config_impl() -> CoordinatorConfig {
         merge_structural_max_iters: 4,
         merge_bisimulation: false,
         merge_bisimulation_max_iters: 1000,
-        merge_global_atoms: false,
+        merge_global_atoms: true,
         merge_global_atoms_max_iters: 2,
         merge_global_atoms_max_atoms_per_pop: 4096,
         eliminate_pop0_except_roots: false,
