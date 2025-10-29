@@ -357,6 +357,7 @@ class Model(GraphProvider):
     internal_to_original_map: Dict[int, RangeSetOut]
     all_internal_llm_tokens_bitset: LLMTokenSet
     all_terminals_bitset: TerminalIdSet
+    original_to_dummy_map: Dict[int, int]
     ignore_terminal_id: Optional[int]
 
     # State
@@ -541,6 +542,9 @@ class Model(GraphProvider):
             pmc_rs[int(tsid)] = mapped
         possible_matches_cache = pmc_rs
 
+        original_to_dummy_map_json = data.get('original_to_dummy_map', [])
+        original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
+
         initial_acc = PyAcc(terminals_union={}, llm_mask=all_internal_llm_tokens_bitset)
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
         state = {tokenizer_initial_state: initial_gss}
@@ -560,6 +564,7 @@ class Model(GraphProvider):
             internal_to_original_map=internal_to_original_map,
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             all_terminals_bitset=all_terminals_bitset,
+            original_to_dummy_map=original_to_dummy_map,
             ignore_terminal_id=ignore_terminal_id,
             state=state,
         )
@@ -668,7 +673,12 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
-                processed_gss = self._process_token(gss, terminal_id)
+                processed_gss = gss
+                dummy_id = self.original_to_dummy_map.get(terminal_id)
+                if dummy_id is not None:
+                    processed_gss = self._process_token(processed_gss, dummy_id)
+                processed_gss = self._process_token(processed_gss, terminal_id)
+
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))

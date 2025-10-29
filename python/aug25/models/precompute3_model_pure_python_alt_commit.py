@@ -47,6 +47,7 @@ class Model(_Model):
     terminal_map_by_llm: Dict[int, Dict[int, TerminalIdSet]] = field(default_factory=dict)
     state_map_by_llm: Dict[int, Dict[int, int]] = field(default_factory=dict)
     original_to_internal_map0: Dict[int, int] = field(default_factory=dict)
+    original_to_dummy_map: Dict[int, int] = field(default_factory=dict)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -119,6 +120,9 @@ class Model(_Model):
             for original in original_list:
                 original_to_internal_map0[original] = int(internal)
 
+        original_to_dummy_map_json = data.get('original_to_dummy_map', [])
+        original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
+
         # Construct the final model using all fields from the base model plus the new ones
         return Model(
             **base_model.__dict__,
@@ -126,7 +130,8 @@ class Model(_Model):
             roots_map0=roots_map0,
             terminal_map_by_llm=terminal_map_by_llm,
             state_map_by_llm=state_map_by_llm,
-            original_to_internal_map0=original_to_internal_map0
+            original_to_internal_map0=original_to_internal_map0,
+            original_to_dummy_map=original_to_dummy_map,
         )
 
     def copy(self):
@@ -218,8 +223,11 @@ class Model(_Model):
                     if edge_key is not None:
                         gtid, disallow_opt = edge_key
                         # print(f"Processing edge with gtid {gtid}, GSS {gss}")
-                        processed_gss = self._process_token(gss, gtid)
-                        # print(f"Processing edge with gtid {gtid}, disallow {disallow_opt}, resulting GSS: {processed_gss}")
+                        dummy_id = self.original_to_dummy_map.get(gtid)
+                        if dummy_id is not None:
+                            processed_gss = self._process_token(processed_gss, dummy_id)
+                        processed_gss = self._process_token(processed_gss, gtid)
+
 
                         if disallow_opt is not None and not processed_gss.is_empty():
                             end_state = disallow_opt

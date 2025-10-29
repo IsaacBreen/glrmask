@@ -170,6 +170,7 @@ class Model(GraphProvider):
     internal_to_original_map: Dict[int, Set[int]]
     all_internal_llm_tokens_bitset: LLMTokenSet
     all_terminals_bitset: TerminalIdSet
+    original_to_dummy_map: Dict[int, int]
     ignore_terminal_id: Optional[int]
 
     # State
@@ -316,6 +317,9 @@ class Model(GraphProvider):
             all_internal = constraint.all_internal_llm_tokens_bitset()
             all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
+        original_to_dummy_map_json = data.get('original_to_dummy_map', [])
+        original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
+
         model = Model(
             arena=arena,
             roots_map=roots_map,
@@ -331,6 +335,7 @@ class Model(GraphProvider):
             internal_to_original_map=internal_to_original_map,
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             all_terminals_bitset=all_terminals_bitset,
+            original_to_dummy_map=original_to_dummy_map,
             ignore_terminal_id=ignore_terminal_id,
             state=state,
         )
@@ -446,7 +451,12 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
-                processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
+                processed_gss = gss
+                if terminal_id != self.ignore_terminal_id:
+                    dummy_id = self.original_to_dummy_map.get(terminal_id)
+                    if dummy_id is not None:
+                        processed_gss = self._process_token(processed_gss, dummy_id)
+                    processed_gss = self._process_token(processed_gss, terminal_id)
 
                 # Immediate re-match disallow
                 if end_state is not None:
