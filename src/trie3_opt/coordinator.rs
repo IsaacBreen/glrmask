@@ -80,7 +80,7 @@ impl Default for CoordinatorConfig {
             factor_common_destinations_min_incoming: 12,
             factor_root_fanout: true,
             factor_root_fanout_max_atoms_per_pop: 512,
-            merge_structural_max_iters: 4,
+            merge_structural_max_iters: 0,
             merge_bisimulation_max_iters: 1000,
             merge_global_atoms: true,
             merge_global_atoms_max_iters: 2,
