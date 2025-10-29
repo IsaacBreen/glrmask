@@ -1125,7 +1125,7 @@ impl GrammarConstraint {
         let templates = Self::build_terminal_trie3_templates(parser, &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
 
         // Group terminals by the similarity of their template trie's features.
-        const SIMILARITY_THRESHOLD: f64 = 0.5;
+        const SIMILARITY_THRESHOLD: f64 = 0.7;
 
         let mut template_features = BTreeMap::new();
         for (tid, (start, _end)) in &templates {
