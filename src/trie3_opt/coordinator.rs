@@ -64,7 +64,7 @@ impl Default for CoordinatorConfig {
             prune_dead_paths: true,
             prune_unproductive_paths: true,
             canonicalize_end_nodes: false,
-            compress_edges: false,
+            compress_edges: true,
             compress_unary_chains: false,
             factor_state_fanout: false,
             factor_state_dest_sets: false,
