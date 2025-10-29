@@ -160,6 +160,7 @@ class BruteForceModel(GraphProvider):
     ignore_terminal_id: Optional[int]
     state: Dict[int, GSS]
     mode: str
+    original_to_dummy_map: Dict[int, int]
     internal_to_representative_original: Optional[Dict[int, int]] = None
 
     @staticmethod
@@ -198,6 +199,9 @@ class BruteForceModel(GraphProvider):
         id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         internal_to_original_map = {int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()}
 
+        original_to_dummy_map_json = data.get('original_to_dummy_map', [])
+        original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
+
         # Build representative map for internal mode
         internal_to_rep = None
         if mode == 'internal':
@@ -234,6 +238,7 @@ class BruteForceModel(GraphProvider):
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
             state={tokenizer.initial_state_id(): initial_gss},
             mode=mode,
+            original_to_dummy_map=original_to_dummy_map,
             internal_to_representative_original=internal_to_rep,
         )
 
@@ -256,6 +261,7 @@ class BruteForceModel(GraphProvider):
             ignore_terminal_id=self.ignore_terminal_id,
             state=self.make_initial_state(),
             mode=self.mode,
+            original_to_dummy_map=self.original_to_dummy_map,
             internal_to_representative_original=self.internal_to_representative_original,
         )
 
@@ -302,7 +308,12 @@ class BruteForceModel(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
 
             for term_id, width in matches:
-                proc_gss = self._process_token(gss, term_id)
+                proc_gss = gss
+                dummy_id = self.original_to_dummy_map.get(term_id)
+                if dummy_id is not None:
+                    proc_gss = self._process_token(proc_gss, dummy_id)
+                proc_gss = self._process_token(proc_gss, term_id)
+
                 if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
                     proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
                 if not proc_gss.is_empty():

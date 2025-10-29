@@ -24,7 +24,8 @@ local_system:
     - python/aug25/models/precompute3_model_pure_python_with_stats.py
     - python/aug25/models/precompute3_model_pure_python.py
     - python/aug25/models/precompute3_model.py
-  conversation_file:
+    - python/aug25/models/bruteforce_model.py
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_cpp.py: |
@@ -25280,6 +25281,425 @@ local_system:
               if self.debug_logging:
                   print("original mask:", x)
               return x
+    python/aug25/models/bruteforce_model.py: |-
+      from __future__ import annotations
+
+      import collections
+      import json
+      from dataclasses import dataclass, field
+      from typing import Dict, List, Tuple, Optional, Union, Set
+
+      import _sep1 as ffi
+      from tqdm import tqdm
+
+      from python.gss_tester.implementations.leveled_rs_impl import LeveledRSGSS as GSS
+      from ..common_interface import GraphProvider
+      from ..stats import Stats
+      from ..range_set import FFIRangeSet as RangeSet
+      from ..range_set import SetRangeSet as RangeSetOut
+      from ..range_set import SetRangeSet as RangeSetStates
+
+      # Type Aliases
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
+      TerminalIdSet = RangeSet
+
+      def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
+          """
+          Per-invocation memoization for PyAcc transformers.
+          - Caches by id(acc) (including None results).
+          - Caches by value (acc) for non-None results, if use_value_cache is True.
+          If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
+          Exposes _acc_memo_size() to inspect id-cache size for stats.
+          """
+          def decorator(fn):
+              id_memo = {}
+              val_memo = {}
+              def wrapper(acc):
+                  # Identity-based fast path
+                  if id(acc) in id_memo:
+                      if stats_prefix:
+                          Stats.get().inc(f'{stats_prefix}.memo_hits')
+                      return id_memo[id(acc)]
+
+                  if use_value_cache:
+                      # Structural equality-based cache (only non-None results are useful here)
+                      cached = val_memo.get(acc)
+                      if cached is not None:
+                          id_memo[id(acc)] = cached
+                          if stats_prefix:
+                              Stats.get().inc(f'{stats_prefix}.memo_hits')
+                          return cached
+                  result = fn(acc)
+                  id_memo[id(acc)] = result
+                  if use_value_cache:
+                      val_memo[acc] = result
+                  return result
+              wrapper._acc_memo_size = lambda: len(id_memo)
+              return wrapper
+          return decorator
+
+      @dataclass(frozen=True)
+      class DFAState:
+          transitions: Dict[int, int]
+          finalizers: Set[int]
+          possible_future_group_ids: Set[int]
+
+
+      @dataclass(frozen=True)
+      class PyTokenizer:
+          states: List[DFAState]
+          start_state: int
+          non_greedy_finalizers: Set[int]
+
+          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+              current_state = state_id
+              matches = {}
+              done = False
+
+              # Check for initial matches (epsilon)
+              for group_id in self.states[current_state].finalizers:
+                  if group_id in self.non_greedy_finalizers:
+                      matches.setdefault(group_id, 0)
+                  else:
+                      matches[group_id] = 0
+
+              for i, byte in enumerate(text):
+                  state_data = self.states[current_state]
+                  next_state = state_data.transitions.get(byte)
+
+                  if next_state is None:
+                      done = True
+                      break
+
+                  current_state = next_state
+                  for group_id in self.states[current_state].finalizers:
+                      if group_id in self.non_greedy_finalizers:
+                          matches.setdefault(group_id, i + 1)
+                      else:
+                          matches[group_id] = i + 1
+
+              end_state = None if done else current_state
+              return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
+
+          def initial_state_id(self) -> int:
+              return self.start_state
+
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
+
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]]
+
+      Action = Union[int, Reduce, Split]
+
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict)
+          gotos: Dict[int, int] = field(default_factory=dict)
+
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
+
+      @dataclass(frozen=True, eq=False)
+      class PyAcc:
+          terminals_union: Dict[int, TerminalIdSet]
+          llm_mask: LLMTokenSet
+
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+
+          def __hash__(self):
+              return hash((len(self.terminals_union), self.llm_mask))
+
+          def merge(self, other: "PyAcc") -> "PyAcc":
+              new_terminals_union = self.terminals_union.copy()
+              for k, v in other.terminals_union.items():
+                  if k in new_terminals_union:
+                      new_terminals_union[k] = new_terminals_union[k].union(v)
+                  else:
+                      new_terminals_union[k] = v
+              return PyAcc(
+                  terminals_union=new_terminals_union,
+                  llm_mask=self.llm_mask.union(other.llm_mask),
+              )
+
+      @dataclass
+      class BruteForceModel(GraphProvider):
+          parser_table: ParserTable
+          tokenizer: PyTokenizer
+          tokenizer_initial_state: int
+          id_to_token: Dict[int, bytes]
+          internal_to_original_map: Dict[int, RangeSetOut]
+          all_internal_llm_tokens_bitset: LLMTokenSet
+          ignore_terminal_id: Optional[int]
+          state: Dict[int, GSS]
+          mode: str
+          internal_to_representative_original: Optional[Dict[int, int]] = None
+
+          @staticmethod
+          def from_json_string(s: str, mode: str = 'original') -> 'BruteForceModel':
+              Stats.get().reset()
+              data = json.loads(s)
+
+              if mode not in ['internal', 'original']:
+                  raise ValueError(f"Mode must be 'internal' or 'original', got {mode}")
+
+              # Tokenizer
+              dfa_data = data['tokenizer']['dfa']
+              dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
+              tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+
+              # Parser Table
+              parser_data = data['parser']
+              py_table: Dict[int, Row] = {}
+              for state_id_str, row_data in parser_data['stage_7_table']:
+                  state_id, py_row = int(state_id_str), Row()
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id, variant = int(term_id_str), action_data['variant']
+                      if variant == 'Shift': py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce': py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                      elif variant == 'Split':
+                          reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
+                          py_row.actions[term_id] = Split(action_data['shift'], reduces)
+                  py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+                  py_table[state_id] = py_row
+              parser_table = ParserTable(parser_data['start_state_id'], py_table)
+
+              # Misc data
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              vocab = data['precompute3_vocab']
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
+              id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              internal_to_original_map = {int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()}
+
+              # Build representative map for internal mode
+              internal_to_rep = None
+              if mode == 'internal':
+                  internal_to_rep = {}
+                  print("Building internal-to-representative token map...")
+                  for internal_id, original_ids_rs in tqdm(internal_to_original_map.items()):
+                      best_orig_id = -1
+                      min_len = float('inf')
+                      for orig_id in original_ids_rs.iter_indices():
+                          token_len = len(id_to_token.get(orig_id, b''))
+                          if token_len < min_len:
+                              min_len = token_len
+                              best_orig_id = orig_id
+                      if best_orig_id != -1:
+                          internal_to_rep[internal_id] = best_orig_id
+
+              # Initial state
+              initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+
+              if len(id_to_token) < 300:
+                  print("Vocab:")
+                  for i, token in id_to_token.items():
+                      print(f"{i}: {token}")
+                  print()
+
+              return BruteForceModel(
+                  parser_table=parser_table,
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer.initial_state_id(),
+                  id_to_token=id_to_token,
+                  internal_to_original_map=internal_to_original_map,
+                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
+                  state={tokenizer.initial_state_id(): initial_gss},
+                  mode=mode,
+                  internal_to_representative_original=internal_to_rep,
+              )
+
+          def make_initial_state(self) -> Dict[int, GSS]:
+              initial_acc = PyAcc({}, self.all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
+              return {self.tokenizer_initial_state: initial_gss}
+
+          def reset_state(self) -> None:
+              self.state = self.make_initial_state()
+
+          def clone_sharing_structure(self) -> "BruteForceModel":
+              return BruteForceModel(
+                  parser_table=self.parser_table,
+                  tokenizer=self.tokenizer,
+                  tokenizer_initial_state=self.tokenizer_initial_state,
+                  id_to_token=self.id_to_token,
+                  internal_to_original_map=self.internal_to_original_map,
+                  all_internal_llm_tokens_bitset=self.all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=self.ignore_terminal_id,
+                  state=self.make_initial_state(),
+                  mode=self.mode,
+                  internal_to_representative_original=self.internal_to_representative_original,
+              )
+
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id): return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def _commit_on_state(self, state: Dict[int, GSS], token_id: int) -> Dict[int, GSS]:
+              token_bytes = self.id_to_token[token_id]
+
+              terminals_map, state_map = {}, {}
+              for tsid in state:
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
+                  if end_state is not None: state_map[tsid] = end_state
+                  terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
+
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  for tsid, matched in terminals_map.items():
+                      if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched): return None
+                  new_bvs = collections.defaultdict(RangeSet.empty)
+                  for old, new in state_map.items():
+                      if old in acc.terminals_union: new_bvs[new] |= acc.terminals_union[old]
+                  return PyAcc(dict(new_bvs), acc.llm_mask)
+
+              cache = {}
+              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in state.items()}
+              current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
+
+              new_states = collections.defaultdict(list)
+              work = {(0, tsid): gss for tsid, gss in current.items()}
+              q = collections.deque(work.keys())
+
+              while q:
+                  offset, tsid = q.popleft()
+                  gss = work.pop((offset, tsid))
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
+
+                  for term_id, width in matches:
+                      proc_gss = self._process_token(gss, term_id)
+                      if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
+                          proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
+                      if not proc_gss.is_empty():
+                          new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
+                          if new_offset == len(token_bytes): new_states[next_tsid].append(proc_gss)
+                          else:
+                              key = (new_offset, next_tsid)
+                              if key in work: work[key] = work[key].merge(proc_gss)
+                              else:
+                                  work[key] = proc_gss
+                                  q.append(key)
+                  if end_state is not None: new_states[end_state].append(gss)
+
+              merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
+              merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
+
+              if not merged:
+                  return merged
+
+              # Check if any of the resulting states can lead to a valid parse state.
+              # We only need one valid path forward from one of the states.
+              if 0 in merged:
+                  return merged
+              for tsid, gss in merged.items():
+                  possible_terminals = self.tokenizer.states[tsid].possible_future_group_ids
+                  for terminal_id in possible_terminals:
+                      if not self._process_token(gss, terminal_id).is_empty():
+                          # Found a viable path, so the state after commit is valid.
+                          return merged
+
+              # No viable path found from any of the resulting states. This token leads to a dead end.
+              return {}
+
+          def commit(self, token_id: int):
+              self.state = self._commit_on_state(self.state, token_id)
+
+          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+              if self.ignore_terminal_id == terminal_id:
+                  return gss
+
+              heads_by_state = collections.defaultdict(list)
+              for state_id in gss.peek(): heads_by_state[state_id].append(gss.isolate(state_id))
+
+              shifted = []
+              while heads_by_state:
+                  state_id, gss_list = heads_by_state.popitem()
+                  state_gss = GSS.merge_many(gss_list)
+                  row = self.parser_table.table.get(state_id)
+                  if not row: continue
+                  action = row.actions.get(terminal_id)
+                  if action is None: continue
+
+                  if isinstance(action, int):
+                      shifted.append(state_gss.push(action))
+                  elif isinstance(action, Reduce):
+                      popped = state_gss.popn(action.len)
+                      for from_id in popped.peek():
+                          goto_id = self.parser_table.table[from_id].gotos.get(action.nonterminal_id)
+                          heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+                  elif isinstance(action, Split):
+                      if action.shift is not None:
+                          shifted.append(state_gss.push(action.shift))
+                      for length, nts in action.reduces.items():
+                          popped = state_gss.popn(length)
+                          for nt_id in nts:
+                              for from_id in popped.peek():
+                                  goto_id = self.parser_table.table[from_id].gotos[nt_id]
+                                  heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+
+              return GSS.merge_many(shifted)
+
+          def get_mask(self) -> RangeSetOut:
+              print(f"States: {list(self.state.keys())}")
+              stats = Stats.get()
+              stats.start('get_mask')
+              
+              allowed_mask = RangeSetOut.empty()
+
+              if self.mode == 'internal':
+                  if self.internal_to_representative_original is None:
+                      raise RuntimeError("Model not initialized for 'internal' mode.")
+                  
+                  iterable = self.internal_to_representative_original.items()
+                  for internal_id, rep_orig_id in tqdm(iterable, desc="get_mask (internal)"):
+                      if rep_orig_id in self.id_to_token:
+                          new_state = self._commit_on_state(self.state, rep_orig_id)
+                          if new_state:
+                              allowed_mask |= self.internal_to_original_map[internal_id]
+
+              elif self.mode == 'original':
+                  iterable = self.id_to_token.keys()
+                  for original_id in tqdm(iterable, desc="get_mask (original)"):
+                      new_state = self._commit_on_state(self.state, original_id)
+                      if new_state:
+                          allowed_mask.add(original_id)
+              else:
+                  raise ValueError(f"Unknown mode: {self.mode}")
+
+              stats.stop('get_mask')
+              return allowed_mask
+
+          def get_last_get_mask_cost(self) -> int:
+              return 0
+
+          def get_last_get_mask_metrics(self) -> Dict[str, float]:
+              return {}
+
+          def finalize(self):
+              print("\n--- Final Stats Report from BruteForceModel ---")
+              Stats.get().report()
+
+
+      Model = BruteForceModel
   prev_file_contents:
     python/aug25/models/precompute3_model_cpp.py: |
       from __future__ import annotations
@@ -50612,6 +51032,436 @@ local_system:
               if self.debug_logging:
                   print("original mask:", x)
               return x
+    python/aug25/models/bruteforce_model.py: |-
+      from __future__ import annotations
+
+      import collections
+      import json
+      from dataclasses import dataclass, field
+      from typing import Dict, List, Tuple, Optional, Union, Set
+
+      import _sep1 as ffi
+      from tqdm import tqdm
+
+      from python.gss_tester.implementations.leveled_rs_impl import LeveledRSGSS as GSS
+      from ..common_interface import GraphProvider
+      from ..stats import Stats
+      from ..range_set import FFIRangeSet as RangeSet
+      from ..range_set import SetRangeSet as RangeSetOut
+      from ..range_set import SetRangeSet as RangeSetStates
+
+      # Type Aliases
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
+      TerminalIdSet = RangeSet
+
+      def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
+          """
+          Per-invocation memoization for PyAcc transformers.
+          - Caches by id(acc) (including None results).
+          - Caches by value (acc) for non-None results, if use_value_cache is True.
+          If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
+          Exposes _acc_memo_size() to inspect id-cache size for stats.
+          """
+          def decorator(fn):
+              id_memo = {}
+              val_memo = {}
+              def wrapper(acc):
+                  # Identity-based fast path
+                  if id(acc) in id_memo:
+                      if stats_prefix:
+                          Stats.get().inc(f'{stats_prefix}.memo_hits')
+                      return id_memo[id(acc)]
+
+                  if use_value_cache:
+                      # Structural equality-based cache (only non-None results are useful here)
+                      cached = val_memo.get(acc)
+                      if cached is not None:
+                          id_memo[id(acc)] = cached
+                          if stats_prefix:
+                              Stats.get().inc(f'{stats_prefix}.memo_hits')
+                          return cached
+                  result = fn(acc)
+                  id_memo[id(acc)] = result
+                  if use_value_cache:
+                      val_memo[acc] = result
+                  return result
+              wrapper._acc_memo_size = lambda: len(id_memo)
+              return wrapper
+          return decorator
+
+      @dataclass(frozen=True)
+      class DFAState:
+          transitions: Dict[int, int]
+          finalizers: Set[int]
+          possible_future_group_ids: Set[int]
+
+
+      @dataclass(frozen=True)
+      class PyTokenizer:
+          states: List[DFAState]
+          start_state: int
+          non_greedy_finalizers: Set[int]
+
+          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+              current_state = state_id
+              matches = {}
+              done = False
+
+              # Check for initial matches (epsilon)
+              for group_id in self.states[current_state].finalizers:
+                  if group_id in self.non_greedy_finalizers:
+                      matches.setdefault(group_id, 0)
+                  else:
+                      matches[group_id] = 0
+
+              for i, byte in enumerate(text):
+                  state_data = self.states[current_state]
+                  next_state = state_data.transitions.get(byte)
+
+                  if next_state is None:
+                      done = True
+                      break
+
+                  current_state = next_state
+                  for group_id in self.states[current_state].finalizers:
+                      if group_id in self.non_greedy_finalizers:
+                          matches.setdefault(group_id, i + 1)
+                      else:
+                          matches[group_id] = i + 1
+
+              end_state = None if done else current_state
+              return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
+
+          def initial_state_id(self) -> int:
+              return self.start_state
+
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
+
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]]
+
+      Action = Union[int, Reduce, Split]
+
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict)
+          gotos: Dict[int, int] = field(default_factory=dict)
+
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
+
+      @dataclass(frozen=True, eq=False)
+      class PyAcc:
+          terminals_union: Dict[int, TerminalIdSet]
+          llm_mask: LLMTokenSet
+
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+
+          def __hash__(self):
+              return hash((len(self.terminals_union), self.llm_mask))
+
+          def merge(self, other: "PyAcc") -> "PyAcc":
+              new_terminals_union = self.terminals_union.copy()
+              for k, v in other.terminals_union.items():
+                  if k in new_terminals_union:
+                      new_terminals_union[k] = new_terminals_union[k].union(v)
+                  else:
+                      new_terminals_union[k] = v
+              return PyAcc(
+                  terminals_union=new_terminals_union,
+                  llm_mask=self.llm_mask.union(other.llm_mask),
+              )
+
+      @dataclass
+      class BruteForceModel(GraphProvider):
+          parser_table: ParserTable
+          tokenizer: PyTokenizer
+          tokenizer_initial_state: int
+          id_to_token: Dict[int, bytes]
+          internal_to_original_map: Dict[int, RangeSetOut]
+          all_internal_llm_tokens_bitset: LLMTokenSet
+          ignore_terminal_id: Optional[int]
+          state: Dict[int, GSS]
+          mode: str
+          original_to_dummy_map: Dict[int, int]
+          internal_to_representative_original: Optional[Dict[int, int]] = None
+
+          @staticmethod
+          def from_json_string(s: str, mode: str = 'original') -> 'BruteForceModel':
+              Stats.get().reset()
+              data = json.loads(s)
+
+              if mode not in ['internal', 'original']:
+                  raise ValueError(f"Mode must be 'internal' or 'original', got {mode}")
+
+              # Tokenizer
+              dfa_data = data['tokenizer']['dfa']
+              dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
+              tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+
+              # Parser Table
+              parser_data = data['parser']
+              py_table: Dict[int, Row] = {}
+              for state_id_str, row_data in parser_data['stage_7_table']:
+                  state_id, py_row = int(state_id_str), Row()
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id, variant = int(term_id_str), action_data['variant']
+                      if variant == 'Shift': py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce': py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                      elif variant == 'Split':
+                          reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
+                          py_row.actions[term_id] = Split(action_data['shift'], reduces)
+                  py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+                  py_table[state_id] = py_row
+              parser_table = ParserTable(parser_data['start_state_id'], py_table)
+
+              # Misc data
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              vocab = data['precompute3_vocab']
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
+              id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              internal_to_original_map = {int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()}
+
+              original_to_dummy_map_json = data.get('original_to_dummy_map', [])
+              original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
+
+              # Build representative map for internal mode
+              internal_to_rep = None
+              if mode == 'internal':
+                  internal_to_rep = {}
+                  print("Building internal-to-representative token map...")
+                  for internal_id, original_ids_rs in tqdm(internal_to_original_map.items()):
+                      best_orig_id = -1
+                      min_len = float('inf')
+                      for orig_id in original_ids_rs.iter_indices():
+                          token_len = len(id_to_token.get(orig_id, b''))
+                          if token_len < min_len:
+                              min_len = token_len
+                              best_orig_id = orig_id
+                      if best_orig_id != -1:
+                          internal_to_rep[internal_id] = best_orig_id
+
+              # Initial state
+              initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+
+              if len(id_to_token) < 300:
+                  print("Vocab:")
+                  for i, token in id_to_token.items():
+                      print(f"{i}: {token}")
+                  print()
+
+              return BruteForceModel(
+                  parser_table=parser_table,
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer.initial_state_id(),
+                  id_to_token=id_to_token,
+                  internal_to_original_map=internal_to_original_map,
+                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
+                  state={tokenizer.initial_state_id(): initial_gss},
+                  mode=mode,
+                  original_to_dummy_map=original_to_dummy_map,
+                  internal_to_representative_original=internal_to_rep,
+              )
+
+          def make_initial_state(self) -> Dict[int, GSS]:
+              initial_acc = PyAcc({}, self.all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
+              return {self.tokenizer_initial_state: initial_gss}
+
+          def reset_state(self) -> None:
+              self.state = self.make_initial_state()
+
+          def clone_sharing_structure(self) -> "BruteForceModel":
+              return BruteForceModel(
+                  parser_table=self.parser_table,
+                  tokenizer=self.tokenizer,
+                  tokenizer_initial_state=self.tokenizer_initial_state,
+                  id_to_token=self.id_to_token,
+                  internal_to_original_map=self.internal_to_original_map,
+                  all_internal_llm_tokens_bitset=self.all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=self.ignore_terminal_id,
+                  state=self.make_initial_state(),
+                  mode=self.mode,
+                  original_to_dummy_map=self.original_to_dummy_map,
+                  internal_to_representative_original=self.internal_to_representative_original,
+              )
+
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id): return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def _commit_on_state(self, state: Dict[int, GSS], token_id: int) -> Dict[int, GSS]:
+              token_bytes = self.id_to_token[token_id]
+
+              terminals_map, state_map = {}, {}
+              for tsid in state:
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
+                  if end_state is not None: state_map[tsid] = end_state
+                  terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
+
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  for tsid, matched in terminals_map.items():
+                      if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched): return None
+                  new_bvs = collections.defaultdict(RangeSet.empty)
+                  for old, new in state_map.items():
+                      if old in acc.terminals_union: new_bvs[new] |= acc.terminals_union[old]
+                  return PyAcc(dict(new_bvs), acc.llm_mask)
+
+              cache = {}
+              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in state.items()}
+              current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
+
+              new_states = collections.defaultdict(list)
+              work = {(0, tsid): gss for tsid, gss in current.items()}
+              q = collections.deque(work.keys())
+
+              while q:
+                  offset, tsid = q.popleft()
+                  gss = work.pop((offset, tsid))
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
+
+                  for term_id, width in matches:
+                      proc_gss = gss
+                      dummy_id = self.original_to_dummy_map.get(term_id)
+                      if dummy_id is not None:
+                          proc_gss = self._process_token(proc_gss, dummy_id)
+                      proc_gss = self._process_token(proc_gss, term_id)
+
+                      if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
+                          proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
+                      if not proc_gss.is_empty():
+                          new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
+                          if new_offset == len(token_bytes): new_states[next_tsid].append(proc_gss)
+                          else:
+                              key = (new_offset, next_tsid)
+                              if key in work: work[key] = work[key].merge(proc_gss)
+                              else:
+                                  work[key] = proc_gss
+                                  q.append(key)
+                  if end_state is not None: new_states[end_state].append(gss)
+
+              merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
+              merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
+
+              if not merged:
+                  return merged
+
+              # Check if any of the resulting states can lead to a valid parse state.
+              # We only need one valid path forward from one of the states.
+              if 0 in merged:
+                  return merged
+              for tsid, gss in merged.items():
+                  possible_terminals = self.tokenizer.states[tsid].possible_future_group_ids
+                  for terminal_id in possible_terminals:
+                      if not self._process_token(gss, terminal_id).is_empty():
+                          # Found a viable path, so the state after commit is valid.
+                          return merged
+
+              # No viable path found from any of the resulting states. This token leads to a dead end.
+              return {}
+
+          def commit(self, token_id: int):
+              self.state = self._commit_on_state(self.state, token_id)
+
+          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+              if self.ignore_terminal_id == terminal_id:
+                  return gss
+
+              heads_by_state = collections.defaultdict(list)
+              for state_id in gss.peek(): heads_by_state[state_id].append(gss.isolate(state_id))
+
+              shifted = []
+              while heads_by_state:
+                  state_id, gss_list = heads_by_state.popitem()
+                  state_gss = GSS.merge_many(gss_list)
+                  row = self.parser_table.table.get(state_id)
+                  if not row: continue
+                  action = row.actions.get(terminal_id)
+                  if action is None: continue
+
+                  if isinstance(action, int):
+                      shifted.append(state_gss.push(action))
+                  elif isinstance(action, Reduce):
+                      popped = state_gss.popn(action.len)
+                      for from_id in popped.peek():
+                          goto_id = self.parser_table.table[from_id].gotos.get(action.nonterminal_id)
+                          heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+                  elif isinstance(action, Split):
+                      if action.shift is not None:
+                          shifted.append(state_gss.push(action.shift))
+                      for length, nts in action.reduces.items():
+                          popped = state_gss.popn(length)
+                          for nt_id in nts:
+                              for from_id in popped.peek():
+                                  goto_id = self.parser_table.table[from_id].gotos[nt_id]
+                                  heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+
+              return GSS.merge_many(shifted)
+
+          def get_mask(self) -> RangeSetOut:
+              print(f"States: {list(self.state.keys())}")
+              stats = Stats.get()
+              stats.start('get_mask')
+              
+              allowed_mask = RangeSetOut.empty()
+
+              if self.mode == 'internal':
+                  if self.internal_to_representative_original is None:
+                      raise RuntimeError("Model not initialized for 'internal' mode.")
+                  
+                  iterable = self.internal_to_representative_original.items()
+                  for internal_id, rep_orig_id in tqdm(iterable, desc="get_mask (internal)"):
+                      if rep_orig_id in self.id_to_token:
+                          new_state = self._commit_on_state(self.state, rep_orig_id)
+                          if new_state:
+                              allowed_mask |= self.internal_to_original_map[internal_id]
+
+              elif self.mode == 'original':
+                  iterable = self.id_to_token.keys()
+                  for original_id in tqdm(iterable, desc="get_mask (original)"):
+                      new_state = self._commit_on_state(self.state, original_id)
+                      if new_state:
+                          allowed_mask.add(original_id)
+              else:
+                  raise ValueError(f"Unknown mode: {self.mode}")
+
+              stats.stop('get_mask')
+              return allowed_mask
+
+          def get_last_get_mask_cost(self) -> int:
+              return 0
+
+          def get_last_get_mask_metrics(self) -> Dict[str, float]:
+              return {}
+
+          def finalize(self):
+              print("\n--- Final Stats Report from BruteForceModel ---")
+              Stats.get().report()
+
+
+      Model = BruteForceModel
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -76824,7 +77674,661 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Add support for dummy tokens in Model
-      by processing them before the actual terminal ID during commit."'
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_cpp.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_2_2.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_2.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_alt_commit.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_get_mask_only_old_with_profiling.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_get_mask_only.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt1.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt2.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt3_no_stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt3.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_2.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_3_1.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_3.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_4.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5_clean_1.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5_clean.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4_5.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt4.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_simple.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_standalone.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_with_debug_stuff.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_with_stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      ```python "python/aug25/models/bruteforce_model.py"
+      from __future__ import annotations
+
+      import collections
+      import json
+      from dataclasses import dataclass, field
+      from typing import Dict, List, Tuple, Optional, Union, Set
+
+      import _sep1 as ffi
+      from tqdm import tqdm
+
+      from python.gss_tester.implementations.leveled_rs_impl import LeveledRSGSS as GSS
+      from ..common_interface import GraphProvider
+      from ..stats import Stats
+      from ..range_set import FFIRangeSet as RangeSet
+      from ..range_set import SetRangeSet as RangeSetOut
+      from ..range_set import SetRangeSet as RangeSetStates
+
+      # Type Aliases
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
+      TerminalIdSet = RangeSet
+
+      def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
+          """
+          Per-invocation memoization for PyAcc transformers.
+          - Caches by id(acc) (including None results).
+          - Caches by value (acc) for non-None results, if use_value_cache is True.
+          If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
+          Exposes _acc_memo_size() to inspect id-cache size for stats.
+          """
+          def decorator(fn):
+              id_memo = {}
+              val_memo = {}
+              def wrapper(acc):
+                  # Identity-based fast path
+                  if id(acc) in id_memo:
+                      if stats_prefix:
+                          Stats.get().inc(f'{stats_prefix}.memo_hits')
+                      return id_memo[id(acc)]
+
+                  if use_value_cache:
+                      # Structural equality-based cache (only non-None results are useful here)
+                      cached = val_memo.get(acc)
+                      if cached is not None:
+                          id_memo[id(acc)] = cached
+                          if stats_prefix:
+                              Stats.get().inc(f'{stats_prefix}.memo_hits')
+                          return cached
+                  result = fn(acc)
+                  id_memo[id(acc)] = result
+                  if use_value_cache:
+                      val_memo[acc] = result
+                  return result
+              wrapper._acc_memo_size = lambda: len(id_memo)
+              return wrapper
+          return decorator
+
+      @dataclass(frozen=True)
+      class DFAState:
+          transitions: Dict[int, int]
+          finalizers: Set[int]
+          possible_future_group_ids: Set[int]
+
+
+      @dataclass(frozen=True)
+      class PyTokenizer:
+          states: List[DFAState]
+          start_state: int
+          non_greedy_finalizers: Set[int]
+
+          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+              current_state = state_id
+              matches = {}
+              done = False
+
+              # Check for initial matches (epsilon)
+              for group_id in self.states[current_state].finalizers:
+                  if group_id in self.non_greedy_finalizers:
+                      matches.setdefault(group_id, 0)
+                  else:
+                      matches[group_id] = 0
+
+              for i, byte in enumerate(text):
+                  state_data = self.states[current_state]
+                  next_state = state_data.transitions.get(byte)
+
+                  if next_state is None:
+                      done = True
+                      break
+
+                  current_state = next_state
+                  for group_id in self.states[current_state].finalizers:
+                      if group_id in self.non_greedy_finalizers:
+                          matches.setdefault(group_id, i + 1)
+                      else:
+                          matches[group_id] = i + 1
+
+              end_state = None if done else current_state
+              return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
+
+          def initial_state_id(self) -> int:
+              return self.start_state
+
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
+
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]]
+
+      Action = Union[int, Reduce, Split]
+
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict)
+          gotos: Dict[int, int] = field(default_factory=dict)
+
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
+
+      @dataclass(frozen=True, eq=False)
+      class PyAcc:
+          terminals_union: Dict[int, TerminalIdSet]
+          llm_mask: LLMTokenSet
+
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+
+          def __hash__(self):
+              return hash((len(self.terminals_union), self.llm_mask))
+
+          def merge(self, other: "PyAcc") -> "PyAcc":
+              new_terminals_union = self.terminals_union.copy()
+              for k, v in other.terminals_union.items():
+                  if k in new_terminals_union:
+                      new_terminals_union[k] = new_terminals_union[k].union(v)
+                  else:
+                      new_terminals_union[k] = v
+              return PyAcc(
+                  terminals_union=new_terminals_union,
+                  llm_mask=self.llm_mask.union(other.llm_mask),
+              )
+
+      @dataclass
+      class BruteForceModel(GraphProvider):
+          parser_table: ParserTable
+          tokenizer: PyTokenizer
+          tokenizer_initial_state: int
+          id_to_token: Dict[int, bytes]
+          internal_to_original_map: Dict[int, RangeSetOut]
+          all_internal_llm_tokens_bitset: LLMTokenSet
+          ignore_terminal_id: Optional[int]
+          state: Dict[int, GSS]
+          mode: str
+          internal_to_representative_original: Optional[Dict[int, int]] = None
+
+          @staticmethod
+          def from_json_string(s: str, mode: str = 'original') -> 'BruteForceModel':
+              Stats.get().reset()
+              data = json.loads(s)
+
+              if mode not in ['internal', 'original']:
+                  raise ValueError(f"Mode must be 'internal' or 'original', got {mode}")
+
+              # Tokenizer
+              dfa_data = data['tokenizer']['dfa']
+              dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
+              tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+
+              # Parser Table
+              parser_data = data['parser']
+              py_table: Dict[int, Row] = {}
+              for state_id_str, row_data in parser_data['stage_7_table']:
+                  state_id, py_row = int(state_id_str), Row()
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id, variant = int(term_id_str), action_data['variant']
+                      if variant == 'Shift': py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce': py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                      elif variant == 'Split':
+                          reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
+                          py_row.actions[term_id] = Split(action_data['shift'], reduces)
+                  py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+                  py_table[state_id] = py_row
+              parser_table = ParserTable(parser_data['start_state_id'], py_table)
+
+              # Misc data
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              vocab = data['precompute3_vocab']
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
+              id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              internal_to_original_map = {int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()}
+
+              # Build representative map for internal mode
+              internal_to_rep = None
+              if mode == 'internal':
+                  internal_to_rep = {}
+                  print("Building internal-to-representative token map...")
+                  for internal_id, original_ids_rs in tqdm(internal_to_original_map.items()):
+                      best_orig_id = -1
+                      min_len = float('inf')
+                      for orig_id in original_ids_rs.iter_indices():
+                          token_len = len(id_to_token.get(orig_id, b''))
+                          if token_len < min_len:
+                              min_len = token_len
+                              best_orig_id = orig_id
+                      if best_orig_id != -1:
+                          internal_to_rep[internal_id] = best_orig_id
+
+              # Initial state
+              initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+
+              if len(id_to_token) < 300:
+                  print("Vocab:")
+                  for i, token in id_to_token.items():
+                      print(f"{i}: {token}")
+                  print()
+
+              return BruteForceModel(
+                  parser_table=parser_table,
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer.initial_state_id(),
+                  id_to_token=id_to_token,
+                  internal_to_original_map=internal_to_original_map,
+                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
+                  state={tokenizer.initial_state_id(): initial_gss},
+                  mode=mode,
+                  internal_to_representative_original=internal_to_rep,
+              )
+
+          def make_initial_state(self) -> Dict[int, GSS]:
+              initial_acc = PyAcc({}, self.all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
+              return {self.tokenizer_initial_state: initial_gss}
+
+          def reset_state(self) -> None:
+              self.state = self.make_initial_state()
+
+          def clone_sharing_structure(self) -> "BruteForceModel":
+              return BruteForceModel(
+                  parser_table=self.parser_table,
+                  tokenizer=self.tokenizer,
+                  tokenizer_initial_state=self.tokenizer_initial_state,
+                  id_to_token=self.id_to_token,
+                  internal_to_original_map=self.internal_to_original_map,
+                  all_internal_llm_tokens_bitset=self.all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=self.ignore_terminal_id,
+                  state=self.make_initial_state(),
+                  mode=self.mode,
+                  internal_to_representative_original=self.internal_to_representative_original,
+              )
+
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id): return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def _commit_on_state(self, state: Dict[int, GSS], token_id: int) -> Dict[int, GSS]:
+              token_bytes = self.id_to_token[token_id]
+
+              terminals_map, state_map = {}, {}
+              for tsid in state:
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
+                  if end_state is not None: state_map[tsid] = end_state
+                  terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
+
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  for tsid, matched in terminals_map.items():
+                      if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched): return None
+                  new_bvs = collections.defaultdict(RangeSet.empty)
+                  for old, new in state_map.items():
+                      if old in acc.terminals_union: new_bvs[new] |= acc.terminals_union[old]
+                  return PyAcc(dict(new_bvs), acc.llm_mask)
+
+              cache = {}
+              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in state.items()}
+              current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
+
+              new_states = collections.defaultdict(list)
+              work = {(0, tsid): gss for tsid, gss in current.items()}
+              q = collections.deque(work.keys())
+
+              while q:
+                  offset, tsid = q.popleft()
+                  gss = work.pop((offset, tsid))
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
+
+                  for term_id, width in matches:
+                      proc_gss = self._process_token(gss, term_id)
+                      if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
+                          proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
+                      if not proc_gss.is_empty():
+                          new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
+                          if new_offset == len(token_bytes): new_states[next_tsid].append(proc_gss)
+                          else:
+                              key = (new_offset, next_tsid)
+                              if key in work: work[key] = work[key].merge(proc_gss)
+                              else:
+                                  work[key] = proc_gss
+                                  q.append(key)
+                  if end_state is not None: new_states[end_state].append(gss)
+
+              merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
+              merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
+
+              if not merged:
+                  return merged
+
+              # Check if any of the resulting states can lead to a valid parse state.
+              # We only need one valid path forward from one of the states.
+              if 0 in merged:
+                  return merged
+              for tsid, gss in merged.items():
+                  possible_terminals = self.tokenizer.states[tsid].possible_future_group_ids
+                  for terminal_id in possible_terminals:
+                      if not self._process_token(gss, terminal_id).is_empty():
+                          # Found a viable path, so the state after commit is valid.
+                          return merged
+
+              # No viable path found from any of the resulting states. This token leads to a dead end.
+              return {}
+
+          def commit(self, token_id: int):
+              self.state = self._commit_on_state(self.state, token_id)
+
+          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+              if self.ignore_terminal_id == terminal_id:
+                  return gss
+
+              heads_by_state = collections.defaultdict(list)
+              for state_id in gss.peek(): heads_by_state[state_id].append(gss.isolate(state_id))
+
+              shifted = []
+              while heads_by_state:
+                  state_id, gss_list = heads_by_state.popitem()
+                  state_gss = GSS.merge_many(gss_list)
+                  row = self.parser_table.table.get(state_id)
+                  if not row: continue
+                  action = row.actions.get(terminal_id)
+                  if action is None: continue
+
+                  if isinstance(action, int):
+                      shifted.append(state_gss.push(action))
+                  elif isinstance(action, Reduce):
+                      popped = state_gss.popn(action.len)
+                      for from_id in popped.peek():
+                          goto_id = self.parser_table.table[from_id].gotos.get(action.nonterminal_id)
+                          heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+                  elif isinstance(action, Split):
+                      if action.shift is not None:
+                          shifted.append(state_gss.push(action.shift))
+                      for length, nts in action.reduces.items():
+                          popped = state_gss.popn(length)
+                          for nt_id in nts:
+                              for from_id in popped.peek():
+                                  goto_id = self.parser_table.table[from_id].gotos[nt_id]
+                                  heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+
+              return GSS.merge_many(shifted)
+
+          def get_mask(self) -> RangeSetOut:
+              print(f"States: {list(self.state.keys())}")
+              stats = Stats.get()
+              stats.start('get_mask')
+              
+              allowed_mask = RangeSetOut.empty()
+
+              if self.mode == 'internal':
+                  if self.internal_to_representative_original is None:
+                      raise RuntimeError("Model not initialized for 'internal' mode.")
+                  
+                  iterable = self.internal_to_representative_original.items()
+                  for internal_id, rep_orig_id in tqdm(iterable, desc="get_mask (internal)"):
+                      if rep_orig_id in self.id_to_token:
+                          new_state = self._commit_on_state(self.state, rep_orig_id)
+                          if new_state:
+                              allowed_mask |= self.internal_to_original_map[internal_id]
+
+              elif self.mode == 'original':
+                  iterable = self.id_to_token.keys()
+                  for original_id in tqdm(iterable, desc="get_mask (original)"):
+                      new_state = self._commit_on_state(self.state, original_id)
+                      if new_state:
+                          allowed_mask.add(original_id)
+              else:
+                  raise ValueError(f"Unknown mode: {self.mode}")
+
+              stats.stop('get_mask')
+              return allowed_mask
+
+          def get_last_get_mask_cost(self) -> int:
+              return 0
+
+          def get_last_get_mask_metrics(self) -> Dict[str, float]:
+              return {}
+
+          def finalize(self):
+              print("\n--- Final Stats Report from BruteForceModel ---")
+              Stats.get().report()
+
+
+      Model = BruteForceModel
+      ```
+    metadata:
+      filename: python/aug25/models/bruteforce_model.py
+  - user: Oh, and this one too.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions and the corresponding git diff to update the `bruteforce_model.py` to handle dummy tokens.
+
+      ### Step-by-step Instructions
+
+      I will make the following edits to `python/aug25/models/bruteforce_model.py`:
+
+      1.  **In the `BruteForceModel` dataclass definition:**
+          -   I will add a new field `original_to_dummy_map: Dict[int, int]` to store the mapping from original terminal IDs to their dummy counterparts.
+
+      2.  **In the `from_json_string` static method:**
+          -   I will add logic to load the `original_to_dummy_map` from the input JSON data.
+          -   I will then pass this new map to the `BruteForceModel` constructor when the instance is created.
+
+      3.  **In the `clone_sharing_structure` method:**
+          -   I will update the constructor call to copy the `original_to_dummy_map` field to the new model instance.
+
+      4.  **In the `_commit_on_state` method:**
+          -   Inside the `for term_id, width in matches:` loop, I will modify the logic for processing a matched terminal. Before processing the `term_id`, I will first check if a corresponding `dummy_id` exists in `original_to_dummy_map`. If it does, I will process the `dummy_id` first, and then proceed to process the original `term_id`.
+
+      ### Git Diff
+
+      ```diff
+      --- a/python/aug25/models/bruteforce_model.py
+      +++ b/python/aug25/models/bruteforce_model.py
+      @@ -188,6 +188,7 @@
+           ignore_terminal_id: Optional[int]
+           state: Dict[int, GSS]
+           mode: str
+      +    original_to_dummy_map: Dict[int, int]
+           internal_to_representative_original: Optional[Dict[int, int]] = None
+       
+           @staticmethod
+      @@ -230,6 +231,9 @@
+               id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+               internal_to_original_map = {int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()}
+       
+      +        original_to_dummy_map_json = data.get('original_to_dummy_map', [])
+      +        original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
+      +
+               # Build representative map for internal mode
+               internal_to_rep = None
+               if mode == 'internal':
+      @@ -258,6 +262,7 @@
+                   ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
+                   state={tokenizer.initial_state_id(): initial_gss},
+                   mode=mode,
+      +            original_to_dummy_map=original_to_dummy_map,
+                   internal_to_representative_original=internal_to_rep,
+               )
+       
+      @@ -277,6 +282,7 @@
+                   ignore_terminal_id=self.ignore_terminal_id,
+                   state=self.make_initial_state(),
+                   mode=self.mode,
+      +            original_to_dummy_map=self.original_to_dummy_map,
+                   internal_to_representative_original=self.internal_to_representative_original,
+               )
+       
+      @@ -321,7 +327,13 @@
+                   end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
+       
+                   for term_id, width in matches:
+      -                proc_gss = self._process_token(gss, term_id)
+      +                proc_gss = gss
+      +                dummy_id = self.original_to_dummy_map.get(term_id)
+      +                if dummy_id is not None:
+      +                    proc_gss = self._process_token(proc_gss, dummy_id)
+      +                proc_gss = self._process_token(proc_gss, term_id)
+      +
+                       if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
+                           proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
+                       if not proc_gss.is_empty():
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/bruteforce_model.py
+      Applying patch to 'python/aug25/models/bruteforce_model.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/bruteforce_model.py.
+    metadata:
+  - user: 'Changes committed with message: "BruteForceModel: Add support for processing
+      dummy tokens during commit"'
     metadata:
 ...
