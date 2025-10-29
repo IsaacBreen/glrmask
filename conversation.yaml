@@ -1580,6 +1580,9 @@ local_system:
                   return;
               }
 
+              // Precompute the full universe of states once for quick equality checks.
+              let all_states_universe = SortedSet::from_iter(0..=ctx.max_state_id);
+
               // Compute the maximum pop seen. If > 0, we need the parser to compute state preimages.
               let mut max_pop = 0usize;
               for node in trie.nodes() {
@@ -1649,6 +1652,15 @@ local_system:
                   current_s
               };
 
+              // Helper: true if s == {0,1,2,...,max_state_id}.
+              let is_universe = |s: &SortedSet| -> bool {
+                  if s.len() != ctx.max_state_id + 1 {
+                      return false;
+                  }
+                  // Exact equality with 0..=max_state_id
+                  s.iter().enumerate().all(|(i, v)| v == i)
+              };
+
               loop {
                   // Collect pop=0 edges by cloning to avoid borrow issues.
                   let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
@@ -1681,7 +1693,21 @@ local_system:
                                   let p_usize = if p_ab <= 0 { 0usize } else { p_ab as usize };
                                   // Compose states with the correct p-step preimage.
                                   // new_sids = S_ab ∩ pre^{p_ab}(S_bc)
-                                  let s_bc_pre = apply_n_step_back(&s_bc, p_usize);
+                                  //
+                                  // IMPORTANT: if S_bc is the full universe (no constraint on the 0-pop edge),
+                                  // then the correct neutral behavior is to impose no additional restriction
+                                  // beyond S_ab, i.e., pre^{p_ab}(U) should act as U under this path semantics.
+                                  // Using the raw preimage of U (domain-of-pop) would over-restrict and cause
+                                  // mismatches when FactorCommonDestinations (or others) introduced U on 0-edges.
+                                  let s_bc_pre = if p_usize == 0 {
+                                      // No preimage needed.
+                                      s_bc.clone()
+                                  } else if is_universe(&s_bc) {
+                                      // Treat pre^{p_ab}(U) as U here to preserve exact path semantics.
+                                      all_states_universe.clone()
+                                  } else {
+                                      apply_n_step_back(&s_bc, p_usize)
+                                  };
                                   let new_sids = s_ab.intersect(&s_bc_pre);
                                   if new_sids.is_empty() { continue; }
 
@@ -4762,20 +4788,24 @@ local_system:
           }
       }
     src/trie3_opt/passes/eliminate_pop0.rs: |
-      use std::collections::{BTreeMap, HashMap};
+      use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-      use crate::trie3_opt::context::OptimizationContext;
-      use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-      use crate::trie3_opt::passes::OptimizationPass;
       use crate::glr::table::StateID;
+      use crate::trie3_opt::context::OptimizationContext;
+      use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
+      use crate::trie3_opt::passes::OptimizationPass;
 
-      /// Eliminate pop=0 edges whose source is not a root by composing predecessors:
-      /// For each B --(0, L_bc, S_bc)--> C and each A --(p_ab, L_ab, S_ab)--> B,
-      /// add A --(p_ab, L_ab∧L_bc, S_ab∧pre^{p_ab}(S_bc))--> C and remove the B->C entry.
-      /// Here pre^{p}(S) is the p-step state preimage under parser "pop" transitions.
-      /// Iterate to a fixed point. This is semantics-preserving under the model where a path's
-      /// token set is the intersection across edges, and the admissible source states for a path
-      /// are the intersection across edges of preimages of the edge state-sets by the cumulative pop.
+      /// Cycle-safe pop=0 composition (add-only).
+      ///
+      /// For each non-root pop=0 edge B --(0, T_bc, S_bc)--> C and each predecessor
+      /// A --(p_ab, T_ab, S_ab)--> B, we add a bypass edge
+      ///   A --(p_ab, T_ab ∩ T_bc, S_ab ∩ pre^{p_ab}(S_bc))--> C.
+      ///
+      /// We do NOT delete any pop=0 edges. We also do NOT compose a 0-parent inside the
+      /// same 0-SCC as B (to avoid perturbing cycles). We iterate a few rounds so that
+      /// long chains of 0-edges are effectively summarized for outside predecessors.
+      /// This is semantics-preserving: every original path remains; each added edge
+      /// corresponds to an existing path segment and thus admits no new tokens/states.
       pub struct EliminatePop0ExceptRootsPass;
 
       impl OptimizationPass for EliminatePop0ExceptRootsPass {
@@ -4784,16 +4814,99 @@ local_system:
           }
 
           fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-              let root_set = trie.root_ids.clone();
               let n = trie.num_nodes();
               if n == 0 {
                   return;
               }
+              let root_set: BTreeSet<NodeId> = trie.root_ids.iter().cloned().collect();
 
-              // Precompute the full universe of states once for quick equality checks.
-              let all_states_universe = SortedSet::from_iter(0..=ctx.max_state_id);
+              // Build dense indices for NodeId.
+              let node_ids: Vec<NodeId> = trie.node_ids().collect();
+              let id_to_idx: HashMap<NodeId, usize> =
+                  node_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
 
-              // Compute the maximum pop seen. If > 0, we need the parser to compute state preimages.
+              // Build adjacency over only pop=0 edges for SCC detection.
+              let mut adj0: Vec<Vec<usize>> = vec![Vec::new(); node_ids.len()];
+              for node in trie.nodes() {
+                  let u_idx = id_to_idx[&node.id()];
+                  for (ek, dm) in node.children() {
+                      if ek.pop == 0 {
+                          for (v, _) in dm {
+                              let v_idx = id_to_idx[v];
+                              adj0[u_idx].push(v_idx);
+                          }
+                      }
+                  }
+              }
+
+              // Tarjan's algorithm to find SCCs in the 0-pop graph.
+              let mut index: usize = 0;
+              let mut stack: Vec<usize> = Vec::new();
+              let mut onstack: Vec<bool> = vec![false; node_ids.len()];
+              let mut indices: Vec<Option<usize>> = vec![None; node_ids.len()];
+              let mut lowlink: Vec<usize> = vec![0; node_ids.len()];
+              let mut comp_id: Vec<usize> = vec![usize::MAX; node_ids.len()];
+              let mut comp_count: usize = 0;
+
+              fn strongconnect(
+                  v: usize,
+                  index: &mut usize,
+                  stack: &mut Vec<usize>,
+                  onstack: &mut [bool],
+                  indices: &mut [Option<usize>],
+                  lowlink: &mut [usize],
+                  comp_id: &mut [usize],
+                  comp_count: &mut usize,
+                  adj0: &Vec<Vec<usize>>,
+              ) {
+                  indices[v] = Some(*index);
+                  lowlink[v] = *index;
+                  *index += 1;
+                  stack.push(v);
+                  onstack[v] = true;
+
+                  for &w in &adj0[v] {
+                      if indices[w].is_none() {
+                          strongconnect(
+                              w, index, stack, onstack, indices, lowlink, comp_id, comp_count, adj0,
+                          );
+                          lowlink[v] = lowlink[v].min(lowlink[w]);
+                      } else if onstack[w] {
+                          lowlink[v] = lowlink[v].min(indices[w].unwrap());
+                      }
+                  }
+
+                  if lowlink[v] == indices[v].unwrap() {
+                      // Start a new component
+                      loop {
+                          let w = stack.pop().unwrap();
+                          onstack[w] = false;
+                          comp_id[w] = *comp_count;
+                          if w == v {
+                              break;
+                          }
+                      }
+                      *comp_count += 1;
+                  }
+              }
+
+              for v in 0..node_ids.len() {
+                  if indices[v].is_none() {
+                      strongconnect(
+                          v,
+                          &mut index,
+                          &mut stack,
+                          &mut onstack,
+                          &mut indices,
+                          &mut lowlink,
+                          &mut comp_id,
+                          &mut comp_count,
+                          &adj0,
+                      );
+                  }
+              }
+
+              // Precompute 2^k state preimage maps if we need to handle p > 0.
               let mut max_pop = 0usize;
               for node in trie.nodes() {
                   for (ek, _) in node.children() {
@@ -4802,140 +4915,149 @@ local_system:
                       }
                   }
               }
-
-              // Build 2^k preimage tables (as in GeneralizeSidsPass) if needed.
               let mut two_power_back_maps: Vec<BTreeMap<StateID, SortedSet>> = Vec::new();
               if max_pop > 0 {
-                  let parser_ref = if let Some(p) = &ctx.parser {
-                      p.borrow()
-                  } else {
-                      // Without a parser we cannot correctly compose states when p_ab > 0.
-                      // To avoid unsound rewrites, skip the pass.
-                      return;
-                  };
-                  let one_step_back_map = parser_ref.build_one_step_back_map();
-                  let num_levels = (max_pop as f64).log2().ceil() as usize + 1;
-                  two_power_back_maps.push(
-                      one_step_back_map
-                          .into_iter()
-                          .map(|(k, v)| (k, SortedSet::from_iter(v.iter())))
-                          .collect(),
-                  );
-                  for i in 1..num_levels {
-                      let prev_map = &two_power_back_maps[i - 1];
-                      let mut next_map: BTreeMap<StateID, SortedSet> = BTreeMap::new();
-                      for (&state_id, preds1) in prev_map {
-                          let mut preds2 = SortedSet::new();
-                          for pred1_val in preds1.iter() {
-                              let sid = StateID(pred1_val);
-                              if let Some(preds_of_pred) = prev_map.get(&sid) {
-                                  preds2.union_inplace(preds_of_pred);
+                  if let Some(p_rc) = &ctx.parser {
+                      let parser = p_rc.borrow();
+                      let one_step_back_map = parser.build_one_step_back_map();
+                      let levels = (max_pop as f64).log2().ceil() as usize + 1;
+                      two_power_back_maps.push(
+                          one_step_back_map
+                              .into_iter()
+                              .map(|(k, v)| (k, SortedSet::from_iter(v.iter())))
+                              .collect(),
+                      );
+                      for i in 1..levels {
+                          let prev = &two_power_back_maps[i - 1];
+                          let mut next: BTreeMap<StateID, SortedSet> = BTreeMap::new();
+                          for (&sid, preds1) in prev {
+                              let mut preds2 = SortedSet::new();
+                              for p1 in preds1.iter() {
+                                  let s = StateID(p1);
+                                  if let Some(preds_of_pred) = prev.get(&s) {
+                                      preds2.union_inplace(preds_of_pred);
+                                  }
+                              }
+                              if !preds2.is_empty() {
+                                  next.insert(sid, preds2);
                               }
                           }
-                          if !preds2.is_empty() {
-                              next_map.insert(state_id, preds2);
-                          }
+                          two_power_back_maps.push(next);
                       }
-                      two_power_back_maps.push(next_map);
                   }
+                  // If parser is absent, we will only compose parents with p<=0 (safe).
               }
 
-              // Closure to apply n-step preimage. If n == 0 (or we have no tables), it's identity.
               let apply_n_step_back = |s: &SortedSet, n_steps: usize| -> SortedSet {
                   if n_steps == 0 || two_power_back_maps.is_empty() {
                       return s.clone();
                   }
-                  let mut current_s = s.clone();
+                  let mut cur = s.clone();
                   for k in 0..two_power_back_maps.len() {
                       if ((n_steps >> k) & 1) == 1 {
                           let map_k = &two_power_back_maps[k];
-                          let mut next_s = SortedSet::new();
-                          for state_id_val in current_s.iter() {
-                              let sid = StateID(state_id_val);
+                          let mut nxt = SortedSet::new();
+                          for sid_val in cur.iter() {
+                              let sid = StateID(sid_val);
                               if let Some(preds) = map_k.get(&sid) {
-                                  next_s.union_inplace(preds);
+                                  nxt.union_inplace(preds);
                               }
                           }
-                          current_s = next_s;
+                          cur = nxt;
                       }
                   }
-                  current_s
+                  cur
               };
 
-              // Helper: true if s == {0,1,2,...,max_state_id}.
-              let is_universe = |s: &SortedSet| -> bool {
-                  if s.len() != ctx.max_state_id + 1 {
-                      return false;
+              // Helper to get current states for a triple (src, key, dst).
+              let get_existing = |trie: &MiniTrie, src: NodeId, key: &EdgeKey, dst: NodeId| -> SortedSet {
+                  if let Some(src_node) = trie.get_node(src) {
+                      if let Some(dm) = src_node.children().get(key) {
+                          if let Some(s) = dm.get(&dst) {
+                              return s.clone();
+                          }
+                      }
                   }
-                  // Exact equality with 0..=max_state_id
-                  s.iter().enumerate().all(|(i, v)| v == i)
+                  SortedSet::new()
               };
 
-              loop {
-                  // Collect pop=0 edges by cloning to avoid borrow issues.
-                  let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
+              // Iterate, adding bypass edges until no more can be added or a small round budget is hit.
+              let max_rounds = 8usize;
+              for _round in 0..max_rounds {
+                  // Collect all candidate additions for this round, unioning their SID sets per (src,key,dst).
+                  let mut to_add: HashMap<(NodeId, EdgeKey, NodeId), SortedSet> = HashMap::new();
 
-                  for node in trie.nodes() {
-                      for (ek, dm) in node.children() {
-                          if ek.pop == 0 {
-                              for (dst, sids) in dm {
-                                  zero_edges.push((node.id(), ek.tokens.clone(), *dst, sids.clone()));
+                  // Enumerate all pop=0 edges B --(0, T_bc, S_bc)--> C.
+                  for b_node in trie.nodes() {
+                      let b_id = b_node.id();
+                      if root_set.contains(&b_id) {
+                          continue; // keep root-origin 0-edges untouched
+                      }
+                      let b_comp = comp_id[id_to_idx[&b_id]];
+                      for (ek_bc, dm_bc) in b_node.children() {
+                          if ek_bc.pop != 0 {
+                              continue;
+                          }
+                          for (c_id, s_bc) in dm_bc {
+                              let t_bc = &ek_bc.tokens;
+                              let s_bc_clone = s_bc.clone();
+
+                              // For each predecessor A --(p_ab, T_ab, S_ab)--> B:
+                              let preds = b_node.parents().clone(); // clone to avoid borrow issues
+                              for (a_id, edges_from_a) in &preds {
+                                  let a_comp = comp_id[id_to_idx[a_id]];
+                                  for (key_ab, s_ab) in edges_from_a {
+                                      let p_ab = key_ab.pop;
+                                      let t_ab = &key_ab.tokens;
+
+                                      // Do not modify the 0-cycle: skip a 0-parent within the same 0-SCC.
+                                      if p_ab == 0 && a_comp == b_comp {
+                                          continue;
+                                      }
+
+                                      // Compose tokens.
+                                      let new_tokens = t_ab.intersect(t_bc);
+                                      if new_tokens.is_empty() {
+                                          continue;
+                                      }
+
+                                      // Compose states: S_ab ∩ pre^{p_ab}(S_bc).
+                                      let p_usize = if p_ab > 0 { p_ab as usize } else { 0 };
+                                      if p_usize > 0 && two_power_back_maps.is_empty() {
+                                          // No parser provided: cannot soundly compute p>0 preimages; skip.
+                                          continue;
+                                      }
+                                      let s_bc_pre = apply_n_step_back(&s_bc_clone, p_usize);
+                                      if s_bc_pre.is_empty() {
+                                          continue;
+                                      }
+                                      let new_sids = s_ab.intersect(&s_bc_pre);
+                                      if new_sids.is_empty() {
+                                          continue;
+                                      }
+
+                                      let new_key = EdgeKey::new(p_ab, new_tokens);
+                                      // Only add the difference relative to what's already present.
+                                      let existing = get_existing(trie, *a_id, &new_key, *c_id);
+                                      let delta = new_sids.difference(&existing);
+                                      if delta.is_empty() {
+                                          continue;
+                                      }
+                                      let k = (*a_id, new_key, *c_id);
+                                      to_add.entry(k).or_default().union_inplace(&delta);
+                                  }
                               }
                           }
                       }
                   }
 
-                  if zero_edges.is_empty() { break; }
-
-                  let mut removed_this_iter = 0usize;
-
-                  for (b, llm_bc, c, s_bc) in zero_edges {
-                      if root_set.contains(&b) { continue; }
-
-                      if let Some(b_node) = trie.get_node(b) {
-                          let preds = b_node.parents().clone(); // clone to avoid borrow issues
-                          for (a, edges_from_a) in &preds {
-                              for (key_ab, s_ab) in edges_from_a {
-                                  let p_ab = key_ab.pop;
-                                  let llm_ab = &key_ab.tokens;
-                                  let new_tokens = llm_ab.intersect(&llm_bc);
-                                  if new_tokens.is_empty() { continue; }
-                                  let p_usize = if p_ab <= 0 { 0usize } else { p_ab as usize };
-                                  // Compose states with the correct p-step preimage.
-                                  // new_sids = S_ab ∩ pre^{p_ab}(S_bc)
-                                  //
-                                  // IMPORTANT: if S_bc is the full universe (no constraint on the 0-pop edge),
-                                  // then the correct neutral behavior is to impose no additional restriction
-                                  // beyond S_ab, i.e., pre^{p_ab}(U) should act as U under this path semantics.
-                                  // Using the raw preimage of U (domain-of-pop) would over-restrict and cause
-                                  // mismatches when FactorCommonDestinations (or others) introduced U on 0-edges.
-                                  let s_bc_pre = if p_usize == 0 {
-                                      // No preimage needed.
-                                      s_bc.clone()
-                                  } else if is_universe(&s_bc) {
-                                      // Treat pre^{p_ab}(U) as U here to preserve exact path semantics.
-                                      all_states_universe.clone()
-                                  } else {
-                                      apply_n_step_back(&s_bc, p_usize)
-                                  };
-                                  let new_sids = s_ab.intersect(&s_bc_pre);
-                                  if new_sids.is_empty() { continue; }
-
-                                  let key = crate::trie3_opt::core::EdgeKey::new(p_ab, new_tokens.clone());
-                                  trie.add_edge(*a, key, c, new_sids);
-                              }
-                          }
-                      }
-
-                      // Remove B -> C under (0, llm_bc)
-                      let key = crate::trie3_opt::core::EdgeKey::new(0, llm_bc.clone());
-                      if trie.remove_edge_dest(b, &key, c).is_some() {
-                          removed_this_iter += 1;
-                      }
+                  if to_add.is_empty() {
+                      break; // fixed point
                   }
 
-                  if removed_this_iter == 0 {
-                      break;
+                  // Apply all new edges for this round.
+                  for ((src, key, dst), sids) in to_add {
+                      trie.add_edge(src, key, dst, sids);
                   }
               }
           }
@@ -8123,6 +8245,9 @@ messages:
                   return;
               }
 
+              // Precompute the full universe of states once for quick equality checks.
+              let all_states_universe = SortedSet::from_iter(0..=ctx.max_state_id);
+
               // Compute the maximum pop seen. If > 0, we need the parser to compute state preimages.
               let mut max_pop = 0usize;
               for node in trie.nodes() {
@@ -8192,6 +8317,15 @@ messages:
                   current_s
               };
 
+              // Helper: true if s == {0,1,2,...,max_state_id}.
+              let is_universe = |s: &SortedSet| -> bool {
+                  if s.len() != ctx.max_state_id + 1 {
+                      return false;
+                  }
+                  // Exact equality with 0..=max_state_id
+                  s.iter().enumerate().all(|(i, v)| v == i)
+              };
+
               loop {
                   // Collect pop=0 edges by cloning to avoid borrow issues.
                   let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
@@ -8224,7 +8358,21 @@ messages:
                                   let p_usize = if p_ab <= 0 { 0usize } else { p_ab as usize };
                                   // Compose states with the correct p-step preimage.
                                   // new_sids = S_ab ∩ pre^{p_ab}(S_bc)
-                                  let s_bc_pre = apply_n_step_back(&s_bc, p_usize);
+                                  //
+                                  // IMPORTANT: if S_bc is the full universe (no constraint on the 0-pop edge),
+                                  // then the correct neutral behavior is to impose no additional restriction
+                                  // beyond S_ab, i.e., pre^{p_ab}(U) should act as U under this path semantics.
+                                  // Using the raw preimage of U (domain-of-pop) would over-restrict and cause
+                                  // mismatches when FactorCommonDestinations (or others) introduced U on 0-edges.
+                                  let s_bc_pre = if p_usize == 0 {
+                                      // No preimage needed.
+                                      s_bc.clone()
+                                  } else if is_universe(&s_bc) {
+                                      // Treat pre^{p_ab}(U) as U here to preserve exact path semantics.
+                                      all_states_universe.clone()
+                                  } else {
+                                      apply_n_step_back(&s_bc, p_usize)
+                                  };
                                   let new_sids = s_ab.intersect(&s_bc_pre);
                                   if new_sids.is_empty() { continue; }
 
@@ -9828,6 +9976,10 @@ messages:
 
       Think mathematically. Rigorously prove your output.
       If you have multiple hypotheses, state them all.
+
+      I've tried a bunch of time to fix it.
+      Let's just delete it and start from scratch.
+      Think deeply about how it ought to work. Think about cycles and handling those. We can't actually modify the cycle, only the incoming edge.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9847,60 +9999,32 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below I explain why EliminatePop0ExceptRoots can change semantics (cause mismatches), outline the math, and give an exact patch that fixes the issue without regressing other cases.
+      Here’s a safe, exact, and cycle-aware redesign of EliminatePop0ExceptRoots that prevents the mismatches you’re seeing. Instead of deleting pop=0 edges (which breaks semantics in the presence of 0-cycles), we only add bypass edges to predecessors so that any path that previously used a non-root pop=0 edge can be realized without traversing that edge. We do not modify a 0-cycle; we only push its effect back onto incoming edges. This is semantics-preserving by construction and handles cycles correctly.
 
       Step-by-step instructions
 
-      1) Background and the intended equivalence
-      - An edge e is a triple (p, L, S) where:
-        - p ∈ Z is the pop delta,
-        - L ⊆ Tokens is the allowed token set for that step,
-        - S ⊆ States is the allowed parser state set associated with that step.
-      - A path e1, e2, ..., ek has token constraint T = ⋂i Li (intersection across the edges).
-      - Under the model used in this code (including the docstring of EliminatePop0ExceptRoots), the admissible source states for the whole path are:
-        StartStates(e1..ek) = ⋂i pre(sum_{j < i} p_j)(S_i)
-        where pre(n)(X) denotes the n-step pop preimage of X; i.e., the set of states from which n pops can lead to some state in X.
+      1) Replace the entire EliminatePop0ExceptRootsPass implementation with a new, cycle-aware, add-only composition:
 
-      - For two adjacent edges
-        A --(p_ab, L_ab, S_ab)--> B --(0, L_bc, S_bc)--> C
-        the equivalent single edge from A to C is
-        (p_ab, L_ab ∧ L_bc, S_ab ∧ pre(p_ab)(S_bc))
+      - What changes:
+        - We stop deleting pop=0 edges. We only add equivalent bypass edges from predecessors, iterating to a fixed point.
+        - We skip composing a pop=0 parent within the same 0-SCC as the zero-edge source (this “do not modify the cycle” rule keeps cycles intact).
+        - For pop>0 parents, we use the parser’s one-step-back map to compute the exact p-step preimage, without special-casing U. If the parser is absent, we still compose parents with p<=0 and skip p>0 (preserving soundness).
+        - We iterate for a bounded number of rounds (8 by default) and only insert truly new state IDs (difference relative to existing edges) to avoid blow-up.
 
-      2) Why mismatches happen
-      - FactorCommonDestinationsPass introduces intermediate nodes connected by a pop=0 edge whose S set is deliberately “all states” (to avoid over-constraining). Formally, S_bc = U (the full state universe).
-      - The current EliminatePop0ExceptRoots implementation computes new_sids = S_ab ∧ pre^{p_ab}(S_bc). If S_bc = U, then pre^{p_ab}(U) is not U in general; it equals the domain of states that can pop p_ab steps to reach some state at all. This is a strict subset of U when the parser pop relation is partial.
+      - Why this is correct (informal proof sketch):
+        - Semantics: A path’s admissible LLM tokens is the intersection across tokens on edges along the path; admissible parser states at the path start is the intersection of edge state-sets, with each state-set transported backwards by the cumulative pops preceding it.
+        - For a single non-root 0-edge B --(0, T_bc, S_bc)--> C, and any predecessor A --(p_ab, T_ab, S_ab)--> B, the path A→B→C admits tokens T_ab ∩ T_bc and states S_ab ∩ pre^{p_ab}(S_bc). We add exactly the edge A --(p_ab, T_ab ∩ T_bc, S_ab ∩ pre^{p_ab}(S_bc))--> C.
+        - We do this for every such predecessor, so every original path that used the non-root 0-edge still exists (possibly now directly). We never remove any 0-edge, so the set of root-to-end labeled paths can only increase or stay the same. But because we only add edges that have the exact tokens and states required by some original 0-path, we do not admit any new tokens or states that were not already admitted by an original path. Hence, the language and state constraints are preserved.
+        - Cycles: If B is in a 0-SCC and A is also in the same 0-SCC via a pop=0 parent, we do not add a bypass. This prevents perturbing the internal 0-cycle. Paths that exploit the 0-cycle remain intact. For A outside the SCC or p_ab≠0, we do add bypass edges; this preserves all cycle-enabled paths that originate from outside while not altering the cycle’s internal structure.
 
-      - But the original two-edge path A -> B (p_ab) then B -> C (p=0, S=U) imposes no additional state constraint beyond S_ab on the entry of A: being able to take the first edge is precisely captured by S_ab; we should not further restrict to states that happen to be in pre^{p_ab}(U). Therefore:
-        - Original path start states: S_ab ∧ pre^{p_ab}(U) = S_ab (because S_ab already encodes the feasibility of p_ab pops).
-        - Current code computes: S_ab ∧ pre^{p_ab}(U) where pre^{p_ab}(U) might be strictly smaller than U. This can drop legitimate start states and is therefore not semantics-preserving. That’s exactly the mismatch you’re seeing.
+      - Why the old approach caused mismatches:
+        - Deleting non-root 0-edges inside or connected to 0-cycles changes which multi-step 0-path intersections are realizable. In a 0-SCC, there can be multiple 0-paths with different edge token/state constraints; removing an internal 0-edge erases some paths and can change the meet-over-paths result (union-of-intersections) for exits. That’s why “we can’t modify the cycle, only the incoming edge” is the safe rule.
 
-      In short: when S_bc = U, using pre^{p_ab}(U) over-restricts. The correct neutral element for the second edge’s state constraint (with pop=0) is not pre^{p_ab}(U) but U itself, i.e., the effect is a no-op on start states, leaving S_ab unchanged.
+      2) Keep the pass in the pipeline:
+      - No coordinator changes are needed. The pass is still semantics-preserving. Follow-up passes (CompressEdges, etc.) can still reduce structure.
 
-      3) The minimal safe fix
-      - Detect S_bc == U, and in that case, treat pre^{p_ab}(S_bc) as U (not as pre^{p_ab}(U)). This yields new_sids = S_ab, exactly matching the original two-edge path semantics for a pop=0 edge whose state set is unconstrained.
-      - For S_bc ≠ U, keep the current logic new_sids = S_ab ∧ pre^{p_ab}(S_bc). This is the correct composition.
-
-      4) Proof sketch: correctness of the fix
-      - Let U be the full state universe; S_ab be the exact set of states for which the first edge (p_ab, L_ab) is admissible. The pop=0 second edge with S_bc=U imposes no restriction: StartStates(A→B→C) = S_ab ∧ pre^{p_ab}(U) = S_ab.
-      - Rewriting to a single composed edge with new_sids = S_ab (our fix in the S_bc=U case) yields exactly the same StartStates for the one-edge path, preserving behavior.
-      - For S_bc≠U, the standard formula S_ab ∧ pre^{p_ab}(S_bc) holds; our code still applies it, so this remains correct.
-
-      5) Implementation details
-      - Compute the “universal” set U once from ctx.max_state_id.
-      - Add a small helper to check whether a SortedSet equals U exactly (size equals max_state_id + 1 and the contents are 0..=max_state_id).
-      - In EliminatePop0ExceptRootsPass, when composing a predecessor edge A→B with the zero-pop edge B→C:
-        - If p_ab <= 0, preimage is identity as before (already implemented).
-        - Else if S_bc == U, set s_bc_pre to U (not pre^{p_ab}(U)).
-        - Else set s_bc_pre = pre^{p_ab}(S_bc) as before.
-        - Then new_sids := S_ab ∧ s_bc_pre as before.
-
-      6) Potential corner cases handled
-      - Cycles: unchanged. The fix only avoids spurious restriction; it doesn’t add any edge or change the overall convergence behavior (the pass still terminates because each iteration removes ≥1 zero-pop edge that is not rooted).
-      - Negative pops: unchanged semantics (we continue to treat p_ab <= 0 as zero-step preimage).
-      - Performance: the “is_universe” check is O(|U|) worst-case but that’s negligible compared to the rest of the pass and far cheaper than a re-run of the whole pipeline.
-
-      7) After applying this change
-      - Re-run your validation harness. The elimination of pop=0 edges inserted by FactorCommonDestinations (or any other source that uses all-states on the 0-edge) will no longer be accompanied by over-restriction of predecessor states, and the mismatches should disappear.
+      3) Rebuild and test:
+      - No local cache or environment tweaks are necessary. Just rebuild and run your existing tests/roundtrip checks. The pass is now add-only and exact, so it should eliminate the mismatches stemming from pop=0 deletion while enabling later passes to compress the graph.
 
       Git diffs
 
@@ -9908,66 +10032,459 @@ messages:
       diff --git a/src/trie3_opt/passes/eliminate_pop0.rs b/src/trie3_opt/passes/eliminate_pop0.rs
       --- a/src/trie3_opt/passes/eliminate_pop0.rs
       +++ b/src/trie3_opt/passes/eliminate_pop0.rs
-      @@ -1,6 +1,6 @@
-       use std::collections::{BTreeMap, HashMap};
-       
-       use crate::trie3_opt::context::OptimizationContext;
+      @@ -1,197 +1,270 @@
+      -use std::collections::{BTreeMap, HashMap};
+      -
+      -use crate::trie3_opt::context::OptimizationContext;
       -use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-      +use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-       use crate::trie3_opt::passes::OptimizationPass;
-       use crate::glr::table::StateID;
-       
-      @@ -23,6 +23,9 @@
-               if n == 0 {
-                   return;
-               }
+      -use crate::trie3_opt::passes::OptimizationPass;
+      -use crate::glr::table::StateID;
+      -
+      -/// Eliminate pop=0 edges whose source is not a root by composing predecessors:
+      -/// For each B --(0, L_bc, S_bc)--> C and each A --(p_ab, L_ab, S_ab)--> B,
+      -/// add A --(p_ab, L_ab∧L_bc, S_ab∧pre^{p_ab}(S_bc))--> C and remove the B->C entry.
+      -/// Here pre^{p}(S) is the p-step state preimage under parser "pop" transitions.
+      -/// Iterate to a fixed point. This is semantics-preserving under the model where a path's
+      -/// token set is the intersection across edges, and the admissible source states for a path
+      -/// are the intersection across edges of preimages of the edge state-sets by the cumulative pop.
+      -pub struct EliminatePop0ExceptRootsPass;
+      -
+      -impl OptimizationPass for EliminatePop0ExceptRootsPass {
+      -    fn name(&self) -> &'static str {
+      -        "EliminatePop0ExceptRoots"
+      -    }
+      -
+      -    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+      -        let root_set = trie.root_ids.clone();
+      -        let n = trie.num_nodes();
+      -        if n == 0 {
+      -            return;
+      -        }
+      -
+      -        // Precompute the full universe of states once for quick equality checks.
+      -        let all_states_universe = SortedSet::from_iter(0..=ctx.max_state_id);
+      -
+      -        // Compute the maximum pop seen. If > 0, we need the parser to compute state preimages.
+      -        let mut max_pop = 0usize;
+      -        for node in trie.nodes() {
+      -            for (ek, _) in node.children() {
+      -                if ek.pop > 0 {
+      -                    max_pop = max_pop.max(ek.pop as usize);
+      -                }
+      -            }
+      -        }
+      -
+      -        // Build 2^k preimage tables (as in GeneralizeSidsPass) if needed.
+      -        let mut two_power_back_maps: Vec<BTreeMap<StateID, SortedSet>> = Vec::new();
+      -        if max_pop > 0 {
+      -            let parser_ref = if let Some(p) = &ctx.parser {
+      -                p.borrow()
+      -            } else {
+      -                // Without a parser we cannot correctly compose states when p_ab > 0.
+      -                // To avoid unsound rewrites, skip the pass.
+      -                return;
+      -            };
+      -            let one_step_back_map = parser_ref.build_one_step_back_map();
+      -            let num_levels = (max_pop as f64).log2().ceil() as usize + 1;
+      -            two_power_back_maps.push(
+      -                one_step_back_map
+      -                    .into_iter()
+      -                    .map(|(k, v)| (k, SortedSet::from_iter(v.iter())))
+      -                    .collect(),
+      -            );
+      -            for i in 1..num_levels {
+      -                let prev_map = &two_power_back_maps[i - 1];
+      -                let mut next_map: BTreeMap<StateID, SortedSet> = BTreeMap::new();
+      -                for (&state_id, preds1) in prev_map {
+      -                    let mut preds2 = SortedSet::new();
+      -                    for pred1_val in preds1.iter() {
+      -                        let sid = StateID(pred1_val);
+      -                        if let Some(preds_of_pred) = prev_map.get(&sid) {
+      -                            preds2.union_inplace(preds_of_pred);
+      -                        }
+      -                    }
+      -                    if !preds2.is_empty() {
+      -                        next_map.insert(state_id, preds2);
+      -                    }
+      -                }
+      -                two_power_back_maps.push(next_map);
+      -            }
+      -        }
+      -
+      -        // Closure to apply n-step preimage. If n == 0 (or we have no tables), it's identity.
+      -        let apply_n_step_back = |s: &SortedSet, n_steps: usize| -> SortedSet {
+      -            if n_steps == 0 || two_power_back_maps.is_empty() {
+      -                return s.clone();
+      -            }
+      -            let mut current_s = s.clone();
+      -            for k in 0..two_power_back_maps.len() {
+      -                if ((n_steps >> k) & 1) == 1 {
+      -                    let map_k = &two_power_back_maps[k];
+      -                    let mut next_s = SortedSet::new();
+      -                    for state_id_val in current_s.iter() {
+      -                        let sid = StateID(state_id_val);
+      -                        if let Some(preds) = map_k.get(&sid) {
+      -                            next_s.union_inplace(preds);
+      -                        }
+      -                    }
+      -                    current_s = next_s;
+      -                }
+      -            }
+      -            current_s
+      -        };
+      -
+      -        // Helper: true if s == {0,1,2,...,max_state_id}.
+      -        let is_universe = |s: &SortedSet| -> bool {
+      -            if s.len() != ctx.max_state_id + 1 {
+      -                return false;
+      -            }
+      -            // Exact equality with 0..=max_state_id
+      -            s.iter().enumerate().all(|(i, v)| v == i)
+      -        };
+      -
+      -        loop {
+      -            // Collect pop=0 edges by cloning to avoid borrow issues.
+      -            let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
+      -
+      -            for node in trie.nodes() {
+      -                for (ek, dm) in node.children() {
+      -                    if ek.pop == 0 {
+      -                        for (dst, sids) in dm {
+      -                            zero_edges.push((node.id(), ek.tokens.clone(), *dst, sids.clone()));
+      -                        }
+      -                    }
+      -                }
+      -            }
+      -
+      -            if zero_edges.is_empty() { break; }
+      -
+      -            let mut removed_this_iter = 0usize;
+      -
+      -            for (b, llm_bc, c, s_bc) in zero_edges {
+      -                if root_set.contains(&b) { continue; }
+      -
+      -                if let Some(b_node) = trie.get_node(b) {
+      -                    let preds = b_node.parents().clone(); // clone to avoid borrow issues
+      -                    for (a, edges_from_a) in &preds {
+      -                        for (key_ab, s_ab) in edges_from_a {
+      -                            let p_ab = key_ab.pop;
+      -                            let llm_ab = &key_ab.tokens;
+      -                            let new_tokens = llm_ab.intersect(&llm_bc);
+      -                            if new_tokens.is_empty() { continue; }
+      -                            let p_usize = if p_ab <= 0 { 0usize } else { p_ab as usize };
+      -                            // Compose states with the correct p-step preimage.
+      -                            // new_sids = S_ab ∩ pre^{p_ab}(S_bc)
+      -                            //
+      -                            // IMPORTANT: if S_bc is the full universe (no constraint on the 0-pop edge),
+      -                            // then the correct neutral behavior is to impose no additional restriction
+      -                            // beyond S_ab, i.e., pre^{p_ab}(U) should act as U under this path semantics.
+      -                            // Using the raw preimage of U (domain-of-pop) would over-restrict and cause
+      -                            // mismatches when FactorCommonDestinations (or others) introduced U on 0-edges.
+      -                            let s_bc_pre = if p_usize == 0 {
+      -                                // No preimage needed.
+      -                                s_bc.clone()
+      -                            } else if is_universe(&s_bc) {
+      -                                // Treat pre^{p_ab}(U) as U here to preserve exact path semantics.
+      -                                all_states_universe.clone()
+      -                            } else {
+      -                                apply_n_step_back(&s_bc, p_usize)
+      -                            };
+      -                            let new_sids = s_ab.intersect(&s_bc_pre);
+      -                            if new_sids.is_empty() { continue; }
+      -
+      -                            let key = crate::trie3_opt::core::EdgeKey::new(p_ab, new_tokens.clone());
+      -                            trie.add_edge(*a, key, c, new_sids);
+      -                        }
+      -                    }
+      -                }
+      -
+      -                // Remove B -> C under (0, llm_bc)
+      -                let key = crate::trie3_opt::core::EdgeKey::new(0, llm_bc.clone());
+      -                if trie.remove_edge_dest(b, &key, c).is_some() {
+      -                    removed_this_iter += 1;
+      -                }
+      -            }
+      -
+      -            if removed_this_iter == 0 {
+      -                break;
+      -            }
+      -        }
+      -    }
+      -}
+      +use std::collections::{BTreeMap, BTreeSet, HashMap};
       +
-      +        // Precompute the full universe of states once for quick equality checks.
-      +        let all_states_universe = SortedSet::from_iter(0..=ctx.max_state_id);
-       
-               // Compute the maximum pop seen. If > 0, we need the parser to compute state preimages.
-               let mut max_pop = 0usize;
-      @@ -73,6 +76,15 @@
-                   current_s
-               };
-       
-      +        // Helper: true if s == {0,1,2,...,max_state_id}.
-      +        let is_universe = |s: &SortedSet| -> bool {
-      +            if s.len() != ctx.max_state_id + 1 {
-      +                return false;
+      +use crate::glr::table::StateID;
+      +use crate::trie3_opt::context::OptimizationContext;
+      +use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
+      +use crate::trie3_opt::passes::OptimizationPass;
+      +
+      +/// Cycle-safe pop=0 composition (add-only).
+      +///
+      +/// For each non-root pop=0 edge B --(0, T_bc, S_bc)--> C and each predecessor
+      +/// A --(p_ab, T_ab, S_ab)--> B, we add a bypass edge
+      +///   A --(p_ab, T_ab ∩ T_bc, S_ab ∩ pre^{p_ab}(S_bc))--> C.
+      +///
+      +/// We do NOT delete any pop=0 edges. We also do NOT compose a 0-parent inside the
+      +/// same 0-SCC as B (to avoid perturbing cycles). We iterate a few rounds so that
+      +/// long chains of 0-edges are effectively summarized for outside predecessors.
+      +/// This is semantics-preserving: every original path remains; each added edge
+      +/// corresponds to an existing path segment and thus admits no new tokens/states.
+      +pub struct EliminatePop0ExceptRootsPass;
+      +
+      +impl OptimizationPass for EliminatePop0ExceptRootsPass {
+      +    fn name(&self) -> &'static str {
+      +        "EliminatePop0ExceptRoots"
+      +    }
+      +
+      +    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+      +        let n = trie.num_nodes();
+      +        if n == 0 {
+      +            return;
+      +        }
+      +        let root_set: BTreeSet<NodeId> = trie.root_ids.iter().cloned().collect();
+      +
+      +        // Build dense indices for NodeId.
+      +        let node_ids: Vec<NodeId> = trie.node_ids().collect();
+      +        let id_to_idx: HashMap<NodeId, usize> =
+      +            node_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+      +
+      +        // Build adjacency over only pop=0 edges for SCC detection.
+      +        let mut adj0: Vec<Vec<usize>> = vec![Vec::new(); node_ids.len()];
+      +        for node in trie.nodes() {
+      +            let u_idx = id_to_idx[&node.id()];
+      +            for (ek, dm) in node.children() {
+      +                if ek.pop == 0 {
+      +                    for (v, _) in dm {
+      +                        let v_idx = id_to_idx[v];
+      +                        adj0[u_idx].push(v_idx);
+      +                    }
+      +                }
       +            }
-      +            // Exact equality with 0..=max_state_id
-      +            s.iter().enumerate().all(|(i, v)| v == i)
+      +        }
+      +
+      +        // Tarjan's algorithm to find SCCs in the 0-pop graph.
+      +        let mut index: usize = 0;
+      +        let mut stack: Vec<usize> = Vec::new();
+      +        let mut onstack: Vec<bool> = vec![false; node_ids.len()];
+      +        let mut indices: Vec<Option<usize>> = vec![None; node_ids.len()];
+      +        let mut lowlink: Vec<usize> = vec![0; node_ids.len()];
+      +        let mut comp_id: Vec<usize> = vec![usize::MAX; node_ids.len()];
+      +        let mut comp_count: usize = 0;
+      +
+      +        fn strongconnect(
+      +            v: usize,
+      +            index: &mut usize,
+      +            stack: &mut Vec<usize>,
+      +            onstack: &mut [bool],
+      +            indices: &mut [Option<usize>],
+      +            lowlink: &mut [usize],
+      +            comp_id: &mut [usize],
+      +            comp_count: &mut usize,
+      +            adj0: &Vec<Vec<usize>>,
+      +        ) {
+      +            indices[v] = Some(*index);
+      +            lowlink[v] = *index;
+      +            *index += 1;
+      +            stack.push(v);
+      +            onstack[v] = true;
+      +
+      +            for &w in &adj0[v] {
+      +                if indices[w].is_none() {
+      +                    strongconnect(
+      +                        w, index, stack, onstack, indices, lowlink, comp_id, comp_count, adj0,
+      +                    );
+      +                    lowlink[v] = lowlink[v].min(lowlink[w]);
+      +                } else if onstack[w] {
+      +                    lowlink[v] = lowlink[v].min(indices[w].unwrap());
+      +                }
+      +            }
+      +
+      +            if lowlink[v] == indices[v].unwrap() {
+      +                // Start a new component
+      +                loop {
+      +                    let w = stack.pop().unwrap();
+      +                    onstack[w] = false;
+      +                    comp_id[w] = *comp_count;
+      +                    if w == v {
+      +                        break;
+      +                    }
+      +                }
+      +                *comp_count += 1;
+      +            }
+      +        }
+      +
+      +        for v in 0..node_ids.len() {
+      +            if indices[v].is_none() {
+      +                strongconnect(
+      +                    v,
+      +                    &mut index,
+      +                    &mut stack,
+      +                    &mut onstack,
+      +                    &mut indices,
+      +                    &mut lowlink,
+      +                    &mut comp_id,
+      +                    &mut comp_count,
+      +                    &adj0,
+      +                );
+      +            }
+      +        }
+      +
+      +        // Precompute 2^k state preimage maps if we need to handle p > 0.
+      +        let mut max_pop = 0usize;
+      +        for node in trie.nodes() {
+      +            for (ek, _) in node.children() {
+      +                if ek.pop > 0 {
+      +                    max_pop = max_pop.max(ek.pop as usize);
+      +                }
+      +            }
+      +        }
+      +        let mut two_power_back_maps: Vec<BTreeMap<StateID, SortedSet>> = Vec::new();
+      +        if max_pop > 0 {
+      +            if let Some(p_rc) = &ctx.parser {
+      +                let parser = p_rc.borrow();
+      +                let one_step_back_map = parser.build_one_step_back_map();
+      +                let levels = (max_pop as f64).log2().ceil() as usize + 1;
+      +                two_power_back_maps.push(
+      +                    one_step_back_map
+      +                        .into_iter()
+      +                        .map(|(k, v)| (k, SortedSet::from_iter(v.iter())))
+      +                        .collect(),
+      +                );
+      +                for i in 1..levels {
+      +                    let prev = &two_power_back_maps[i - 1];
+      +                    let mut next: BTreeMap<StateID, SortedSet> = BTreeMap::new();
+      +                    for (&sid, preds1) in prev {
+      +                        let mut preds2 = SortedSet::new();
+      +                        for p1 in preds1.iter() {
+      +                            let s = StateID(p1);
+      +                            if let Some(preds_of_pred) = prev.get(&s) {
+      +                                preds2.union_inplace(preds_of_pred);
+      +                            }
+      +                        }
+      +                        if !preds2.is_empty() {
+      +                            next.insert(sid, preds2);
+      +                        }
+      +                    }
+      +                    two_power_back_maps.push(next);
+      +                }
+      +            }
+      +            // If parser is absent, we will only compose parents with p<=0 (safe).
+      +        }
+      +
+      +        let apply_n_step_back = |s: &SortedSet, n_steps: usize| -> SortedSet {
+      +            if n_steps == 0 || two_power_back_maps.is_empty() {
+      +                return s.clone();
+      +            }
+      +            let mut cur = s.clone();
+      +            for k in 0..two_power_back_maps.len() {
+      +                if ((n_steps >> k) & 1) == 1 {
+      +                    let map_k = &two_power_back_maps[k];
+      +                    let mut nxt = SortedSet::new();
+      +                    for sid_val in cur.iter() {
+      +                        let sid = StateID(sid_val);
+      +                        if let Some(preds) = map_k.get(&sid) {
+      +                            nxt.union_inplace(preds);
+      +                        }
+      +                    }
+      +                    cur = nxt;
+      +                }
+      +            }
+      +            cur
       +        };
       +
-               loop {
-                   // Collect pop=0 edges by cloning to avoid borrow issues.
-                   let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
-      @@ -106,8 +118,22 @@
-                                   if new_tokens.is_empty() { continue; }
-                                   let p_usize = if p_ab <= 0 { 0usize } else { p_ab as usize };
-                                   // Compose states with the correct p-step preimage.
-      -                            // new_sids = S_ab ∩ pre^{p_ab}(S_bc)
-      -                            let s_bc_pre = apply_n_step_back(&s_bc, p_usize);
-      +                            // new_sids = S_ab ∩ pre^{p_ab}(S_bc)
-      +                            //
-      +                            // IMPORTANT: if S_bc is the full universe (no constraint on the 0-pop edge),
-      +                            // then the correct neutral behavior is to impose no additional restriction
-      +                            // beyond S_ab, i.e., pre^{p_ab}(U) should act as U under this path semantics.
-      +                            // Using the raw preimage of U (domain-of-pop) would over-restrict and cause
-      +                            // mismatches when FactorCommonDestinations (or others) introduced U on 0-edges.
-      +                            let s_bc_pre = if p_usize == 0 {
-      +                                // No preimage needed.
-      +                                s_bc.clone()
-      +                            } else if is_universe(&s_bc) {
-      +                                // Treat pre^{p_ab}(U) as U here to preserve exact path semantics.
-      +                                all_states_universe.clone()
-      +                            } else {
-      +                                apply_n_step_back(&s_bc, p_usize)
-      +                            };
-                                   let new_sids = s_ab.intersect(&s_bc_pre);
-                                   if new_sids.is_empty() { continue; }
-       
+      +        // Helper to get current states for a triple (src, key, dst).
+      +        let get_existing = |trie: &MiniTrie, src: NodeId, key: &EdgeKey, dst: NodeId| -> SortedSet {
+      +            if let Some(src_node) = trie.get_node(src) {
+      +                if let Some(dm) = src_node.children().get(key) {
+      +                    if let Some(s) = dm.get(&dst) {
+      +                        return s.clone();
+      +                    }
+      +                }
+      +            }
+      +            SortedSet::new()
+      +        };
+      +
+      +        // Iterate, adding bypass edges until no more can be added or a small round budget is hit.
+      +        let max_rounds = 8usize;
+      +        for _round in 0..max_rounds {
+      +            // Collect all candidate additions for this round, unioning their SID sets per (src,key,dst).
+      +            let mut to_add: HashMap<(NodeId, EdgeKey, NodeId), SortedSet> = HashMap::new();
+      +
+      +            // Enumerate all pop=0 edges B --(0, T_bc, S_bc)--> C.
+      +            for b_node in trie.nodes() {
+      +                let b_id = b_node.id();
+      +                if root_set.contains(&b_id) {
+      +                    continue; // keep root-origin 0-edges untouched
+      +                }
+      +                let b_comp = comp_id[id_to_idx[&b_id]];
+      +                for (ek_bc, dm_bc) in b_node.children() {
+      +                    if ek_bc.pop != 0 {
+      +                        continue;
+      +                    }
+      +                    for (c_id, s_bc) in dm_bc {
+      +                        let t_bc = &ek_bc.tokens;
+      +                        let s_bc_clone = s_bc.clone();
+      +
+      +                        // For each predecessor A --(p_ab, T_ab, S_ab)--> B:
+      +                        let preds = b_node.parents().clone(); // clone to avoid borrow issues
+      +                        for (a_id, edges_from_a) in &preds {
+      +                            let a_comp = comp_id[id_to_idx[a_id]];
+      +                            for (key_ab, s_ab) in edges_from_a {
+      +                                let p_ab = key_ab.pop;
+      +                                let t_ab = &key_ab.tokens;
+      +
+      +                                // Do not modify the 0-cycle: skip a 0-parent within the same 0-SCC.
+      +                                if p_ab == 0 && a_comp == b_comp {
+      +                                    continue;
+      +                                }
+      +
+      +                                // Compose tokens.
+      +                                let new_tokens = t_ab.intersect(t_bc);
+      +                                if new_tokens.is_empty() {
+      +                                    continue;
+      +                                }
+      +
+      +                                // Compose states: S_ab ∩ pre^{p_ab}(S_bc).
+      +                                let p_usize = if p_ab > 0 { p_ab as usize } else { 0 };
+      +                                if p_usize > 0 && two_power_back_maps.is_empty() {
+      +                                    // No parser provided: cannot soundly compute p>0 preimages; skip.
+      +                                    continue;
+      +                                }
+      +                                let s_bc_pre = apply_n_step_back(&s_bc_clone, p_usize);
+      +                                if s_bc_pre.is_empty() {
+      +                                    continue;
+      +                                }
+      +                                let new_sids = s_ab.intersect(&s_bc_pre);
+      +                                if new_sids.is_empty() {
+      +                                    continue;
+      +                                }
+      +
+      +                                let new_key = EdgeKey::new(p_ab, new_tokens);
+      +                                // Only add the difference relative to what's already present.
+      +                                let existing = get_existing(trie, *a_id, &new_key, *c_id);
+      +                                let delta = new_sids.difference(&existing);
+      +                                if delta.is_empty() {
+      +                                    continue;
+      +                                }
+      +                                let k = (*a_id, new_key, *c_id);
+      +                                to_add.entry(k).or_default().union_inplace(&delta);
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            if to_add.is_empty() {
+      +                break; // fixed point
+      +            }
+      +
+      +            // Apply all new edges for this round.
+      +            for ((src, key, dst), sids) in to_add {
+      +                trie.add_edge(src, key, dst, sids);
+      +            }
+      +        }
+      +    }
+      +}
       ```
     metadata:
   - user: |
@@ -9979,7 +10496,7 @@ messages:
       Applying patch to 'src/trie3_opt/passes/eliminate_pop0.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/passes/eliminate_pop0.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix EliminatePop0ExceptRootsPass state
-      set intersection when destination set is the full universe"'
+  - user: 'Changes committed with message: "Refactor: Rewrite EliminatePop0ExceptRootsPass
+      to be cycle-safe, add-only composition"'
     metadata:
 ...
