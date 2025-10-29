@@ -1497,7 +1497,7 @@ impl GrammarConstraint {
         //     &llm_vocab.llm_token_map,
         //     &trie2_god,
         // );
-
+        let precompute3_vocab_before = precompute3_vocab.clone();
         let (precomputed3, trie3_god) = Self::precompute3(
             &precomputed1,
             &trie1_god,
@@ -1505,6 +1505,49 @@ impl GrammarConstraint {
             config,
             &mut precompute3_vocab,
         );
+
+        // After precompute3, vocab may have changed due to optimizations. Remap other structures that use internal LLM token IDs.
+        let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
+        for (original_id, old_internal_id) in &precompute3_vocab_before.original_to_internal {
+            if let Some(new_internal_id) = precompute3_vocab.original_to_internal.get(original_id) {
+                old_to_new_map.insert(*old_internal_id, *new_internal_id);
+            }
+        }
+
+        if precompute3_vocab_before.original_to_internal != precompute3_vocab.original_to_internal {
+            crate::debug!(2, "Remapping LLM token IDs in auxiliary structures due to Trie3 optimization ({} changed).", old_to_new_map.len());
+
+            // Remap possible_matches
+            for terminal_map in computed_possible_matches.values_mut() {
+                for llm_token_bv in terminal_map.values_mut() {
+                    let mut new_bv = LLMTokenBV::zeros();
+                    for old_id in llm_token_bv.iter() {
+                        if let Some(new_id) = old_to_new_map.get(&old_id) {
+                            new_bv.insert(*new_id);
+                        }
+                    }
+                    *llm_token_bv = new_bv;
+                }
+            }
+
+            // Remap state_map_by_llm
+            let mut new_state_map_by_llm = DedupValueMap::new();
+            for (old_llm_id, value) in state_map_by_llm.iter() {
+                if let Some(new_internal_id) = old_to_new_map.get(&old_llm_id.0) {
+                    new_state_map_by_llm.insert(LLMTokenID(*new_internal_id), value.clone());
+                }
+            }
+            state_map_by_llm = new_state_map_by_llm;
+
+            // Remap terminal_map_by_llm
+            let mut new_terminal_map_by_llm = DedupValueMap::new();
+            for (old_llm_id, value) in terminal_map_by_llm.iter() {
+                if let Some(new_internal_id) = old_to_new_map.get(&old_llm_id.0) {
+                    new_terminal_map_by_llm.insert(LLMTokenID(*new_internal_id), value.clone());
+                }
+            }
+            terminal_map_by_llm = new_terminal_map_by_llm;
+        }
 
         let mut stats3 = PrecomputeStats::default();
         crate::constraint_extra::calculate_final_stats3(&precomputed3, &mut stats3, &trie3_god);
@@ -1787,7 +1830,7 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
             &config.trie2,
         );
-
+        let precompute3_vocab_before = precompute3_vocab.clone();
         let (precomputed3, trie3_god) = Self::precompute3(
             &precomputed1,
             &trie1_god,
@@ -1795,6 +1838,49 @@ impl GrammarConstraint {
             config,
             &mut precompute3_vocab,
         );
+
+        // After precompute3, vocab may have changed due to optimizations. Remap other structures that use internal LLM token IDs.
+        let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
+        for (original_id, old_internal_id) in &precompute3_vocab_before.original_to_internal {
+            if let Some(new_internal_id) = precompute3_vocab.original_to_internal.get(original_id) {
+                old_to_new_map.insert(*old_internal_id, *new_internal_id);
+            }
+        }
+
+        if precompute3_vocab_before.original_to_internal != precompute3_vocab.original_to_internal {
+            crate::debug!(2, "Remapping LLM token IDs in auxiliary structures due to Trie3 optimization ({} changed).", old_to_new_map.len());
+
+            // Remap possible_matches
+            for terminal_map in computed_possible_matches.values_mut() {
+                for llm_token_bv in terminal_map.values_mut() {
+                    let mut new_bv = LLMTokenBV::zeros();
+                    for old_id in llm_token_bv.iter() {
+                        if let Some(new_id) = old_to_new_map.get(&old_id) {
+                            new_bv.insert(*new_id);
+                        }
+                    }
+                    *llm_token_bv = new_bv;
+                }
+            }
+
+            // Remap state_map_by_llm
+            let mut new_state_map_by_llm = DedupValueMap::new();
+            for (old_llm_id, value) in state_map_by_llm.iter() {
+                if let Some(new_internal_id) = old_to_new_map.get(&old_llm_id.0) {
+                    new_state_map_by_llm.insert(LLMTokenID(*new_internal_id), value.clone());
+                }
+            }
+            state_map_by_llm = new_state_map_by_llm;
+
+            // Remap terminal_map_by_llm
+            let mut new_terminal_map_by_llm = DedupValueMap::new();
+            for (old_llm_id, value) in terminal_map_by_llm.iter() {
+                if let Some(new_internal_id) = old_to_new_map.get(&old_llm_id.0) {
+                    new_terminal_map_by_llm.insert(LLMTokenID(*new_internal_id), value.clone());
+                }
+            }
+            terminal_map_by_llm = new_terminal_map_by_llm;
+        }
 
         let mut stats3 = PrecomputeStats::default();
         crate::constraint_extra::calculate_final_stats3(&precomputed3, &mut stats3, &trie3_god);
