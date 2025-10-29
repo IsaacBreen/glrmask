@@ -26,6 +26,9 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
             return;
         }
 
+        // Precompute the full universe of states once for quick equality checks.
+        let all_states_universe = SortedSet::from_iter(0..=ctx.max_state_id);
+
         // Compute the maximum pop seen. If > 0, we need the parser to compute state preimages.
         let mut max_pop = 0usize;
         for node in trie.nodes() {
@@ -95,6 +98,15 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
             current_s
         };
 
+        // Helper: true if s == {0,1,2,...,max_state_id}.
+        let is_universe = |s: &SortedSet| -> bool {
+            if s.len() != ctx.max_state_id + 1 {
+                return false;
+            }
+            // Exact equality with 0..=max_state_id
+            s.iter().enumerate().all(|(i, v)| v == i)
+        };
+
         loop {
             // Collect pop=0 edges by cloning to avoid borrow issues.
             let mut zero_edges: Vec<(NodeId, SortedSet, NodeId, SortedSet)> = Vec::new();
@@ -127,7 +139,21 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
                             let p_usize = if p_ab <= 0 { 0usize } else { p_ab as usize };
                             // Compose states with the correct p-step preimage.
                             // new_sids = S_ab ∩ pre^{p_ab}(S_bc)
-                            let s_bc_pre = apply_n_step_back(&s_bc, p_usize);
+                            //
+                            // IMPORTANT: if S_bc is the full universe (no constraint on the 0-pop edge),
+                            // then the correct neutral behavior is to impose no additional restriction
+                            // beyond S_ab, i.e., pre^{p_ab}(U) should act as U under this path semantics.
+                            // Using the raw preimage of U (domain-of-pop) would over-restrict and cause
+                            // mismatches when FactorCommonDestinations (or others) introduced U on 0-edges.
+                            let s_bc_pre = if p_usize == 0 {
+                                // No preimage needed.
+                                s_bc.clone()
+                            } else if is_universe(&s_bc) {
+                                // Treat pre^{p_ab}(U) as U here to preserve exact path semantics.
+                                all_states_universe.clone()
+                            } else {
+                                apply_n_step_back(&s_bc, p_usize)
+                            };
                             let new_sids = s_ab.intersect(&s_bc_pre);
                             if new_sids.is_empty() { continue; }
 
