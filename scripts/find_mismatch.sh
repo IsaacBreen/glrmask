@@ -77,12 +77,14 @@ run_test() {
     fi
 
     # Parse the log file to find the mismatch count for the rust_model
-    # We look for the line starting with 'rust_model' and grab the 3rd column.
+    # This grep is now more specific to avoid matching 'bruteforce_rust_model'
     local mismatch_count
-    mismatch_count=$(grep '^rust_model' "$log_file" | awk '{print $3}')
+    mismatch_count=$(grep '^[[:space:]]*rust_model' "$log_file" | awk '{print $3}')
 
-    if [[ -z "$mismatch_count" ]]; then
-        printf "[${RED} FAILED ${NC}] %-35s (Could not parse output. Check log: %s)\n" "$opt_name" "$log_file"
+    # Robustly check the result
+    if ! [[ "$mismatch_count" =~ ^[0-9]+$ ]]; then
+        # This catches empty strings, multi-line strings, or non-numeric values
+        printf "[${RED} FAILED ${NC}] %-35s (Could not parse mismatch count. Check log: %s)\n" "$opt_name" "$log_file"
     elif [[ "$mismatch_count" -gt 0 ]]; then
         printf "[${RED}MISMATCH${NC}] %-35s (Mismatch count: %s)\n" "$opt_name" "$mismatch_count"
     else
