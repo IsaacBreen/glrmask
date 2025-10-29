@@ -11,7 +11,7 @@ impl OptimizationPass for PruneUnproductivePathsPass {
         "PruneUnproductivePaths"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext<'_>) {
         let productive: BTreeSet<NodeId> = trie.can_reach_end();
         if productive.len() == trie.num_nodes() {
             return;

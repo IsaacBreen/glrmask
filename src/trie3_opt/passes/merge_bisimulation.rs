@@ -19,7 +19,7 @@ impl OptimizationPass for MergeBisimulationPass {
         "MergeBisimulation"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext<'_>) {
         let node_ids: Vec<_> = trie.node_ids().collect();
         let id_to_idx: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let n = node_ids.len();

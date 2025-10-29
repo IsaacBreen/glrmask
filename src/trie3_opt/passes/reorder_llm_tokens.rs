@@ -9,7 +9,7 @@ impl OptimizationPass for ReorderLLMTokensPass {
         "ReorderLLMTokens"
     }
 
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext<'_>) {
         let sv_rc = if let Some(sv_rc) = &ctx.stage_vocab {
             sv_rc
         } else {

@@ -15,7 +15,7 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
         "EliminatePop0ExceptRoots"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext<'_>) {
         let root_set = trie.root_ids.clone();
         let n = trie.num_nodes();
         if n == 0 {

@@ -209,7 +209,7 @@ impl OptimizationPass for FactorStateDestSetsPass {
         "FactorStateDestSets"
     }
 
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext<'_>) {
         let targets = self.collect_targets(trie);
         if targets.is_empty() {
             return;

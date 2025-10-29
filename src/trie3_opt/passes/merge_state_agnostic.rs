@@ -31,7 +31,7 @@ impl OptimizationPass for MergeStateAgnosticPass {
         "MergeStateAgnostic"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext<'_>) {
         let node_ids: Vec<_> = trie.node_ids().collect();
         let n = node_ids.len();
         if n == 0 {

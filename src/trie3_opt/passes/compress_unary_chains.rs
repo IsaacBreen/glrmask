@@ -11,7 +11,7 @@ impl OptimizationPass for CompressUnaryChainsPass {
         "CompressUnaryChains"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext<'_>) {
         let roots_set: BTreeSet<NodeId> = trie.root_ids.iter().cloned().collect();
         let max_iters = 8;
         for _ in 0..max_iters {

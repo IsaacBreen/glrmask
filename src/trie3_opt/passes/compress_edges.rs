@@ -14,7 +14,7 @@ impl OptimizationPass for CompressEdgesPass {
         "CompressEdges"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext<'_>) {
         let node_ids: Vec<_> = trie.node_ids().collect();
         for node_id in node_ids {
             let n = trie.get_node(node_id).unwrap();
