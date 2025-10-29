@@ -2318,14 +2318,12 @@ impl GrammarConstraint {
                 );
                 inserter.try_destination(cur.clone()).expect("Failed to insert unconditional edge to template head");
             }
-
-            let items = &items[1..]; // Skip first element
             if items.is_empty() {
                 continue;
             }
 
-            let shifted_state_content = *items.last().unwrap();
-            let pre_shift_stack = &items[..items.len() - 1];
+            let shifted_state_content = items[0];
+            let pre_shift_stack = &items[1..];
 
             // Walk the pre-shift stack from top to bottom to build the trie path
             for state_content in pre_shift_stack {
