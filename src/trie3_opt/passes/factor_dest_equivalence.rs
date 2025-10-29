@@ -319,7 +319,7 @@ impl OptimizationPass for FactorStateDestEquivalencePass {
         "FactorStateDestEquivalence"
     }
 
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext<'_>) {
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
         let targets = self.collect_targets(trie);
         if targets.is_empty() {
             return;

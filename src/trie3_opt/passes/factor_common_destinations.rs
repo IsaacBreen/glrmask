@@ -19,7 +19,7 @@ impl OptimizationPass for FactorCommonDestinationsPass {
         "FactorCommonDestinations"
     }
 
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext<'_>) {
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
         if self.min_incoming == 0 {
             return;
         }
@@ -68,7 +68,7 @@ impl OptimizationPass for FactorCommonDestinationsPass {
                                 *src_id,
                                 none_like_edge_key,
                                 intermediate_id,
-                                sids.clone(),
+                                all_states.clone(),
                             );
                         }
                     }

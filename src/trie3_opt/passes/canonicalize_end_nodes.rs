@@ -15,7 +15,7 @@ impl OptimizationPass for CanonicalizeEndNodesPass {
         "CanonicalizeEndNodes"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext<'_>) {
+    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
         // Collect end nodes
         let mut ends: Vec<NodeId> = trie
             .nodes()

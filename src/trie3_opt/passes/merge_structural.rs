@@ -24,7 +24,7 @@ impl OptimizationPass for MergeStructuralPass {
         "MergeStructural"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext<'_>) {
+    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
         let node_ids: Vec<_> = trie.node_ids().collect();
         let dense_of: HashMap<_, _> = node_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         let n = node_ids.len();

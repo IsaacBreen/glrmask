@@ -19,7 +19,7 @@ impl OptimizationPass for FactorRootFanoutPass {
         "FactorRootFanout"
     }
 
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext<'_>) {
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
         let all_states = SortedSet::from_iter(0..=ctx.max_state_id);
         let root_ids: Vec<_> = trie.root_ids.iter().cloned().collect();
 
@@ -63,16 +63,15 @@ impl OptimizationPass for FactorRootFanoutPass {
                 for (tokens, _) in &entries {
                     let mut next_blocks = Vec::new();
                     for b in &blocks {
-                        // If there is no overlap, keep the block unchanged.
-                        if !b.intersects(tokens) {
-                            next_blocks.push(b.clone());
-                            continue;
-                        }
-                        // Otherwise split into intersection and difference.
                         let inter = b.intersect(tokens);
-                        if !inter.is_empty() { next_blocks.push(inter); }
-                        let diff = b.difference(tokens);
-                        if !diff.is_empty() { next_blocks.push(diff); }
+                        if !inter.is_empty() {
+                            next_blocks.push(inter);
+                        }
+                        let diff_elems: Vec<_> =
+                            b.iter().filter(|t| !tokens.elems.binary_search(t).is_ok()).collect();
+                        if !diff_elems.is_empty() {
+                            next_blocks.push(SortedSet::from_iter(diff_elems));
+                        }
                     }
                     if self.max_atoms_per_pop > 0 && next_blocks.len() > self.max_atoms_per_pop {
                         aborted = true;

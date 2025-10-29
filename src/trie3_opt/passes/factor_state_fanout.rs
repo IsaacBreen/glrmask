@@ -30,7 +30,7 @@ impl OptimizationPass for FactorStateFanoutPass {
         "FactorStateFanout"
     }
 
-    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext<'_>) {
+    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
         const MAX_ATOMS_PER_POP: usize = 4096;
         let node_ids: Vec<_> = trie.node_ids().collect();
         for node_id in node_ids {

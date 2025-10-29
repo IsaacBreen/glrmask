@@ -9,7 +9,7 @@ impl OptimizationPass for MergeEquivalentLLMTokensPass {
         "MergeEquivalentLLMTokens"
     }
 
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext<'_>) {
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
         let sv_rc = if let Some(sv_rc) = &ctx.stage_vocab {
             sv_rc
         } else {

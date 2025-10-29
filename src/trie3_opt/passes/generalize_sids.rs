@@ -14,7 +14,7 @@ impl OptimizationPass for GeneralizeSidsPass {
         "GeneralizeSids"
     }
 
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext<'_>) {
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
         let parser = if let Some(p) = &ctx.parser {
             p.borrow()
         } else {
@@ -40,11 +40,7 @@ impl OptimizationPass for GeneralizeSidsPass {
         two_power_back_maps.push(
             one_step_back_map
                 .into_iter()
-                .map(|(k, v)| {
-                    // Convert StateID predecessors into usize for SortedSet
-                    let preds = SortedSet::from_iter(v.into_iter().map(|sid| sid));
-                    (k, preds)
-                })
+                .map(|(k, v)| (k, SortedSet::from_iter(v.iter())))
                 .collect(),
         );
 

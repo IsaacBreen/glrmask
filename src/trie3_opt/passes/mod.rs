@@ -4,7 +4,7 @@ use crate::trie3_opt::core::MiniTrie;
 /// Trait implemented by each independent optimization pass over the MiniTrie.
 pub trait OptimizationPass {
     fn name(&self) -> &'static str;
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext<'_>);
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext);
 }
 
 pub mod canonicalize_end_nodes;

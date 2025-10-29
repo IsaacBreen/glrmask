@@ -324,7 +324,7 @@ pub(crate) fn import_from_mini(
     root_keys: &[TokenizerStateID],
     trie3_god: &Trie3GodWrapper,
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-    ctx: &OptimizationContext<'_>,
+    ctx: &OptimizationContext,
 ) {
     // Create all nodes first, and map MiniTrie NodeId to new PrecomputeNode3Index
     let mut id_map: BTreeMap<NodeId, PrecomputeNode3Index> = BTreeMap::new();

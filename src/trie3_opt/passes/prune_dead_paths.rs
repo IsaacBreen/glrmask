@@ -14,7 +14,7 @@ impl OptimizationPass for PruneDeadPathsPass {
         "PruneDeadPaths"
     }
 
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext<'_>) {
+    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
         let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
         let productive_tokens = trie.productive_tokens_at_nodes(&universe);
 
