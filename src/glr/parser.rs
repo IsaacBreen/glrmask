@@ -1924,7 +1924,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 (new_dest, PruneAndTransformRecursiveMemo::default())
                             });
                             let key = IntermediateTrie3EdgeKey::Pop(0, bv.clone());
-                            crate::debug!(5, "Applying state filter {:?}.", bv);
+                            crate::debug!(5, "Applying state filter {:?} to {:?}", bv, dest);
                             deep_add_precompute_trie_edges(
                                 &mut parent_after_filter, god, &key,
                                 &mut || dest.clone(),

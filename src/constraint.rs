@@ -2206,6 +2206,12 @@ impl GrammarConstraint {
                     println!("  [{}]", edge_keys_str.join(", "));
                 }
             }
+            let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+                .display_edge_keys_only()
+                .display_nodes()
+                .omit_depth()
+                ;
+            println!("{}", Trie::pretty_print_with_options(&trie3_god, &[start], &options));
         }
 
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
