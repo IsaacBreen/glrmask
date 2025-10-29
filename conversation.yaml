@@ -110,7 +110,6 @@ local_system:
           pub canonicalize_end_nodes: bool,
           pub compress_edges: bool,
           pub compress_unary_chains: bool,
-          pub factor_state_fanout: bool,
           pub factor_common_destinations: bool,
           pub factor_common_destinations_min_incoming: usize,
           pub merge_structural: bool,
@@ -135,7 +134,6 @@ local_system:
                   canonicalize_end_nodes: false,
                   compress_edges: true,
                   compress_unary_chains: true,
-                  factor_state_fanout: false,
                   factor_common_destinations: true,
                   factor_common_destinations_min_incoming: 12,
                   merge_structural: true,
@@ -162,7 +160,6 @@ local_system:
                   canonicalize_end_nodes: false,
                   compress_edges: false,
                   compress_unary_chains: false,
-                  factor_state_fanout: false,
                   factor_common_destinations: false,
                   factor_common_destinations_min_incoming: 0,
                   merge_structural: false,
@@ -209,9 +206,6 @@ local_system:
               }
 
               // Phase 3: Factoring and structural simplification
-              if config.factor_state_fanout {
-                  pipeline.push(Box::new(FactorStateFanoutPass));
-              }
               if config.factor_common_destinations {
                   pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
               }
@@ -1541,7 +1535,6 @@ local_system:
               canonicalize_end_nodes: true, // Always good practice
               compress_edges: config.compress_edges,
               compress_unary_chains: config.compress_edges,
-              factor_state_fanout: config.factor_state_fanout,
               factor_common_destinations: config.factor_common_destinations,
               factor_common_destinations_min_incoming: config.factor_common_destinations_min_incoming,
               merge_structural: config.merge_structural,
@@ -2884,7 +2877,6 @@ local_system:
       pub mod compress_unary_chains;
       pub mod eliminate_pop0;
       pub mod factor_common_destinations;
-      pub mod factor_state_fanout;
       pub mod generalize_sids;
       pub mod merge_bisimulation;
       pub mod merge_equivalent_llm_tokens;
@@ -2899,7 +2891,6 @@ local_system:
       pub use compress_unary_chains::CompressUnaryChainsPass;
       pub use eliminate_pop0::EliminatePop0ExceptRootsPass;
       pub use factor_common_destinations::FactorCommonDestinationsPass;
-      pub use factor_state_fanout::FactorStateFanoutPass;
       pub use generalize_sids::GeneralizeSidsPass;
       pub use merge_bisimulation::MergeBisimulationPass;
       pub use merge_equivalent_llm_tokens::MergeEquivalentLLMTokensPass;
@@ -3131,9 +3122,12 @@ local_system:
       use std::cell::RefCell;
       use std::collections::{BTreeMap, HashMap};
       use std::rc::Rc;
+      use std::env;
 
       use ordered_hash_map::OrderedHashMap;
       use kdam::BarExt;
+      use once_cell::sync::Lazy;
+      use serde::Deserialize;
 
       use crate::profiler::PROGRESS_BAR_ENABLED;
 
@@ -3153,7 +3147,7 @@ local_system:
       use crate::trie3_opt::merge_global_atoms::MergeGlobalAtomsPass;
 
       /// Configuration for the coordinator: which passes to run and their key parameters.
-      #[derive(Clone, Debug)]
+      #[derive(Clone, Debug, Deserialize)]
       pub struct CoordinatorConfig {
           pub num_passes: usize,
           pub prune_dead_paths: bool,
@@ -3176,29 +3170,85 @@ local_system:
           pub generalize_sids: bool,
       }
 
+      fn get_default_config_impl() -> CoordinatorConfig {
+          CoordinatorConfig {
+              num_passes: 3,
+              prune_dead_paths: true,
+              prune_unproductive_paths: true,
+              canonicalize_end_nodes: false,
+              compress_edges: true,
+              compress_unary_chains: true,
+              factor_common_destinations: true,
+              factor_common_destinations_min_incoming: 12,
+              merge_structural: true,
+              merge_structural_max_iters: 4,
+              merge_bisimulation: false,
+              merge_bisimulation_max_iters: 1000,
+              merge_global_atoms: false,
+              merge_global_atoms_max_iters: 2,
+              merge_global_atoms_max_atoms_per_pop: 4096,
+              eliminate_pop0_except_roots: false,
+              merge_equivalent_llm_tokens: true,
+              reorder_llm_tokens: false,
+              generalize_sids: false,
+          }
+      }
+
+      static EFFECTIVE_CONFIG: Lazy<CoordinatorConfig> = Lazy::new(|| {
+          let mut config = get_default_config_impl();
+          if let Ok(json_str) = env::var("AICI_TRIE3_CONFIG") {
+              if json_str.is_empty() {
+                  return config;
+              }
+              match serde_json::from_str::<serde_json::Value>(&json_str) {
+                  Ok(val) => {
+                      if let serde_json::Value::Object(map) = val {
+                          macro_rules! override_field {
+                              ($field:ident, $type:ty, $as_fn:ident) => {
+                                  if let Some(v) = map.get(stringify!($field)).and_then(|v| v.$as_fn()) {
+                                      config.$field = v as $type;
+                                  }
+                              };
+                              ($field:ident, $as_fn:ident) => {
+                                  if let Some(v) = map.get(stringify!($field)).and_then(|v| v.$as_fn()) {
+                                      config.$field = v;
+                                  }
+                              };
+                          }
+                          override_field!(num_passes, usize, as_u64);
+                          override_field!(prune_dead_paths, as_bool);
+                          override_field!(prune_unproductive_paths, as_bool);
+                          override_field!(canonicalize_end_nodes, as_bool);
+                          override_field!(compress_edges, as_bool);
+                          override_field!(compress_unary_chains, as_bool);
+                          override_field!(factor_common_destinations, as_bool);
+                          override_field!(factor_common_destinations_min_incoming, usize, as_u64);
+                          override_field!(merge_structural, as_bool);
+                          override_field!(merge_structural_max_iters, usize, as_u64);
+                          override_field!(merge_bisimulation, as_bool);
+                          override_field!(merge_bisimulation_max_iters, usize, as_u64);
+                          override_field!(merge_global_atoms, as_bool);
+                          override_field!(merge_global_atoms_max_iters, usize, as_u64);
+                          override_field!(merge_global_atoms_max_atoms_per_pop, usize, as_u64);
+                          override_field!(eliminate_pop0_except_roots, as_bool);
+                          override_field!(merge_equivalent_llm_tokens, as_bool);
+                          override_field!(reorder_llm_tokens, as_bool);
+                          override_field!(generalize_sids, as_bool);
+                      } else {
+                          eprintln!("[Trie3 Opt] WARNING: AICI_TRIE3_CONFIG is not a JSON object. Using default config.");
+                      }
+                  }
+                  Err(e) => {
+                      eprintln!("[Trie3 Opt] WARNING: Failed to parse AICI_TRIE3_CONFIG: {}. Using default config.", e);
+                  }
+              }
+          }
+          config
+      });
+
       impl Default for CoordinatorConfig {
           fn default() -> Self {
-              Self {
-                  num_passes: 3,
-                  prune_dead_paths: true,
-                  prune_unproductive_paths: true,
-                  canonicalize_end_nodes: false,
-                  compress_edges: true,
-                  compress_unary_chains: true,
-                  factor_common_destinations: true,
-                  factor_common_destinations_min_incoming: 12,
-                  merge_structural: true,
-                  merge_structural_max_iters: 4,
-                  merge_bisimulation: false,
-                  merge_bisimulation_max_iters: 1000,
-                  merge_global_atoms: false,
-                  merge_global_atoms_max_iters: 2,
-                  merge_global_atoms_max_atoms_per_pop: 4096,
-                  eliminate_pop0_except_roots: false,
-                  merge_equivalent_llm_tokens: true,
-                  reorder_llm_tokens: false,
-                  generalize_sids: false,
-              }
+              EFFECTIVE_CONFIG.clone()
           }
       }
 
@@ -6126,7 +6176,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -6250,7 +6300,6 @@ messages:
           pub canonicalize_end_nodes: bool,
           pub compress_edges: bool,
           pub compress_unary_chains: bool,
-          pub factor_state_fanout: bool,
           pub factor_common_destinations: bool,
           pub factor_common_destinations_min_incoming: usize,
           pub merge_structural: bool,
@@ -6275,7 +6324,6 @@ messages:
                   canonicalize_end_nodes: false,
                   compress_edges: true,
                   compress_unary_chains: true,
-                  factor_state_fanout: false,
                   factor_common_destinations: true,
                   factor_common_destinations_min_incoming: 12,
                   merge_structural: true,
@@ -6302,7 +6350,6 @@ messages:
                   canonicalize_end_nodes: false,
                   compress_edges: false,
                   compress_unary_chains: false,
-                  factor_state_fanout: false,
                   factor_common_destinations: false,
                   factor_common_destinations_min_incoming: 0,
                   merge_structural: false,
@@ -6349,9 +6396,6 @@ messages:
               }
 
               // Phase 3: Factoring and structural simplification
-              if config.factor_state_fanout {
-                  pipeline.push(Box::new(FactorStateFanoutPass));
-              }
               if config.factor_common_destinations {
                   pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
               }
@@ -7701,7 +7745,6 @@ messages:
               canonicalize_end_nodes: true, // Always good practice
               compress_edges: config.compress_edges,
               compress_unary_chains: config.compress_edges,
-              factor_state_fanout: config.factor_state_fanout,
               factor_common_destinations: config.factor_common_destinations,
               factor_common_destinations_min_incoming: config.factor_common_destinations_min_incoming,
               merge_structural: config.merge_structural,
@@ -8168,242 +8211,6 @@ messages:
       ```
     metadata:
       filename: src/trie3_opt/passes/factor_common_destinations.rs
-  - user: |-
-      ```rust "src/trie3_opt/passes/factor_state_fanout.rs"
-      use std::collections::{BTreeMap, HashMap};
-
-      use crate::trie3_opt::context::OptimizationContext;
-      use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-      use crate::trie3_opt::EdgeKey;
-      use crate::trie3_opt::passes::OptimizationPass;
-
-      /// State-aware factoring via token atoms and intermediates.
-      ///
-      /// For each node and each pop > 0:
-      ///   1) Build token-atoms from the outgoing (pop, tokens) sets so that, within an atom T,
-      ///      membership of each original token-set is uniform (either T ⊆ tokens or disjoint).
-      ///   2) For each atom T, compute a destination map dest -> union(states) over original edges
-      ///      that cover T. Then for each state s appearing at T, compute D(s, T) (the set of dests).
-      ///   3) Group states by identical D(s, T). Accumulate token unions across atoms for identical
-      ///      (dest-set, state-set) groups.
-      ///   4) For a dest-set of size:
-      ///      - 0: nothing to emit.
-      ///      - 1: keep a direct edge (p, unioned_tokens) to that single dest for its state-set.
-      ///      - >=2: create (or reuse) a per-dest-set intermediate I; add one source --(0, tokens)--> I
-      ///        for the state-set; and add I --(p, unioned_tokens_over_all_states_for_this_destset)--> v
-      ///        for each v in the dest-set with sids = all_states.
-      ///
-      /// This strictly reduces per-state fanout at the source from |D(s, T)| to 1 for atoms where
-      /// |D(s, T)| >= 2 and merges tokens across atoms wherever (D(s, T)) is identical.
-      pub struct FactorStateFanoutPass;
-
-      impl OptimizationPass for FactorStateFanoutPass {
-          fn name(&self) -> &'static str {
-              "FactorStateFanout"
-          }
-
-          fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-              const MAX_ATOMS_PER_POP: usize = 4096;
-              let node_ids: Vec<_> = trie.node_ids().collect();
-              for node_id in node_ids {
-                  let node = if let Some(n) = trie.get_node(node_id) { n } else { continue };
-                  if node.children().is_empty() {
-                      continue;
-                  }
-
-                  // Group existing edges by pop so we can completely rebuild per-pop.
-                  let mut by_pop: BTreeMap<isize, Vec<(EdgeKey, BTreeMap<NodeId, SortedSet>)>> =
-                      BTreeMap::new();
-                  for (ek, dm) in node.children() {
-                      by_pop.entry(ek.pop).or_default().push((ek.clone(), dm.clone()));
-                  }
-
-                  let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-                  let all_states = SortedSet::from_iter(0..= _ctx.max_state_id);
-
-                  for (pop, edges) in by_pop {
-                      // We only factor for pop > 0; keep pop<=0 as-is.
-                      if pop <= 0 {
-                          for (ek, dm) in edges {
-                              let entry = new_children.entry(ek).or_default();
-                              for (dst, sids) in dm {
-                                  entry.entry(dst).or_default().union_inplace(&sids);
-                              }
-                          }
-                          continue;
-                      }
-
-                      // Build token universe and atoms for these edges.
-                      let mut universe = SortedSet::new();
-                      for (ek, _) in &edges {
-                          universe.union_inplace(&ek.tokens);
-                      }
-                      if universe.is_empty() {
-                          // No tokens for this pop; nothing to do.
-                          continue;
-                      }
-
-                      let mut atoms: Vec<SortedSet> = vec![universe.clone()];
-                      let mut aborted = false;
-                      for (ek, _) in &edges {
-                          let toks = &ek.tokens;
-                          if toks.is_empty() {
-                              continue;
-                          }
-                          let mut next_atoms = Vec::with_capacity(atoms.len().saturating_mul(2));
-                          for b in &atoms {
-                              if !b.intersects(toks) {
-                                  next_atoms.push(b.clone());
-                                  continue;
-                              }
-                              let inter = b.intersect(toks);
-                              if !inter.is_empty() {
-                                  next_atoms.push(inter);
-                              }
-                              let diff = b.difference(toks);
-                              if !diff.is_empty() {
-                                  next_atoms.push(diff);
-                              }
-                          }
-                          if next_atoms.len() > MAX_ATOMS_PER_POP {
-                              aborted = true;
-                              break;
-                          }
-                          atoms = next_atoms;
-                      }
-                      if aborted {
-                          atoms = vec![universe];
-                      }
-
-                      // Accumulators:
-                      // - For destset size >=2: per-destset intermediate and edges.
-                      let mut mid_for_destset: HashMap<Vec<NodeId>, NodeId> = HashMap::new();
-                      let mut tokens_for_destset_union: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
-                      let mut destset_states_to_tokens: HashMap<Vec<NodeId>, HashMap<SortedSet, SortedSet>> =
-                          HashMap::new();
-                      // - For destset size == 1: keep direct edges; union tokens across atoms.
-                      let mut direct_edges: HashMap<NodeId, HashMap<SortedSet, SortedSet>> = HashMap::new();
-
-                      for tset in atoms {
-                          // Build dest -> union(states) map for this atom tset.
-                          let mut dest_map: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
-                          for (ek, dm) in &edges {
-                              if !tset.intersects(&ek.tokens) {
-                                  continue;
-                              }
-                              for (dst, sids) in dm {
-                                  dest_map.entry(*dst).or_default().union_inplace(sids);
-                              }
-                          }
-                          if dest_map.is_empty() {
-                              continue;
-                          }
-
-                          // For this atom, compute D(s, atom) per state s.
-                          // Use a sparse mapping only for states that appear.
-                          let mut state_to_dests: HashMap<usize, Vec<NodeId>> = HashMap::new();
-                          for (dst, sids) in &dest_map {
-                              for s in sids.iter() {
-                                  state_to_dests.entry(s).or_default().push(*dst);
-                              }
-                          }
-
-                          // Group states by identical dest-set for this atom.
-                          let mut local_dset_to_states: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
-                          for (s, mut v) in state_to_dests {
-                              v.sort_unstable();
-                              v.dedup();
-                              if v.is_empty() {
-                                  continue;
-                              }
-                              local_dset_to_states.entry(v).or_default().insert(s);
-                          }
-
-                          // Accumulate across atoms:
-                          for (dset, states) in local_dset_to_states {
-                              if dset.len() == 1 {
-                                  // Single destination: keep direct edge (pop, tokens) -> that dest, for these states.
-                                  let dst = dset[0];
-                                  direct_edges
-                                      .entry(dst)
-                                      .or_default()
-                                      .entry(states.clone())
-                                      .or_default()
-                                      .union_inplace(&tset);
-                              } else {
-                                  // Multi-destination set: go via an intermediate for this dest-set.
-                                  tokens_for_destset_union
-                                      .entry(dset.clone())
-                                      .or_default()
-                                      .union_inplace(&tset);
-                                  destset_states_to_tokens
-                                      .entry(dset)
-                                      .or_default()
-                                      .entry(states)
-                                      .or_default()
-                                      .union_inplace(&tset);
-                              }
-                          }
-                      }
-
-                      // Emit direct edges for single-destination groups (merged across atoms).
-                      for (dst, states_to_tokens) in direct_edges {
-                          for (states, toks) in states_to_tokens {
-                              if toks.is_empty() || states.is_empty() {
-                                  continue;
-                              }
-                              let key = EdgeKey::new(pop, toks);
-                              new_children
-                                  .entry(key)
-                                  .or_default()
-                                  .entry(dst)
-                                  .or_default()
-                                  .union_inplace(&states);
-                          }
-                      }
-
-                      // Emit intermediates and their edges for multi-destination sets.
-                      for (dset, states_to_tokens) in destset_states_to_tokens {
-                          // Create/reuse intermediate for this dest-set
-                          let mid_id = *mid_for_destset
-                              .entry(dset.clone())
-                              .or_insert_with(|| trie.add_node(false));
-
-                          // Source -> intermediate (pop=0) for each state-group; tokens merged across atoms.
-                          for (states, toks) in states_to_tokens {
-                              if toks.is_empty() || states.is_empty() {
-                                  continue;
-                              }
-                              let key = EdgeKey::new(0, toks);
-                              new_children
-                                  .entry(key)
-                                  .or_default()
-                                  .entry(mid_id)
-                                  .or_default()
-                                  .union_inplace(&states);
-                          }
-
-                          // Intermediate -> destinations (pop=p), state-agnostic, tokens = union across all states for this dest-set.
-                          let toks_mid = tokens_for_destset_union
-                              .get(&dset)
-                              .cloned()
-                              .unwrap_or_else(SortedSet::new);
-                          if !toks_mid.is_empty() {
-                              for dst in dset {
-                                  trie.add_edge(mid_id, EdgeKey::new(pop, toks_mid.clone()), dst, all_states.clone());
-                              }
-                          }
-                      }
-                  }
-
-                  trie.set_children(node_id, new_children);
-              }
-          }
-      }
-
-      ```
-    metadata:
-      filename: src/trie3_opt/passes/factor_state_fanout.rs
   - user: |-
       ```rust "src/trie3_opt/passes/generalize_sids.rs"
       use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -9335,7 +9142,6 @@ messages:
       pub mod compress_unary_chains;
       pub mod eliminate_pop0;
       pub mod factor_common_destinations;
-      pub mod factor_state_fanout;
       pub mod generalize_sids;
       pub mod merge_bisimulation;
       pub mod merge_equivalent_llm_tokens;
@@ -9350,7 +9156,6 @@ messages:
       pub use compress_unary_chains::CompressUnaryChainsPass;
       pub use eliminate_pop0::EliminatePop0ExceptRootsPass;
       pub use factor_common_destinations::FactorCommonDestinationsPass;
-      pub use factor_state_fanout::FactorStateFanoutPass;
       pub use generalize_sids::GeneralizeSidsPass;
       pub use merge_bisimulation::MergeBisimulationPass;
       pub use merge_equivalent_llm_tokens::MergeEquivalentLLMTokensPass;
@@ -9543,7 +9348,8 @@ messages:
       ```
     metadata:
       filename: src/trie3_opt/passes/reorder_llm_tokens.rs
-  - user: Remove the factor_state_fanout pass.
+  - user: Make it so the default `CoordinatorConfig` can be overridden by an environment
+      vairable, a JSON.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9563,411 +9369,297 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The `factor_state_fanout` pass and its configuration field will be removed.
+      Of course. Here are the step-by-step instructions to allow overriding the `CoordinatorConfig` via an environment variable, followed by the corresponding git diffs.
 
-      Here are the step-by-step instructions:
+      ### Step-by-step Instructions
 
-      ### Step 1: Modify `src/trie3_opt/coordinator.rs`
+      First, you'll need to add a few dependencies to your `Cargo.toml` file for JSON parsing and lazy static initialization.
 
-      Remove the `factor_state_fanout` field from `CoordinatorConfig` and remove its usage in the `Default`, `off`, and `build_pipeline` implementations.
+      **1. Add dependencies to `Cargo.toml`**
 
-      In `src/trie3_opt/coordinator.rs`:
+      Add the following lines to the `[dependencies]` section of your `Cargo.toml` file:
 
-      1.  Remove line 35: `pub factor_state_fanout: bool,`
-      2.  Remove line 56: `factor_state_fanout: false,` (inside `impl Default for CoordinatorConfig`)
-      3.  Remove line 78: `factor_state_fanout: false,` (inside `impl CoordinatorConfig::off`)
-      4.  Remove lines 109-111 (the `FactorStateFanoutPass` push) from `fn build_pipeline`:
-          ```rust
-          // Phase 3: Factoring and structural simplification
-          if config.factor_state_fanout {
-              pipeline.push(Box::new(FactorStateFanoutPass));
+      ```toml
+      once_cell = "1.18"
+      serde = { version = "1.0", features = ["derive"] }
+      serde_json = "1.0"
+      ```
+
+      **2. Modify `src/trie3_opt/coordinator.rs`**
+
+      Next, you'll update the coordinator configuration to read from the `AICI_TRIE3_CONFIG` environment variable.
+
+      **a. Add necessary imports**
+
+      At the top of `src/trie3_opt/coordinator.rs`, add the following `use` statements:
+
+      ```rust
+      use std::env;
+      use once_cell::sync::Lazy;
+      use serde::Deserialize;
+      ```
+
+      **b. Make `CoordinatorConfig` deserializable**
+
+      Find the `CoordinatorConfig` struct definition and add `Deserialize` to its `derive` macro:
+
+      ```rust
+      // Before
+      #[derive(Clone, Debug)]
+      pub struct CoordinatorConfig {
+
+      // After
+      #[derive(Clone, Debug, Deserialize)]
+      pub struct CoordinatorConfig {
+      ```
+
+      **c. Implement environment variable override logic**
+
+      Replace the entire `impl Default for CoordinatorConfig` block with the new logic that reads from the environment. This involves creating a helper function for the hardcoded defaults and a `lazy_static` variable to compute the effective configuration once.
+
+      Delete the existing `impl Default for CoordinatorConfig` block:
+
+      ```rust
+      impl Default for CoordinatorConfig {
+          fn default() -> Self {
+              Self {
+                  num_passes: 3,
+                  prune_dead_paths: true,
+                  // ... and so on
+              }
           }
-          ```
+      }
+      ```
 
-      ### Step 2: Modify `src/trie3_opt/optimizer.rs`
+      And replace it with the following code in the same location (right after the `CoordinatorConfig` struct definition):
 
-      Remove the mapping for the removed field in `run_pipeline_on_precompute3`.
+      ```rust
+      fn get_default_config_impl() -> CoordinatorConfig {
+          CoordinatorConfig {
+              num_passes: 3,
+              prune_dead_paths: true,
+              prune_unproductive_paths: true,
+              canonicalize_end_nodes: false,
+              compress_edges: true,
+              compress_unary_chains: true,
+              factor_common_destinations: true,
+              factor_common_destinations_min_incoming: 12,
+              merge_structural: true,
+              merge_structural_max_iters: 4,
+              merge_bisimulation: false,
+              merge_bisimulation_max_iters: 1000,
+              merge_global_atoms: false,
+              merge_global_atoms_max_iters: 2,
+              merge_global_atoms_max_atoms_per_pop: 4096,
+              eliminate_pop0_except_roots: false,
+              merge_equivalent_llm_tokens: true,
+              reorder_llm_tokens: false,
+              generalize_sids: false,
+          }
+      }
 
-      In `src/trie3_opt/optimizer.rs`:
+      static EFFECTIVE_CONFIG: Lazy<CoordinatorConfig> = Lazy::new(|| {
+          let mut config = get_default_config_impl();
+          if let Ok(json_str) = env::var("AICI_TRIE3_CONFIG") {
+              if json_str.is_empty() {
+                  return config;
+              }
+              match serde_json::from_str::<serde_json::Value>(&json_str) {
+                  Ok(val) => {
+                      if let serde_json::Value::Object(map) = val {
+                          macro_rules! override_field {
+                              ($field:ident, $type:ty, $as_fn:ident) => {
+                                  if let Some(v) = map.get(stringify!($field)).and_then(|v| v.$as_fn()) {
+                                      config.$field = v as $type;
+                                  }
+                              };
+                              ($field:ident, $as_fn:ident) => {
+                                  if let Some(v) = map.get(stringify!($field)).and_then(|v| v.$as_fn()) {
+                                      config.$field = v;
+                                  }
+                              };
+                          }
+                          override_field!(num_passes, usize, as_u64);
+                          override_field!(prune_dead_paths, as_bool);
+                          override_field!(prune_unproductive_paths, as_bool);
+                          override_field!(canonicalize_end_nodes, as_bool);
+                          override_field!(compress_edges, as_bool);
+                          override_field!(compress_unary_chains, as_bool);
+                          override_field!(factor_common_destinations, as_bool);
+                          override_field!(factor_common_destinations_min_incoming, usize, as_u64);
+                          override_field!(merge_structural, as_bool);
+                          override_field!(merge_structural_max_iters, usize, as_u64);
+                          override_field!(merge_bisimulation, as_bool);
+                          override_field!(merge_bisimulation_max_iters, usize, as_u64);
+                          override_field!(merge_global_atoms, as_bool);
+                          override_field!(merge_global_atoms_max_iters, usize, as_u64);
+                          override_field!(merge_global_atoms_max_atoms_per_pop, usize, as_u64);
+                          override_field!(eliminate_pop0_except_roots, as_bool);
+                          override_field!(merge_equivalent_llm_tokens, as_bool);
+                          override_field!(reorder_llm_tokens, as_bool);
+                          override_field!(generalize_sids, as_bool);
+                      } else {
+                          eprintln!("[Trie3 Opt] WARNING: AICI_TRIE3_CONFIG is not a JSON object. Using default config.");
+                      }
+                  }
+                  Err(e) => {
+                      eprintln!("[Trie3 Opt] WARNING: Failed to parse AICI_TRIE3_CONFIG: {}. Using default config.", e);
+                  }
+              }
+          }
+          config
+      });
 
-      1.  Remove line 24: `factor_state_fanout: config.factor_state_fanout,`
+      impl Default for CoordinatorConfig {
+          fn default() -> Self {
+              EFFECTIVE_CONFIG.clone()
+          }
+      }
+      ```
 
-      ### Step 3: Modify `src/trie3_opt/passes/mod.rs`
+      After applying these changes, you can override any `CoordinatorConfig` setting by setting the `AICI_TRIE3_CONFIG` environment variable to a JSON string. For example:
 
-      Remove the module declaration and re-export for the pass.
+      ```bash
+      export AICI_TRIE3_CONFIG='{"num_passes": 1, "merge_structural": false}'
+      ```
 
-      In `src/trie3_opt/passes/mod.rs`:
+      ### Git Diffs
 
-      1.  Remove line 14: `pub mod factor_state_fanout;`
-      2.  Remove line 28: `pub use factor_state_fanout::FactorStateFanoutPass;`
-
-      ### Step 4: Delete `src/trie3_opt/passes/factor_state_fanout.rs`
-
-      Delete the entire file `src/trie3_opt/passes/factor_state_fanout.rs`.
-
-      ***
-
-      ## Git Diffs
+      Here is the git diff for the changes described above.
 
       ```diff
-      diff --git a/src/trie3_opt/coordinator.rs b/src/trie3_opt/coordinator.rs
       --- a/src/trie3_opt/coordinator.rs
       +++ b/src/trie3_opt/coordinator.rs
-      @@ -32,7 +32,6 @@
-           pub canonicalize_end_nodes: bool,
-           pub compress_edges: bool,
-           pub compress_unary_chains: bool,
-      -    pub factor_state_fanout: bool,
-           pub factor_common_destinations: bool,
-           pub factor_common_destinations_min_incoming: usize,
-           pub merge_structural: bool,
-      @@ -53,7 +52,6 @@
-                   canonicalize_end_nodes: false,
-                   compress_edges: true,
-                   compress_unary_chains: true,
-      -            factor_state_fanout: false,
-                   factor_common_destinations: true,
-                   factor_common_destinations_min_incoming: 12,
-                   merge_structural: true,
-      @@ -75,7 +73,6 @@
-                   canonicalize_end_nodes: false,
-                   compress_edges: false,
-                   compress_unary_chains: false,
-      -            factor_state_fanout: false,
-                   factor_common_destinations: false,
-                   factor_common_destinations_min_incoming: 0,
-                   merge_structural: false,
-      @@ -109,9 +106,6 @@
-               }
+      @@ -1,9 +1,13 @@
+       use std::cell::RefCell;
+       use std::collections::{BTreeMap, HashMap};
+       use std::rc::Rc;
+      +use std::env;
        
-               // Phase 3: Factoring and structural simplification
-      -        if config.factor_state_fanout {
-      -            pipeline.push(Box::new(FactorStateFanoutPass));
-      -        }
-               if config.factor_common_destinations {
-                   pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
-               }
-      ```
-
-      ```diff
-      diff --git a/src/trie3_opt/optimizer.rs b/src/trie3_opt/optimizer.rs
-      --- a/src/trie3_opt/optimizer.rs
-      +++ b/src/trie3_opt/optimizer.rs
-      @@ -23,7 +23,6 @@
-               canonicalize_end_nodes: true, // Always good practice
-               compress_edges: config.compress_edges,
-               compress_unary_chains: config.compress_edges,
-      -        factor_state_fanout: config.factor_state_fanout,
-               factor_common_destinations: config.factor_common_destinations,
-               factor_common_destinations_min_incoming: config.factor_common_destinations_min_incoming,
-               merge_structural: config.merge_structural,
-      ```
-
-      ```diff
-      diff --git a/src/trie3_opt/passes/factor_state_fanout.rs b/src/trie3_opt/passes/factor_state_fanout.rs
-      deleted file mode 100644
-      --- a/src/trie3_opt/passes/factor_state_fanout.rs
-      +++ /dev/null
-      @@ -1,166 +0,0 @@
-      -use std::collections::{BTreeMap, HashMap};
-      -
-      -use crate::trie3_opt::context::OptimizationContext;
-      -use crate::trie3_opt::core::{MiniTrie, NodeId, SortedSet};
-      -use crate::trie3_opt::EdgeKey;
-      -use crate::trie3_opt::passes::OptimizationPass;
-      -
-      -/// State-aware factoring via token atoms and intermediates.
-      -///
-      -/// For each node and each pop > 0:
-      -///   1) Build token-atoms from the outgoing (pop, tokens) sets so that, within an atom T,
-      -///      membership of each original token-set is uniform (either T ⊆ tokens or disjoint).
-      -///   2) For each atom T, compute a destination map dest -> union(states) over original edges
-      -///      that cover T. Then for each state s appearing at T, compute D(s, T) (the set of dests).
-      -///   3) Group states by identical D(s, T). Accumulate token unions across atoms for identical
-      -///      (dest-set, state-set) groups.
-      -///   4) For a dest-set of size:
-      -///      - 0: nothing to emit.
-      -///      - 1: keep a direct edge (p, unioned_tokens) to that single dest for its state-set.
-      -///      - >=2: create (or reuse) a per-dest-set intermediate I; add one source --(0, tokens)--> I
-      -///        for the state-set; and add I --(p, unioned_tokens_over_all_states_for_this_destset)--> v
-      -///        for each v in the dest-set with sids = all_states.
-      -///
-      -/// This strictly reduces per-state fanout at the source from |D(s, T)| to 1 for atoms where
-      -/// |D(s, T)| >= 2 and merges tokens across atoms wherever (D(s, T)) is identical.
-      -pub struct FactorStateFanoutPass;
-      -
-      -impl OptimizationPass for FactorStateFanoutPass {
-      -    fn name(&self) -> &'static str {
-      -        "FactorStateFanout"
-      -    }
-      -
-      -    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
-      -        const MAX_ATOMS_PER_POP: usize = 4096;
-      -        let node_ids: Vec<_> = trie.node_ids().collect();
-      -        for node_id in node_ids {
-      -            let node = if let Some(n) = trie.get_node(node_id) { n } else { continue };
-      -            if node.children().is_empty() {
-      -                continue;
-      -            }
-      -
-      -            // Group existing edges by pop so we can completely rebuild per-pop.
-      -            let mut by_pop: BTreeMap<isize, Vec<(EdgeKey, BTreeMap<NodeId, SortedSet>)>> =
-      -                BTreeMap::new();
-      -            for (ek, dm) in node.children() {
-      -                by_pop.entry(ek.pop).or_default().push((ek.clone(), dm.clone()));
-      -            }
-      -
-      -            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
-      -            let all_states = SortedSet::from_iter(0..= _ctx.max_state_id);
-      -
-      -            for (pop, edges) in by_pop {
-      -                // We only factor for pop > 0; keep pop<=0 as-is.
-      -                if pop <= 0 {
-      -                    for (ek, dm) in edges {
-      -                        let entry = new_children.entry(ek).or_default();
-      -                        for (dst, sids) in dm {
-      -                            entry.entry(dst).or_default().union_inplace(&sids);
-      -                        }
-      -                    }
-      -                    continue;
-      -                }
-      -
-      -                // Build token universe and atoms for these edges.
-      -                let mut universe = SortedSet::new();
-      -                for (ek, _) in &edges {
-      -                    universe.union_inplace(&ek.tokens);
-      -                }
-      -                if universe.is_empty() {
-      -                    // No tokens for this pop; nothing to do.
-      -                    continue;
-      -                }
-      -
-      -                let mut atoms: Vec<SortedSet> = vec![universe.clone()];
-      -                let mut aborted = false;
-      -                for (ek, _) in &edges {
-      -                    let toks = &ek.tokens;
-      -                    if toks.is_empty() {
-      -                        continue;
-      -                    }
-      -                    let mut next_atoms = Vec::with_capacity(atoms.len().saturating_mul(2));
-      -                    for b in &atoms {
-      -                        if !b.intersects(toks) {
-      -                            next_atoms.push(b.clone());
-      -                            continue;
-      -                        }
-      -                        let inter = b.intersect(toks);
-      -                        if !inter.is_empty() {
-      -                            next_atoms.push(inter);
-      -                        }
-      -                        let diff = b.difference(toks);
-      -                        if !diff.is_empty() {
-      -                            next_atoms.push(diff);
-      -                        }
-      -                    }
-      -                    if next_atoms.len() > MAX_ATOMS_PER_POP {
-      -                        aborted = true;
-      -                        break;
-      -                    }
-      -                    atoms = next_atoms;
-      -                }
-      -                if aborted {
-      -                    atoms = vec![universe];
-      -                }
-      -
-      -                // Accumulators:
-      -                // - For destset size >=2: per-destset intermediate and edges.
-      -                let mut mid_for_destset: HashMap<Vec<NodeId>, NodeId> = HashMap::new();
-      -                let mut tokens_for_destset_union: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
-      -                let mut destset_states_to_tokens: HashMap<Vec<NodeId>, HashMap<SortedSet, SortedSet>> =
-      -                    HashMap::new();
-      -                // - For destset size == 1: keep direct edges; union tokens across atoms.
-      -                let mut direct_edges: HashMap<NodeId, HashMap<SortedSet, SortedSet>> = HashMap::new();
-      -
-      -                for tset in atoms {
-      -                    // Build dest -> union(states) map for this atom tset.
-      -                    let mut dest_map: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
-      -                    for (ek, dm) in &edges {
-      -                        if !tset.intersects(&ek.tokens) {
-      -                            continue;
-      -                        }
-      -                        for (dst, sids) in dm {
-      -                            dest_map.entry(*dst).or_default().union_inplace(sids);
-      -                        }
-      -                    }
-      -                    if dest_map.is_empty() {
-      -                        continue;
-      -                    }
-      -
-      -                    // For this atom, compute D(s, atom) per state s.
-      -                    // Use a sparse mapping only for states that appear.
-      -                    let mut state_to_dests: HashMap<usize, Vec<NodeId>> = HashMap::new();
-      -                    for (dst, sids) in &dest_map {
-      -                        for s in sids.iter() {
-      -                            state_to_dests.entry(s).or_default().push(*dst);
-      -                        }
-      -                    }
-      -
-      -                    // Group states by identical dest-set for this atom.
-      -                    let mut local_dset_to_states: HashMap<Vec<NodeId>, SortedSet> = HashMap::new();
-      -                    for (s, mut v) in state_to_dests {
-      -                        v.sort_unstable();
-      -                        v.dedup();
-      -                        if v.is_empty() {
-      -                            continue;
-      -                        }
-      -                        local_dset_to_states.entry(v).or_default().insert(s);
-      -                    }
-      -
-      -                    // Accumulate across atoms:
-      -                    for (dset, states) in local_dset_to_states {
-      -                        if dset.len() == 1 {
-      -                            // Single destination: keep direct edge (pop, tokens) -> that dest, for these states.
-      -                            let dst = dset[0];
-      -                            direct_edges
-      -                                .entry(dst)
-      -                                .or_default()
-      -                                .entry(states.clone())
-      -                                .or_default()
-      -                                .union_inplace(&tset);
-      -                        } else {
-      -                            // Multi-destination set: go via an intermediate for this dest-set.
-      -                            tokens_for_destset_union
-      -                                .entry(dset.clone())
-      -                                .or_default()
-      -                                .union_inplace(&tset);
-      -                            destset_states_to_tokens
-      -                                .entry(dset)
-      -                                .or_default()
-      -                                .entry(states)
-      -                                .or_default()
-      -                                .union_inplace(&tset);
-      -                        }
-      -                    }
-      -                }
-      -
-      -                // Emit direct edges for single-destination groups (merged across atoms).
-      -                for (dst, states_to_tokens) in direct_edges {
-      -                    for (states, toks) in states_to_tokens {
-      -                        if toks.is_empty() || states.is_empty() {
-      -                            continue;
-      -                        }
-      -                        let key = EdgeKey::new(pop, toks);
-      -                        new_children
-      -                            .entry(key)
-      -                            .or_default()
-      -                            .entry(dst)
-      -                            .or_default()
-      -                            .union_inplace(&states);
-      -                    }
-      -                }
-      -
-      -                // Emit intermediates and their edges for multi-destination sets.
-      -                for (dset, states_to_tokens) in destset_states_to_tokens {
-      -                    // Create/reuse intermediate for this dest-set
-      -                    let mid_id = *mid_for_destset
-      -                        .entry(dset.clone())
-      -                        .or_insert_with(|| trie.add_node(false));
-      -
-      -                    // Source -> intermediate (pop=0) for each state-group; tokens merged across atoms.
-      -                    for (states, toks) in states_to_tokens {
-      -                        if toks.is_empty() || states.is_empty() {
-      -                            continue;
-      -                        }
-      -                        let key = EdgeKey::new(0, toks);
-      -                        new_children
-      -                            .entry(key)
-      -                            .or_default()
-      -                            .entry(mid_id)
-      -                            .or_default()
-      -                            .union_inplace(&states);
-      -                    }
-      -
-      -                    // Intermediate -> destinations (pop=p), state-agnostic, tokens = union across all states for this dest-set.
-      -                    let toks_mid = tokens_for_destset_union
-      -                        .get(&dset)
-      -                        .cloned()
-      -                        .unwrap_or_else(SortedSet::new);
-      -                    if !toks_mid.is_empty() {
-      -                        for dst in dset {
-      -                            trie.add_edge(mid_id, EdgeKey::new(pop, toks_mid.clone()), dst, all_states.clone());
-      -                        }
-      -                    }
-      -                }
-      -            }
-      -
-      -            trie.set_children(node_id, new_children);
-      -        }
-      -    }
-      -}
-      ```
-
-      ```diff
-      diff --git a/src/trie3_opt/passes/mod.rs b/src/trie3_opt/passes/mod.rs
-      --- a/src/trie3_opt/passes/mod.rs
-      +++ b/src/trie3_opt/passes/mod.rs
-      @@ -10,7 +10,6 @@
-       pub mod compress_edges;
-       pub mod compress_unary_chains;
-       pub mod eliminate_pop0;
-       pub mod factor_common_destinations;
-      -pub mod factor_state_fanout;
-       pub mod generalize_sids;
-       pub mod merge_bisimulation;
-       pub mod merge_equivalent_llm_tokens;
-      @@ -23,7 +22,6 @@
-       pub use compress_edges::CompressEdgesPass;
-       pub use compress_unary_chains::CompressUnaryChainsPass;
-       pub use eliminate_pop0::EliminatePop0ExceptRootsPass;
-       pub use factor_common_destinations::FactorCommonDestinationsPass;
-      -pub use factor_state_fanout::FactorStateFanoutPass;
-       pub use generalize_sids::GeneralizeSidsPass;
-       pub use merge_bisimulation::MergeBisimulationPass;
-       pub use merge_equivalent_llm_tokens::MergeEquivalentLLMTokensPass;
-      ```
-    metadata:
-  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
-      applied now.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/src/trie3_opt/coordinator.rs b/src/trie3_opt/coordinator.rs
-      --- a/src/trie3_opt/coordinator.rs
-      +++ b/src/trie3_opt/coordinator.rs
-      @@ -32,7 +32,6 @@
-           pub canonicalize_end_nodes: bool,
-           pub compress_edges: bool,
-           pub compress_unary_chains: bool,
-      -    pub factor_state_fanout: bool,
-           pub factor_common_destinations: bool,
-           pub factor_common_destinations_min_incoming: usize,
-           pub merge_structural: bool,
-      @@ -60,8 +60,7 @@
-                   canonicalize_end_nodes: false,
-                   compress_edges: true,
-      -            compress_unary_chains: false,
-      -            factor_state_fanout: false,
-      +            compress_unary_chains: true,
-                   factor_common_destinations: true,
-                   factor_common_destinations_min_incoming: 12,
-                   merge_structural: true,
-      @@ -75,7 +73,6 @@
-                   canonicalize_end_nodes: false,
-                   compress_edges: false,
-                   compress_unary_chains: false,
-      -            factor_state_fanout: false,
-                   factor_common_destinations: false,
-                   factor_common_destinations_min_incoming: 0,
-                   merge_structural: false,
-      @@ -109,9 +106,6 @@
-               }
+       use ordered_hash_map::OrderedHashMap;
+       use kdam::BarExt;
+      +use once_cell::sync::Lazy;
+      +use serde::Deserialize;
        
-               // Phase 3: Factoring and structural simplification
-      -        if config.factor_state_fanout {
-      -            pipeline.push(Box::new(FactorStateFanoutPass));
+       use crate::profiler::PROGRESS_BAR_ENABLED;
+       
+      @@ -17,7 +21,7 @@
+       use crate::trie3_opt::merge_global_atoms::MergeGlobalAtomsPass;
+       
+       /// Configuration for the coordinator: which passes to run and their key parameters.
+      -#[derive(Clone, Debug)]
+      +#[derive(Clone, Debug, Deserialize)]
+       pub struct CoordinatorConfig {
+           pub num_passes: usize,
+           pub prune_dead_paths: bool,
+      @@ -42,28 +46,78 @@
+           pub generalize_sids: bool,
+       }
+       
+      +fn get_default_config_impl() -> CoordinatorConfig {
+      +    CoordinatorConfig {
+      +        num_passes: 3,
+      +        prune_dead_paths: true,
+      +        prune_unproductive_paths: true,
+      +        canonicalize_end_nodes: false,
+      +        compress_edges: true,
+      +        compress_unary_chains: true,
+      +        factor_common_destinations: true,
+      +        factor_common_destinations_min_incoming: 12,
+      +        merge_structural: true,
+      +        merge_structural_max_iters: 4,
+      +        merge_bisimulation: false,
+      +        merge_bisimulation_max_iters: 1000,
+      +        merge_global_atoms: false,
+      +        merge_global_atoms_max_iters: 2,
+      +        merge_global_atoms_max_atoms_per_pop: 4096,
+      +        eliminate_pop0_except_roots: false,
+      +        merge_equivalent_llm_tokens: true,
+      +        reorder_llm_tokens: false,
+      +        generalize_sids: false,
+      +    }
+      +}
+      +
+      +static EFFECTIVE_CONFIG: Lazy<CoordinatorConfig> = Lazy::new(|| {
+      +    let mut config = get_default_config_impl();
+      +    if let Ok(json_str) = env::var("AICI_TRIE3_CONFIG") {
+      +        if json_str.is_empty() {
+      +            return config;
+      +        }
+      +        match serde_json::from_str::<serde_json::Value>(&json_str) {
+      +            Ok(val) => {
+      +                if let serde_json::Value::Object(map) = val {
+      +                    macro_rules! override_field {
+      +                        ($field:ident, $type:ty, $as_fn:ident) => {
+      +                            if let Some(v) = map.get(stringify!($field)).and_then(|v| v.$as_fn()) {
+      +                                config.$field = v as $type;
+      +                            }
+      +                        };
+      +                        ($field:ident, $as_fn:ident) => {
+      +                            if let Some(v) = map.get(stringify!($field)).and_then(|v| v.$as_fn()) {
+      +                                config.$field = v;
+      +                            }
+      +                        };
+      +                    }
+      +                    override_field!(num_passes, usize, as_u64);
+      +                    override_field!(prune_dead_paths, as_bool);
+      +                    override_field!(prune_unproductive_paths, as_bool);
+      +                    override_field!(canonicalize_end_nodes, as_bool);
+      +                    override_field!(compress_edges, as_bool);
+      +                    override_field!(compress_unary_chains, as_bool);
+      +                    override_field!(factor_common_destinations, as_bool);
+      +                    override_field!(factor_common_destinations_min_incoming, usize, as_u64);
+      +                    override_field!(merge_structural, as_bool);
+      +                    override_field!(merge_structural_max_iters, usize, as_u64);
+      +                    override_field!(merge_bisimulation, as_bool);
+      +                    override_field!(merge_bisimulation_max_iters, usize, as_u64);
+      +                    override_field!(merge_global_atoms, as_bool);
+      +                    override_field!(merge_global_atoms_max_iters, usize, as_u64);
+      +                    override_field!(merge_global_atoms_max_atoms_per_pop, usize, as_u64);
+      +                    override_field!(eliminate_pop0_except_roots, as_bool);
+      +                    override_field!(merge_equivalent_llm_tokens, as_bool);
+      +                    override_field!(reorder_llm_tokens, as_bool);
+      +                    override_field!(generalize_sids, as_bool);
+      +                } else {
+      +                    eprintln!("[Trie3 Opt] WARNING: AICI_TRIE3_CONFIG is not a JSON object. Using default config.");
+      +                }
+      +            }
+      +            Err(e) => {
+      +                eprintln!("[Trie3 Opt] WARNING: Failed to parse AICI_TRIE3_CONFIG: {}. Using default config.", e);
+      +            }
+      +        }
+      +    }
+      +    config
+      +});
+      +
+       impl Default for CoordinatorConfig {
+           fn default() -> Self {
+      -        Self {
+      -            num_passes: 3,
+      -            prune_dead_paths: true,
+      -            prune_unproductive_paths: true,
+      -            canonicalize_end_nodes: false,
+      -            compress_edges: true,
+      -            compress_unary_chains: true,
+      -            factor_common_destinations: true,
+      -            factor_common_destinations_min_incoming: 12,
+      -            merge_structural: true,
+      -            merge_structural_max_iters: 4,
+      -            merge_bisimulation: false,
+      -            merge_bisimulation_max_iters: 1000,
+      -            merge_global_atoms: false,
+      -            merge_global_atoms_max_iters: 2,
+      -            merge_global_atoms_max_atoms_per_pop: 4096,
+      -            eliminate_pop0_except_roots: false,
+      -            merge_equivalent_llm_tokens: true,
+      -            reorder_llm_tokens: false,
+      -            generalize_sids: false,
       -        }
-               if config.factor_common_destinations {
-                   pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
-               }
+      +        EFFECTIVE_CONFIG.clone()
+           }
+       }
+       
+
       ```
     metadata:
   - user: |
@@ -9979,7 +9671,7 @@ messages:
       Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
     metadata:
-  - user: 'Changes committed with message: "Remove FactorStateFanoutPass and related
-      configuration"'
+  - user: 'Changes committed with message: "feat: Allow overriding CoordinatorConfig
+      via AICI_TRIE3_CONFIG env var"'
     metadata:
 ...

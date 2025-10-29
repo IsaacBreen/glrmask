@@ -1,9 +1,12 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
+use std::env;
 
 use ordered_hash_map::OrderedHashMap;
 use kdam::BarExt;
+use once_cell::sync::Lazy;
+use serde::Deserialize;
 
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
@@ -23,7 +26,7 @@ use crate::constraint::StageVocab;
 use crate::trie3_opt::merge_global_atoms::MergeGlobalAtomsPass;
 
 /// Configuration for the coordinator: which passes to run and their key parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct CoordinatorConfig {
     pub num_passes: usize,
     pub prune_dead_paths: bool,
@@ -46,29 +49,85 @@ pub struct CoordinatorConfig {
     pub generalize_sids: bool,
 }
 
+fn get_default_config_impl() -> CoordinatorConfig {
+    CoordinatorConfig {
+        num_passes: 3,
+        prune_dead_paths: true,
+        prune_unproductive_paths: true,
+        canonicalize_end_nodes: false,
+        compress_edges: true,
+        compress_unary_chains: true,
+        factor_common_destinations: true,
+        factor_common_destinations_min_incoming: 12,
+        merge_structural: true,
+        merge_structural_max_iters: 4,
+        merge_bisimulation: false,
+        merge_bisimulation_max_iters: 1000,
+        merge_global_atoms: false,
+        merge_global_atoms_max_iters: 2,
+        merge_global_atoms_max_atoms_per_pop: 4096,
+        eliminate_pop0_except_roots: false,
+        merge_equivalent_llm_tokens: true,
+        reorder_llm_tokens: false,
+        generalize_sids: false,
+    }
+}
+
+static EFFECTIVE_CONFIG: Lazy<CoordinatorConfig> = Lazy::new(|| {
+    let mut config = get_default_config_impl();
+    if let Ok(json_str) = env::var("AICI_TRIE3_CONFIG") {
+        if json_str.is_empty() {
+            return config;
+        }
+        match serde_json::from_str::<serde_json::Value>(&json_str) {
+            Ok(val) => {
+                if let serde_json::Value::Object(map) = val {
+                    macro_rules! override_field {
+                        ($field:ident, $type:ty, $as_fn:ident) => {
+                            if let Some(v) = map.get(stringify!($field)).and_then(|v| v.$as_fn()) {
+                                config.$field = v as $type;
+                            }
+                        };
+                        ($field:ident, $as_fn:ident) => {
+                            if let Some(v) = map.get(stringify!($field)).and_then(|v| v.$as_fn()) {
+                                config.$field = v;
+                            }
+                        };
+                    }
+                    override_field!(num_passes, usize, as_u64);
+                    override_field!(prune_dead_paths, as_bool);
+                    override_field!(prune_unproductive_paths, as_bool);
+                    override_field!(canonicalize_end_nodes, as_bool);
+                    override_field!(compress_edges, as_bool);
+                    override_field!(compress_unary_chains, as_bool);
+                    override_field!(factor_common_destinations, as_bool);
+                    override_field!(factor_common_destinations_min_incoming, usize, as_u64);
+                    override_field!(merge_structural, as_bool);
+                    override_field!(merge_structural_max_iters, usize, as_u64);
+                    override_field!(merge_bisimulation, as_bool);
+                    override_field!(merge_bisimulation_max_iters, usize, as_u64);
+                    override_field!(merge_global_atoms, as_bool);
+                    override_field!(merge_global_atoms_max_iters, usize, as_u64);
+                    override_field!(merge_global_atoms_max_atoms_per_pop, usize, as_u64);
+                    override_field!(eliminate_pop0_except_roots, as_bool);
+                    override_field!(merge_equivalent_llm_tokens, as_bool);
+                    override_field!(reorder_llm_tokens, as_bool);
+                    override_field!(generalize_sids, as_bool);
+                } else {
+                    eprintln!("[Trie3 Opt] WARNING: AICI_TRIE3_CONFIG is not a JSON object. Using default config.");
+                }
+            }
+            Err(e) => {
+                eprintln!("[Trie3 Opt] WARNING: Failed to parse AICI_TRIE3_CONFIG: {}. Using default config.", e);
+            }
+        }
+    }
+    config
+});
+
 impl Default for CoordinatorConfig {
     fn default() -> Self {
-        Self {
-            num_passes: 3,
-            prune_dead_paths: true,
-            prune_unproductive_paths: true,
-            canonicalize_end_nodes: false,
-            compress_edges: true,
-            compress_unary_chains: true,
-            factor_common_destinations: true,
-            factor_common_destinations_min_incoming: 12,
-            merge_structural: true,
-            merge_structural_max_iters: 4,
-            merge_bisimulation: false,
-            merge_bisimulation_max_iters: 1000,
-            merge_global_atoms: false,
-            merge_global_atoms_max_iters: 2,
-            merge_global_atoms_max_atoms_per_pop: 4096,
-            eliminate_pop0_except_roots: false,
-            merge_equivalent_llm_tokens: true,
-            reorder_llm_tokens: false,
-            generalize_sids: false,
-        }
+        EFFECTIVE_CONFIG.clone()
     }
 }
 
