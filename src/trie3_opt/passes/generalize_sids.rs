@@ -122,20 +122,35 @@ impl OptimizationPass for GeneralizeSidsPass {
         let node_ids: Vec<_> = trie.node_ids().collect();
         for node_id in node_ids {
             let node = trie.get_node(node_id).unwrap();
+            let s_u = if let Some(s) = possible_states.get(&node_id) {
+                s.clone()
+            } else {
+                // Node is not reachable with any valid states. Prune its outgoing edges.
+                trie.clear_children(node_id);
+                continue;
+            };
+
             let mut new_children = node.children().clone();
 
-            for (_ek, dm) in &mut new_children {
-                dm.retain(|v_id, sids| {
-                    if let Some(s_v) = possible_states.get(v_id) {
-                        let intersection = sids.intersect(s_v);
-                        if !intersection.is_empty() {
-                            *sids = intersection;
-                            true
-                        } else {
-                            false
-                        }
+            for (ek, dm) in &mut new_children {
+                let s_u_popped = if ek.pop > 0 {
+                    apply_n_step_back(&s_u, ek.pop as usize)
+                } else {
+                    s_u.clone()
+                };
+
+                if s_u_popped.is_empty() {
+                    // This edge group is impossible, clear its destinations.
+                    dm.clear();
+                    continue;
+                }
+
+                dm.retain(|_v_id, sids| {
+                    let intersection = sids.intersect(&s_u_popped);
+                    if !intersection.is_empty() {
+                        *sids = intersection;
+                        true
                     } else {
-                        // v is not reachable with any valid state, so this edge is dead.
                         false
                     }
                 });
