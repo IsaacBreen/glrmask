@@ -1497,7 +1497,8 @@ impl GrammarConstraint {
         //     &llm_vocab.llm_token_map,
         //     &trie2_god,
         // );
-        let (precomputed3, trie3_god, llm_token_remapping) = Self::precompute3(
+
+        let (precomputed3, trie3_god) = Self::precompute3(
             &precomputed1,
             &trie1_god,
             &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
@@ -1546,9 +1547,6 @@ impl GrammarConstraint {
         };
 
         gc.special_precomputation = gc.precompute_special();
-        if !llm_token_remapping.is_empty() {
-            gc.apply_llm_token_remapping(&llm_token_remapping);
-        }
         gc
     }
     pub fn new_with_config_and_precompute0_cache(
@@ -1790,7 +1788,7 @@ impl GrammarConstraint {
             &config.trie2,
         );
 
-        let (precomputed3, trie3_god, llm_token_remapping) = Self::precompute3(
+        let (precomputed3, trie3_god) = Self::precompute3(
             &precomputed1,
             &trie1_god,
             &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
@@ -1832,9 +1830,6 @@ impl GrammarConstraint {
         };
 
         gc.special_precomputation = gc.precompute_special();
-        if !llm_token_remapping.is_empty() {
-            gc.apply_llm_token_remapping(&llm_token_remapping);
-        }
         gc
     }
 
@@ -1847,56 +1842,6 @@ impl GrammarConstraint {
             precomputed0: self.precomputed0.clone(),
             trie0_god: self.trie0_god.clone(),
         }
-    }
-
-    fn apply_llm_token_remapping(&mut self, remap: &BTreeMap<usize, usize>) {
-        if remap.is_empty() {
-            return;
-        }
-        crate::debug!(2, "Applying LLM token remapping to constraint data structures...");
-
-        // Helper to remap a bitvector
-        let remap_bv = |bv: &LLMTokenBV, remap: &BTreeMap<usize, usize>| -> LLMTokenBV {
-            if bv.is_all() {
-                // Universe size is preserved by the remapping, so is_all remains is_all.
-                return bv.clone();
-            }
-            let mut new_bv = LLMTokenBV::zeros();
-            for old_id in bv.iter() {
-                if let Some(&new_id) = remap.get(&old_id) {
-                    new_bv.insert(new_id);
-                } else {
-                    // This case should not happen if the remapping is total for all active tokens.
-                    // We'll keep the old ID, but this might indicate an issue.
-                    new_bv.insert(old_id);
-                }
-            }
-            new_bv
-        };
-
-        // 1. Update possible_matches
-        for terminal_map in self.possible_matches.values_mut() {
-            for llm_token_bv in terminal_map.values_mut() {
-                *llm_token_bv = remap_bv(llm_token_bv, remap);
-            }
-        }
-
-        // 2. Update state_map_by_llm
-        let mut new_state_map = DedupValueMap::new();
-        for (old_id, value) in self.state_map_by_llm.iter() {
-            let new_id = remap.get(&old_id.0).copied().unwrap_or(old_id.0);
-            new_state_map.insert(LLMTokenID(new_id), value.clone());
-        }
-        self.state_map_by_llm = new_state_map;
-
-        // 3. Update terminal_map_by_llm
-        let mut new_terminal_map = DedupValueMap::new();
-        for (old_id, value) in self.terminal_map_by_llm.iter() {
-            let new_id = remap.get(&old_id.0).copied().unwrap_or(old_id.0);
-            new_terminal_map.insert(LLMTokenID(new_id), value.clone());
-        }
-        self.terminal_map_by_llm = new_terminal_map;
-        crate::debug!(2, "Finished applying LLM token remapping.");
     }
 
     pub fn precompute0(
@@ -2456,7 +2401,7 @@ impl GrammarConstraint {
         _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         config: &GrammarConstraintConfig,
         stage_vocab: &mut StageVocab,
-    ) -> (Precomputed3, Trie3GodWrapper, BTreeMap<usize, usize>) {
+    ) -> (Precomputed3, Trie3GodWrapper) {
         crate::debug!(2, "Precomputing Trie 3 (template-driven)...");
         let roots: Vec<PrecomputeNode1Index> = precomputed1.values().cloned().collect();
         // assert!(!Trie::has_cycle(trie1_god, roots));
@@ -2790,8 +2735,8 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
-        let llm_token_remapping = optimize_trie3_size(&mut precomputed3, &trie3_god, &config.trie3, max_state_id, internal_max_llm_token, stage_vocab, parser.unwrap());
-        (precomputed3, trie3_god, llm_token_remapping)
+        optimize_trie3_size(&mut precomputed3, &trie3_god, &config.trie3, max_state_id, internal_max_llm_token, stage_vocab, parser.unwrap());
+        (precomputed3, trie3_god)
     }
 
     fn convert_intermediate_trie3_to_final(

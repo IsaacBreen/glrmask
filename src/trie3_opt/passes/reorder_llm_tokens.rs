@@ -32,22 +32,11 @@ impl OptimizationPass for ReorderLLMTokensPass {
         if present.is_empty() {
             return;
         }
-        let not_present: Vec<usize> = (0..=max_tok).filter(|&t| freq[t] == 0).collect();
         present.sort_by_key(|&t| (std::cmp::Reverse(freq[t]), t));
 
         let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
-        let mut next_new_id = 0;
-        for old_id in present.iter() {
-            old_to_new.insert(*old_id, next_new_id);
-            next_new_id += 1;
-        }
-        for old_id in not_present.iter() {
-            old_to_new.insert(*old_id, next_new_id);
-            next_new_id += 1;
-        }
-
-        if !old_to_new.is_empty() {
-            *ctx.llm_token_remapping.borrow_mut() = old_to_new.clone();
+        for (new_id, old_id) in present.iter().enumerate() {
+            old_to_new.insert(*old_id, new_id);
         }
 
         let remap_sorted_set = |s: &SortedSet| -> SortedSet {
@@ -90,8 +79,7 @@ impl OptimizationPass for ReorderLLMTokensPass {
             }
         }
         sv.original_to_internal = new_original_to_internal;
-        // The number of tokens is preserved, so the max ID is also preserved.
-        sv.internal_max_llm_token = (0..=max_tok).count().saturating_sub(1);
+        sv.internal_max_llm_token = present.len().saturating_sub(1);
         ctx.max_llm_token_id = sv.internal_max_llm_token;
     }
 }

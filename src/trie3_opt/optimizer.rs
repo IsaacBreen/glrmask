@@ -17,7 +17,7 @@ pub fn optimize_trie3_size(
     max_llm_token_id: usize,
     stage_vocab: &mut StageVocab,
     parser: &GLRParser,
-) -> BTreeMap<usize, usize> {
+) {
     crate::debug!(2, "Optimizing Trie 3 size (using new pipeline)...");
     let start = Instant::now();
 
@@ -44,7 +44,7 @@ pub fn optimize_trie3_size(
         generalize_sids: config.generalize_sids,
     };
 
-    let remapping = run_pipeline_on_precompute3(
+    run_pipeline_on_precompute3(
         roots,
         trie3_god,
         max_llm_token_id,
@@ -55,5 +55,4 @@ pub fn optimize_trie3_size(
     );
 
     crate::debug!(2, "Finished optimizing Trie 3 size in {:?}", start.elapsed());
-    remapping
 }

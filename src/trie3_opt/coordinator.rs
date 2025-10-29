@@ -408,7 +408,7 @@ pub fn run_pipeline_on_precompute3<'a>(
     config: CoordinatorConfig,
     stage_vocab: Option<&'a mut StageVocab>,
     parser: Option<&'a GLRParser>,
-) -> BTreeMap<usize, usize> {
+) {
     // Export the current graph into a minimal structure
     let (mut mini, root_keys, _old_mapping) =
         export_to_mini(roots, trie3_god, max_llm_token_id, max_state_id);
@@ -487,8 +487,6 @@ pub fn run_pipeline_on_precompute3<'a>(
 
     // Import the result back and finalize
     import_from_mini(&mini, &root_keys, trie3_god, roots, &ctx);
-
-    Rc::try_unwrap(ctx.llm_token_remapping).unwrap().into_inner()
 }
 
 #[cfg(test)]
