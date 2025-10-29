@@ -2267,9 +2267,7 @@ impl GrammarConstraint {
         s.process_token_advanced(tid, &cfg);
 
         // Flatten the active GSS into explicit stacks.
-        let mut stacks = s.active_state.stack.inner.to_stacks();
-        // Sort stacks to ensure deterministic behavior when multiple paths lead to the same shifted state.
-        stacks.sort();
+        let stacks = s.active_state.stack.inner.to_stacks();
         
         // This new function will build the paths for the stack *below* the shifted state.
         let final_nodes_map = Self::reduce_gss_stacks_to_trie3_paths_from_start(trie3_god, &stacks);
@@ -2302,18 +2300,11 @@ impl GrammarConstraint {
     /// trie node that represents the end of the corresponding pre-shift stack path.
     fn reduce_gss_stacks_to_trie3_paths_from_start(
         trie3_god: &IntermediateTrie3GodWrapper,
-        stacks: &[(Vec<ParseStateEdgeContent>, Acc)], // This is sorted for determinism.
+        stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
     ) -> BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> {
         let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
 
         for (items, acc) in stacks.iter() {
-            if items.is_empty() {
-                continue;
-            }
-            let shifted_state_content = items[0];
-            let pre_shift_stack = &items[1..];
-
-            // Create a new head node for this specific path.
             let mut cur = IntermediatePrecomputeNode3Index::new(
                 trie3_god.insert(IntermediatePrecomputeNode3::new(
                     IntermediatePrecomputedNodeContents3::internal()
@@ -2327,6 +2318,14 @@ impl GrammarConstraint {
                 );
                 inserter.try_destination(cur.clone()).expect("Failed to insert unconditional edge to template head");
             }
+
+            let items = &items[1..]; // Skip first element
+            if items.is_empty() {
+                continue;
+            }
+
+            let shifted_state_content = *items.last().unwrap();
+            let pre_shift_stack = &items[..items.len() - 1];
 
             // Walk the pre-shift stack from top to bottom to build the trie path
             for state_content in pre_shift_stack {
