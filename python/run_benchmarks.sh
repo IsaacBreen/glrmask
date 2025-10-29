@@ -99,7 +99,15 @@ fi
 
 # --- Setup ---
 # Create a unique directory for this benchmark run's results.
-RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+# If a directory with the same timestamp already exists, append a counter.
+BASE_RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+RESULTS_DIR="$BASE_RESULTS_DIR"
+COUNTER=1
+while [ -d "$RESULTS_DIR" ]; do
+  RESULTS_DIR="${BASE_RESULTS_DIR}_${COUNTER}"
+  COUNTER=$((COUNTER + 1))
+done
+
 mkdir -p "$RESULTS_DIR"
 echo "Benchmark results will be saved in: $RESULTS_DIR"
 echo "Benchmark pairs: ${ALL_PAIRS[*]}"
