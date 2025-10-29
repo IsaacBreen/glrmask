@@ -66,7 +66,7 @@ run_test() {
             --output "$constraint_file" \
             --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" --token-len 1 \
         && \
-        SKIP_PLOTS=1 REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 CONSTRAINT_FILE="$constraint_file" CODE_FILE=./src/example_code9.js \
+        SKIP_PLOTS=1 REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_RUST_BUILD=1 CONSTRAINT_FILE="$constraint_file" CODE_FILE=./src/example_code9.js \
         bash python/run_benchmarks.sh python/aug25/models/bruteforce_rust_model.py python/aug25/models/rust_model.py
     ) > "$log_file" 2>&1
 
