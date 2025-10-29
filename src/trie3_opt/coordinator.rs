@@ -416,7 +416,7 @@ pub fn run_pipeline_on_precompute3<'a>(
     parser: Option<&'a GLRParser>,
 ) {
     // Export the current graph into a minimal structure
-    let (mut mini, root_pairs, _old_mapping) =
+    let (mut mini, mut root_pairs, _old_mapping) =
         export_to_mini(roots, trie3_god, max_llm_token_id, max_state_id);
 
     // Build a fresh pass pipeline and context
@@ -447,6 +447,18 @@ pub fn run_pipeline_on_precompute3<'a>(
             crate::debug!(1, "[Trie3 Opt] Running pass: {}", pass.name());
         }
         pass.run(&mut mini, &mut ctx);
+
+        // If the pass produced a node->representative mapping, remap the in-flight root_pairs now.
+        // This composes mappings across multiple passes correctly.
+        if !ctx.root_remap.is_empty() {
+            for (_key, nid) in root_pairs.iter_mut() {
+                if let Some(&new_id) = ctx.root_remap.get(nid) {
+                    *nid = new_id;
+                }
+            }
+            // Clear for the next pass; subsequent passes can publish their own remaps.
+            ctx.root_remap.clear();
+        }
 
         // After certain passes that are known to create garbage, run GC.
         let pass_name = pass.name();
@@ -490,6 +502,20 @@ pub fn run_pipeline_on_precompute3<'a>(
         crate::debug!(1, "[Trie3 Opt] Metrics after optimization: {}",
             crate::trie3_opt::metrics::pretty_print_metrics_map(&ctx.metrics_after)
         );
+    }
+
+    // Final guard: ensure every chosen root in root_pairs exists in the current root set.
+    // If any does not, replace it deterministically with a current root (by index or last).
+    if !mini.root_ids.is_empty() {
+        let current_roots: Vec<NodeId> = mini.root_ids.iter().cloned().collect();
+        for (i, (_key, nid)) in root_pairs.iter_mut().enumerate() {
+            if !mini.root_ids.contains(nid) {
+                // Use ith current root if available, else the last as a fallback.
+                if let Some(repl) = current_roots.get(i).copied().or_else(|| current_roots.last().copied()) {
+                    *nid = repl;
+                }
+            }
+        }
     }
 
     // Import the result back and finalize
