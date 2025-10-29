@@ -20,6 +20,7 @@ use crate::datastructures::trie::Trie;
 use crate::glr::parser::GLRParser;
 use crate::tokenizer::TokenizerStateID;
 use crate::constraint::StageVocab;
+use crate::trie3_opt::merge_global_atoms::MergeGlobalAtomsPass;
 
 /// Configuration for the coordinator: which passes to run and their key parameters.
 #[derive(Clone, Debug)]
@@ -32,25 +33,12 @@ pub struct CoordinatorConfig {
     pub compress_unary_chains: bool,
     pub factor_state_fanout: bool,
     pub factor_common_destinations: bool,
-    pub factor_state_dest_sets: bool,
-    pub factor_state_dest_sets_max_depth_from_roots: usize,
-    pub factor_state_dest_sets_max_intermediates_per_pop: usize,
-    pub factor_state_dest_sets_min_out_degree: usize,
-    pub factor_state_dest_equivalence: bool,
-    pub factor_state_dest_equivalence_max_depth_from_roots: usize,
-    pub factor_state_dest_equivalence_max_atoms_per_pop: usize,
-    pub factor_state_dest_equivalence_min_gain_edges: usize,
-    pub factor_state_dest_equivalence_min_out_degree: usize,
     pub factor_common_destinations_min_incoming: usize,
-    pub factor_root_fanout: bool,
-    pub factor_root_fanout_max_atoms_per_pop: usize,
     pub merge_structural_max_iters: usize,
     pub merge_bisimulation_max_iters: usize,
     pub merge_global_atoms: bool,
     pub merge_global_atoms_max_iters: usize,
     pub merge_global_atoms_max_atoms_per_pop: usize,
-    pub merge_state_agnostic: bool,
-    pub merge_state_agnostic_max_iters: usize,
     pub eliminate_pop0_except_roots: bool,
     pub merge_equivalent_llm_tokens: bool,
     pub reorder_llm_tokens: bool,
@@ -67,26 +55,13 @@ impl Default for CoordinatorConfig {
             compress_edges: true,
             compress_unary_chains: true,
             factor_state_fanout: true,
-            factor_state_dest_sets: true,
-            factor_state_dest_sets_max_depth_from_roots: 0, // roots only by default
-            factor_state_dest_sets_max_intermediates_per_pop: 4096,
-            factor_state_dest_sets_min_out_degree: 0,
-            factor_state_dest_equivalence: true,
-            factor_state_dest_equivalence_max_depth_from_roots: 0, // roots only
-            factor_state_dest_equivalence_max_atoms_per_pop: 4096,
-            factor_state_dest_equivalence_min_gain_edges: 64,
-            factor_state_dest_equivalence_min_out_degree: 0,
             factor_common_destinations: true,
             factor_common_destinations_min_incoming: 12,
-            factor_root_fanout: true,
-            factor_root_fanout_max_atoms_per_pop: 512,
             merge_structural_max_iters: 4,
             merge_bisimulation_max_iters: 1000,
             merge_global_atoms: true,
             merge_global_atoms_max_iters: 2,
             merge_global_atoms_max_atoms_per_pop: 4096,
-            merge_state_agnostic: true,
-            merge_state_agnostic_max_iters: 8,
             eliminate_pop0_except_roots: true,
             merge_equivalent_llm_tokens: true,
             reorder_llm_tokens: true,
@@ -105,26 +80,13 @@ impl CoordinatorConfig {
             compress_edges: false,
             compress_unary_chains: false,
             factor_state_fanout: false,
-            factor_state_dest_sets: false,
-            factor_state_dest_sets_max_depth_from_roots: 0,
-            factor_state_dest_sets_max_intermediates_per_pop: 0,
-            factor_state_dest_sets_min_out_degree: 0,
-            factor_state_dest_equivalence: false,
-            factor_state_dest_equivalence_max_depth_from_roots: 0,
-            factor_state_dest_equivalence_max_atoms_per_pop: 0,
-            factor_state_dest_equivalence_min_gain_edges: 0,
-            factor_state_dest_equivalence_min_out_degree: 0,
             factor_common_destinations: false,
             factor_common_destinations_min_incoming: 0,
-            factor_root_fanout: false,
-            factor_root_fanout_max_atoms_per_pop: 0,
             merge_structural_max_iters: 0,
             merge_bisimulation_max_iters: 0,
             merge_global_atoms: false,
             merge_global_atoms_max_iters: 0,
             merge_global_atoms_max_atoms_per_pop: 0,
-            merge_state_agnostic: false,
-            merge_state_agnostic_max_iters: 0,
             eliminate_pop0_except_roots: false,
             merge_equivalent_llm_tokens: false,
             reorder_llm_tokens: false,
@@ -165,20 +127,6 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
         if config.factor_state_fanout {
             pipeline.push(Box::new(FactorStateFanoutPass));
         }
-        if config.factor_root_fanout {
-            pipeline.push(Box::new(FactorRootFanoutPass::new(config.factor_root_fanout_max_atoms_per_pop)));
-        }
-        if config.factor_state_dest_sets {
-            pipeline.push(Box::new(FactorStateDestSetsPass::new(config.factor_state_dest_sets_max_intermediates_per_pop, config.factor_state_dest_sets_max_depth_from_roots, config.factor_state_dest_sets_min_out_degree)));
-        }
-        if config.factor_state_dest_equivalence {
-            pipeline.push(Box::new(FactorStateDestEquivalencePass::new(
-                config.factor_state_dest_equivalence_max_depth_from_roots,
-                config.factor_state_dest_equivalence_max_atoms_per_pop,
-                config.factor_state_dest_equivalence_min_gain_edges,
-                config.factor_state_dest_equivalence_min_out_degree,
-            )));
-        }
         if config.factor_common_destinations {
             pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
         }
@@ -200,11 +148,6 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
         }
         if config.merge_structural_max_iters > 0 {
             pipeline.push(Box::new(MergeStructuralPass::new(config.merge_structural_max_iters)));
-        }
-        if config.merge_state_agnostic && config.merge_state_agnostic_max_iters > 0 {
-            pipeline.push(Box::new(MergeStateAgnosticPass::new(
-                config.merge_state_agnostic_max_iters,
-            )));
         }
         if pass_num == config.num_passes - 1 && config.merge_bisimulation_max_iters > 0 {
              pipeline.push(Box::new(MergeBisimulationPass::new(config.merge_bisimulation_max_iters)));
@@ -447,7 +390,6 @@ pub fn run_pipeline_on_precompute3<'a>(
             || pass_name == "MergeStructural"
             || pass_name == "MergeBisimulation"
             || pass_name == "MergeGlobalAtoms"
-            || pass_name == "MergeStateAgnostic"
             || pass_name == "EliminatePop0ExceptRoots"
             || pass_name == "CompressUnaryChains"
         {
