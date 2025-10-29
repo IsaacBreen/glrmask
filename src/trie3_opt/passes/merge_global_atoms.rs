@@ -53,10 +53,10 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                     acc.insert(t);
                 }
             }
+            union_by_pop.insert(*pop, SortedSet::from_iter(acc.into_iter()));
         }
 
         let mut atoms_by_pop: BTreeMap<isize, Vec<SortedSet>> = BTreeMap::new();
-        let mut any_aborted = false;
         for (pop, masks) in &by_pop_masks {
             let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
             let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
@@ -105,16 +105,14 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                 }
                 blocks = next_blocks;
             }
-            if aborted {
-                any_aborted = true;
-            }
-            atoms_by_pop.insert(*pop, blocks);
-        }
-
-        // If any pop exceeded the atom budget, the derived partition does not refine all masks.
-        // To avoid unsound merges, bail out of this pass without changing the trie.
-        if any_aborted {
-            return;
+            atoms_by_pop.insert(
+                *pop,
+                if aborted {
+                    if universe.is_empty() { vec![] } else { vec![universe.clone()] }
+                } else {
+                    blocks
+                },
+            );
         }
 
         // Create dense IDs for all unique token sets for faster lookups.
@@ -295,27 +293,40 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             node_to_rep.insert(node_ids[u_idx], representatives[class_id].unwrap());
         }
 
-        // Rewire every node's outgoing edges to point to representative destinations,
-        // unioning state sets as needed. This produces the quotient graph semantics.
-        let all_node_ids: Vec<_> = trie.node_ids().collect();
-        for u_id in all_node_ids.clone() {
-            let u_node = trie.get_node(u_id).unwrap().clone();
-            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
-                BTreeMap::new();
-            for (ek, dm) in u_node.children() {
-                let entry = new_children.entry(ek.clone()).or_default();
-                for (v_id, sids) in dm {
-                    let rep = *node_to_rep.get(v_id).unwrap();
-                    entry.entry(rep).or_default().union_inplace(sids);
+        // Rebuild representative edges.
+        for class_id in 0..num_classes {
+            if let Some(rep_id) = representatives[class_id] {
+                let exemplar_idx = final_partition.iter().position(|&c| c == class_id).unwrap();
+                let exemplar_id = node_ids[exemplar_idx];
+                let exemplar_node = trie.get_node(exemplar_id).unwrap().clone();
+
+                // Aggregate by (pop, tokens, dest_class) -> union of sids
+                let mut aggr: BTreeMap<(isize, SortedSet, usize), SortedSet> = BTreeMap::new();
+                for (ek, dm) in exemplar_node.children() {
+                    for (v_id, sids) in dm {
+                        let v_class = final_partition[id_to_idx[v_id]];
+                        aggr.entry((ek.pop, ek.tokens.clone(), v_class))
+                            .or_default()
+                            .union_inplace(sids);
+                    }
                 }
+
+                let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
+                    BTreeMap::new();
+                for ((pop, tokens, dest_class), sids) in aggr {
+                    if let Some(dest_rep) = representatives[dest_class] {
+                        let key = EdgeKey::new(pop, tokens);
+                        new_children.entry(key).or_default().insert(dest_rep, sids);
+                    }
+                }
+                trie.set_children(rep_id, new_children);
             }
-            trie.set_children(u_id, new_children);
         }
 
         // Clear children of non-representatives.
         let rep_set: HashSet<NodeId> = representatives.iter().filter_map(|&x| x).collect();
-        let all_node_ids2: Vec<_> = trie.node_ids().collect();
-        for node_id in all_node_ids2 {
+        let all_node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in all_node_ids {
             if !rep_set.contains(&node_id) {
                 trie.clear_children(node_id);
                 trie.set_end(node_id, false); // Non-reps are effectively deleted.
