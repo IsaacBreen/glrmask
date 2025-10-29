@@ -678,11 +678,11 @@ impl Default for GrammarConstraintConfig {
             skip_precomputation: false,
             precompute0_only: false,
             trie0: Trie0Config::off(),
-            trie1: Trie1Config::off(),
+            trie1: Trie1Config::default(),
             trie2: Trie2Config::off(),
-            trie3: Trie3Config::off(),
-            intermediate_trie3_templates: IntermediateTrie3Config::off(),
-            intermediate_trie3_main: IntermediateTrie3Config::off(),
+            trie3: Trie3Config::default(),
+            intermediate_trie3_templates: IntermediateTrie3Config::default(),
+            intermediate_trie3_main: IntermediateTrie3Config::default(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
         }
@@ -2183,35 +2183,35 @@ impl GrammarConstraint {
             end.write(trie3_god).unwrap().value.end = true;
             out.insert(tid, (start, end));
 
-            let terminal_name = parser.terminal_map.get_by_right(&tid).unwrap().clone();
-
-            println!("Template3 for terminal '{}' ({}):", terminal_name, tid.0);
-
-            let template_paths = IntermediatePrecomputeNode3::get_all_paths(
-                &trie3_god,
-                &[start.clone()],
-                |idx, _node| idx == end
-            );
-
-            if template_paths.is_empty() {
-                println!("  (No paths found to end node)");
-            }
-
-            for (_root_value, path_edges) in &template_paths {
-                let edge_keys_str: Vec<_> = path_edges.iter()
-                    .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
-                    .map(|(ek, _, _)| format!("{}", ek))
-                    .collect();
-                if !edge_keys_str.is_empty() {
-                    println!("  [{}]", edge_keys_str.join(", "));
-                }
-            }
-            let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-                .display_edge_keys_only()
-                .display_nodes()
-                .omit_depth()
-                ;
-            println!("{}", Trie::pretty_print_with_options(&trie3_god, &[start], &options));
+            // let terminal_name = parser.terminal_map.get_by_right(&tid).unwrap().clone();
+            //
+            // println!("Template3 for terminal '{}' ({}):", terminal_name, tid.0);
+            //
+            // let template_paths = IntermediatePrecomputeNode3::get_all_paths(
+            //     &trie3_god,
+            //     &[start.clone()],
+            //     |idx, _node| idx == end
+            // );
+            //
+            // if template_paths.is_empty() {
+            //     println!("  (No paths found to end node)");
+            // }
+            //
+            // for (_root_value, path_edges) in &template_paths {
+            //     let edge_keys_str: Vec<_> = path_edges.iter()
+            //         .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+            //         .map(|(ek, _, _)| format!("{}", ek))
+            //         .collect();
+            //     if !edge_keys_str.is_empty() {
+            //         println!("  [{}]", edge_keys_str.join(", "));
+            //     }
+            // }
+            // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+            //     .display_edge_keys_only()
+            //     .display_nodes()
+            //     .omit_depth()
+            //     ;
+            // println!("{}", Trie::pretty_print_with_options(&trie3_god, &[start], &options));
         }
 
         // Global, cross-template optimization pass (merge identical subgraphs, compress NoOp chains).
