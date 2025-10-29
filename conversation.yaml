@@ -317,12 +317,11 @@ local_system:
           trie3_god: &Trie3GodWrapper,
           max_llm_token_id: usize,
           max_state_id: usize,
-      ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
+      ) -> (MiniTrie, Vec<TokenizerStateID>, HashMap<PrecomputeNode3Index, NodeId>) {
           let mut mini = MiniTrie::new();
           let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
 
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+          let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
           // First, create all nodes in MiniTrie and map old to new
           #[cfg(not(rustrover))]
@@ -342,7 +341,7 @@ local_system:
           }
 
           // Mark roots in MiniTrie
-          for r_idx in &roots_vec {
+          for r_idx in roots.values() {
               if let Some(&id) = map_old_to_new.get(r_idx) {
                   mini.add_root(id);
               }
@@ -395,15 +394,8 @@ local_system:
               }
           }
 
-          // Stable root list preserving the original key ordering
-          let mut root_pairs: Vec<(TokenizerStateID, NodeId)> = Vec::new();
-          for (k, r) in roots {
-              if let Some(id) = map_old_to_new.get(r).cloned() {
-                  root_pairs.push((*k, id));
-              }
-          }
-
-          (mini, root_pairs, map_old_to_new)
+          let root_keys = roots.keys().cloned().collect();
+          (mini, root_keys, map_old_to_new)
       }
 
       /// Import a MiniTrie back into the precompute3 arena by constructing a fresh graph.
@@ -413,7 +405,7 @@ local_system:
       /// - end flags are set from the mini-trie.
       pub(crate) fn import_from_mini(
           mini: &MiniTrie,
-          root_pairs: &[(TokenizerStateID, NodeId)],
+          root_keys: &[TokenizerStateID],
           trie3_god: &Trie3GodWrapper,
           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
           ctx: &OptimizationContext,
@@ -475,7 +467,7 @@ local_system:
 
           // Remap roots to new nodes
           roots.clear();
-          for (key, nid) in root_pairs {
+          for (key, nid) in root_keys.iter().zip(mini.root_ids.iter()) {
               if let Some(idx) = id_map.get(nid) {
                   roots.insert(*key, *idx);
               }
@@ -500,7 +492,7 @@ local_system:
           parser: Option<&'a GLRParser>,
       ) {
           // Export the current graph into a minimal structure
-          let (mut mini, root_pairs, _old_mapping) =
+          let (mut mini, root_keys, _old_mapping) =
               export_to_mini(roots, trie3_god, max_llm_token_id, max_state_id);
 
           // Build a fresh pass pipeline and context
@@ -577,7 +569,7 @@ local_system:
           }
 
           // Import the result back and finalize
-          import_from_mini(&mini, &root_pairs, trie3_god, roots, &ctx);
+          import_from_mini(&mini, &root_keys, trie3_god, roots, &ctx);
       }
 
       #[cfg(test)]
@@ -830,9 +822,9 @@ local_system:
 
       /// A compact, no-generics mini trie for precompute3 optimization.
       #[derive(Clone, Debug)]
-      pub struct ]MiniTrie {
+      pub struct MiniTrie {
           nodes: BTreeMap<NodeId, Node>,
-          pub root_ids: BTreeSet<NodeId>,
+          pub root_ids: Vec<NodeId>,
           /// Counter to generate unique node IDs.
           next_node_id: NodeId,
       }
@@ -841,7 +833,7 @@ local_system:
           pub fn new() -> Self {
               Self {
                   nodes: BTreeMap::new(),
-                  root_ids: BTreeSet::new(),
+                  root_ids: Vec::new(),
                   next_node_id: 0,
               }
           }
@@ -875,7 +867,7 @@ local_system:
               }
           }
           pub fn add_root(&mut self, id: NodeId) {
-              self.root_ids.insert(id);
+              self.root_ids.push(id);
           }
 
           pub fn get_node(&self, id: NodeId) -> Option<&Node> {
@@ -5944,7 +5936,7 @@ local_system:
           crate::debug!(2, "Finished optimizing Trie 3 size in {:?}", start.elapsed());
       }
     src/trie3_opt/passes/canonicalize_end_nodes.rs: |
-      use std::collections::BTreeMap;
+      use std::collections::{BTreeMap, BTreeSet};
 
       use crate::trie3_opt::context::OptimizationContext;
       use crate::trie3_opt::core::{MiniTrie, NodeId};
@@ -5973,13 +5965,20 @@ local_system:
               }
               ends.sort_unstable();
               let canonical = ends[0];
+              let other_ends: BTreeSet<NodeId> = ends.iter().skip(1).cloned().collect();
 
-              // Ensure canonical has no outgoing edges
+              // Ensure canonical has no outgoing edges and is an end node.
               trie.clear_children(canonical);
               trie.set_end(canonical, true);
 
-              // Rewire all edges to target canonical if they target any end
-              let end_set: std::collections::BTreeSet<NodeId> = ends.into_iter().collect();
+              // Decommission other end nodes. They will be garbage collected if unreferenced.
+              for &end_node_id in &other_ends {
+                  trie.set_end(end_node_id, false);
+                  trie.clear_children(end_node_id);
+              }
+
+              // Rewire all edges that target any end node to target the canonical one.
+              let end_set: BTreeSet<NodeId> = ends.into_iter().collect();
               let node_ids: Vec<_> = trie.node_ids().collect();
 
               for node_id in node_ids {
@@ -5999,6 +5998,21 @@ local_system:
                   }
                   trie.set_children(node_id, new_children);
               }
+
+              // Remap roots if any of them were end nodes that are not the canonical one.
+              let mut new_roots = Vec::with_capacity(trie.root_ids.len());
+              let mut root_set = BTreeSet::new();
+              for root_id in &trie.root_ids {
+                  let new_root = if other_ends.contains(root_id) {
+                      canonical
+                  } else {
+                      *root_id
+                  };
+                  if root_set.insert(new_root) {
+                      new_roots.push(new_root);
+                  }
+              }
+              trie.root_ids = new_roots;
           }
       }
     src/trie3_opt/passes/compress_edges.rs: |
@@ -8968,12 +8982,11 @@ messages:
           trie3_god: &Trie3GodWrapper,
           max_llm_token_id: usize,
           max_state_id: usize,
-      ) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
+      ) -> (MiniTrie, Vec<TokenizerStateID>, HashMap<PrecomputeNode3Index, NodeId>) {
           let mut mini = MiniTrie::new();
           let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
 
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+          let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
           // First, create all nodes in MiniTrie and map old to new
           #[cfg(not(rustrover))]
@@ -8993,7 +9006,7 @@ messages:
           }
 
           // Mark roots in MiniTrie
-          for r_idx in &roots_vec {
+          for r_idx in roots.values() {
               if let Some(&id) = map_old_to_new.get(r_idx) {
                   mini.add_root(id);
               }
@@ -9046,15 +9059,8 @@ messages:
               }
           }
 
-          // Stable root list preserving the original key ordering
-          let mut root_pairs: Vec<(TokenizerStateID, NodeId)> = Vec::new();
-          for (k, r) in roots {
-              if let Some(id) = map_old_to_new.get(r).cloned() {
-                  root_pairs.push((*k, id));
-              }
-          }
-
-          (mini, root_pairs, map_old_to_new)
+          let root_keys = roots.keys().cloned().collect();
+          (mini, root_keys, map_old_to_new)
       }
 
       /// Import a MiniTrie back into the precompute3 arena by constructing a fresh graph.
@@ -9064,7 +9070,7 @@ messages:
       /// - end flags are set from the mini-trie.
       pub(crate) fn import_from_mini(
           mini: &MiniTrie,
-          root_pairs: &[(TokenizerStateID, NodeId)],
+          root_keys: &[TokenizerStateID],
           trie3_god: &Trie3GodWrapper,
           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
           ctx: &OptimizationContext,
@@ -9126,7 +9132,7 @@ messages:
 
           // Remap roots to new nodes
           roots.clear();
-          for (key, nid) in root_pairs {
+          for (key, nid) in root_keys.iter().zip(mini.root_ids.iter()) {
               if let Some(idx) = id_map.get(nid) {
                   roots.insert(*key, *idx);
               }
@@ -9151,7 +9157,7 @@ messages:
           parser: Option<&'a GLRParser>,
       ) {
           // Export the current graph into a minimal structure
-          let (mut mini, root_pairs, _old_mapping) =
+          let (mut mini, root_keys, _old_mapping) =
               export_to_mini(roots, trie3_god, max_llm_token_id, max_state_id);
 
           // Build a fresh pass pipeline and context
@@ -9228,7 +9234,7 @@ messages:
           }
 
           // Import the result back and finalize
-          import_from_mini(&mini, &root_pairs, trie3_god, roots, &ctx);
+          import_from_mini(&mini, &root_keys, trie3_god, roots, &ctx);
       }
 
       #[cfg(test)]
@@ -9486,9 +9492,9 @@ messages:
 
       /// A compact, no-generics mini trie for precompute3 optimization.
       #[derive(Clone, Debug)]
-      pub struct ]MiniTrie {
+      pub struct MiniTrie {
           nodes: BTreeMap<NodeId, Node>,
-          pub root_ids: BTreeSet<NodeId>,
+          pub root_ids: Vec<NodeId>,
           /// Counter to generate unique node IDs.
           next_node_id: NodeId,
       }
@@ -9497,7 +9503,7 @@ messages:
           pub fn new() -> Self {
               Self {
                   nodes: BTreeMap::new(),
-                  root_ids: BTreeSet::new(),
+                  root_ids: Vec::new(),
                   next_node_id: 0,
               }
           }
@@ -9531,7 +9537,7 @@ messages:
               }
           }
           pub fn add_root(&mut self, id: NodeId) {
-              self.root_ids.insert(id);
+              self.root_ids.push(id);
           }
 
           pub fn get_node(&self, id: NodeId) -> Option<&Node> {
@@ -13103,9 +13109,8 @@ messages:
       ```
     metadata:
       filename: src/trie3_opt/passes/reorder_llm_tokens.rs
-  - user: Get rid of `root_pairs`. e.g. don't return them from `export_to_mini`. It's
-      enough to have to roots in `MiniTrie`. Their order is guaranteed, so if we want
-      to compute the root pairs later, we can do so by zipping.
+  - user: Do all optimization passes here that map nodes, create nodes, remove etc,
+      properly update the roots?
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -13125,178 +13130,160 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on your request, I will make the necessary changes to remove `root_pairs` and streamline the root handling logic in the optimization pipeline. Here are the step-by-step instructions followed by the git diffs.
+      Of course. You've raised an excellent point about ensuring root nodes are handled correctly during graph transformations. After reviewing the optimization passes, I've identified that `CanonicalizeEndNodesPass` does not correctly update the trie's roots if a root node happens to be an end node that gets canonicalized. It also fails to properly decommission the non-canonical end nodes.
+
+      Here are the step-by-step instructions to fix this, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      #### 1. Update `src/trie3_opt/core.rs`
+      1.  **Modify `src/trie3_opt/passes/canonicalize_end_nodes.rs`:**
+          *   At the top of the file, update the `use` statement to import `BTreeSet` alongside `BTreeMap`. Change this line:
+              ```rust
+              use std::collections::BTreeMap;
+              ```
+              to:
+              ```rust
+              use std::collections::{BTreeMap, BTreeSet};
+              ```
+          *   Replace the `run` method within the `impl OptimizationPass for CanonicalizeEndNodesPass` block with the following implementation. This new version correctly handles non-canonical end nodes and remaps roots if they are affected by the canonicalization.
 
-      I'll modify the `MiniTrie` struct to use an ordered `Vec<NodeId>` for its roots, which is essential for preserving the mapping from the original root keys.
-
-      1.  **In `src/trie3_opt/core.rs`:**
-          *   In the `MiniTrie` struct definition, change the type of `root_ids` from `BTreeSet<NodeId>` to `Vec<NodeId>`.
-          *   In `MiniTrie::new()`, update the initialization of `root_ids` to `Vec::new()`.
-          *   In `MiniTrie::add_root()`, change the implementation to simply push the new `id` to the `root_ids` vector. This allows for duplicate root nodes, which is necessary if multiple original root keys point to the same node.
-          *   Fix a typo in the struct definition from `]MiniTrie` to `MiniTrie`.
-
-      #### 2. Update `src/trie3_opt/coordinator.rs`
-
-      I'll refactor the coordinator functions to pass around the ordered list of root keys instead of the `(key, node_id)` pairs.
-
-      1.  **In `src/trie3_opt/coordinator.rs`:**
-          *   **`export_to_mini` function:**
-              *   Change the function's return type to `(MiniTrie, Vec<TokenizerStateID>, HashMap<PrecomputeNode3Index, NodeId>)`.
-              *   Remove the logic that creates `root_pairs`.
-              *   The function will now return the `MiniTrie`, a `Vec<TokenizerStateID>` containing the original root keys in order, and the old-to-new node ID map.
-          *   **`import_from_mini` function:**
-              *   Change the function signature to accept `root_keys: &[TokenizerStateID]` instead of `root_pairs`.
-              *   Update the implementation to remap roots by zipping the `root_keys` slice with the `mini.root_ids` vector.
-          *   **`run_pipeline_on_precompute3` function:**
-              *   Update the call to `export_to_mini` to correctly handle the new return values, storing the returned keys in a `root_keys` variable.
-              *   Update the call to `import_from_mini` to pass `&root_keys`.
-
-      No other files require changes. The optimization passes that modify `trie.root_ids` will correctly `collect()` into a `Vec`, preserving the order and correspondence to `root_keys`.
+              ```rust
+              fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+                  // Collect end nodes
+                  let mut ends: Vec<NodeId> = trie
+                      .nodes()
+                      .filter(|n| n.is_end())
+                      .map(|n| n.id())
+                      .collect();
+                  if ends.len() <= 1 {
+                      return;
+                  }
+                  ends.sort_unstable();
+                  let canonical = ends[0];
+                  let other_ends: BTreeSet<NodeId> = ends.iter().skip(1).cloned().collect();
+          
+                  // Ensure canonical has no outgoing edges and is an end node.
+                  trie.clear_children(canonical);
+                  trie.set_end(canonical, true);
+          
+                  // Decommission other end nodes. They will be garbage collected if unreferenced.
+                  for &end_node_id in &other_ends {
+                      trie.set_end(end_node_id, false);
+                      trie.clear_children(end_node_id);
+                  }
+          
+                  // Rewire all edges that target any end node to target the canonical one.
+                  let end_set: BTreeSet<NodeId> = ends.into_iter().collect();
+                  let node_ids: Vec<_> = trie.node_ids().collect();
+          
+                  for node_id in node_ids {
+                      let node = trie.get_node(node_id).unwrap();
+                      let mut new_children: BTreeMap<_, _> = BTreeMap::new();
+                      for (ek, dm) in node.children().clone() {
+                          let mut dm2: BTreeMap<NodeId, _> = BTreeMap::new();
+                          for (dst, sids) in dm {
+                              let new_dst = if end_set.contains(&dst) { canonical } else { dst };
+                              dm2.entry(new_dst)
+                                  .and_modify(|e: &mut SortedSet| e.union_inplace(&sids))
+                                  .or_insert(sids);
+                          }
+                          if !dm2.is_empty() {
+                              new_children.insert(ek, dm2);
+                          }
+                      }
+                      trie.set_children(node_id, new_children);
+                  }
+          
+                  // Remap roots if any of them were end nodes that are not the canonical one.
+                  let mut new_roots = Vec::with_capacity(trie.root_ids.len());
+                  let mut root_set = BTreeSet::new();
+                  for root_id in &trie.root_ids {
+                      let new_root = if other_ends.contains(root_id) {
+                          canonical
+                      } else {
+                          *root_id
+                      };
+                      if root_set.insert(new_root) {
+                          new_roots.push(new_root);
+                      }
+                  }
+                  trie.root_ids = new_roots;
+              }
+              ```
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes.
+      Here is the git diff for the change.
 
       ```diff
-      --- a/src/trie3_opt/coordinator.rs
-      +++ b/src/trie3_opt/coordinator.rs
-      @@ -263,11 +263,10 @@
-           trie3_god: &Trie3GodWrapper,
-           max_llm_token_id: usize,
-           max_state_id: usize,
-      -) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
-      +) -> (MiniTrie, Vec<TokenizerStateID>, HashMap<PrecomputeNode3Index, NodeId>) {
-           let mut mini = MiniTrie::new();
-           let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
+      diff --git a/src/trie3_opt/passes/canonicalize_end_nodes.rs b/src/trie3_opt/passes/canonicalize_end_nodes.rs
+      index 6241111..131211c 100644
+      --- a/src/trie3_opt/passes/canonicalize_end_nodes.rs
+      +++ b/src/trie3_opt/passes/canonicalize_end_nodes.rs
+      @@ -1,4 +1,4 @@
+      -use std::collections::BTreeMap;
+      +use std::collections::{BTreeMap, BTreeSet};
        
-      -    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      -    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-      +    let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-       
-           // First, create all nodes in MiniTrie and map old to new
-           #[cfg(not(rustrover))]
-      @@ -286,8 +285,8 @@
-           }
-       
-           // Mark roots in MiniTrie
-      -    for r_idx in &roots_vec {
-      +    for r_idx in roots.values() {
-               if let Some(&id) = map_old_to_new.get(r_idx) {
-                   mini.add_root(id);
+       use crate::trie3_opt::context::OptimizationContext;
+       use crate::trie3_opt::core::{MiniTrie, NodeId};
+      @@ -26,11 +26,24 @@
                }
-      @@ -337,16 +336,8 @@
-               }
-           }
+               ends.sort_unstable();
+               let canonical = ends[0];
+      +        let other_ends: BTreeSet<NodeId> = ends.iter().skip(1).cloned().collect();
        
-      -    // Stable root list preserving the original key ordering
-      -    let mut root_pairs: Vec<(TokenizerStateID, NodeId)> = Vec::new();
-      -    for (k, r) in roots {
-      -        if let Some(id) = map_old_to_new.get(r).cloned() {
-      -            root_pairs.push((*k, id));
-      -        }
-      -    }
-      -
-      -    (mini, root_pairs, map_old_to_new)
-      +    let root_keys = roots.keys().cloned().collect();
-      +    (mini, root_keys, map_old_to_new)
+      -        // Ensure canonical has no outgoing edges
+      +        // Ensure canonical has no outgoing edges and is an end node.
+               trie.clear_children(canonical);
+               trie.set_end(canonical, true);
+       
+      -        // Rewire all edges to target canonical if they target any end
+      -        let end_set: std::collections::BTreeSet<NodeId> = ends.into_iter().collect();
+      +        // Decommission other end nodes. They will be garbage collected if unreferenced.
+      +        for &end_node_id in &other_ends {
+      +            trie.set_end(end_node_id, false);
+      +            trie.clear_children(end_node_id);
+      +        }
+      +
+      +        // Rewire all edges that target any end node to target the canonical one.
+      +        let end_set: BTreeSet<NodeId> = ends.into_iter().collect();
+               let node_ids: Vec<_> = trie.node_ids().collect();
+       
+               for node_id in node_ids {
+      @@ -50,5 +63,20 @@
+                   }
+                   trie.set_children(node_id, new_children);
+               }
+      +
+      +        // Remap roots if any of them were end nodes that are not the canonical one.
+      +        let mut new_roots = Vec::with_capacity(trie.root_ids.len());
+      +        let mut root_set = BTreeSet::new();
+      +        for root_id in &trie.root_ids {
+      +            let new_root = if other_ends.contains(root_id) {
+      +                canonical
+      +            } else {
+      +                *root_id
+      +            };
+      +            if root_set.insert(new_root) {
+      +                new_roots.push(new_root);
+      +            }
+      +        }
+      +        trie.root_ids = new_roots;
+           }
        }
-       
-       /// Import a MiniTrie back into the precompute3 arena by constructing a fresh graph.
-      @@ -356,7 +347,7 @@
-       /// - end flags are set from the mini-trie.
-       pub(crate) fn import_from_mini(
-           mini: &MiniTrie,
-      -    root_pairs: &[(TokenizerStateID, NodeId)],
-      +    root_keys: &[TokenizerStateID],
-           trie3_god: &Trie3GodWrapper,
-           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-           ctx: &OptimizationContext,
-      @@ -416,8 +407,8 @@
-       
-           // Remap roots to new nodes
-           roots.clear();
-      -    for (key, nid) in root_pairs {
-      -        if let Some(idx) = id_map.get(nid) {
-      +    for (key, nid) in root_keys.iter().zip(mini.root_ids.iter()) {
-      +        if let Some(idx) = id_map.get(nid) {
-                   roots.insert(*key, *idx);
-               }
-           }
-      @@ -440,7 +431,7 @@
-           parser: Option<&'a GLRParser>,
-       ) {
-           // Export the current graph into a minimal structure
-      -    let (mut mini, root_pairs, _old_mapping) =
-      +    let (mut mini, root_keys, _old_mapping) =
-               export_to_mini(roots, trie3_god, max_llm_token_id, max_state_id);
-       
-           // Build a fresh pass pipeline and context
-      @@ -514,7 +505,7 @@
-           }
-       
-           // Import the result back and finalize
-      -    import_from_mini(&mini, &root_pairs, trie3_god, roots, &ctx);
-      +    import_from_mini(&mini, &root_keys, trie3_god, roots, &ctx);
-       }
-       
-       #[cfg(test)]
-
-      ```
-      ```diff
-      --- a/src/trie3_opt/core.rs
-      +++ b/src/trie3_opt/core.rs
-      @@ -221,8 +221,8 @@
-       
-       /// A compact, no-generics mini trie for precompute3 optimization.
-       #[derive(Clone, Debug)]
-      -pub struct ]MiniTrie {
-      +pub struct MiniTrie {
-           nodes: BTreeMap<NodeId, Node>,
-      -    pub root_ids: BTreeSet<NodeId>,
-      +    pub root_ids: Vec<NodeId>,
-           /// Counter to generate unique node IDs.
-           next_node_id: NodeId,
-       }
-      @@ -232,7 +232,7 @@
-           pub fn new() -> Self {
-               Self {
-                   nodes: BTreeMap::new(),
-      -            root_ids: BTreeSet::new(),
-      +            root_ids: Vec::new(),
-                   next_node_id: 0,
-               }
-           }
-      @@ -264,7 +264,7 @@
-               }
-           }
-           pub fn add_root(&mut self, id: NodeId) {
-      -        self.root_ids.insert(id);
-      +        self.root_ids.push(id);
-           }
-       
-           pub fn get_node(&self, id: NodeId) -> Option<&Node> {
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/coordinator.rs
-      Applying patch to 'src/trie3_opt/coordinator.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/coordinator.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/trie3_opt/core.rs
-      Applying patch to 'src/trie3_opt/core.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/core.rs.
+      Identified target file: src/trie3_opt/passes/canonicalize_end_nodes.rs
+      Applying patch to 'src/trie3_opt/passes/canonicalize_end_nodes.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/canonicalize_end_nodes.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Remove explicit root_pairs storage
-      in MiniTrie export/import"'
+  - user: 'Changes committed with message: "Fix: Correctly remap roots and decommission
+      non-canonical end nodes in CanonicalizeEndNodesPass"'
     metadata:
 ...

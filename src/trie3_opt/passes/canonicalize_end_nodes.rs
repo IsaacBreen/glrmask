@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{MiniTrie, NodeId};
@@ -27,13 +27,20 @@ impl OptimizationPass for CanonicalizeEndNodesPass {
         }
         ends.sort_unstable();
         let canonical = ends[0];
+        let other_ends: BTreeSet<NodeId> = ends.iter().skip(1).cloned().collect();
 
-        // Ensure canonical has no outgoing edges
+        // Ensure canonical has no outgoing edges and is an end node.
         trie.clear_children(canonical);
         trie.set_end(canonical, true);
 
-        // Rewire all edges to target canonical if they target any end
-        let end_set: std::collections::BTreeSet<NodeId> = ends.into_iter().collect();
+        // Decommission other end nodes. They will be garbage collected if unreferenced.
+        for &end_node_id in &other_ends {
+            trie.set_end(end_node_id, false);
+            trie.clear_children(end_node_id);
+        }
+
+        // Rewire all edges that target any end node to target the canonical one.
+        let end_set: BTreeSet<NodeId> = ends.into_iter().collect();
         let node_ids: Vec<_> = trie.node_ids().collect();
 
         for node_id in node_ids {
@@ -53,5 +60,20 @@ impl OptimizationPass for CanonicalizeEndNodesPass {
             }
             trie.set_children(node_id, new_children);
         }
+
+        // Remap roots if any of them were end nodes that are not the canonical one.
+        let mut new_roots = Vec::with_capacity(trie.root_ids.len());
+        let mut root_set = BTreeSet::new();
+        for root_id in &trie.root_ids {
+            let new_root = if other_ends.contains(root_id) {
+                canonical
+            } else {
+                *root_id
+            };
+            if root_set.insert(new_root) {
+                new_roots.push(new_root);
+            }
+        }
+        trie.root_ids = new_roots;
     }
 }
