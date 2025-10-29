@@ -2303,8 +2303,18 @@ impl GrammarConstraint {
         stacks: &[(Vec<ParseStateEdgeContent>, Acc)],
     ) -> BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> {
         let mut final_nodes_map: BTreeMap<ParseStateEdgeContent, IntermediatePrecomputeNode3Index> = BTreeMap::new();
+        // A BTreeMap is used here to ensure deterministic iteration order.
+        let mut grouped_paths: BTreeMap<ParseStateEdgeContent, Vec<IntermediatePrecomputeNode3Index>> = BTreeMap::new();
 
         for (items, acc) in stacks.iter() {
+            if items.is_empty() {
+                continue;
+            }
+            // Per the function's documentation, items[0] is the new state after the shift.
+            let shifted_state_content = items[0];
+            // The rest of the items form the stack that existed *before* the shift.
+            let pre_shift_stack = &items[1..];
+
             let mut cur = IntermediatePrecomputeNode3Index::new(
                 trie3_god.insert(IntermediatePrecomputeNode3::new(
                     IntermediatePrecomputedNodeContents3::internal()
@@ -2318,14 +2328,6 @@ impl GrammarConstraint {
                 );
                 inserter.try_destination(cur.clone()).expect("Failed to insert unconditional edge to template head");
             }
-
-            let items = &items[1..]; // Skip first element
-            if items.is_empty() {
-                continue;
-            }
-
-            let shifted_state_content = *items.last().unwrap();
-            let pre_shift_stack = &items[..items.len() - 1];
 
             // Walk the pre-shift stack from top to bottom to build the trie path
             for state_content in pre_shift_stack {
@@ -2349,7 +2351,30 @@ impl GrammarConstraint {
                     .expect("Failed to insert Push edge in template chain");
             }
 
-            final_nodes_map.insert(shifted_state_content, cur);
+            // Group the final node of the generated path by the shifted state.
+            grouped_paths.entry(shifted_state_content).or_default().push(cur);
+        }
+
+        for (shifted_state_content, path_end_nodes) in grouped_paths {
+            // If multiple paths lead to the same shifted state, merge them into a single node.
+            if path_end_nodes.len() == 1 {
+                final_nodes_map.insert(shifted_state_content, path_end_nodes.into_iter().next().unwrap());
+            } else {
+                let merged_node = IntermediatePrecomputeNode3Index::new(
+                    trie3_god.insert(IntermediatePrecomputeNode3::new(
+                        IntermediatePrecomputedNodeContents3::internal()
+                    ))
+                );
+                for node in path_end_nodes {
+                    let inserter = EdgeInserter::new(
+                        trie3_god,
+                        node.as_arc().clone(),
+                        IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+                    );
+                    inserter.try_destination(merged_node.clone()).expect("Failed to merge path ends");
+                }
+                final_nodes_map.insert(shifted_state_content, merged_node);
+            }
         }
 
         final_nodes_map
