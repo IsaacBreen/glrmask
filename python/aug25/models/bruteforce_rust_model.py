@@ -44,8 +44,10 @@ class BruteForceRustModel:
             
             # Check if the next token is valid
             temp_state.commit(token_id)
-            mask_bv = temp_state.get_mask_bv()
-            if mask_bv.to_ranges(): # Non-empty mask means the token is valid
+            # mask_bv = temp_state.get_mask_bv()
+            # if mask_bv.to_ranges(): # Non-empty mask means the token is valid
+            #     allowed_tokens.append(token_id)
+            if temp_state.is_active():
                 allowed_tokens.append(token_id)
 
         return RangeSet.from_indices(allowed_tokens)

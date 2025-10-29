@@ -1027,6 +1027,10 @@ impl PyGrammarConstraintState {
         })
     }
 
+    fn is_active(&self) -> bool {
+        self.inner.with_inner(|state| state.is_active())
+    }
+
     fn __str__(&self) -> String {
         self.inner.with_inner(|state| format!("{}", state))
     }
