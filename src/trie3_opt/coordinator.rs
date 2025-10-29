@@ -31,7 +31,6 @@ pub struct CoordinatorConfig {
     pub canonicalize_end_nodes: bool,
     pub compress_edges: bool,
     pub compress_unary_chains: bool,
-    pub factor_state_fanout: bool,
     pub factor_common_destinations: bool,
     pub factor_common_destinations_min_incoming: usize,
     pub merge_structural: bool,
@@ -56,7 +55,6 @@ impl Default for CoordinatorConfig {
             canonicalize_end_nodes: false,
             compress_edges: true,
             compress_unary_chains: true,
-            factor_state_fanout: true,
             factor_common_destinations: true,
             factor_common_destinations_min_incoming: 12,
             merge_structural: true,
@@ -83,7 +81,6 @@ impl CoordinatorConfig {
             canonicalize_end_nodes: false,
             compress_edges: false,
             compress_unary_chains: false,
-            factor_state_fanout: false,
             factor_common_destinations: false,
             factor_common_destinations_min_incoming: 0,
             merge_structural: false,
@@ -130,9 +127,6 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
         }
 
         // Phase 3: Factoring and structural simplification
-        if config.factor_state_fanout {
-            pipeline.push(Box::new(FactorStateFanoutPass));
-        }
         if config.factor_common_destinations {
             pipeline.push(Box::new(FactorCommonDestinationsPass::new(config.factor_common_destinations_min_incoming)));
         }
