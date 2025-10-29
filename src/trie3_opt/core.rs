@@ -432,18 +432,17 @@ impl MiniTrie {
             let live_at_node = productive_tokens.get(&node_id).unwrap().clone();
             if let Some(node) = self.get_node(node_id) {
                 for (pred_id, edges) in node.parents() {
-                    let pred_live = productive_tokens.get_mut(pred_id).unwrap();
-                    let old_len = pred_live.len();
-
-                    // A token is productive at the predecessor if it's on an edge to the current
-                    // node, OR if it's productive from the current node.
-                    pred_live.union_inplace(&live_at_node);
                     for edge_key in edges.keys() {
-                        pred_live.union_inplace(&edge_key.tokens);
-                    }
-
-                    if pred_live.len() > old_len {
-                        worklist.push_back(*pred_id);
+                        let live_from_edge = live_at_node.intersect(&edge_key.tokens);
+                        if live_from_edge.is_empty() {
+                            continue;
+                        }
+                        let pred_live = productive_tokens.get_mut(pred_id).unwrap();
+                        let old_len = pred_live.len();
+                        pred_live.union_inplace(&live_from_edge);
+                        if pred_live.len() > old_len {
+                            worklist.push_back(*pred_id);
+                        }
                     }
                 }
             }
