@@ -25,30 +25,33 @@ impl OptimizationPass for ReorderLLMTokensPass {
                         freq[t] += 1;
                     }
                 }
-            }
-        }
+                    }
+                }
 
-        let mut present: Vec<usize> = (0..=max_tok).filter(|&t| freq[t] > 0).collect();
-        if present.is_empty() {
-            return;
-        }
-        present.sort_by_key(|&t| (std::cmp::Reverse(freq[t]), t));
+                let mut all_tokens: Vec<usize> = (0..=max_tok).collect();
+                all_tokens.sort_by_key(|&t| (std::cmp::Reverse(freq[t]), t));
 
-        let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
-        for (new_id, old_id) in present.iter().enumerate() {
-            old_to_new.insert(*old_id, new_id);
-        }
+                let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
+                for (new_id, old_id) in all_tokens.iter().enumerate() {
+                    old_to_new.insert(*old_id, new_id);
+                }
 
-        let remap_sorted_set = |s: &SortedSet| -> SortedSet {
-            let mut new_elems = Vec::with_capacity(s.len());
-            for elem in s.iter() {
-                new_elems.push(old_to_new.get(&elem).copied().unwrap_or(elem));
-            }
-            SortedSet::from_iter(new_elems)
-        };
+                // If the mapping is identity, no reordering is needed.
+                if all_tokens.iter().enumerate().all(|(i, &t)| i == t) {
+                    return;
+                }
 
-        let node_ids: Vec<_> = trie.node_ids().collect();
-        for node_id in node_ids {
+                let remap_sorted_set = |s: &SortedSet| -> SortedSet {
+                    let mut new_elems = Vec::with_capacity(s.len());
+                    for elem in s.iter() {
+                        // This unwrap is safe because all tokens are in old_to_new.
+                        new_elems.push(*old_to_new.get(&elem).unwrap());
+                    }
+                    SortedSet::from_iter(new_elems)
+                };
+
+                let node_ids: Vec<_> = trie.node_ids().collect();
+                for node_id in node_ids {
             let node = trie.get_node(node_id).unwrap();
             let mut new_children = BTreeMap::new();
             for (mut ek, dm) in node.children().clone() {
@@ -76,10 +79,9 @@ impl OptimizationPass for ReorderLLMTokensPass {
         for (orig, old_internal) in sv.original_to_internal.clone() {
             if let Some(new_internal) = old_to_new.get(&old_internal) {
                 new_original_to_internal.insert(orig, *new_internal);
+                    }
+                }
+                sv.original_to_internal = new_original_to_internal;
             }
         }
-        sv.original_to_internal = new_original_to_internal;
-        sv.internal_max_llm_token = present.len().saturating_sub(1);
-        ctx.max_llm_token_id = sv.internal_max_llm_token;
-    }
-}
+
