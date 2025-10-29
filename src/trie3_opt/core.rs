@@ -411,39 +411,39 @@ impl MiniTrie {
 
     /// Compute for each node, the set of LLM tokens that can appear on a path from it to an END node.
     /// This is a backward reachability analysis of tokens.
-    pub fn productive_tokens_at_nodes(
-        &self,
-        universe: &SortedSet,
-    ) -> HashMap<NodeId, SortedSet> {
-        let mut worklist = VecDeque::new();
+    pub fn productive_tokens_at_nodes(&self) -> HashMap<NodeId, SortedSet> {
         let mut productive_tokens: HashMap<NodeId, SortedSet> = self
             .node_ids()
             .map(|id| (id, SortedSet::new()))
             .collect();
 
-        for node in self.nodes() {
-            if node.is_end() {
-                productive_tokens.insert(node.id(), universe.clone());
-                worklist.push_back(node.id());
-            }
-        }
+        let can_reach_end_set = self.can_reach_end();
 
-        while let Some(node_id) = worklist.pop_front() {
-            let live_at_node = productive_tokens.get(&node_id).unwrap().clone();
-            if let Some(node) = self.get_node(node_id) {
-                for (pred_id, edges) in node.parents() {
-                    for edge_key in edges.keys() {
-                        let live_from_edge = live_at_node.intersect(&edge_key.tokens);
-                        if live_from_edge.is_empty() {
-                            continue;
-                        }
-                        let pred_live = productive_tokens.get_mut(pred_id).unwrap();
-                        let old_len = pred_live.len();
-                        pred_live.union_inplace(&live_from_edge);
-                        if pred_live.len() > old_len {
-                            worklist.push_back(*pred_id);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            // Iterate over all nodes. Reverse order can speed up convergence but is not required.
+            for u_id in self.node_ids() {
+                let u_node = self.get_node(u_id).unwrap();
+                let mut new_productive = SortedSet::new();
+
+                for (ek, dm) in u_node.children() {
+                    for v_id in dm.keys() {
+                        // If child can reach end, its edge tokens and its own productive tokens
+                        // contribute to the parent's productive tokens.
+                        if can_reach_end_set.contains(v_id) {
+                            new_productive.union_inplace(&ek.tokens);
+                            if let Some(productive_v) = productive_tokens.get(v_id) {
+                                new_productive.union_inplace(productive_v);
+                            }
                         }
                     }
+                }
+
+                let current_productive = productive_tokens.get_mut(&u_id).unwrap();
+                if new_productive.elems != current_productive.elems {
+                    *current_productive = new_productive;
+                    changed = true;
                 }
             }
         }
