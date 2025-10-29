@@ -47,6 +47,7 @@ pub struct CoordinatorConfig {
     pub merge_equivalent_llm_tokens: bool,
     pub reorder_llm_tokens: bool,
     pub generalize_sids: bool,
+    pub assert_no_pop0_except_roots: bool,
 }
 
 fn get_default_config_impl() -> CoordinatorConfig {
@@ -70,6 +71,7 @@ fn get_default_config_impl() -> CoordinatorConfig {
         merge_equivalent_llm_tokens: true,
         reorder_llm_tokens: true,
         generalize_sids: true,
+        assert_no_pop0_except_roots: true,
     }
 }
 
@@ -113,6 +115,7 @@ static EFFECTIVE_CONFIG: Lazy<CoordinatorConfig> = Lazy::new(|| {
                     override_field!(merge_equivalent_llm_tokens, as_bool);
                     override_field!(reorder_llm_tokens, as_bool);
                     override_field!(generalize_sids, as_bool);
+                    override_field!(assert_no_pop0_except_roots, as_bool);
                 } else {
                     eprintln!("[Trie3 Opt] WARNING: AICI_TRIE3_CONFIG is not a JSON object. Using default config.");
                 }
@@ -153,6 +156,7 @@ impl CoordinatorConfig {
             merge_equivalent_llm_tokens: false,
             reorder_llm_tokens: false,
             generalize_sids: false,
+            assert_no_pop0_except_roots: false,
         }
     }
 }
@@ -422,6 +426,7 @@ pub fn run_pipeline_on_precompute3<'a>(
         ctx.parser = Some(Rc::new(RefCell::new(p)));
     }
     ctx.debug_level = 1;
+    ctx.assert_no_pop0_except_roots = config.assert_no_pop0_except_roots;
 
     // Run initial metrics
     ctx.metrics_before = run_all_metrics(&mini);

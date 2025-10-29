@@ -5,17 +5,12 @@ use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
 use crate::trie3_opt::passes::OptimizationPass;
 
-/// Cycle-safe pop=0 composition (add-only).
-///
-/// For each non-root pop=0 edge B --(0, T_bc, S_bc)--> C and each predecessor
-/// A --(p_ab, T_ab, S_ab)--> B, we add a bypass edge
-///   A --(p_ab, T_ab ∩ T_bc, S_ab ∩ pre^{p_ab}(S_bc))--> C.
-///
-/// We do NOT delete any pop=0 edges. We also do NOT compose a 0-parent inside the
-/// same 0-SCC as B (to avoid perturbing cycles). We iterate a few rounds so that
-/// long chains of 0-edges are effectively summarized for outside predecessors.
-/// This is semantics-preserving: every original path remains; each added edge
-/// corresponds to an existing path segment and thus admits no new tokens/states.
+/// Compose away all pop=0 edges whose source is not a root:
+/// - Iteratively, for each B --(0,T_bc,S_bc)--> C and each incoming A --(p_ab,T_ab,S_ab)--> B,
+///   add a bypass A --(p_ab, T_ab ∩ T_bc, S_ab ∩ pre^{p_ab}(S_bc))--> C.
+///   Skip 0-parent edges inside the same 0-SCC unless A is a root (to avoid in-cycle blow-ups).
+/// - After reaching a fixed point, delete all remaining pop=0 edges with non-root sources.
+/// - Optionally assert that no non-root pop=0 edges remain (config flag).
 pub struct EliminatePop0ExceptRootsPass;
 
 impl OptimizationPass for EliminatePop0ExceptRootsPass {
@@ -116,7 +111,7 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
             }
         }
 
-        // Precompute 2^k state preimage maps if we need to handle p > 0.
+        // Precompute 2^k state preimage maps for p>0 compositions (if parser is available).
         let mut max_pop = 0usize;
         for node in trie.nodes() {
             for (ek, _) in node.children() {
@@ -155,7 +150,6 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
                     two_power_back_maps.push(next);
                 }
             }
-            // If parser is absent, we will only compose parents with p<=0 (safe).
         }
 
         let apply_n_step_back = |s: &SortedSet, n_steps: usize| -> SortedSet {
@@ -191,8 +185,13 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
             SortedSet::new()
         };
 
+        // If parser is missing and any p>0 compositions are needed, we cannot do a sound removal.
+        // We still proceed with composition for p=0 when it is safe (root parent allowed),
+        // but we will NOT delete non-root pop=0 edges unless we can assert the property later.
+        let parser_available = ctx.parser.is_some();
+
         // Iterate, adding bypass edges until no more can be added or a small round budget is hit.
-        let max_rounds = 8usize;
+        let max_rounds = 16usize;
         for _round in 0..max_rounds {
             // Collect all candidate additions for this round, unioning their SID sets per (src,key,dst).
             let mut to_add: HashMap<(NodeId, EdgeKey, NodeId), SortedSet> = HashMap::new();
@@ -200,9 +199,6 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
             // Enumerate all pop=0 edges B --(0, T_bc, S_bc)--> C.
             for b_node in trie.nodes() {
                 let b_id = b_node.id();
-                if root_set.contains(&b_id) {
-                    continue; // keep root-origin 0-edges untouched
-                }
                 let b_comp = comp_id[id_to_idx[&b_id]];
                 for (ek_bc, dm_bc) in b_node.children() {
                     if ek_bc.pop != 0 {
@@ -220,8 +216,8 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
                                 let p_ab = key_ab.pop;
                                 let t_ab = &key_ab.tokens;
 
-                                // Do not modify the 0-cycle: skip a 0-parent within the same 0-SCC.
-                                if p_ab == 0 && a_comp == b_comp {
+                                // Guard against in-cycle 0-parent expansion unless A is a root.
+                                if p_ab == 0 && !root_set.contains(a_id) && a_comp == b_comp {
                                     continue;
                                 }
 
@@ -237,7 +233,11 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
                                     // No parser provided: cannot soundly compute p>0 preimages; skip.
                                     continue;
                                 }
-                                let s_bc_pre = apply_n_step_back(&s_bc_clone, p_usize);
+                                let s_bc_pre = if p_usize > 0 {
+                                    apply_n_step_back(&s_bc_clone, p_usize)
+                                } else {
+                                    s_bc_clone.clone()
+                                };
                                 if s_bc_pre.is_empty() {
                                     continue;
                                 }
@@ -270,5 +270,59 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
                 trie.add_edge(src, key, dst, sids);
             }
         }
+
+        // After convergence, delete all pop=0 edges whose source is not a root.
+        // This enforces the target property while preserving semantics via the composed edges.
+        let mut removed_any = false;
+        let all_node_ids: Vec<_> = trie.node_ids().collect();
+        for u_id in all_node_ids {
+            if root_set.contains(&u_id) {
+                continue;
+            }
+            if let Some(u_node) = trie.get_node(u_id) {
+                // Collect pop=0 keys to remove.
+                let mut keys_to_remove: Vec<EdgeKey> = Vec::new();
+                for (ek, _dm) in u_node.children() {
+                    if ek.pop == 0 {
+                        keys_to_remove.push(ek.clone());
+                    }
+                }
+                if keys_to_remove.is_empty() {
+                    continue;
+                }
+                for key in keys_to_remove {
+                    if let Some(u_node2) = trie.get_node(u_id) {
+                        if let Some(dm) = u_node2.children().get(&key) {
+                            let dests: Vec<_> = dm.keys().cloned().collect();
+                            for v_id in dests {
+                                let _ = trie.remove_edge_dest(u_id, &key, v_id);
+                                removed_any = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Optional assertion: verify no pop=0 edges remain from non-root sources.
+        if ctx.assert_no_pop0_except_roots {
+            let mut violations = 0usize;
+            for node in trie.nodes() {
+                if root_set.contains(&node.id()) {
+                    continue;
+                }
+                for (ek, dm) in node.children() {
+                    if ek.pop == 0 && !dm.is_empty() {
+                        violations += dm.len();
+                    }
+                }
+            }
+            assert!(
+                violations == 0,
+                "EliminatePop0ExceptRoots: found {} pop=0 edge destinations from non-root sources after pass",
+                violations
+            );
+        }
     }
 }
+

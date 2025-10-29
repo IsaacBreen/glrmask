@@ -42,6 +42,7 @@ pub fn optimize_trie3_size(
         merge_equivalent_llm_tokens: config.merge_equivalent_llm_tokens,
         reorder_llm_tokens: config.reorder_llm_tokens,
         generalize_sids: config.generalize_sids,
+        assert_no_pop0_except_roots: true,
     };
 
     run_pipeline_on_precompute3(
@@ -56,3 +57,4 @@ pub fn optimize_trie3_size(
 
     crate::debug!(2, "Finished optimizing Trie 3 size in {:?}", start.elapsed());
 }
+

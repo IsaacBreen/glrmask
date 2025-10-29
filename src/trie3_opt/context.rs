@@ -14,6 +14,7 @@ pub struct OptimizationContext<'a> {
     pub max_state_id: usize,
     pub iteration_budget: usize,
     pub debug_level: u8,
+    pub assert_no_pop0_except_roots: bool,
     pub metrics_before: BTreeMap<String, String>,
     pub metrics_after: BTreeMap<String, String>,
     // New fields for advanced passes
@@ -28,6 +29,7 @@ impl<'a> OptimizationContext<'a> {
             max_state_id,
             iteration_budget: 1_000_000,
             debug_level: 1,
+            assert_no_pop0_except_roots: true,
             metrics_before: BTreeMap::new(),
             metrics_after: BTreeMap::new(),
             stage_vocab: None,
@@ -43,6 +45,7 @@ impl<'a> fmt::Debug for OptimizationContext<'a> {
             .field("max_state_id", &self.max_state_id)
             .field("iteration_budget", &self.iteration_budget)
             .field("debug_level", &self.debug_level)
+            .field("assert_no_pop0_except_roots", &self.assert_no_pop0_except_roots)
             .field("metrics_before", &self.metrics_before)
             .field("metrics_after", &self.metrics_after)
             .field("stage_vocab_present", &self.stage_vocab.is_some())
@@ -50,3 +53,4 @@ impl<'a> fmt::Debug for OptimizationContext<'a> {
             .finish()
     }
 }
+
