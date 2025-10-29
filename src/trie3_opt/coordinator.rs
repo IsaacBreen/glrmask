@@ -34,7 +34,9 @@ pub struct CoordinatorConfig {
     pub factor_state_fanout: bool,
     pub factor_common_destinations: bool,
     pub factor_common_destinations_min_incoming: usize,
+    pub merge_structural: bool,
     pub merge_structural_max_iters: usize,
+    pub merge_bisimulation: bool,
     pub merge_bisimulation_max_iters: usize,
     pub merge_global_atoms: bool,
     pub merge_global_atoms_max_iters: usize,
@@ -57,7 +59,9 @@ impl Default for CoordinatorConfig {
             factor_state_fanout: true,
             factor_common_destinations: true,
             factor_common_destinations_min_incoming: 12,
+            merge_structural: true,
             merge_structural_max_iters: 4,
+            merge_bisimulation: true,
             merge_bisimulation_max_iters: 1000,
             merge_global_atoms: false,
             merge_global_atoms_max_iters: 2,
@@ -82,7 +86,9 @@ impl CoordinatorConfig {
             factor_state_fanout: false,
             factor_common_destinations: false,
             factor_common_destinations_min_incoming: 0,
+            merge_structural: false,
             merge_structural_max_iters: 0,
+            merge_bisimulation: false,
             merge_bisimulation_max_iters: 0,
             merge_global_atoms: false,
             merge_global_atoms_max_iters: 0,
@@ -146,10 +152,10 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
                 config.merge_global_atoms_max_atoms_per_pop,
             )));
         }
-        if config.merge_structural_max_iters > 0 {
+        if config.merge_structural && config.merge_structural_max_iters > 0 {
             pipeline.push(Box::new(MergeStructuralPass::new(config.merge_structural_max_iters)));
         }
-        if pass_num == config.num_passes - 1 && config.merge_bisimulation_max_iters > 0 {
+        if pass_num == config.num_passes - 1 && config.merge_bisimulation && config.merge_bisimulation_max_iters > 0 {
              pipeline.push(Box::new(MergeBisimulationPass::new(config.merge_bisimulation_max_iters)));
         }
 
