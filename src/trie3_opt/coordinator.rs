@@ -88,7 +88,7 @@ impl Default for CoordinatorConfig {
             merge_state_agnostic: false,
             merge_state_agnostic_max_iters: 8,
             eliminate_pop0_except_roots: false,
-            merge_equivalent_llm_tokens: false,
+            merge_equivalent_llm_tokens: true,
             reorder_llm_tokens: false,
             generalize_sids: true,
         }
