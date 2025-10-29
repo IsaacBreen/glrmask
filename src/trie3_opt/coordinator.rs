@@ -61,7 +61,7 @@ impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
             num_passes: 3,
-            prune_dead_paths: true,
+            prune_dead_paths: false,
             prune_unproductive_paths: false,
             canonicalize_end_nodes: false,
             compress_edges: false,
