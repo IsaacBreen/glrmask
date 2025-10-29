@@ -76,10 +76,14 @@ run_test() {
         return
     fi
 
-    # Parse the log file to find the mismatch count for the rust_model
-    # This grep is now more specific to avoid matching 'bruteforce_rust_model'
+    # --- MODIFIED SECTION ---
+    # This is the robust parsing logic.
+    # 1. Find the "get_mask() Timings" block.
+    # 2. From that block, find the "rust_model" line.
+    # 3. Extract the 3rd column (the mismatch count).
     local mismatch_count
-    mismatch_count=$(grep '^[[:space:]]*rust_model' "$log_file" | awk '{print $3}')
+    mismatch_count=$(grep -A 5 '--- get_mask() Timings ---' "$log_file" | grep '^[[:space:]]*rust_model' | awk '{print $3}')
+    # --- END MODIFIED SECTION ---
 
     # Robustly check the result
     if ! [[ "$mismatch_count" =~ ^[0-9]+$ ]]; then
