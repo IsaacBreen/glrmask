@@ -1271,7 +1271,7 @@ where
             return "[Arena is empty]\n".to_string();
         }
 
-        let mut in_degrees: std::collections::HashMap<Trie2Index, usize> =
+        let mut in_degrees: OrderedHashMap<Trie2Index, usize> =
             all_node_indices.iter().map(|&idx| (idx, 0)).collect();
 
         for &node_idx in &all_node_indices {
