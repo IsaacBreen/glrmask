@@ -51,6 +51,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             for m in masks {
                 for t in m.iter() {
                     acc.insert(t);
+                }
             }
         }
 
