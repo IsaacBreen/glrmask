@@ -5,7 +5,6 @@ use std::rc::Rc;
 
 use crate::constraint::StageVocab;
 use crate::glr::parser::GLRParser;
-use crate::trie3_opt::core::NodeId;
 
 /// Shared, immutable and mutable context passed to every optimization pass.
 /// Keeps global bounds and simple telemetry.
@@ -20,8 +19,6 @@ pub struct OptimizationContext<'a> {
     // New fields for advanced passes
     pub stage_vocab: Option<Rc<RefCell<&'a mut StageVocab>>>,
     pub parser: Option<Rc<RefCell<&'a GLRParser>>>,
-    /// Optional per-pass node-to-representative mapping for root remapping.
-    pub root_remap: BTreeMap<NodeId, NodeId>,
 }
 
 impl<'a> OptimizationContext<'a> {
@@ -35,7 +32,6 @@ impl<'a> OptimizationContext<'a> {
             metrics_after: BTreeMap::new(),
             stage_vocab: None,
             parser: None,
-            root_remap: BTreeMap::new(),
         }
     }
 }
@@ -51,7 +47,6 @@ impl<'a> fmt::Debug for OptimizationContext<'a> {
             .field("metrics_after", &self.metrics_after)
             .field("stage_vocab_present", &self.stage_vocab.is_some())
             .field("parser_present", &self.parser.is_some())
-            .field("root_remap_size", &self.root_remap.len())
             .finish()
     }
 }
