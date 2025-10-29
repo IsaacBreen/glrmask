@@ -125,31 +125,26 @@ impl OptimizationPass for MergeStructuralPass {
             rep_of_node.insert(*node_id, rep_of_class[cid].unwrap());
         }
 
-        for (cid, rep_id_opt) in rep_of_class.iter().enumerate() {
-            if let Some(rep_id) = rep_id_opt {
-                let exemplar_idx = prev_class.iter().position(|&c| c == cid).unwrap();
-                let exemplar_node = trie.get_node(node_ids[exemplar_idx]).unwrap().clone();
-
-                let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> =
-                    BTreeMap::new();
-                for (ek, dm) in exemplar_node.children() {
-                    let mut new_dm: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
-                    for (dst, sids) in dm {
-                        let rep = *rep_of_node.get(dst).unwrap();
-                        new_dm.entry(rep).or_default().union_inplace(sids);
-                    }
-                    if !new_dm.is_empty() {
-                        new_children.insert(ek.clone(), new_dm);
-                    }
+        // Rewire every node's outgoing edges to point to representative destinations.
+        // This ensures no incoming edges remain to non-representatives, preserving semantics.
+        let all_node_ids: Vec<_> = trie.node_ids().collect();
+        for u_id in all_node_ids.clone() {
+            let u_node = trie.get_node(u_id).unwrap().clone();
+            let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+            for (ek, dm) in u_node.children() {
+                let entry = new_children.entry(ek.clone()).or_default();
+                for (dst, sids) in dm {
+                    let rep = *rep_of_node.get(dst).unwrap();
+                    entry.entry(rep).or_default().union_inplace(sids);
                 }
-                trie.set_children(*rep_id, new_children);
             }
+            trie.set_children(u_id, new_children);
         }
 
         let rep_set: std::collections::HashSet<NodeId> =
             rep_of_class.iter().filter_map(|&x| x).collect();
-        let all_node_ids: Vec<_> = trie.node_ids().collect();
-        for node_id in all_node_ids {
+        let all_node_ids2: Vec<_> = trie.node_ids().collect();
+        for node_id in all_node_ids2 {
             if !rep_set.contains(&node_id) {
                 trie.clear_children(node_id);
                 trie.set_end(node_id, false);
