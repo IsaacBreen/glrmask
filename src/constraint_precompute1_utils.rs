@@ -456,7 +456,6 @@ fn minimize_dummy_penalty_trie1(
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     if all_nodes.is_empty() { return; }
-    let initial_node_count = all_nodes.len();
 
     // 1. Build predecessor map
     let mut preds: HashMap<PrecomputeNode1Index, Vec<PrecomputeNode1Index>> = HashMap::new();
@@ -483,20 +482,24 @@ fn minimize_dummy_penalty_trie1(
                         // Check if i_node is an intermediate node with a single predecessor (u)
                         if !i_is_end && preds.get(&i_node).map_or(false, |p| p.len() == 1 && p[0] == *u) {
                             // This is a candidate for unrolling.
+                            // It's only safe to unroll if the intermediate node only has None edges,
+                            // otherwise we would be incorrectly changing the grammar symbol on the path.
                             let i_children = i_node.read(trie1_god).unwrap().children().clone();
-                            
-                            edges_to_remove.entry(*u).or_default().push((ek, i_node));
+                            let can_unroll = i_children.keys().all(|k| k.is_none());
+
+                            if can_unroll {
+                                edges_to_remove.entry(*u).or_default().push((ek, i_node));
                                 
-                            for (orig_ek, orig_dm) in i_children {
+                                for (_orig_ek, orig_dm) in i_children { // _orig_ek is always None here
                                     for (v_node, bv_iv) in orig_dm {
                                         let new_bv = bv_ui.clone() & &bv_iv;
                                         if !new_bv.is_empty() {
-                                            // If the original edge from the intermediate node was a None edge,
-                                            // the new edge from the parent should be keyed by the dummy terminal.
-                                            let final_ek = orig_ek.or(Some(tid));
-                                            modifications.entry(*u).or_default().push((final_ek, v_node, new_bv));
+                                            // The new edge from the parent should be keyed by the dummy terminal,
+                                            // as we are absorbing a None edge.
+                                            modifications.entry(*u).or_default().push((Some(tid), v_node, new_bv));
                                         }
                                     }
+                                }
                             }
                         }
                     }
@@ -509,12 +512,7 @@ fn minimize_dummy_penalty_trie1(
         crate::debug!(3, "Trie1: no dummy terminals to unroll.");
         return;
     }
-
-    let unrollable_nodes_count = edges_to_remove
-        .values()
-        .flat_map(|edges| edges.iter().map(|(_, i_node)| *i_node))
-        .collect::<HashSet<_>>()
-        .len();
+    crate::debug!(3, "Trie1: unrolling {} dummy terminal edges.", edges_to_remove.values().map(|v| v.len()).sum::<usize>());
 
     // 3. Apply modifications
     for (u, edges) in edges_to_remove {
@@ -538,19 +536,6 @@ fn minimize_dummy_penalty_trie1(
                 .or_insert(bv);
         }
     }
-
-    // GC to remove orphaned nodes
-    Trie::gc(trie1_god, &roots_vec);
-
-    let final_node_count = Trie::all_nodes(trie1_god, &roots_vec).len();
-
-    crate::debug!(
-        2,
-        "Trie1: minimized dummy terminal penalty. Initial structural penalty (unrollable nodes): {}, final: 0. Total nodes reduced from {} to {}.",
-        unrollable_nodes_count,
-        initial_node_count,
-        final_node_count
-    );
 }
 
 // Exact signature-based DAG minimization for Trie1:
