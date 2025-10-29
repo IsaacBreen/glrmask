@@ -482,17 +482,22 @@ fn minimize_dummy_penalty_trie1(
                         // Check if i_node is an intermediate node with a single predecessor (u)
                         if !i_is_end && preds.get(&i_node).map_or(false, |p| p.len() == 1 && p[0] == *u) {
                             // This is a candidate for unrolling.
-                            edges_to_remove.entry(*u).or_default().push((ek, i_node));
-                            
+                            // It's only safe to unroll if the intermediate node only has None edges,
+                            // otherwise we would be incorrectly changing the grammar symbol on the path.
                             let i_children = i_node.read(trie1_god).unwrap().children().clone();
-                            for (orig_ek, orig_dm) in i_children {
-                                for (v_node, bv_iv) in orig_dm {
-                                    let new_bv = bv_ui.clone() & &bv_iv;
-                                    if !new_bv.is_empty() {
-                                        // If the original edge from the intermediate node was a None edge,
-                                        // the new edge from the parent should be keyed by the dummy terminal.
-                                        let final_ek = orig_ek.or(Some(tid));
-                                        modifications.entry(*u).or_default().push((final_ek, v_node, new_bv));
+                            let can_unroll = i_children.keys().all(|k| k.is_none());
+
+                            if can_unroll {
+                                edges_to_remove.entry(*u).or_default().push((ek, i_node));
+                                
+                                for (_orig_ek, orig_dm) in i_children { // _orig_ek is always None here
+                                    for (v_node, bv_iv) in orig_dm {
+                                        let new_bv = bv_ui.clone() & &bv_iv;
+                                        if !new_bv.is_empty() {
+                                            // The new edge from the parent should be keyed by the dummy terminal,
+                                            // as we are absorbing a None edge.
+                                            modifications.entry(*u).or_default().push((Some(tid), v_node, new_bv));
+                                        }
                                     }
                                 }
                             }
