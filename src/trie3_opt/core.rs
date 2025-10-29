@@ -413,31 +413,34 @@ impl MiniTrie {
     /// This is a backward reachability analysis of tokens.
     pub fn productive_tokens_at_nodes(
         &self,
-        _universe: &SortedSet,
+        universe: &SortedSet,
     ) -> HashMap<NodeId, SortedSet> {
+        let mut worklist = VecDeque::new();
         let mut productive_tokens: HashMap<NodeId, SortedSet> = self
             .node_ids()
             .map(|id| (id, SortedSet::new()))
             .collect();
 
-        let mut worklist: VecDeque<NodeId> = self.nodes().filter(|n| n.is_end()).map(|n| n.id()).collect();
-        let mut in_worklist: BTreeSet<NodeId> = worklist.iter().cloned().collect();
+        for node in self.nodes() {
+            if node.is_end() {
+                productive_tokens.insert(node.id(), universe.clone());
+                worklist.push_back(node.id());
+            }
+        }
 
-        while let Some(v_id) = worklist.pop_front() {
-            in_worklist.remove(&v_id);
-            let pt_v = productive_tokens.get(&v_id).unwrap().clone();
-            if let Some(v_node) = self.get_node(v_id) {
-                for (pred_id, edges) in v_node.parents() {
+        while let Some(node_id) = worklist.pop_front() {
+            let live_at_node = productive_tokens.get(&node_id).unwrap().clone();
+            if let Some(node) = self.get_node(node_id) {
+                for (pred_id, edges) in node.parents() {
                     for edge_key in edges.keys() {
+                        let live_from_edge = live_at_node.intersect(&edge_key.tokens);
+                        if live_from_edge.is_empty() {
+                            continue;
+                        }
                         let pred_live = productive_tokens.get_mut(pred_id).unwrap();
                         let old_len = pred_live.len();
-                        // A productive path from pred_id can be formed by taking the edge
-                        // to v_id, and then following a productive path from v_id.
-                        // The tokens on such paths are the tokens on the edge, plus the
-                        // tokens on productive paths from v_id.
-                        pred_live.union_inplace(&edge_key.tokens);
-                        pred_live.union_inplace(&pt_v);
-                        if pred_live.len() > old_len && in_worklist.insert(*pred_id) {
+                        pred_live.union_inplace(&live_from_edge);
+                        if pred_live.len() > old_len {
                             worklist.push_back(*pred_id);
                         }
                     }
