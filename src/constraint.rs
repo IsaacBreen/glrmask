@@ -1318,9 +1318,9 @@ impl GrammarConstraint {
 
         // Build precomputed per-token (internal) maps.
         crate::debug!(2, "Building state_map_by_llm and terminal_map_by_llm");
-        let state_map_by_llm = Self::build_state_map_by_llm(&tokenizer, &vocab_for_possible_matches.root); // slow
+        let mut state_map_by_llm = Self::build_state_map_by_llm(&tokenizer, &vocab_for_possible_matches.root); // slow
         crate::debug!(2, "Built state_map_by_llm with {} entries", state_map_by_llm.len());
-        let terminal_map_by_llm = Self::rearrange_possible_matches(&computed_possible_matches);
+        let mut terminal_map_by_llm = Self::rearrange_possible_matches(&computed_possible_matches);
 
         let grammar_productions = &parser.productions; // Assuming parser is the GLRParser instance
         let grammar_term_map = &parser.terminal_map;
@@ -1647,9 +1647,9 @@ impl GrammarConstraint {
 
         // Build precomputed per-token (internal) maps.
         crate::debug!(2, "Building state_map_by_llm and terminal_map_by_llm");
-        let state_map_by_llm = Self::build_state_map_by_llm(&tokenizer, &vocab_for_possible_matches.root);
+        let mut state_map_by_llm = Self::build_state_map_by_llm(&tokenizer, &vocab_for_possible_matches.root);
         crate::debug!(2, "Built state_map_by_llm with {} entries", state_map_by_llm.len());
-        let terminal_map_by_llm = Self::rearrange_possible_matches(&computed_possible_matches);
+        let mut terminal_map_by_llm = Self::rearrange_possible_matches(&computed_possible_matches);
 
         let grammar_productions = &parser.productions;
         let grammar_term_map = &parser.terminal_map;
