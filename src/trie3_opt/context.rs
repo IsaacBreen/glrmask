@@ -19,6 +19,7 @@ pub struct OptimizationContext<'a> {
     // New fields for advanced passes
     pub stage_vocab: Option<Rc<RefCell<&'a mut StageVocab>>>,
     pub parser: Option<Rc<RefCell<&'a GLRParser>>>,
+    pub llm_token_remapping: Rc<RefCell<BTreeMap<usize, usize>>>,
 }
 
 impl<'a> OptimizationContext<'a> {
@@ -32,6 +33,7 @@ impl<'a> OptimizationContext<'a> {
             metrics_after: BTreeMap::new(),
             stage_vocab: None,
             parser: None,
+            llm_token_remapping: Rc::new(RefCell::new(BTreeMap::new())),
         }
     }
 }
@@ -47,6 +49,7 @@ impl<'a> fmt::Debug for OptimizationContext<'a> {
             .field("metrics_after", &self.metrics_after)
             .field("stage_vocab_present", &self.stage_vocab.is_some())
             .field("parser_present", &self.parser.is_some())
+            .field("llm_token_remapping_len", &self.llm_token_remapping.borrow().len())
             .finish()
     }
 }
