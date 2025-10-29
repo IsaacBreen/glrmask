@@ -60,9 +60,12 @@ impl OptimizationPass for CompressUnaryChainsPass {
                 if let (Some((out_key, v_id, s_uv)), Some((p_id, in_key))) =
                     (out_info.get(&u_id), unique_parent.get(&u_id))
                 {
-                    if p_id != &u_id && in_key.pop == out_key.pop && in_key.tokens == out_key.tokens
+                    // State set intersection is only valid if pop <= 0.
+                    // Pop must be accumulated.
+                    if p_id != &u_id && in_key.pop <= 0 && in_key.pop == out_key.pop && in_key.tokens == out_key.tokens
                     {
-                        rewrites.push((*p_id, u_id, *v_id, in_key.clone(), s_uv.clone()));
+                        let new_key = EdgeKey::new(in_key.pop * 2, in_key.tokens.clone());
+                        rewrites.push((*p_id, u_id, *v_id, new_key, s_uv.clone(), in_key.clone()));
                     }
                 }
             }
@@ -71,11 +74,11 @@ impl OptimizationPass for CompressUnaryChainsPass {
                 break;
             }
 
-            for (p_id, u_id, v_id, key, s_uv) in rewrites {
-                if let Some(s_pu) = trie.remove_edge_dest(p_id, &key, u_id) {
+            for (p_id, u_id, v_id, new_key, s_uv, old_key) in rewrites {
+                if let Some(s_pu) = trie.remove_edge_dest(p_id, &old_key, u_id) {
                     let s_comp = s_pu.intersect(&s_uv);
                     if !s_comp.is_empty() {
-                        trie.add_edge(p_id, key, v_id, s_comp);
+                        trie.add_edge(p_id, new_key, v_id, s_comp);
                     }
                 }
             }

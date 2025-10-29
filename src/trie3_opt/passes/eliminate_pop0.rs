@@ -48,6 +48,11 @@ impl OptimizationPass for EliminatePop0ExceptRootsPass {
                     for (a, edges_from_a) in &preds {
                         for (key_ab, s_ab) in edges_from_a {
                             let p_ab = key_ab.pop;
+                            // State set intersection is only valid if the state doesn't change,
+                            // which requires pop <= 0. For pop > 0, we would need to map
+                            // s_bc back to the state space at node A, which requires parser access.
+                            if p_ab > 0 { continue; }
+
                             let llm_ab = &key_ab.tokens;
                             let new_tokens = llm_ab.intersect(&llm_bc);
                             if new_tokens.is_empty() { continue; }
