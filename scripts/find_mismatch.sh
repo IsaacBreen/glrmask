@@ -102,13 +102,13 @@ export BASE_JSON_CONFIG LOG_DIR CACHE_DIR GREEN RED YELLOW NC
 
 # Use a simple background job management loop
 for opt in "${OPTS[@]}"; do
+    # Wait until there is a free spot in the job pool
+    while (( $(jobs -p | wc -l) >= MAX_JOBS )); do
+        sleep 1
+    done
+
     # Run the test function in the background
     run_test "$opt" &
-
-    # If we've hit the job limit, wait for any one job to finish
-    if (( $(jobs -p | wc -l) >= MAX_JOBS )); then
-        wait -n
-    fi
 done
 
 # Wait for all remaining background jobs to complete
