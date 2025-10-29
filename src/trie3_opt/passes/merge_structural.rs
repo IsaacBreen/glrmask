@@ -47,7 +47,11 @@ impl OptimizationPass for MergeStructuralPass {
             prev_class[i] = cid;
         }
 
-        for _ in 0..self.max_iters.max(1) {
+        // Refine until convergence. If a max_iters budget is provided and we do not
+        // converge within that budget, abort without changing the trie to preserve semantics.
+        let mut iter_count = 0usize;
+        loop {
+            // Build signature per node
             // Build signature per node
             #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
             struct EdgeSig {
@@ -57,7 +61,6 @@ impl OptimizationPass for MergeStructuralPass {
             }
             type NodeSig = (bool, Vec<EdgeSig>);
 
-            let mut sig_to_id: HashMap<NodeSig, usize> = HashMap::new();
             let mut new_class: Vec<usize> = vec![0; n];
             let mut next = 0usize;
             let mut changes = 0usize;
@@ -65,6 +68,8 @@ impl OptimizationPass for MergeStructuralPass {
             for (i, node_id) in node_ids.iter().enumerate() {
                 let node = trie.get_node(*node_id).unwrap();
                 // Aggregate by (pop, tokens) -> dest_class -> union of states
+                let mut sig_to_id: HashMap<NodeSig, usize> = HashMap::new();
+
                 let mut per_key: BTreeMap<(isize, SortedSet), BTreeMap<usize, SortedSet>> = BTreeMap::new();
                 for (ek, dm) in node.children() {
                     let inner = per_key.entry((ek.pop, ek.tokens.clone())).or_default();
@@ -105,9 +110,18 @@ impl OptimizationPass for MergeStructuralPass {
                     changes += 1;
                 }
             }
-            prev_class = new_class;
+            // If no change, we've reached a fixed point and can proceed to merge.
             if changes == 0 {
+                prev_class = new_class;
                 break;
+            }
+            prev_class = new_class;
+
+            iter_count += 1;
+            if self.max_iters > 0 && iter_count >= self.max_iters {
+                // Did not converge within the configured budget; to preserve semantics,
+                // abort this pass without modifying the trie.
+                return;
             }
         }
 

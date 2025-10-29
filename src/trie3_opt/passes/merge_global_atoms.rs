@@ -57,6 +57,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
         }
 
         let mut atoms_by_pop: BTreeMap<isize, Vec<SortedSet>> = BTreeMap::new();
+        let mut aborted_any_pop = false;
         for (pop, masks) in &by_pop_masks {
             let universe = union_by_pop.get(pop).cloned().unwrap_or_else(SortedSet::new);
             let mut blocks = if universe.is_empty() { Vec::new() } else { vec![universe.clone()] };
@@ -97,6 +98,7 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                 }
                 if self.max_atoms_per_pop > 0 && next_blocks.len() > self.max_atoms_per_pop {
                     aborted = true;
+                    aborted_any_pop = true;
                     break;
                 }
                 if !any_split {
@@ -107,12 +109,20 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             }
             atoms_by_pop.insert(
                 *pop,
-                if aborted {
-                    if universe.is_empty() { vec![] } else { vec![universe.clone()] }
-                } else {
-                    blocks
-                },
+                if aborted { 
+                    // We do NOT fall back to a coarse "universe" atom because that is unsound.
+                    // We record the abort and return early below (no changes).
+                    blocks 
+                } else { 
+                    blocks 
+                }
             );
+        }
+
+        // If atom construction was aborted for any pop, we cannot safely proceed without
+        // risking unsound merges. Abort the pass with no changes.
+        if aborted_any_pop {
+            return;
         }
 
         // Create dense IDs for all unique token sets for faster lookups.
@@ -219,7 +229,10 @@ impl OptimizationPass for MergeGlobalAtomsPass {
             prev_class[i] = class_id;
         }
 
-        for iter_num in 0..self.max_iters {
+        // Refine until convergence. If max_iters > 0 and we do not converge within
+        // the budget, abort to preserve semantics.
+        let mut iter_num = 0usize;
+        loop {
             type InternedEdgeSig = Vec<(usize, usize)>; // (dest_class, sset_id)
             type InternedNodeSig = (bool, Vec<((isize, usize), InternedEdgeSig)>); // (is_end, [((pop, atom_idx), edge_sig)])
 
@@ -276,7 +289,15 @@ impl OptimizationPass for MergeGlobalAtomsPass {
                 if new_class[u_idx] != prev_class[u_idx] { changes += 1; }
             }
             prev_class = new_class;
-            if changes == 0 { break; }
+            if changes == 0 { 
+                break; 
+            }
+
+            iter_num += 1;
+            if self.max_iters > 0 && iter_num >= self.max_iters {
+                // Not converged within budget: abort without changing the trie.
+                return;
+            }
         }
 
         // Rewire and rebuild.
