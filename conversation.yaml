@@ -5366,39 +5366,39 @@ local_system:
 
           /// Compute for each node, the set of LLM tokens that can appear on a path from it to an END node.
           /// This is a backward reachability analysis of tokens.
-          pub fn productive_tokens_at_nodes(&self) -> HashMap<NodeId, SortedSet> {
+          pub fn productive_tokens_at_nodes(
+              &self,
+              universe: &SortedSet,
+          ) -> HashMap<NodeId, SortedSet> {
+              let mut worklist = VecDeque::new();
               let mut productive_tokens: HashMap<NodeId, SortedSet> = self
                   .node_ids()
                   .map(|id| (id, SortedSet::new()))
                   .collect();
 
-              let can_reach_end_set = self.can_reach_end();
+              for node in self.nodes() {
+                  if node.is_end() {
+                      productive_tokens.insert(node.id(), universe.clone());
+                      worklist.push_back(node.id());
+                  }
+              }
 
-              let mut changed = true;
-              while changed {
-                  changed = false;
-                  // Iterate over all nodes. Reverse order can speed up convergence but is not required.
-                  for u_id in self.node_ids() {
-                      let u_node = self.get_node(u_id).unwrap();
-                      let mut new_productive = SortedSet::new();
-
-                      for (ek, dm) in u_node.children() {
-                          for v_id in dm.keys() {
-                              // If child can reach end, its edge tokens and its own productive tokens
-                              // contribute to the parent's productive tokens.
-                              if can_reach_end_set.contains(v_id) {
-                                  new_productive.union_inplace(&ek.tokens);
-                                  if let Some(productive_v) = productive_tokens.get(v_id) {
-                                      new_productive.union_inplace(productive_v);
-                                  }
+              while let Some(node_id) = worklist.pop_front() {
+                  let live_at_node = productive_tokens.get(&node_id).unwrap().clone();
+                  if let Some(node) = self.get_node(node_id) {
+                      for (pred_id, edges) in node.parents() {
+                          for edge_key in edges.keys() {
+                              let live_from_edge = live_at_node.intersect(&edge_key.tokens);
+                              if live_from_edge.is_empty() {
+                                  continue;
+                              }
+                              let pred_live = productive_tokens.get_mut(pred_id).unwrap();
+                              let old_len = pred_live.len();
+                              pred_live.union_inplace(&live_from_edge);
+                              if pred_live.len() > old_len {
+                                  worklist.push_back(*pred_id);
                               }
                           }
-                      }
-
-                      let current_productive = productive_tokens.get_mut(&u_id).unwrap();
-                      if new_productive.elems != current_productive.elems {
-                          *current_productive = new_productive;
-                          changed = true;
                       }
                   }
               }
@@ -8494,27 +8494,26 @@ local_system:
               "PruneDeadPaths"
           }
 
-          fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-              let productive_tokens = trie.productive_tokens_at_nodes();
+          fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+              // Identify nodes that can reach an END node.
+              let productive_nodes = trie.can_reach_end();
 
               let node_ids: Vec<_> = trie.node_ids().collect();
               for node_id in node_ids {
                   let node = trie.get_node(node_id).unwrap();
                   let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
                   for (ek, dm) in node.children() {
+                      // Keep the original edge key; only filter out dead destinations.
+                      let mut dm2: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
                       for (dst, sids) in dm {
-                          let productive_from_child = productive_tokens.get(dst).unwrap();
-                          let productive_on_edge = ek.tokens.intersect(productive_from_child);
-
-                          if !productive_on_edge.is_empty() {
-                              let new_ek = EdgeKey::new(ek.pop, productive_on_edge);
-                              new_children
-                                  .entry(new_ek)
+                          if productive_nodes.contains(dst) {
+                              dm2.entry(*dst)
                                   .or_default()
-                                  .entry(*dst)
-                                  .and_modify(|e: &mut SortedSet| e.union_inplace(sids))
-                                  .or_insert(sids.clone());
+                                  .union_inplace(sids);
                           }
+                      }
+                      if !dm2.is_empty() {
+                          new_children.insert(ek.clone(), dm2);
                       }
                   }
                   trie.set_children(node_id, new_children);
@@ -8653,7 +8652,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -13140,179 +13139,115 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. It appears there's a subtle but critical bug in the dataflow analysis for identifying productive tokens, which causes `prune_dead_paths` to behave incorrectly. This incorrect pruning then leads to failures when combined with other passes like `reorder_llm_tokens` and `compress_edges`.
+      Here’s what’s going wrong and how to fix it.
 
-      The core issue is in the `productive_tokens_at_nodes` function in `src/trie3_opt/core.rs`. Its implementation does not correctly compute the set of tokens that can appear on a path to an end node. The base case for the analysis (initializing end nodes with a "universe" of all tokens) and the propagation logic (using set intersection instead of union) are flawed.
+      Root cause analysis and proof
+      - The failing combination involves prune_dead_paths, compress_edges, and reorder_llm_tokens. Only when prune_dead_paths is active do the tests fail; disabling it (or either of the others) makes the issue disappear. That strongly suggests prune_dead_paths is doing an invalid transformation that’s later amplified but not caused by the other passes.
+      - In the current prune_dead_paths implementation, each edge (u --(pop, tokens)--> v) is rewritten by intersecting its token set tokens with the child’s “productive tokens” set, computed by productive_tokens_at_nodes. In other words, it keeps only tokens that appear at the child on any path to an end node.
+      - This is mathematically incorrect. Consider a simple path u --(a)--> v --(b)--> END. The child v’s productive token set equals {b}, not {a}. The current pass will intersect the parent’s {a} with child’s {b} to empty, and incorrectly delete the valid parent edge’s tokens, even though the path to END is valid via v. The token used on u->v is determined at u; it should not be constrained by which tokens will later be used at v.
+      - Correct pruning must be based on reachability only: an edge u->v can be pruned if and only if v cannot reach END at all. There is no justification for trimming the token set of u->v using the child’s “productive tokens”.
 
-      Here are the step-by-step instructions to fix the issue, followed by the corresponding git diffs.
+      Fix
+      - Change prune_dead_paths to:
+        - Compute the set of “productive nodes” (nodes that can reach an END) via can_reach_end().
+        - For each node, keep only edge destinations that are productive; do not modify token sets.
+        - Do not intersect token sets with any computed per-node token sets.
 
-      ### Step-by-Step Instructions
+      Why this is correct
+      - Let G be the original graph and G' the pruned graph.
+      - For any path of the form u --(t)--> v ... END in G:
+        - If v can reach END, v is in the productive set, hence the edge (u, t, v) survives in G'.
+        - Since token sets on edges are unchanged, t remains allowed on that step. Therefore the same path remains valid in G'.
+      - Conversely, any edge to a node that is not in the productive set cannot possibly lead to END; removing it preserves language semantics.
+      - Therefore, the pruning is both sound and complete with respect to removing only dead edges — no valid token is lost on live edges.
 
-      1.  **File: `src/trie3_opt/core.rs`**
+      Step-by-step instructions
+      1) Edit file src/trie3_opt/passes/prune_dead_paths.rs:
+         - Update the run method of PruneDeadPathsPass to:
+           - Use trie.can_reach_end() to compute the productive node set.
+           - For each node, rebuild its children by filtering out destinations not in the productive set.
+           - Keep the EdgeKey unchanged (no token intersection).
+           - Avoid using ctx in this pass.
 
-          We will replace the incorrect implementation of `productive_tokens_at_nodes` with a correct one based on a standard fixed-point iteration. This new version correctly calculates for each node which tokens can appear on a path from that node to any end node.
+      2) Rebuild and run your tests. With this change, prune_dead_paths will no longer trim edge token sets incorrectly, and the downstream compress_edges and reorder_llm_tokens passes will operate on a semantically valid graph.
 
-          -   Navigate to the function `productive_tokens_at_nodes`.
-          -   Change its signature to remove the `universe: &SortedSet` parameter, as it's no longer needed. The new signature will be `pub fn productive_tokens_at_nodes(&self) -> HashMap<NodeId, SortedSet>`.
-          -   Replace the entire body of the function with the following code:
-
-          ```rust
-          let mut productive_tokens: HashMap<NodeId, SortedSet> = self
-              .node_ids()
-              .map(|id| (id, SortedSet::new()))
-              .collect();
-
-          let can_reach_end_set = self.can_reach_end();
-
-          let mut changed = true;
-          while changed {
-              changed = false;
-              // Iterate over all nodes. Reverse order can speed up convergence but is not required.
-              for u_id in self.node_ids() {
-                  let u_node = self.get_node(u_id).unwrap();
-                  let mut new_productive = SortedSet::new();
-
-                  for (ek, dm) in u_node.children() {
-                      for v_id in dm.keys() {
-                          // If child can reach end, its edge tokens and its own productive tokens
-                          // contribute to the parent's productive tokens.
-                          if can_reach_end_set.contains(v_id) {
-                              new_productive.union_inplace(&ek.tokens);
-                              if let Some(productive_v) = productive_tokens.get(v_id) {
-                                  new_productive.union_inplace(productive_v);
-                              }
-                          }
-                      }
-                  }
-
-                  let current_productive = productive_tokens.get_mut(&u_id).unwrap();
-                  if new_productive.elems != current_productive.elems {
-                      *current_productive = new_productive;
-                      changed = true;
-                  }
-              }
-          }
-
-          productive_tokens
-          ```
-
-      2.  **File: `src/trie3_opt/passes/prune_dead_paths.rs`**
-
-          Since we changed the signature of `productive_tokens_at_nodes`, we must update the call site in the `PruneDeadPathsPass`.
-
-          -   Navigate to the `run` function for the `PruneDeadPathsPass`.
-          -   Delete the line that defines the `universe` variable: `let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);`.
-          -   Modify the call to `trie.productive_tokens_at_nodes` to remove the `&universe` argument. The new call will be `trie.productive_tokens_at_nodes()`.
-
-      ### Git Diffs
-
-      Here are the git diffs corresponding to the changes described above.
+      Patches
 
       ```diff
-      --- a/src/trie3_opt/core.rs
-      +++ b/src/trie3_opt/core.rs
-      @@ -501,43 +501,40 @@
-       
-           /// Compute for each node, the set of LLM tokens that can appear on a path from it to an END node.
-           /// This is a backward reachability analysis of tokens.
-      -    pub fn productive_tokens_at_nodes(
-      -        &self,
-      -        universe: &SortedSet,
-      -    ) -> HashMap<NodeId, SortedSet> {
-      -        let mut worklist = VecDeque::new();
-      +    pub fn productive_tokens_at_nodes(&self) -> HashMap<NodeId, SortedSet> {
-               let mut productive_tokens: HashMap<NodeId, SortedSet> = self
-                   .node_ids()
-                   .map(|id| (id, SortedSet::new()))
-                   .collect();
-       
-      -        for node in self.nodes() {
-      -            if node.is_end() {
-      -                productive_tokens.insert(node.id(), universe.clone());
-      -                worklist.push_back(node.id());
-      -            }
-      -        }
-      +        let can_reach_end_set = self.can_reach_end();
-       
-      -        while let Some(node_id) = worklist.pop_front() {
-      -            let live_at_node = productive_tokens.get(&node_id).unwrap().clone();
-      -            if let Some(node) = self.get_node(node_id) {
-      -                for (pred_id, edges) in node.parents() {
-      -                    for edge_key in edges.keys() {
-      -                        let live_from_edge = live_at_node.intersect(&edge_key.tokens);
-      -                        if live_from_edge.is_empty() {
-      -                            continue;
-      -                        }
-      -                        let pred_live = productive_tokens.get_mut(pred_id).unwrap();
-      -                        let old_len = pred_live.len();
-      -                        pred_live.union_inplace(&live_from_edge);
-      -                        if pred_live.len() > old_len {
-      -                            worklist.push_back(*pred_id);
-      +        let mut changed = true;
-      +        while changed {
-      +            changed = false;
-      +            // Iterate over all nodes. Reverse order can speed up convergence but is not required.
-      +            for u_id in self.node_ids() {
-      +                let u_node = self.get_node(u_id).unwrap();
-      +                let mut new_productive = SortedSet::new();
-      +
-      +                for (ek, dm) in u_node.children() {
-      +                    for v_id in dm.keys() {
-      +                        // If child can reach end, its edge tokens and its own productive tokens
-      +                        // contribute to the parent's productive tokens.
-      +                        if can_reach_end_set.contains(v_id) {
-      +                            new_productive.union_inplace(&ek.tokens);
-      +                            if let Some(productive_v) = productive_tokens.get(v_id) {
-      +                                new_productive.union_inplace(productive_v);
-      +                            }
-                               }
-                           }
-                       }
-      +
-      +                let current_productive = productive_tokens.get_mut(&u_id).unwrap();
-      +                if new_productive.elems != current_productive.elems {
-      +                    *current_productive = new_productive;
-      +                    changed = true;
-      +                }
-                   }
-               }
-               productive_tokens
-           }
-       }
-
-      ```
-
-      ```diff
+      diff --git a/src/trie3_opt/passes/prune_dead_paths.rs b/src/trie3_opt/passes/prune_dead_paths.rs
       --- a/src/trie3_opt/passes/prune_dead_paths.rs
       +++ b/src/trie3_opt/passes/prune_dead_paths.rs
-      @@ -13,8 +13,7 @@
+      @@ -1,35 +1,34 @@
+       use std::collections::BTreeMap;
+       
+       use crate::trie3_opt::context::OptimizationContext;
+       use crate::trie3_opt::core::{EdgeKey, MiniTrie, NodeId, SortedSet};
+       use crate::trie3_opt::passes::OptimizationPass;
+       
+       /// Remove edges that provably cannot lead to an end node by reverse reachability.
+       /// Nodes are not deleted in the mini-trie (to keep NodeId stability), but edges to
+       /// non-productive nodes are pruned.
+       pub struct PruneDeadPathsPass;
+       
+       impl OptimizationPass for PruneDeadPathsPass {
+           fn name(&self) -> &'static str {
+               "PruneDeadPaths"
            }
        
-           fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+      -    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
       -        let universe = SortedSet::from_iter(0..=ctx.max_llm_token_id);
       -        let productive_tokens = trie.productive_tokens_at_nodes(&universe);
-      +        let productive_tokens = trie.productive_tokens_at_nodes();
+      +    fn run(&self, trie: &mut MiniTrie, _ctx: &mut OptimizationContext) {
+      +        // Identify nodes that can reach an END node.
+      +        let productive_nodes = trie.can_reach_end();
        
                let node_ids: Vec<_> = trie.node_ids().collect();
                for node_id in node_ids {
-
+                   let node = trie.get_node(node_id).unwrap();
+                   let mut new_children: BTreeMap<EdgeKey, BTreeMap<NodeId, SortedSet>> = BTreeMap::new();
+      -            for (ek, dm) in node.children() {
+      -                for (dst, sids) in dm {
+      -                    let productive_from_child = productive_tokens.get(dst).unwrap();
+      -                    let productive_on_edge = ek.tokens.intersect(productive_from_child);
+      -
+      -                    if !productive_on_edge.is_empty() {
+      -                        let new_ek = EdgeKey::new(ek.pop, productive_on_edge);
+      -                        new_children
+      -                            .entry(new_ek)
+      -                            .or_default()
+      -                            .entry(*dst)
+      -                            .and_modify(|e: &mut SortedSet| e.union_inplace(sids))
+      -                            .or_insert(sids.clone());
+      -                    }
+      -                }
+      -            }
+      +            for (ek, dm) in node.children() {
+      +                // Keep the original edge key; only filter out dead destinations.
+      +                let mut dm2: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
+      +                for (dst, sids) in dm {
+      +                    if productive_nodes.contains(dst) {
+      +                        dm2.entry(*dst)
+      +                            .or_default()
+      +                            .union_inplace(sids);
+      +                    }
+      +                }
+      +                if !dm2.is_empty() {
+      +                    new_children.insert(ek.clone(), dm2);
+      +                }
+      +            }
+                   trie.set_children(node_id, new_children);
+               }
+           }
+       }
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/core.rs
-      Applying patch to 'src/trie3_opt/core.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/core.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/trie3_opt/passes/prune_dead_paths.rs
       Applying patch to 'src/trie3_opt/passes/prune_dead_paths.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/passes/prune_dead_paths.rs.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Correctly compute productive tokens
-      for dead path pruning"'
     metadata:
 ...
