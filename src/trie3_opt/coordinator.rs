@@ -233,12 +233,11 @@ pub(crate) fn export_to_mini(
     trie3_god: &Trie3GodWrapper,
     max_llm_token_id: usize,
     max_state_id: usize,
-) -> (MiniTrie, Vec<(TokenizerStateID, NodeId)>, HashMap<PrecomputeNode3Index, NodeId>) {
+) -> (MiniTrie, Vec<TokenizerStateID>, HashMap<PrecomputeNode3Index, NodeId>) {
     let mut mini = MiniTrie::new();
     let mut map_old_to_new: HashMap<PrecomputeNode3Index, NodeId> = HashMap::new();
 
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
     // First, create all nodes in MiniTrie and map old to new
     #[cfg(not(rustrover))]
@@ -258,7 +257,7 @@ pub(crate) fn export_to_mini(
     }
 
     // Mark roots in MiniTrie
-    for r_idx in &roots_vec {
+    for r_idx in roots.values() {
         if let Some(&id) = map_old_to_new.get(r_idx) {
             mini.add_root(id);
         }
@@ -311,15 +310,8 @@ pub(crate) fn export_to_mini(
         }
     }
 
-    // Stable root list preserving the original key ordering
-    let mut root_pairs: Vec<(TokenizerStateID, NodeId)> = Vec::new();
-    for (k, r) in roots {
-        if let Some(id) = map_old_to_new.get(r).cloned() {
-            root_pairs.push((*k, id));
-        }
-    }
-
-    (mini, root_pairs, map_old_to_new)
+    let root_keys = roots.keys().cloned().collect();
+    (mini, root_keys, map_old_to_new)
 }
 
 /// Import a MiniTrie back into the precompute3 arena by constructing a fresh graph.
@@ -329,7 +321,7 @@ pub(crate) fn export_to_mini(
 /// - end flags are set from the mini-trie.
 pub(crate) fn import_from_mini(
     mini: &MiniTrie,
-    root_pairs: &[(TokenizerStateID, NodeId)],
+    root_keys: &[TokenizerStateID],
     trie3_god: &Trie3GodWrapper,
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     ctx: &OptimizationContext,
@@ -391,7 +383,7 @@ pub(crate) fn import_from_mini(
 
     // Remap roots to new nodes
     roots.clear();
-    for (key, nid) in root_pairs {
+    for (key, nid) in root_keys.iter().zip(mini.root_ids.iter()) {
         if let Some(idx) = id_map.get(nid) {
             roots.insert(*key, *idx);
         }
@@ -416,7 +408,7 @@ pub fn run_pipeline_on_precompute3<'a>(
     parser: Option<&'a GLRParser>,
 ) {
     // Export the current graph into a minimal structure
-    let (mut mini, root_pairs, _old_mapping) =
+    let (mut mini, root_keys, _old_mapping) =
         export_to_mini(roots, trie3_god, max_llm_token_id, max_state_id);
 
     // Build a fresh pass pipeline and context
@@ -493,7 +485,7 @@ pub fn run_pipeline_on_precompute3<'a>(
     }
 
     // Import the result back and finalize
-    import_from_mini(&mini, &root_pairs, trie3_god, roots, &ctx);
+    import_from_mini(&mini, &root_keys, trie3_god, roots, &ctx);
 }
 
 #[cfg(test)]

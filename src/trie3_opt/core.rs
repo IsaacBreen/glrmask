@@ -185,7 +185,7 @@ impl Node {
 #[derive(Clone, Debug)]
 pub struct MiniTrie {
     nodes: BTreeMap<NodeId, Node>,
-    pub root_ids: BTreeSet<NodeId>,
+    pub root_ids: Vec<NodeId>,
     /// Counter to generate unique node IDs.
     next_node_id: NodeId,
 }
@@ -194,7 +194,7 @@ impl MiniTrie {
     pub fn new() -> Self {
         Self {
             nodes: BTreeMap::new(),
-            root_ids: BTreeSet::new(),
+            root_ids: Vec::new(),
             next_node_id: 0,
         }
     }
@@ -228,7 +228,7 @@ impl MiniTrie {
         }
     }
     pub fn add_root(&mut self, id: NodeId) {
-        self.root_ids.insert(id);
+        self.root_ids.push(id);
     }
 
     pub fn get_node(&self, id: NodeId) -> Option<&Node> {
