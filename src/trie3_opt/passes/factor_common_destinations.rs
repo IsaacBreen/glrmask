@@ -25,6 +25,7 @@ impl OptimizationPass for FactorCommonDestinationsPass {
         }
 
         let all_states = SortedSet::from_iter(0..=ctx.max_state_id);
+        let all_tokens = SortedSet::from_iter(0..=ctx.max_llm_token_id);
 
         // Map: dest -> { (pop, tokens) -> { states -> [sources] } }
         let mut incoming_map: HashMap<NodeId, HashMap<EdgeKey, HashMap<SortedSet, Vec<NodeId>>>> =
@@ -53,7 +54,8 @@ impl OptimizationPass for FactorCommonDestinationsPass {
                         let intermediate_id = trie.add_node(false);
 
                         // Add edge from intermediate to original destination
-                        trie.add_edge(intermediate_id, edge_key.clone(), dest_id, sids.clone());
+                        let inter_to_dest_key = EdgeKey::new(edge_key.pop, all_tokens.clone());
+                        trie.add_edge(intermediate_id, inter_to_dest_key, dest_id, sids.clone());
 
                         // Reroute sources to point to intermediate node
                         for src_id in &sources {
