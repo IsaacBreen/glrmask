@@ -61,8 +61,8 @@ impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
             num_passes: 3,
-            prune_dead_paths: true,
-            prune_unproductive_paths: true,
+            prune_dead_paths: false,
+            prune_unproductive_paths: false,
             canonicalize_end_nodes: false,
             compress_edges: true,
             compress_unary_chains: false,
@@ -88,8 +88,8 @@ impl Default for CoordinatorConfig {
             merge_state_agnostic: false,
             merge_state_agnostic_max_iters: 0,
             eliminate_pop0_except_roots: false,
-            merge_equivalent_llm_tokens: true,
-            reorder_llm_tokens: true,
+            merge_equivalent_llm_tokens: false,
+            reorder_llm_tokens: false,
             generalize_sids: false,
         }
     }
