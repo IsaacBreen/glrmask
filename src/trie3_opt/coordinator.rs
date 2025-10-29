@@ -69,9 +69,9 @@ impl Default for CoordinatorConfig {
             factor_state_fanout: false,
             factor_state_dest_sets: false,
             factor_state_dest_sets_max_depth_from_roots: 0, // roots only by default
-            factor_state_dest_sets_max_intermediates_per_pop: 4096,
+            factor_state_dest_sets_max_intermediates_per_pop: 0,
             factor_state_dest_sets_min_out_degree: 0,
-            factor_state_dest_equivalence: true,
+            factor_state_dest_equivalence: false,
             factor_state_dest_equivalence_max_depth_from_roots: 0, // roots only
             factor_state_dest_equivalence_max_atoms_per_pop: 0,
             factor_state_dest_equivalence_min_gain_edges: 0,
