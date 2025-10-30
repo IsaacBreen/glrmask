@@ -222,9 +222,7 @@ impl OptimizationPass for NwaDwaRoundtripPass {
                         for (a_id, edges_from_a_to_b) in &parents_of_b {
                             for (ek_ab, sids_ab) in edges_from_a_to_b {
                                 let new_tokens = ek_ab.tokens.intersect(&pop0_ek.tokens);
-                                if new_tokens.is_empty() { continue; }
                                 let new_sids = sids_ab.intersect(sids_bc);
-                                if new_sids.is_empty() { continue; }
                                 let new_ek = EdgeKey::new(ek_ab.pop, new_tokens);
                                 trie.add_edge(*a_id, new_ek, *c_id, new_sids);
                             }
