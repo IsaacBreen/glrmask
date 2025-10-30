@@ -303,51 +303,83 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         }
 
         let original_roots = trie.root_ids.clone();
-        // Build per-root roundtrip and merge results into a single MiniTrie.
-        let mut merged = MiniTrie::new();
-        let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
-
-        // println!("{}", trie);
-        for &root in &original_roots {
-            println!("Processing root {}", root);
-            let (nwa, _map_mt_to_nwa) = Self::build_nwa_for_root(trie, root, ctx);
-            println!("Determinizing NWA");
-            // println!("NWA for root {}: {}", root, nwa);
-            let mut dwa = nwa.determinize();
-            dwa.simplify();
-            println!("Converting DWA to MiniTrie");
-            // println!("DWA for root {}: {}", root, dwa);
-            let (partial, partial_root) = Self::convert_dwa_to_minitrie(dwa, ctx);
-            println!("Done!");
-
-            // Merge partial into merged
-            // Build map: partial NodeId -> merged NodeId
-            let mut id_map: BTreeMap<NodeId, NodeId> = BTreeMap::new();
-            for node in partial.nodes() {
-                let nid = merged.add_node(node.is_end());
-                id_map.insert(node.id(), nid);
+        // Build a single shared NWA that covers all roots and add a synthetic
+        // first-step edge per root (edge key = enumerate index).
+        let mut nwa = NWA::new();
+        // Collect all nodes reachable from any root.
+        let mut sub_nodes: BTreeSet<NodeId> = BTreeSet::new();
+        for &r in &original_roots {
+            sub_nodes.extend(Self::reachable_from_one(trie, r));
+        }
+        // Map MiniTrie node -> NWA state
+        let mut map_mt_to_nwa: BTreeMap<NodeId, usize> = BTreeMap::new();
+        for n_id in sub_nodes.iter() {
+            let s = nwa.add_state();
+            map_mt_to_nwa.insert(*n_id, s);
+        }
+        // Synthetic transitions from start to each root (weight = ALL).
+        for (i, &root) in original_roots.iter().enumerate() {
+            if let Some(&dst) = map_mt_to_nwa.get(&root) {
+                nwa.add_transition(nwa.start_state, i as u16, dst, SimpleBitset::all());
             }
-            // Edges
-            for node in partial.nodes() {
-                let src_new = *id_map.get(&node.id()).unwrap();
-                for (ek, dm) in node.children() {
-                    let mut new_dm: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
-                    for (dst, sids) in dm {
-                        let dst_new = *id_map.get(dst).unwrap();
-                        new_dm.insert(dst_new, sids.clone());
-                    }
-                    for (dst_new, sids) in new_dm {
-                        merged.add_edge(src_new, ek.clone(), dst_new, sids);
+        }
+        // Mark final weights for end nodes.
+        for (mt_id, nwa_id) in map_mt_to_nwa.iter() {
+            if let Some(node) = trie.get_node(*mt_id) {
+                if node.is_end() {
+                    nwa.set_final_weight(*nwa_id, SimpleBitset::all());
+                }
+            }
+        }
+        // Encode MiniTrie edges (pop chains and SID-specific steps).
+        for (mt_id, &nwa_src) in map_mt_to_nwa.iter() {
+            let node = trie.get_node(*mt_id).unwrap();
+            for (ek, dm) in node.children() {
+                if ek.pop < 0 { continue; }
+                let pop = ek.pop as usize;
+                let mut cur = nwa_src;
+                for _ in 0..pop.saturating_sub(1) {
+                    let inter = nwa.add_state();
+                    nwa.add_default_transition(cur, inter, SimpleBitset::all());
+                    cur = inter;
+                }
+                let weight = SimpleBitset::from_iter(ek.tokens.iter());
+                for (&mt_dst, sids) in dm {
+                    let nwa_dst = map_mt_to_nwa[&mt_dst];
+                    for sid in sids.iter() {
+                        nwa.add_transition(cur, sid as u16, nwa_dst, weight.clone());
                     }
                 }
             }
-            // Root
-            new_roots.push(*id_map.get(&partial_root).unwrap());
         }
-
+        // Determinize + simplify once
+        let mut dwa = nwa.determinize();
+        dwa.simplify();
+        // Convert back into a MiniTrie
+        let (mut merged, mt_root_id) = Self::convert_dwa_to_minitrie(dwa, ctx);
+        // Derive final roots by following the synthetic first edges (0..N).
+        let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
+        let root_node = merged.get_node(mt_root_id).unwrap().clone();
+        for i in 0..original_roots.len() {
+            let mut chosen: Option<NodeId> = None;
+            for (_ek, dm) in root_node.children() {
+                for (dst, sids) in dm {
+                    for sid in sids.iter() {
+                        if sid == i {
+                            chosen = Some(*dst);
+                            break;
+                        }
+                    }
+                    if chosen.is_some() { break; }
+                }
+                if chosen.is_some() { break; }
+            }
+            new_roots.push(chosen.expect("missing synthetic root edge during roundtrip"));
+        }
+        // Drop the synthetic edges from the artificial root node and set root order.
+        merged.set_children(mt_root_id, BTreeMap::new());
         merged.root_ids = new_roots;
-        // Replace input trie with merged result
         *trie = merged;
-        // println!("{}", trie);
     }
 }
+
