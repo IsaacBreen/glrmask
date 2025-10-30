@@ -519,7 +519,16 @@ impl Display for NWA {
             }
             for (on, transitions) in &state.transitions.exceptions {
                 for (to, weight) in transitions {
-                    writeln!(f, "    '{}' -> {} (weight: {})", *on as u8 as char, to, weight)?;
+                    let char_repr = if let Some(c) = char::from_u32(*on as u32) {
+                        if c.is_ascii_graphic() || c == ' ' {
+                            format!("'{}'", c)
+                        } else {
+                            format!("{}", *on)
+                        }
+                    } else {
+                        format!("{}", *on)
+                    };
+                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, weight)?;
                 }
             }
         }
@@ -540,7 +549,16 @@ impl Display for DWA {
                 writeln!(f, "    * -> {}", to)?;
             }
             for (on, to) in &state.transitions.exceptions {
-                writeln!(f, "    '{}' -> {}", *on as u8 as char, to)?;
+                let char_repr = if let Some(c) = char::from_u32(*on as u32) {
+                    if c.is_ascii_graphic() || c == ' ' {
+                        format!("'{}'", c)
+                    } else {
+                        format!("{}", *on)
+                    }
+                } else {
+                    format!("{}", *on)
+                };
+                writeln!(f, "    {} -> {}", char_repr, to)?;
             }
         }
         Ok(())
