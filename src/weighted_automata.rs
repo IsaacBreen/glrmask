@@ -770,6 +770,8 @@ mod tests {
         nwa.add_transition(s1, 5, s2, w01.clone());
 
         let dwa = nwa.determinize();
+        println!("{}", nwa);
+        println!("{}", dwa);
 
         // Expected DWA: 4 states (S0, S1, S2, S3)
         assert_eq!(dwa.states.len(), 4);
