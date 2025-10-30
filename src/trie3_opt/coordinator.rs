@@ -53,7 +53,7 @@ pub struct CoordinatorConfig {
 
 fn get_default_config_impl() -> CoordinatorConfig {
     CoordinatorConfig {
-        num_passes: 1,
+        num_passes: 2,
         prune_dead_paths: true,
         prune_unproductive_paths: true,
         canonicalize_end_nodes: true,
@@ -68,11 +68,11 @@ fn get_default_config_impl() -> CoordinatorConfig {
         merge_global_atoms: false,
         merge_global_atoms_max_iters: 2,
         merge_global_atoms_max_atoms_per_pop: 4096,
-        eliminate_pop0_except_roots: false,
+        eliminate_pop0_except_roots: true,
         merge_equivalent_llm_tokens: false,
         reorder_llm_tokens: false,
         generalize_sids: false,
-        nwa_dwa_roundtrip: true,
+        nwa_dwa_roundtrip: false,
         assert_no_pop0_except_roots: false,
     }
 }
