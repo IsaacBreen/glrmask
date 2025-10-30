@@ -516,8 +516,8 @@ impl MiniTrie {
                 let states_str = states.to_ranges_string();
                 write!(
                     f,
-                    "{}{}Edge(pop: {}, tokens: {}) -> Node({}) [states: {}]",
-                    prefix, current_prefix, edge_key.pop, tokens_str, dest_id, states_str
+                    "{}{}Edge(pop: {}, tokens: {}, states: {}) -> Node({})",
+                    prefix, current_prefix, edge_key.pop, tokens_str, states_str, dest_id
                 )?;
 
                 let dest_node = self.get_node(*dest_id).unwrap();
