@@ -3,7 +3,7 @@
 #![allow(dead_code)] // Allow unused code for this library module example
 
 use range_set_blaze::RangeSetBlaze;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
@@ -340,41 +340,58 @@ impl NWA {
     ///    reachable states without consuming input.
     /// 5. The alphabet is partitioned based on character exceptions in the NWA states to
     ///    build the DWA's transition map.
+    /// The alphabet is partitioned based on character exceptions in the NWA states to
+    /// build the DWA's transition map.
     pub fn determinize(&self) -> DWA {
         let mut dwa = DWA::default();
         if self.states.is_empty() {
             return dwa;
         }
 
-        // Map from a DWA state's composition to its StateID in the new DWA.
-        // A composition is a map from NWA StateID -> Path Weight.
-        let mut known_states: BTreeMap<BTreeMap<StateID, Weight>, StateID> = BTreeMap::new();
-        let mut worklist: VecDeque<BTreeMap<StateID, Weight>> = VecDeque::new();
+        // Fast-path: check once if the NWA has any epsilon transitions.
+        let has_epsilons = self
+            .states
+            .iter()
+            .any(|s| !s.epsilon_transitions.is_empty());
 
-        // The initial DWA state is the epsilon closure of the NWA start state.
-        // The initial path has a weight of `all()`, representing no constraints yet.
-        let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
-        let start_composition = self.epsilon_closure(start_composition_raw);
+        // Use a compact canonical composition key: Vec<(StateID, Weight)> sorted by StateID.
+        // This drastically reduces memory and makes hashing/lookup much faster than nested maps.
+        let to_key = |comp: BTreeMap<StateID, Weight>| -> Vec<(StateID, Weight)> {
+            // BTreeMap iteration is sorted by key, so the resulting Vec is sorted too.
+            comp.into_iter().filter(|(_, w)| !w.is_empty()).collect()
+        };
+
+        // Map from a DWA state's composition key to its StateID in the new DWA.
+        let mut known_states: HashMap<Vec<(StateID, Weight)>, StateID> = HashMap::new();
+        // Worklist holds canonical composition keys.
+        let mut worklist: VecDeque<Vec<(StateID, Weight)>> = VecDeque::new();
 
         // Helper function to create a new DWA state if it's not already known.
         let mut get_or_create_dwa_state =
-            |comp: BTreeMap<StateID, Weight>,
+            |comp_key: Vec<(StateID, Weight)>,
              dwa: &mut DWA,
-             known: &mut BTreeMap<_, _>,
-             work: &mut VecDeque<_>|
+             known: &mut HashMap<Vec<(StateID, Weight)>, StateID>,
+             work: &mut VecDeque<Vec<(StateID, Weight)>>|
              -> Option<StateID> {
-                if comp.is_empty() {
+                if comp_key.is_empty() {
                     return None;
                 }
-                if let Some(&id) = known.get(&comp) {
+                if let Some(&id) = known.get(&comp_key) {
                     return Some(id);
                 }
                 let new_id = dwa.states.len();
                 dwa.states.push(DWAState::default());
-                known.insert(comp.clone(), new_id);
-                work.push_back(comp);
+                known.insert(comp_key.clone(), new_id);
+                work.push_back(comp_key);
                 Some(new_id)
             };
+
+        // The initial DWA state is the epsilon closure of the NWA start state.
+        // The initial path has a weight of `all()`, representing no constraints yet.
+        let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
+        let start_composition_map =
+            self.epsilon_closure_with_flag(start_composition_raw, has_epsilons);
+        let start_composition = to_key(start_composition_map);
 
         if let Some(start_id) = get_or_create_dwa_state(
             start_composition,
@@ -429,7 +446,9 @@ impl NWA {
                     }
                 }
             }
-            let default_next_composition = self.epsilon_closure(default_next_raw);
+            let default_next_composition_map =
+                self.epsilon_closure_with_flag(default_next_raw, has_epsilons);
+            let default_next_composition = to_key(default_next_composition_map);
             let default_target_dwa_id = get_or_create_dwa_state(
                 default_next_composition,
                 &mut dwa,
@@ -457,7 +476,14 @@ impl NWA {
                         }
                     }
                 }
-                let exception_next_composition = self.epsilon_closure(exception_next_raw);
+                // Skip work if there are no outgoing transitions on this character.
+                if exception_next_raw.is_empty() {
+                    continue;
+                }
+
+                let exception_next_composition_map =
+                    self.epsilon_closure_with_flag(exception_next_raw, has_epsilons);
+                let exception_next_composition = to_key(exception_next_composition_map);
                 let exception_target_dwa_id = get_or_create_dwa_state(
                     exception_next_composition,
                     &mut dwa,
@@ -489,6 +515,21 @@ impl NWA {
     /// This function transitively follows all epsilon transitions, combining weights
     /// until a fixed point is reached.
     fn epsilon_closure(&self, initial_states: BTreeMap<StateID, Weight>) -> BTreeMap<StateID, Weight> {
+        // Preserve original behavior; determinize() uses the fast-path helper.
+        self.epsilon_closure_with_flag(initial_states, true)
+    }
+
+    /// Same as epsilon_closure, but with a fast-path: when has_epsilons is false,
+    /// return the input as-is to avoid needless work and allocations.
+    fn epsilon_closure_with_flag(
+        &self,
+        initial_states: BTreeMap<StateID, Weight>,
+        has_epsilons: bool,
+    ) -> BTreeMap<StateID, Weight> {
+        if !has_epsilons {
+            return initial_states;
+        }
+
         let mut closure = initial_states;
         let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
 
@@ -518,6 +559,8 @@ impl NWA {
         closure
     }
 }
+
+// --- Display Implementations for Debugging ---
 
 // --- Display Implementations for Debugging ---
 
