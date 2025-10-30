@@ -226,7 +226,9 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         let mut merged = MiniTrie::new();
         let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
 
+        println!("{}", trie);
         for &root in &original_roots {
+            dbg!(&root);
             let (nwa, _map_mt_to_nwa) = Self::build_nwa_for_root(trie, root, ctx);
             println!("NWA for root {}: {}", root, nwa);
             let dwa = nwa.determinize();

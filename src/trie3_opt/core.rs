@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
+use std::fmt;
 
 /// Compact node id for the mini trie.
 pub type NodeId = u32;
@@ -448,5 +449,88 @@ impl MiniTrie {
             }
         }
         productive_tokens
+    }
+}
+
+impl MiniTrie {
+    fn fmt_node_recursive(
+        &self,
+        node_id: NodeId,
+        f: &mut fmt::Formatter<'_>,
+        prefix: &str,
+        visited: &mut BTreeSet<NodeId>,
+    ) -> fmt::Result {
+        if visited.contains(&node_id) {
+            return Ok(()); // Stop recursion for cycles
+        }
+        visited.insert(node_id);
+
+        let node = self.get_node(node_id).unwrap();
+        let total_dests: usize = node.children().values().map(|dm| dm.len()).sum();
+        let mut dests_processed = 0;
+
+        for (edge_key, dest_map) in node.children() {
+            for (dest_id, states) in dest_map {
+                dests_processed += 1;
+                let is_last = dests_processed == total_dests;
+
+                let (current_prefix, next_prefix_part) = if is_last {
+                    ("└── ", "    ")
+                } else {
+                    ("├── ", "│   ")
+                };
+
+                let tokens_str = if edge_key.tokens.len() > 5 {
+                    format!("[{} tokens]", edge_key.tokens.len())
+                } else {
+                    format!("{:?}", edge_key.tokens.elems)
+                };
+
+                let states_str = if states.len() > 5 {
+                    format!("[{} states]", states.len())
+                } else {
+                    format!("{:?}", states.elems)
+                };
+
+                write!(
+                    f,
+                    "{}{}Edge(pop: {}, tokens: {}) -> Node({}) [states: {}]",
+                    prefix, current_prefix, edge_key.pop, tokens_str, dest_id, states_str
+                )?;
+
+                let dest_node = self.get_node(*dest_id).unwrap();
+                if dest_node.is_end() {
+                    write!(f, " [END]")?;
+                }
+                if visited.contains(dest_id) {
+                    write!(f, " ... (cycle)")?;
+                }
+                writeln!(f)?;
+
+                let next_prefix = format!("{}{}", prefix, next_prefix_part);
+                self.fmt_node_recursive(*dest_id, f, &next_prefix, visited)?;
+            }
+        }
+
+        visited.remove(&node_id);
+        Ok(())
+    }
+}
+
+impl fmt::Display for MiniTrie {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "MiniTrie with {} nodes, {} roots.", self.nodes.len(), self.root_ids.len())?;
+
+        for (i, root_id) in self.root_ids.iter().enumerate() {
+            let root_node = self.get_node(*root_id).unwrap();
+            if i > 0 { writeln!(f)?; }
+            writeln!(f, "--- Root Index {} (NodeId: {}) ---", i, root_id)?;
+            write!(f, "Root Node({})", root_id)?;
+            if root_node.is_end() { write!(f, " [END]")?; }
+            writeln!(f)?;
+            let mut visited = BTreeSet::new();
+            self.fmt_node_recursive(*root_id, f, "", &mut visited)?;
+        }
+        Ok(())
     }
 }
