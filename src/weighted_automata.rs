@@ -571,6 +571,79 @@ impl Display for DWA {
 mod tests {
     use super::*;
 
+    fn build_complex_nwa() -> NWA {
+        let mut nwa = NWA::default();
+        // Add 20 states (0 to 19)
+        for _ in 0..20 {
+            nwa.add_state();
+        }
+        nwa.start_state = 1;
+
+        let w0 = SimpleBitset::from_item(0);
+        let w1 = SimpleBitset::from_item(1);
+        let w2 = SimpleBitset::from_item(2);
+        let w3 = SimpleBitset::from_item(3);
+        let w123 = SimpleBitset::from_iter(1..=3);
+        let wall = SimpleBitset::all();
+
+        // State 7 is final
+        nwa.set_final_weight(7, wall.clone());
+
+        // Transitions from s1 (1)
+        nwa.add_transition(1, 1, 2, w0.clone());
+        nwa.add_transition(1, 2, 7, w1.clone());
+        nwa.add_transition(1, 2, 7, w2.clone());
+        nwa.add_transition(1, 2, 3, w3.clone());
+        nwa.add_transition(1, 4, 4, w0.clone());
+        nwa.add_transition(1, 5, 5, w123.clone());
+        nwa.add_transition(1, 6, 6, w123.clone());
+        nwa.add_transition(1, 7, 7, w0.clone());
+        nwa.add_transition(1, 10, 7, w1.clone());
+        nwa.add_transition(1, 10, 7, w2.clone());
+        nwa.add_transition(1, 10, 7, w3.clone());
+
+        // Transitions from s2 (2)
+        nwa.add_default_transition(2, 8, wall.clone());
+
+        // Transitions from s3 (3)
+        nwa.add_transition(3, 10, 7, w3.clone());
+
+        // Transitions from s4 (4)
+        nwa.add_default_transition(4, 9, wall.clone());
+
+        // Transitions from s5 (5)
+        nwa.add_default_transition(5, 11, wall.clone());
+        nwa.add_default_transition(5, 12, wall.clone());
+        nwa.add_default_transition(5, 13, wall.clone());
+
+        // Transitions from s6 (6)
+        nwa.add_default_transition(6, 14, wall.clone());
+        nwa.add_default_transition(6, 16, wall.clone());
+        nwa.add_default_transition(6, 18, wall.clone());
+
+        // Transitions from s8 (8)
+        nwa.add_transition(8, 10, 7, w0.clone());
+
+        // Transitions from s9 (9)
+        nwa.add_default_transition(9, 10, wall.clone());
+
+        // Transitions from s10 (10)
+        nwa.add_transition(10, 10, 7, w0.clone());
+
+        // The rest of the transitions (11-19) are simple and follow the pattern
+        nwa.add_transition(11, 10, 7, w1.clone());
+        nwa.add_transition(12, 10, 7, w2.clone());
+        nwa.add_transition(13, 10, 7, w3.clone());
+        nwa.add_default_transition(14, 15, wall.clone());
+        nwa.add_transition(15, 10, 7, w1.clone());
+        nwa.add_default_transition(16, 17, wall.clone());
+        nwa.add_transition(17, 10, 7, w2.clone());
+        nwa.add_default_transition(18, 19, wall.clone());
+        nwa.add_transition(19, 10, 7, w3.clone());
+
+        nwa
+    }
+
     #[test]
     fn test_simple_bitset_ops() {
         let set1 = SimpleBitset::from_iter(vec![1, 2, 5]);
@@ -804,5 +877,78 @@ mod tests {
         assert_eq!(*s0_dwa.transitions.get(2).unwrap(), s1_dwa_id);
         assert_eq!(*s0_dwa.transitions.get(3).unwrap(), s1_dwa_id);
         assert_eq!(*s0_dwa.transitions.get(5).unwrap(), s1_dwa_id);
+    }
+
+    #[test]
+    fn test_determinize_complex_nwa_from_input() {
+        let nwa = build_complex_nwa();
+        let dwa = nwa.determinize();
+
+        // Expected DWA states: 15 (0 to 14)
+        assert_eq!(dwa.states.len(), 15);
+
+        let w0 = SimpleBitset::from_item(0);
+        let w1 = SimpleBitset::from_item(1);
+        let w2 = SimpleBitset::from_item(2);
+        let w3 = SimpleBitset::from_item(3);
+        let w12 = SimpleBitset::from_iter(1..=2);
+        let w123 = SimpleBitset::from_iter(1..=3);
+        let wall = SimpleBitset::all();
+
+        // S0 (ID 0): {1:ALL} - Start state
+        let s0 = &dwa.states[dwa.start_state];
+        assert_eq!(s0.weight, wall);
+        assert!(s0.final_weight.is_none());
+
+        // S1 (ID 1): Target of '1' from S0. Composition: {2:[0]}
+        let s1_id = *s0.transitions.get(1).unwrap();
+        assert_eq!(s1_id, 1);
+        let s1 = &dwa.states[s1_id];
+        assert_eq!(s1.weight, w0.clone());
+        assert!(s1.final_weight.is_none());
+
+        // S2 (ID 2): Target of '2' from S0. Composition: {7:[1..=2], 3:[3]}
+        let s2_id = *s0.transitions.get(2).unwrap();
+        assert_eq!(s2_id, 2);
+        let s2 = &dwa.states[s2_id];
+        assert_eq!(s2.weight, w123.clone());
+        // Final weight: ([1..=2] & ALL) | ([3] & None) = [1..=2]
+        assert_eq!(s2.final_weight, Some(w12.clone()));
+
+        // S7 (ID 7): Target of '10' from S0. Composition: {7:[1..=3]}
+        let s7_id = *s0.transitions.get(10).unwrap();
+        assert_eq!(s7_id, 7);
+        let s7 = &dwa.states[s7_id];
+        assert_eq!(s7.weight, w123.clone());
+        // Final weight: [1..=3] & ALL = [1..=3]
+        assert_eq!(s7.final_weight, Some(w123.clone()));
+
+        // S9 (ID 9): Target of '10' from S2. Composition: {7:[3]}
+        let s9_id = *s2.transitions.get(10).unwrap();
+        assert_eq!(s9_id, 9);
+        let s9 = &dwa.states[s9_id];
+        assert_eq!(s9.weight, w3.clone());
+        // Final weight: [3] & ALL = [3]
+        assert_eq!(s9.final_weight, Some(w3.clone()));
+
+        // Check S6 (ID 6) and S8 (ID 8) properties and transitions
+        let s6_id = *s0.transitions.get(7).unwrap(); // Target of '7' from S0. Composition: {7:[0]}
+        assert_eq!(s6_id, 6);
+        let s6 = &dwa.states[s6_id];
+        assert_eq!(s6.weight, w0.clone());
+        assert_eq!(s6.final_weight, Some(w0.clone()));
+
+        let s8_id = s1.transitions.default.unwrap(); // Target of '*' from S1. Composition: {8:[0]}
+        assert_eq!(s8_id, 8);
+        let s8 = &dwa.states[s8_id];
+        assert_eq!(s8.weight, w0.clone());
+        assert!(s8.final_weight.is_none());
+        
+        // Check a transition to a known state (S8 -> '10' -> S6)
+        assert_eq!(*s8.transitions.get(10).unwrap(), s6_id);
+
+        // Check a transition to a known state (S7 is a sink)
+        assert!(s7.transitions.exceptions.is_empty());
+        assert!(s7.transitions.default.is_none());
     }
 }
