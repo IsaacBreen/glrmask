@@ -174,13 +174,8 @@ impl NwaDwaRoundtripPass {
             // This encodes the conditional finality.
             if let Some(final_weight) = &dwa_src_state.final_weight {
                 if !final_weight.is_empty() {
-                    // Per user request, "with the final states". We interpret final_weight as SIDs.
-                    // This contradicts its use as tokens elsewhere, implying a deeper issue, but we proceed.
-                    let sids = SortedSet::from_iter(final_weight.iter());
-
-                    // MiniTrie edges must consume a token. As a compromise, we use the set of all tokens
-                    // that can lead to this DWA state.
-                    let tokens = SortedSet::from_iter(dwa_src_state.weight.iter());
+                    let tokens = SortedSet::from_iter(final_weight.iter());
+                    let sids = SortedSet::from_iter(0..=_ctx.max_state_id);  // TODO: VERY INEFFICIENT
                     new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
                 }
             }
