@@ -381,8 +381,7 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         merged.root_ids = new_roots;
         // For the real root nodes, force their outgoing edges to have pop=0.
         // They should have pop=1 at this point from the conversion logic.
-        let roots_to_fix = merged.root_ids.clone();
-        for &root_id in &roots_to_fix {
+        for root_id in merged.root_ids.clone() {
             let root_node = merged.get_node(root_id).unwrap().clone();
             let mut new_children = BTreeMap::new();
             for (ek, dm) in root_node.children() {
