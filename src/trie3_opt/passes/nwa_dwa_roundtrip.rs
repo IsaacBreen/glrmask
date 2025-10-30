@@ -391,6 +391,62 @@ impl OptimizationPass for NwaDwaRoundtripPass {
             }
             merged.set_children(root_id, new_children);
         }
+        // Second pass: eliminate pop=0 edges on non-root nodes in the merged MiniTrie.
+        // This collapses chains like root -> u (pop=0, tokens=T1) and u -> END (pop=0, tokens=Tfinal)
+        // into a single edge root -> END with tokens T1 ∩ Tfinal, preserving the final-weight gating.
+        {
+            let mut changed2 = true;
+            while changed2 {
+                changed2 = false;
+                let node_ids: Vec<_> = merged.node_ids().collect();
+                let root_set: BTreeSet<_> = merged.root_ids.iter().copied().collect();
+
+                for b_id in node_ids {
+                    if root_set.contains(&b_id) {
+                        continue;
+                    }
+
+                    // Must clone, as we will be modifying the trie.
+                    let b_node = if let Some(n) = merged.get_node(b_id) {
+                        n.clone()
+                    } else {
+                        continue;
+                    };
+
+                    let mut pop0_edges = BTreeMap::new();
+                    let mut non_pop0_edges = BTreeMap::new();
+
+                    for (ek, dm) in b_node.children() {
+                        if ek.pop == 0 {
+                            pop0_edges.insert(ek.clone(), dm.clone());
+                        } else {
+                            non_pop0_edges.insert(ek.clone(), dm.clone());
+                        }
+                    }
+
+                    if pop0_edges.is_empty() {
+                        continue;
+                    }
+
+                    changed2 = true;
+                    let parents_of_b = b_node.parents().clone();
+
+                    for (pop0_ek, pop0_dm) in &pop0_edges {
+                        for (c_id, sids_bc) in pop0_dm {
+                            for (a_id, edges_from_a_to_b) in &parents_of_b {
+                                for (ek_ab, sids_ab) in edges_from_a_to_b {
+                                    let new_tokens = ek_ab.tokens.intersect(&pop0_ek.tokens);
+                                    let new_sids = sids_ab.intersect(sids_bc);
+                                    let new_ek = EdgeKey::new(ek_ab.pop, new_tokens);
+                                    merged.add_edge(*a_id, new_ek, *c_id, new_sids);
+                                }
+                            }
+                        }
+                    }
+                    merged.set_children(b_id, non_pop0_edges);
+                }
+            }
+        }
         *trie = merged;
     }
 }
