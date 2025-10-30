@@ -378,32 +378,19 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         }
         // Drop the synthetic edges from the artificial root node and set root order.
         merged.set_children(mt_root_id, BTreeMap::new());
-
-        // The edges from the new roots (which were not the artificial root) should have pop=0.
-        // They were created with pop_base=1, so we change pop=1 to pop=0.
-        for &root_id in &new_roots {
-            // We must clone the node to modify it via set_children.
-            let root_node = if let Some(n) = merged.get_node(root_id) {
-                n.clone()
-            } else {
-                continue;
-            };
-            let mut new_children = BTreeMap::new();
-            let mut changed_pop = false;
-            for (ek, dm) in root_node.children() {
-                if ek.pop == 1 {
-                    let new_ek = EdgeKey::new(0, ek.tokens.clone());
-                    new_children.insert(new_ek, dm.clone());
-                    changed_pop = true;
-                } else {
-                    new_children.insert(ek.clone(), dm.clone());
-                }
-            }
-            if changed_pop {
-                merged.set_children(root_id, new_children);
-            }
-        }
         merged.root_ids = new_roots;
+        // For the real root nodes, force their outgoing edges to have pop=0.
+        // They should have pop=1 at this point from the conversion logic.
+        for &root_id in &merged.root_ids {
+            let root_node = merged.get_node(root_id).unwrap().clone();
+            let mut new_children = BTreeMap::new();
+            for (ek, dm) in root_node.children() {
+                assert_eq!(ek.pop, 1, "Expected pop=1 for edges from a new root node");
+                let new_ek = EdgeKey::new(0, ek.tokens.clone());
+                new_children.insert(new_ek, dm.clone());
+            }
+            merged.set_children(root_id, new_children);
+        }
         *trie = merged;
     }
 }
