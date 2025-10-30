@@ -145,7 +145,7 @@ impl NwaDwaRoundtripPass {
             // Accumulate simple default-only states into the pop count.
             let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
             let dwa_term_state = &dwa.states[terminal_dwa_id];
-            let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };
+            let pop_base = 1isize;
             let pop = pop_base + (simple_steps as isize);
 
             // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
@@ -378,6 +378,31 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         }
         // Drop the synthetic edges from the artificial root node and set root order.
         merged.set_children(mt_root_id, BTreeMap::new());
+
+        // The edges from the new roots (which were not the artificial root) should have pop=0.
+        // They were created with pop_base=1, so we change pop=1 to pop=0.
+        for &root_id in &new_roots {
+            // We must clone the node to modify it via set_children.
+            let root_node = if let Some(n) = merged.get_node(root_id) {
+                n.clone()
+            } else {
+                continue;
+            };
+            let mut new_children = BTreeMap::new();
+            let mut changed_pop = false;
+            for (ek, dm) in root_node.children() {
+                if ek.pop == 1 {
+                    let new_ek = EdgeKey::new(0, ek.tokens.clone());
+                    new_children.insert(new_ek, dm.clone());
+                    changed_pop = true;
+                } else {
+                    new_children.insert(ek.clone(), dm.clone());
+                }
+            }
+            if changed_pop {
+                merged.set_children(root_id, new_children);
+            }
+        }
         merged.root_ids = new_roots;
         *trie = merged;
     }
