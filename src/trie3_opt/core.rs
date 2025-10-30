@@ -126,6 +126,38 @@ impl SortedSet {
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.elems.iter().cloned()
     }
+
+    pub fn to_ranges_string(&self) -> String {
+        if self.elems.is_empty() {
+            return "[]".to_string();
+        }
+
+        let mut ranges = Vec::new();
+        let mut iter = self.elems.iter();
+        let mut start = *iter.next().unwrap();
+        let mut end = start;
+
+        for &x in iter {
+            if x == end + 1 {
+                end = x;
+            } else {
+                if start == end {
+                    ranges.push(start.to_string());
+                } else {
+                    ranges.push(format!("{}..={}", start, end));
+                }
+                start = x;
+                end = x;
+            }
+        }
+        if start == end {
+            ranges.push(start.to_string());
+        } else {
+            ranges.push(format!("{}..={}", start, end));
+        }
+
+        format!("[{}]", ranges.join(", "))
+    }
 }
 
 /// Edge key for the mini trie: pop delta and a token set.
@@ -480,18 +512,8 @@ impl MiniTrie {
                     ("├── ", "│   ")
                 };
 
-                let tokens_str = if edge_key.tokens.len() > 5 {
-                    format!("[{} tokens]", edge_key.tokens.len())
-                } else {
-                    format!("{:?}", edge_key.tokens.elems)
-                };
-
-                let states_str = if states.len() > 5 {
-                    format!("[{} states]", states.len())
-                } else {
-                    format!("{:?}", states.elems)
-                };
-
+                let tokens_str = edge_key.tokens.to_ranges_string();
+                let states_str = states.to_ranges_string();
                 write!(
                     f,
                     "{}{}Edge(pop: {}, tokens: {}) -> Node({}) [states: {}]",
