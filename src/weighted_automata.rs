@@ -591,10 +591,6 @@ impl DWA {
             if self.minimize_partition_refinement() {
                 changed_any = true;
             }
-            // 3) Safely collapse default-only non-final chains.
-            if self.collapse_simple_edges() {
-                changed_any = true;
-            }
             // 4) Final tidy-up per pass.
             if self.normalize_edges_inplace() {
                 changed_any = true;
@@ -603,123 +599,6 @@ impl DWA {
                 changed_any = true;
             }
         }
-    }
-
-    /// Rewire transitions to "skip" over simple default-only states.
-    /// A state S is considered simple if `S.simple_default_target().is_some()`.
-    /// After rewiring, any exception that equals the (new) default target is removed.
-    ///
-    /// Returns true if any transition changed.
-    pub fn collapse_simple_edges(&mut self) -> bool {
-        if self.states.is_empty() {
-            return false;
-        }
-        // Build a jump table that follows default-only "simple" chains to their first non-simple endpoint.
-        let n = self.states.len();
-        let mut cache: Vec<Option<StateID>> = vec![None; n];
-        let mut visiting: Vec<bool> = vec![false; n];
-        fn dfs(
-            i: StateID,
-            states: &Vec<DWAState>,
-            cache: &mut Vec<Option<StateID>>,
-            visiting: &mut Vec<bool>,
-        ) -> StateID {
-            if let Some(v) = cache[i] {
-                return v;
-            }
-            if visiting[i] {
-                // Cycle among "simple" states; pick self as representative to break the loop.
-                cache[i] = Some(i);
-                return i;
-            }
-            visiting[i] = true;
-            // A state is skippable if:
-            //  - it has no final_weight,
-            //  - it has no exception transitions,
-            //  - it has a default transition to nx,
-            //  - and the default target is also non-final.
-            // This preserves language semantics even for strings ending right after entering i.
-            let next = {
-                let st = &states[i];
-                if st.final_weight.is_none()
-                    && st.transitions.exceptions.is_empty()
-                {
-                    if let Some(nx) = st.transitions.default {
-                        let tgt = &states[nx];
-                        if tgt.final_weight.is_none() {
-                            Some(dfs(nx, states, cache, visiting))
-                        } else {
-                            None
-                        }
-                    } else { None }
-                } else { None }
-            };
-            visiting[i] = false;
-            let res = next.unwrap_or(i);
-            cache[i] = Some(res);
-            res
-        }
-        let mut jump: Vec<StateID> = Vec::with_capacity(n);
-        for i in 0..n {
-            jump.push(dfs(i, &self.states, &mut cache, &mut visiting));
-        }
-
-        let mut changed = false;
-        for i in 0..n {
-            // Rewire default
-            if let Some(d) = self.states[i].transitions.default {
-                let nd = jump[d];
-                if nd != d {
-                    self.states[i].transitions.default = Some(nd);
-                    changed = true;
-                }
-            }
-            // Rewire exceptions
-            let mapped: Vec<(u16, StateID)> = self.states[i]
-                .transitions
-                .exceptions
-                .iter()
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            for (ch, to_old) in mapped {
-                let to_new = jump[to_old];
-                if to_new != to_old {
-                    // Update edge target
-                    self.states[i]
-                        .transitions
-                        .exceptions
-                        .insert(ch, to_new);
-                    changed = true;
-                }
-            }
-            // Drop exceptions that now equal the default
-            if let Some(def) = self.states[i].transitions.default {
-                let to_remove: Vec<u16> = self.states[i]
-                    .transitions
-                    .exceptions
-                    .iter()
-                    .filter_map(|(k, v)| if *v == def { Some(*k) } else { None })
-                    .collect();
-                for ch in to_remove {
-                    self.states[i].transitions.exceptions.remove(&ch);
-                    changed = true;
-                }
-            }
-            // Also drop associated per-exception weights that no longer exist.
-            if let Some(def) = self.states[i].transitions.default {
-                let to_remove: Vec<u16> = self.states[i]
-                    .transitions
-                    .exceptions
-                    .iter()
-                    .filter_map(|(k, v)| if *v == def { Some(*k) } else { None })
-                    .collect();
-                for ch in to_remove {
-                    self.states[i].transitions.exceptions.remove(&ch);
-                    self.states[i].trans_weights_exceptions.remove(&ch);
-                }
-            }
-        }
-        changed
     }
 
     /// Drop exceptions that point to the default target and clean up their weights.
