@@ -2080,15 +2080,7 @@ local_system:
                   std::collections::HashMap::new();
               for i in 0..n {
                   let key = (self.states[i].weight.clone(), self.states[i].final_weight.clone());
-                  let pid = match canon0.entry(key) {
-                      Entry::Occupied(o) => *o.get(),
-                      Entry::Vacant(v) => {
-                          let id = canon0.len();
-                          v.insert(id);
-                          id
-                      }
-                  };
-                  part[i] = pid;
+                  part[i] = *canon0.entry(key).or_insert_with(|| canon0.len());
               }
 
               // Refine until stable
@@ -2125,15 +2117,7 @@ local_system:
                           def_cls,
                           ex,
                       );
-                      let pid = match sig2pid.entry(sig) {
-                          Entry::Occupied(o) => *o.get(),
-                          Entry::Vacant(v) => {
-                              let id = sig2pid.len();
-                              v.insert(id);
-                              id
-                          }
-                      };
-                      next_part[i] = pid;
+                      next_part[i] = *sig2pid.entry(sig).or_insert_with(|| sig2pid.len());
                   }
                   if next_part != part {
                       part = next_part;
@@ -2398,6 +2382,15 @@ local_system:
               self.start_state = *repr_to_new.get(&repr[self.start_state]).unwrap();
               self.states = new_states;
               true
+          }
+      }
+
+      // New: convenience helper to determinize and simplify in one call.
+      impl NWA {
+          pub fn determinize_simplified(&self) -> DWA {
+              let mut dwa = self.determinize();
+              dwa.simplify();
+              dwa
           }
       }
 
@@ -4842,6 +4835,171 @@ messages:
                                v.insert(id);
                                id
                            }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/weighted_automata.rs
+      Applying patch to 'src/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/weighted_automata.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Correct partition ID generation in
+      DWA partition refinement minimizer"'
+    metadata:
+  - user: |-
+      Diff of src/weighted_automata.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --workspace --profile test
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0502]: cannot borrow `canon0` as immutable because it is also borrowed as mutable
+         --> src/weighted_automata.rs:777:30
+          |
+      774 |             let pid = match canon0.entry(key) {
+          |                             ------ mutable borrow occurs here
+      ...
+      777 |                     let id = canon0.len();
+          |                              ^^^^^^ immutable borrow occurs here
+      778 |                     v.insert(id);
+          |                     - mutable borrow later used here
+
+      error[E0502]: cannot borrow `sig2pid` as immutable because it is also borrowed as mutable
+         --> src/weighted_automata.rs:822:34
+          |
+      819 |                 let pid = match sig2pid.entry(sig) {
+          |                                 ------- mutable borrow occurs here
+      ...
+      822 |                         let id = sig2pid.len();
+          |                                  ^^^^^^^ immutable borrow occurs here
+      823 |                         v.insert(id);
+          |                         - mutable borrow later used here
+
+      error[E0502]: cannot borrow `canon0` as immutable because it is also borrowed as mutable
+         --> src/weighted_automata.rs:777:30
+          |
+      774 |             let pid = match canon0.entry(key) {
+          |                             ------ mutable borrow occurs here
+      ...
+      777 |                     let id = canon0.len();
+          |                              ^^^^^^ immutable borrow occurs here
+      778 |                     v.insert(id);
+          |                     - mutable borrow later used here
+
+      error[E0502]: cannot borrow `sig2pid` as immutable because it is also borrowed as mutable
+         --> src/weighted_automata.rs:822:34
+          |
+      819 |                 let pid = match sig2pid.entry(sig) {
+          |                                 ------- mutable borrow occurs here
+      ...
+      822 |                         let id = sig2pid.len();
+          |                                  ^^^^^^^ immutable borrow occurs here
+      823 |                         v.insert(id);
+          |                         - mutable borrow later used here
+
+      For more information about this error, try `rustc --explain E0502`.
+      error: could not compile `sep1` (lib test) due to 2 previous errors
+      warning: build failed, waiting for other jobs to finish...
+      For more information about this error, try `rustc --explain E0502`.
+      error: could not compile `sep1` (lib) due to 2 previous errors
+      Process finished with exit code 101
+    metadata:
+  - assistant: |-
+      Of course. You've run into a classic Rust borrow checker error (`E0502`). This happens because the code attempts to read the length of a `HashMap` while it's already being held as mutable by the `.entry()` API.
+
+      The idiomatic way to fix this is to use the `.or_insert_with()` method on the entry, which is designed for exactly this "get or compute and insert" pattern. I'll also restore the `determinize_simplified` helper function that was removed.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file** `src/weighted_automata.rs`.
+
+      2.  **Navigate to the `minimize_partition_refinement` method.**
+
+      3.  **Fix the first borrow error:** Locate the `match canon0.entry(key)` block (around line 774). Replace the entire `match` statement and the following `part[i] = pid;` line with this single, corrected line:
+          ```rust
+          part[i] = *canon0.entry(key).or_insert_with(|| canon0.len());
+          ```
+
+      4.  **Fix the second borrow error:** A little further down in the same method, find the `match sig2pid.entry(sig)` block (around line 819). Replace that entire `match` statement and the `next_part[i] = pid;` line with this corrected version:
+          ```rust
+          next_part[i] = *sig2pid.entry(sig).or_insert_with(|| sig2pid.len());
+          ```
+
+      5.  **Restore the helper function:** Go to the very end of the `impl DWA` block (around line 949). After the closing brace `}`, add the `determinize_simplified` helper function back:
+          ```rust
+          // New: convenience helper to determinize and simplify in one call.
+          impl NWA {
+              pub fn determinize_simplified(&self) -> DWA {
+                  let mut dwa = self.determinize();
+                  dwa.simplify();
+                  dwa
+              }
+          }
+          ```
+
+      These changes will resolve the compilation errors and restore the convenient helper method.
+
+      ### Git Diff
+
+      Here is the git diff to apply the fixes:
+
+      ```diff
+      diff --git a/src/weighted_automata.rs b/src/weighted_automata.rs
+      --- a/src/weighted_automata.rs
+      +++ b/src/weighted_automata.rs
+      @@ -771,15 +771,7 @@
+                   std::collections::HashMap::new();
+               for i in 0..n {
+                   let key = (self.states[i].weight.clone(), self.states[i].final_weight.clone());
+      -            let pid = match canon0.entry(key) {
+      -                Entry::Occupied(o) => *o.get(),
+      -                Entry::Vacant(v) => {
+      -                    let id = canon0.len();
+      -                    v.insert(id);
+      -                    id
+      -                }
+      -            };
+      -            part[i] = pid;
+      +            part[i] = *canon0.entry(key).or_insert_with(|| canon0.len());
+               }
+       
+               // Refine until stable
+      @@ -816,16 +808,7 @@
+                           def_cls,
+                           ex,
+                       );
+      -                let pid = match sig2pid.entry(sig) {
+      -                    Entry::Occupied(o) => *o.get(),
+      -                    Entry::Vacant(v) => {
+      -                        let id = sig2pid.len();
+      -                        v.insert(id);
+      -                        id
+      -                    }
+      -                };
+      -                next_part[i] = pid;
+      +                next_part[i] = *sig2pid.entry(sig).or_insert_with(|| sig2pid.len());
+                   }
+                   if next_part != part {
+                       part = next_part;
+      @@ -948,3 +931,13 @@
+               true
+           }
+       }
+      +
+      +// New: convenience helper to determinize and simplify in one call.
+      +impl NWA {
+      +    pub fn determinize_simplified(&self) -> DWA {
+      +        let mut dwa = self.determinize();
+      +        dwa.simplify();
+      +        dwa
+      +    }
+      +}
 
       ```
     metadata:
