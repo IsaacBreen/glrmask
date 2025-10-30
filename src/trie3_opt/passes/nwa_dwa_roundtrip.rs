@@ -113,7 +113,8 @@ impl NwaDwaRoundtripPass {
         for (mt_id, &nwa_src) in map_mt_to_nwa.iter() {
             let node = mini.get_node(*mt_id).unwrap();
             for (ek, dm) in node.children() {
-                let mut pop = if ek.pop < 0 { 0 } else { ek.pop as usize };
+                assert!(ek.pop > 0, "Expected pop > 0 in NWA conversion");
+                let mut pop = ek.pop as usize;
                 for (&mt_dst, sids) in dm {
                     let mut cur = nwa_src;
                     // Create pop default chain
