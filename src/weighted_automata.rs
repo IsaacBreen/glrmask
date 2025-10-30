@@ -368,10 +368,12 @@ impl NWA {
             let mut aggregate_weight = Weight::zeros();
             let mut aggregate_final_weight = Weight::zeros();
             let mut critical_points = BTreeSet::new();
+            let mut is_final = false; // Flag to track if we encountered any final NWA state
 
             for (nwa_id, path_weight) in &current_composition {
                 aggregate_weight |= path_weight;
                 if let Some(final_w) = &self.states[*nwa_id].final_weight {
+                    is_final = true; // We found a final state
                     aggregate_final_weight |= &(path_weight & final_w);
                 }
                 // Collect all exception characters that define alphabet partitions.
@@ -380,7 +382,7 @@ impl NWA {
                 }
             }
             dwa.states[current_dwa_id].weight = aggregate_weight;
-            if !aggregate_final_weight.is_empty() {
+            if is_final {
                 dwa.states[current_dwa_id].final_weight = Some(aggregate_final_weight);
             }
 
@@ -575,7 +577,7 @@ mod tests {
         //   'a' -> S1
         // S1: weight={1}
         //   'b' -> S2
-        // S2: weight={1,2}, final_weight={1,2,3}
+        // S2: weight={1} & {2} = {}, final_weight=({1}&{2})&{3} = {}
         assert_eq!(dwa.states.len(), 3);
         let start_state = &dwa.states[dwa.start_state];
         assert_eq!(start_state.weight, SimpleBitset::all());
@@ -611,7 +613,7 @@ mod tests {
         // Expected DWA:
         // S0 (start): composition={0:ALL, 1:{1}}. weight=ALL|{1}. final_weight={4}
         //   'a' -> S1
-        // S1: composition={2:{1,2}}. weight={1,2}. final_weight={1,2,3}
+        // S1: composition={2:{1}&{2}}. weight={1}&{2}. final_weight=({1}&{2})&{3}
         assert_eq!(dwa.states.len(), 2);
 
         let start_state = &dwa.states[dwa.start_state];
@@ -644,8 +646,8 @@ mod tests {
         // S0 (start): weight=ALL
         //   'a' -> S1 (exception)
         //   * -> S2 (default)
-        // S1: weight={1}, final_weight={1,10}
-        // S2: weight={2}, final_weight={2,20}
+        // S1: weight={1}, final_weight={1}&{10}
+        // S2: weight={2}, final_weight={2}&{20}
         assert_eq!(dwa.states.len(), 3);
 
         let start_state = &dwa.states[dwa.start_state];
