@@ -26,7 +26,7 @@ pub fn optimize_trie3_size(
         num_passes: config.num_passes,
         prune_dead_paths: config.prune_dead_paths,
         prune_unproductive_paths: config.prune_unproductive_paths,
-        canonicalize_end_nodes: true, // Always good practice
+        canonicalize_end_nodes: config.canonicalize_end_nodes, // Always good practice
         compress_edges: config.compress_edges,
         compress_unary_chains: config.compress_edges,
         factor_common_destinations: config.factor_common_destinations,
