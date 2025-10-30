@@ -774,7 +774,7 @@ impl DWA {
             let pid = match canon0.entry(key) {
                 Entry::Occupied(o) => *o.get(),
                 Entry::Vacant(v) => {
-                    let id = v.len();
+                    let id = canon0.len();
                     v.insert(id);
                     id
                 }
@@ -819,7 +819,7 @@ impl DWA {
                 let pid = match sig2pid.entry(sig) {
                     Entry::Occupied(o) => *o.get(),
                     Entry::Vacant(v) => {
-                        let id = v.len();
+                        let id = sig2pid.len();
                         v.insert(id);
                         id
                     }
