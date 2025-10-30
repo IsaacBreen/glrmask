@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
-use crate::datastructures::hybrid_bitset::HybridBitset;
+
 // --- Part 1: SimpleBitset ---
 
 /// A simple wrapper around `RangeSetBlaze<usize>` for representing sets of numbers as weights.
@@ -34,14 +34,6 @@ impl SimpleBitset {
         SimpleBitset(RangeSetBlaze::from_iter([item]))
     }
 
-    fn from_range_set_blaze(rsb: RangeSetBlaze<usize>) -> Self {
-        SimpleBitset(rsb)
-    }
-
-    pub fn from_hybrid_bitset(hb: HybridBitset) -> Self {
-        SimpleBitset(RangeSetBlaze::from_iter(hb.iter()))
-    }
-
     /// Returns the number of elements in the set. Saturates at `usize::MAX`.
     pub fn len(&self) -> usize {
         self.0.len().try_into().unwrap_or(usize::MAX)
@@ -55,6 +47,11 @@ impl SimpleBitset {
     /// Checks if a specific number is present in the set.
     pub fn contains(&self, index: usize) -> bool {
         self.0.contains(index)
+    }
+
+    /// Returns an iterator over the numbers in the set.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.iter()
     }
 }
 
