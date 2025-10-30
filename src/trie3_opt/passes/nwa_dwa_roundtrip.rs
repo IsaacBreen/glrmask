@@ -71,16 +71,16 @@ impl NwaDwaRoundtripPass {
             for (ek, dm) in node.children() {
                 if ek.pop < 0 { continue; }
                 let pop = ek.pop as usize;
+                let mut cur = nwa_src;
+                // Create pop chain using default transitions. A pop `m` operation has `m-1` intermediate
+                // steps that consume any SID, followed by one SID-specific step.
+                for _ in 0..pop.saturating_sub(1) {
+                    let inter = nwa.add_state();
+                    // Pop steps consume any SID and don't constrain tokens.
+                    nwa.add_default_transition(cur, inter, SimpleBitset::all());
+                    cur = inter;
+                }
                 for (&mt_dst, sids) in dm {
-                    let mut cur = nwa_src;
-                    // Create pop chain using default transitions. A pop `m` operation has `m-1` intermediate
-                    // steps that consume any SID, followed by one SID-specific step.
-                    for _ in 0..pop.saturating_sub(1) {
-                        let inter = nwa.add_state();
-                        // Pop steps consume any SID and don't constrain tokens.
-                        nwa.add_default_transition(cur, inter, SimpleBitset::all());
-                        cur = inter;
-                    }
 
                     // The last step is not a default transition, but specific to the SIDs.
                     let nwa_dst = map_mt_to_nwa[&mt_dst];
