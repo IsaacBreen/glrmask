@@ -580,19 +580,34 @@ local_system:
               if self.states.is_empty() {
                   return;
               }
-              let mut changed = true;
+              // Normalize trivial redundancies up-front.
+              self.normalize_edges_inplace();
+              self.prune_unreachable();
+
+              let mut changed_any = true;
               let mut passes = 0usize;
-              while changed && passes < 10 {
+              while changed_any && passes < 10 {
                   passes += 1;
-                  changed = false;
-                  if self.collapse_simple_edges() {
-                      changed = true;
+                  changed_any = false;
+
+                  // 1) Normalize edges (drop exceptions equal to default).
+                  if self.normalize_edges_inplace() {
+                      changed_any = true;
                   }
-                  if self.merge_equivalent_states() {
-                      changed = true;
+                  // 2) Partition-refinement DFA minimization (language-preserving).
+                  if self.minimize_partition_refinement() {
+                      changed_any = true;
+                  }
+                  // 3) Safely collapse default-only non-final chains.
+                  if self.collapse_simple_edges() {
+                      changed_any = true;
+                  }
+                  // 4) Final tidy-up per pass.
+                  if self.normalize_edges_inplace() {
+                      changed_any = true;
                   }
                   if self.prune_unreachable() {
-                      changed = true;
+                      changed_any = true;
                   }
               }
           }
@@ -625,9 +640,27 @@ local_system:
                       return i;
                   }
                   visiting[i] = true;
-                  let next = states[i]
-                      .simple_default_target()
-                      .map(|nx| dfs(nx, states, cache, visiting));
+                  // A state is skippable if:
+                  //  - it has no final_weight,
+                  //  - it has no exception transitions,
+                  //  - it has a default transition to nx,
+                  //  - and the default target is also non-final.
+                  // This preserves language semantics even for strings ending right after entering i.
+                  let next = {
+                      let st = &states[i];
+                      if st.final_weight.is_none()
+                          && st.transitions.exceptions.is_empty()
+                      {
+                          if let Some(nx) = st.transitions.default {
+                              let tgt = &states[nx];
+                              if tgt.final_weight.is_none() {
+                                  Some(dfs(nx, states, cache, visiting))
+                              } else {
+                                  None
+                              }
+                          } else { None }
+                      } else { None }
+                  };
                   visiting[i] = false;
                   let res = next.unwrap_or(i);
                   cache[i] = Some(res);
@@ -658,6 +691,7 @@ local_system:
                   for (ch, to_old) in mapped {
                       let to_new = jump[to_old];
                       if to_new != to_old {
+                          // Update edge target
                           self.states[i]
                               .transitions
                               .exceptions
@@ -678,8 +712,235 @@ local_system:
                           changed = true;
                       }
                   }
+                  // Also drop associated per-exception weights that no longer exist.
+                  if let Some(def) = self.states[i].transitions.default {
+                      let to_remove: Vec<u16> = self.states[i]
+                          .transitions
+                          .exceptions
+                          .iter()
+                          .filter_map(|(k, v)| if *v == def { Some(*k) } else { None })
+                          .collect();
+                      for ch in to_remove {
+                          self.states[i].transitions.exceptions.remove(&ch);
+                          self.states[i].trans_weights_exceptions.remove(&ch);
+                      }
+                  }
               }
               changed
+          }
+
+          /// Drop exceptions that point to the default target and clean up their weights.
+          ///
+          /// Returns true if any exception was removed.
+          pub fn normalize_edges_inplace(&mut self) -> bool {
+              let mut changed = false;
+              for st in &mut self.states {
+                  if let Some(def) = st.transitions.default {
+                      let to_remove: Vec<u16> = st
+                          .transitions
+                          .exceptions
+                          .iter()
+                          .filter_map(|(ch, tgt)| if *tgt == def { Some(*ch) } else { None })
+                          .collect();
+                      if !to_remove.is_empty() {
+                          changed = true;
+                      }
+                      for ch in to_remove {
+                          st.transitions.exceptions.remove(&ch);
+                          st.trans_weights_exceptions.remove(&ch);
+                      }
+                  }
+              }
+              changed
+          }
+
+          /// Partition-refinement DFA minimization that preserves:
+          /// - state.weight
+          /// - state.final_weight
+          /// - transition structure up to character classes (default + exceptions that differ from default)
+          ///
+          /// Missing transitions are treated as going to an implicit sink partition,
+          /// enabling merging of partial and explicit-sink behaviors when equivalent.
+          ///
+          /// Returns true if any merge happened.
+          pub fn minimize_partition_refinement(&mut self) -> bool {
+              let n = self.states.len();
+              if n <= 1 {
+                  return false;
+              }
+              // Use an implicit sink partition id for "no transition".
+              let sink_pid: usize = n; // one beyond valid state indices
+
+              // Initial partition by observable outputs: (weight, final_weight)
+              use std::collections::hash_map::Entry;
+              let mut part: Vec<usize> = vec![0; n];
+              let mut canon0: std::collections::HashMap<(Weight, Option<Weight>), usize> =
+                  std::collections::HashMap::new();
+              for i in 0..n {
+                  let key = (self.states[i].weight.clone(), self.states[i].final_weight.clone());
+                  let pid = match canon0.entry(key) {
+                      Entry::Occupied(o) => *o.get(),
+                      Entry::Vacant(v) => {
+                          let id = v.len();
+                          v.insert(id);
+                          id
+                      }
+                  };
+                  part[i] = pid;
+              }
+
+              // Refine until stable
+              let mut changed = true;
+              let mut rounds = 0usize;
+              while changed && rounds < 30 {
+                  rounds += 1;
+                  changed = false;
+                  let mut next_part: Vec<usize> = vec![0; n];
+                  let mut sig2pid: std::collections::HashMap<
+                      (Weight, Option<Weight>, usize, Vec<(u16, usize)>),
+                      usize,
+                  > = std::collections::HashMap::new();
+
+                  for i in 0..n {
+                      let st = &self.states[i];
+                      let def_cls = if let Some(d) = st.transitions.default {
+                          part[d]
+                      } else {
+                          sink_pid
+                      };
+                      // Only keep exceptions whose class differs from default class.
+                      let mut ex: Vec<(u16, usize)> = Vec::with_capacity(st.transitions.exceptions.len());
+                      for (ch, tgt) in &st.transitions.exceptions {
+                          let cls = part[*tgt];
+                          if cls != def_cls {
+                              ex.push((*ch, cls));
+                          }
+                      }
+                      // ex is already in key order due to BTreeMap iteration.
+                      let sig = (
+                          st.weight.clone(),
+                          st.final_weight.clone(),
+                          def_cls,
+                          ex,
+                      );
+                      let pid = match sig2pid.entry(sig) {
+                          Entry::Occupied(o) => *o.get(),
+                          Entry::Vacant(v) => {
+                              let id = v.len();
+                              v.insert(id);
+                              id
+                          }
+                      };
+                      next_part[i] = pid;
+                  }
+                  if next_part != part {
+                      part = next_part;
+                      changed = true;
+                  }
+              }
+
+              let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+              for (i, p) in part.iter().enumerate() {
+                  groups.entry(*p).or_default().push(i);
+              }
+              if groups.len() == n {
+                  return false; // nothing to merge
+              }
+
+              // Build mapping from partition -> new state id
+              let mut pid_to_new: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+              let mut new_states: Vec<DWAState> = Vec::with_capacity(groups.len());
+              for (pid, members) in &groups {
+                  let rep = members[0];
+                  let rep_state = &self.states[rep];
+                  // Representative default class (after refinement, all members share it)
+                  let def_cls = if let Some(d) = rep_state.transitions.default {
+                      part[d]
+                  } else {
+                      sink_pid
+                  };
+                  let mut st = DWAState::default();
+                  st.weight = rep_state.weight.clone();
+                  st.final_weight = rep_state.final_weight.clone();
+                  st.transitions.default = if def_cls == sink_pid {
+                      None
+                  } else {
+                      Some(0) // will be fixed after pid_to_new is filled
+                  };
+                  // Exceptions differing from default class
+                  for (ch, tgt) in &rep_state.transitions.exceptions {
+                      let cls = part[*tgt];
+                      if cls != def_cls {
+                          st.transitions.exceptions.insert(*ch, 0); // placeholder
+                      }
+                  }
+                  // Aggregate per-edge weights across all members.
+                  if st.transitions.default.is_some() {
+                      let mut agg_def: Option<Weight> = None;
+                      for &old in members {
+                          if let Some(w) = self.states[old].trans_weight_default.as_ref() {
+                              if let Some(ref mut a) = agg_def {
+                                  *a |= w;
+                              } else {
+                                  agg_def = Some(w.clone());
+                              }
+                          }
+                      }
+                      st.trans_weight_default = agg_def;
+                  }
+                  let ex_keys: Vec<u16> = st.transitions.exceptions.keys().cloned().collect();
+                  for ch in ex_keys {
+                      let mut agg: Option<Weight> = None;
+                      for &old in members {
+                          if let Some(w) = self.states[old].trans_weights_exceptions.get(&ch) {
+                              if let Some(ref mut a) = agg {
+                                  *a |= w;
+                              } else {
+                                  agg = Some(w.clone());
+                              }
+                          }
+                      }
+                      if let Some(w) = agg {
+                          st.trans_weights_exceptions.insert(ch, w);
+                      }
+                  }
+                  let new_id = new_states.len();
+                  pid_to_new.insert(*pid, new_id);
+                  new_states.push(st);
+              }
+              // Fix transition targets now that we have pid_to_new.
+              for (pid, members) in &groups {
+                  let new_id = *pid_to_new.get(pid).unwrap();
+                  let rep = members[0];
+                  let rep_state = &self.states[rep];
+                  // Default
+                  let def_cls = if let Some(d) = rep_state.transitions.default {
+                      part[d]
+                  } else {
+                      sink_pid
+                  };
+                  if let Some(ref mut d) = new_states[new_id].transitions.default {
+                      *d = *pid_to_new.get(&def_cls).unwrap();
+                  }
+                  // Exceptions
+                  let ex_old = new_states[new_id].transitions.exceptions.clone();
+                  new_states[new_id].transitions.exceptions.clear();
+                  for (ch, _) in ex_old {
+                      // For representative, we already know the class to use.
+                      let cls = part[*rep_state.transitions.exceptions.get(&ch).unwrap()];
+                      new_states[new_id]
+                          .transitions
+                          .exceptions
+                          .insert(ch, *pid_to_new.get(&cls).unwrap());
+                  }
+              }
+              self.states = new_states;
+              // Normalize edges (drop redundant exceptions)
+              self.normalize_edges_inplace();
+              // Remap start state
+              let start_pid = part[self.start_state];
+              self.start_state = *pid_to_new.get(&start_pid).unwrap();
+              true
           }
 
           /// Remove states that are unreachable from `start_state` and renumber densely.
@@ -823,6 +1084,13 @@ local_system:
                       for k in to_remove {
                           st.transitions.exceptions.remove(&k);
                       }
+                  }
+              }
+              // Also normalize stray per-exception weights that might be dangling.
+              for st in &mut new_states {
+                  let keys: Vec<u16> = st.trans_weights_exceptions.keys().cloned().collect();
+                  for k in keys {
+                      if !st.transitions.exceptions.contains_key(&k) { st.trans_weights_exceptions.remove(&k); }
                   }
               }
               self.start_state = *repr_to_new.get(&repr[self.start_state]).unwrap();
@@ -2401,15 +2669,6 @@ local_system:
           }
       }
 
-      // New: convenience helper to determinize and simplify in one call.
-      impl NWA {
-          pub fn determinize_simplified(&self) -> DWA {
-              let mut dwa = self.determinize();
-              dwa.simplify();
-              dwa
-          }
-      }
-
       // --- Display Implementations for Debugging ---
 
       // --- Display Implementations for Debugging ---
@@ -2886,7 +3145,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -3494,19 +3753,34 @@ messages:
               if self.states.is_empty() {
                   return;
               }
-              let mut changed = true;
+              // Normalize trivial redundancies up-front.
+              self.normalize_edges_inplace();
+              self.prune_unreachable();
+
+              let mut changed_any = true;
               let mut passes = 0usize;
-              while changed && passes < 10 {
+              while changed_any && passes < 10 {
                   passes += 1;
-                  changed = false;
-                  if self.collapse_simple_edges() {
-                      changed = true;
+                  changed_any = false;
+
+                  // 1) Normalize edges (drop exceptions equal to default).
+                  if self.normalize_edges_inplace() {
+                      changed_any = true;
                   }
-                  if self.merge_equivalent_states() {
-                      changed = true;
+                  // 2) Partition-refinement DFA minimization (language-preserving).
+                  if self.minimize_partition_refinement() {
+                      changed_any = true;
+                  }
+                  // 3) Safely collapse default-only non-final chains.
+                  if self.collapse_simple_edges() {
+                      changed_any = true;
+                  }
+                  // 4) Final tidy-up per pass.
+                  if self.normalize_edges_inplace() {
+                      changed_any = true;
                   }
                   if self.prune_unreachable() {
-                      changed = true;
+                      changed_any = true;
                   }
               }
           }
@@ -3539,9 +3813,27 @@ messages:
                       return i;
                   }
                   visiting[i] = true;
-                  let next = states[i]
-                      .simple_default_target()
-                      .map(|nx| dfs(nx, states, cache, visiting));
+                  // A state is skippable if:
+                  //  - it has no final_weight,
+                  //  - it has no exception transitions,
+                  //  - it has a default transition to nx,
+                  //  - and the default target is also non-final.
+                  // This preserves language semantics even for strings ending right after entering i.
+                  let next = {
+                      let st = &states[i];
+                      if st.final_weight.is_none()
+                          && st.transitions.exceptions.is_empty()
+                      {
+                          if let Some(nx) = st.transitions.default {
+                              let tgt = &states[nx];
+                              if tgt.final_weight.is_none() {
+                                  Some(dfs(nx, states, cache, visiting))
+                              } else {
+                                  None
+                              }
+                          } else { None }
+                      } else { None }
+                  };
                   visiting[i] = false;
                   let res = next.unwrap_or(i);
                   cache[i] = Some(res);
@@ -3572,6 +3864,7 @@ messages:
                   for (ch, to_old) in mapped {
                       let to_new = jump[to_old];
                       if to_new != to_old {
+                          // Update edge target
                           self.states[i]
                               .transitions
                               .exceptions
@@ -3592,8 +3885,235 @@ messages:
                           changed = true;
                       }
                   }
+                  // Also drop associated per-exception weights that no longer exist.
+                  if let Some(def) = self.states[i].transitions.default {
+                      let to_remove: Vec<u16> = self.states[i]
+                          .transitions
+                          .exceptions
+                          .iter()
+                          .filter_map(|(k, v)| if *v == def { Some(*k) } else { None })
+                          .collect();
+                      for ch in to_remove {
+                          self.states[i].transitions.exceptions.remove(&ch);
+                          self.states[i].trans_weights_exceptions.remove(&ch);
+                      }
+                  }
               }
               changed
+          }
+
+          /// Drop exceptions that point to the default target and clean up their weights.
+          ///
+          /// Returns true if any exception was removed.
+          pub fn normalize_edges_inplace(&mut self) -> bool {
+              let mut changed = false;
+              for st in &mut self.states {
+                  if let Some(def) = st.transitions.default {
+                      let to_remove: Vec<u16> = st
+                          .transitions
+                          .exceptions
+                          .iter()
+                          .filter_map(|(ch, tgt)| if *tgt == def { Some(*ch) } else { None })
+                          .collect();
+                      if !to_remove.is_empty() {
+                          changed = true;
+                      }
+                      for ch in to_remove {
+                          st.transitions.exceptions.remove(&ch);
+                          st.trans_weights_exceptions.remove(&ch);
+                      }
+                  }
+              }
+              changed
+          }
+
+          /// Partition-refinement DFA minimization that preserves:
+          /// - state.weight
+          /// - state.final_weight
+          /// - transition structure up to character classes (default + exceptions that differ from default)
+          ///
+          /// Missing transitions are treated as going to an implicit sink partition,
+          /// enabling merging of partial and explicit-sink behaviors when equivalent.
+          ///
+          /// Returns true if any merge happened.
+          pub fn minimize_partition_refinement(&mut self) -> bool {
+              let n = self.states.len();
+              if n <= 1 {
+                  return false;
+              }
+              // Use an implicit sink partition id for "no transition".
+              let sink_pid: usize = n; // one beyond valid state indices
+
+              // Initial partition by observable outputs: (weight, final_weight)
+              use std::collections::hash_map::Entry;
+              let mut part: Vec<usize> = vec![0; n];
+              let mut canon0: std::collections::HashMap<(Weight, Option<Weight>), usize> =
+                  std::collections::HashMap::new();
+              for i in 0..n {
+                  let key = (self.states[i].weight.clone(), self.states[i].final_weight.clone());
+                  let pid = match canon0.entry(key) {
+                      Entry::Occupied(o) => *o.get(),
+                      Entry::Vacant(v) => {
+                          let id = v.len();
+                          v.insert(id);
+                          id
+                      }
+                  };
+                  part[i] = pid;
+              }
+
+              // Refine until stable
+              let mut changed = true;
+              let mut rounds = 0usize;
+              while changed && rounds < 30 {
+                  rounds += 1;
+                  changed = false;
+                  let mut next_part: Vec<usize> = vec![0; n];
+                  let mut sig2pid: std::collections::HashMap<
+                      (Weight, Option<Weight>, usize, Vec<(u16, usize)>),
+                      usize,
+                  > = std::collections::HashMap::new();
+
+                  for i in 0..n {
+                      let st = &self.states[i];
+                      let def_cls = if let Some(d) = st.transitions.default {
+                          part[d]
+                      } else {
+                          sink_pid
+                      };
+                      // Only keep exceptions whose class differs from default class.
+                      let mut ex: Vec<(u16, usize)> = Vec::with_capacity(st.transitions.exceptions.len());
+                      for (ch, tgt) in &st.transitions.exceptions {
+                          let cls = part[*tgt];
+                          if cls != def_cls {
+                              ex.push((*ch, cls));
+                          }
+                      }
+                      // ex is already in key order due to BTreeMap iteration.
+                      let sig = (
+                          st.weight.clone(),
+                          st.final_weight.clone(),
+                          def_cls,
+                          ex,
+                      );
+                      let pid = match sig2pid.entry(sig) {
+                          Entry::Occupied(o) => *o.get(),
+                          Entry::Vacant(v) => {
+                              let id = v.len();
+                              v.insert(id);
+                              id
+                          }
+                      };
+                      next_part[i] = pid;
+                  }
+                  if next_part != part {
+                      part = next_part;
+                      changed = true;
+                  }
+              }
+
+              let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+              for (i, p) in part.iter().enumerate() {
+                  groups.entry(*p).or_default().push(i);
+              }
+              if groups.len() == n {
+                  return false; // nothing to merge
+              }
+
+              // Build mapping from partition -> new state id
+              let mut pid_to_new: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+              let mut new_states: Vec<DWAState> = Vec::with_capacity(groups.len());
+              for (pid, members) in &groups {
+                  let rep = members[0];
+                  let rep_state = &self.states[rep];
+                  // Representative default class (after refinement, all members share it)
+                  let def_cls = if let Some(d) = rep_state.transitions.default {
+                      part[d]
+                  } else {
+                      sink_pid
+                  };
+                  let mut st = DWAState::default();
+                  st.weight = rep_state.weight.clone();
+                  st.final_weight = rep_state.final_weight.clone();
+                  st.transitions.default = if def_cls == sink_pid {
+                      None
+                  } else {
+                      Some(0) // will be fixed after pid_to_new is filled
+                  };
+                  // Exceptions differing from default class
+                  for (ch, tgt) in &rep_state.transitions.exceptions {
+                      let cls = part[*tgt];
+                      if cls != def_cls {
+                          st.transitions.exceptions.insert(*ch, 0); // placeholder
+                      }
+                  }
+                  // Aggregate per-edge weights across all members.
+                  if st.transitions.default.is_some() {
+                      let mut agg_def: Option<Weight> = None;
+                      for &old in members {
+                          if let Some(w) = self.states[old].trans_weight_default.as_ref() {
+                              if let Some(ref mut a) = agg_def {
+                                  *a |= w;
+                              } else {
+                                  agg_def = Some(w.clone());
+                              }
+                          }
+                      }
+                      st.trans_weight_default = agg_def;
+                  }
+                  let ex_keys: Vec<u16> = st.transitions.exceptions.keys().cloned().collect();
+                  for ch in ex_keys {
+                      let mut agg: Option<Weight> = None;
+                      for &old in members {
+                          if let Some(w) = self.states[old].trans_weights_exceptions.get(&ch) {
+                              if let Some(ref mut a) = agg {
+                                  *a |= w;
+                              } else {
+                                  agg = Some(w.clone());
+                              }
+                          }
+                      }
+                      if let Some(w) = agg {
+                          st.trans_weights_exceptions.insert(ch, w);
+                      }
+                  }
+                  let new_id = new_states.len();
+                  pid_to_new.insert(*pid, new_id);
+                  new_states.push(st);
+              }
+              // Fix transition targets now that we have pid_to_new.
+              for (pid, members) in &groups {
+                  let new_id = *pid_to_new.get(pid).unwrap();
+                  let rep = members[0];
+                  let rep_state = &self.states[rep];
+                  // Default
+                  let def_cls = if let Some(d) = rep_state.transitions.default {
+                      part[d]
+                  } else {
+                      sink_pid
+                  };
+                  if let Some(ref mut d) = new_states[new_id].transitions.default {
+                      *d = *pid_to_new.get(&def_cls).unwrap();
+                  }
+                  // Exceptions
+                  let ex_old = new_states[new_id].transitions.exceptions.clone();
+                  new_states[new_id].transitions.exceptions.clear();
+                  for (ch, _) in ex_old {
+                      // For representative, we already know the class to use.
+                      let cls = part[*rep_state.transitions.exceptions.get(&ch).unwrap()];
+                      new_states[new_id]
+                          .transitions
+                          .exceptions
+                          .insert(ch, *pid_to_new.get(&cls).unwrap());
+                  }
+              }
+              self.states = new_states;
+              // Normalize edges (drop redundant exceptions)
+              self.normalize_edges_inplace();
+              // Remap start state
+              let start_pid = part[self.start_state];
+              self.start_state = *pid_to_new.get(&start_pid).unwrap();
+              true
           }
 
           /// Remove states that are unreachable from `start_state` and renumber densely.
@@ -3737,6 +4257,13 @@ messages:
                       for k in to_remove {
                           st.transitions.exceptions.remove(&k);
                       }
+                  }
+              }
+              // Also normalize stray per-exception weights that might be dangling.
+              for st in &mut new_states {
+                  let keys: Vec<u16> = st.trans_weights_exceptions.keys().cloned().collect();
+                  for k in keys {
+                      if !st.transitions.exceptions.contains_key(&k) { st.trans_weights_exceptions.remove(&k); }
                   }
               }
               self.start_state = *repr_to_new.get(&repr[self.start_state]).unwrap();
@@ -4223,8 +4750,7 @@ messages:
       ```
     metadata:
       filename: src/weighted_automata.rs
-  - user: Make the DWA simplification code better. We want to aggressively minimize
-      it. As few states and as few transitions as possible.
+  - user: Remove determinize_simplified.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4244,456 +4770,50 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are the concrete steps to aggressively minimize your DWA:
+      The `determinize_simplified` method, which was a convenience wrapper around `determinize` followed by `simplify`, has been removed from the `NWA` implementation.
 
-      Step-by-step instructions
+      Here are the step-by-step instructions and the corresponding git diff.
 
-      1) Update the simplification pipeline
-      - Open src/weighted_automata.rs.
-      - In impl DWA, replace the simplify() method to:
-        - Normalize edges first (drop exceptions that equal the default).
-        - Prune unreachable states early.
-        - Run a new DFA-style partition-refinement minimizer until a fixed point.
-        - Safely collapse default-only non-final chains.
-        - Normalize and prune again.
-        - Repeat for a few passes or until no change.
+      ### Step-by-step Instructions
 
-      2) Make collapsing default-only chains safe and more effective
-      - In collapse_simple_edges(), replace the reliance on simple_default_target() with a local, stricter check:
-        - A state i is skippable if:
-          - i has no final_weight,
-          - i has no exceptions,
-          - i has a default transition to nx,
-          - and the target nx also has no final_weight.
-        - This ensures language-preserving rewiring and is more aggressive than the previous equality-of-weights check.
+      In the file `src/weighted_automata.rs`, remove the `impl NWA` block containing the `determinize_simplified` function, which starts around line 705.
 
-      3) Add a reusable edge-normalization helper
-      - Add DWA::normalize_edges_inplace() that:
-        - Removes exceptions whose target equals the default target.
-        - Drops corresponding trans_weights_exceptions entries for removed exceptions.
-        - Returns true if any change occurred.
-      - This centralizes the exception-dropping logic which previously appeared in multiple places.
+      1.  **Open** `src/weighted_automata.rs`.
+      2.  **Delete** the following lines (approximately lines 705-711):
 
-      4) Add a true DFA-style minimizer
-      - Add DWA::minimize_partition_refinement() that:
-        - Performs partition refinement over the DWA with respect to:
-          - state.weight and state.final_weight,
-          - the default destination class (or an implicit sink for None),
-          - normalized exception character-to-class mapping (only where it differs from the default).
-        - Uses an implicit sink partition for missing transitions so that states with explicit sink-like behavior can be merged with partial (None) transitions when equivalent in language.
-        - Rebuilds the automaton across partitions:
-          - Keeps the start_state mapped into the representative of its partition.
-          - Rewrites transitions to partition representatives.
-          - Aggregates per-edge trans_weight_default and trans_weights_exceptions by OR-ing weights from all merged states.
-          - Normalizes edges again to drop exceptions that match the new default.
+          ```rust
+          // New: convenience helper to determinize and simplify in one call.
+          impl NWA {
+              pub fn determinize_simplified(&self) -> DWA {
+                  let mut dwa = self.determinize();
+                  dwa.simplify();
+                  dwa
+              }
+          }
+          ```
 
-      5) Keep merge_equivalent_states() for compatibility (do not remove)
-      - Leave merge_equivalent_states() intact (some users may call it directly).
-      - The simplify() routine will rely on the new partition-refinement minimizer instead, which is strictly more powerful.
-
-      6) Do a quick scan for correctness and performance notes
-      - This approach is language-preserving and aggressively reduces states and transitions.
-      - Default-only state collapsing is now guarded to avoid semantic changes at end-of-input.
-      - Partition refinement avoids iterating over the entire alphabet by:
-        - Representing the mapping via default class + exceptions-different-from-default.
-      - Edge weights on transitions are preserved conservatively by aggregating via BitOr across merged states.
-
-      Git diff
+      ### Git Diff
 
       ```diff
       diff --git a/src/weighted_automata.rs b/src/weighted_automata.rs
       --- a/src/weighted_automata.rs
       +++ b/src/weighted_automata.rs
-      @@ -439,23 +439,41 @@
-           /// determinize() is intentionally left unchanged; call this afterwards if you want a smaller DWA.
-           pub fn simplify(&mut self) {
-               if self.states.is_empty() {
-                   return;
-               }
-      -        let mut changed = true;
-      -        let mut passes = 0usize;
-      -        while changed && passes < 10 {
-      -            passes += 1;
-      -            changed = false;
-      -            if self.collapse_simple_edges() {
-      -                changed = true;
-      -            }
-      -            if self.merge_equivalent_states() {
-      -                changed = true;
-      -            }
-      -            if self.prune_unreachable() {
-      -                changed = true;
-      -            }
-      -        }
-      +        // Normalize trivial redundancies up-front.
-      +        self.normalize_edges_inplace();
-      +        self.prune_unreachable();
-      +
-      +        let mut changed_any = true;
-      +        let mut passes = 0usize;
-      +        while changed_any && passes < 10 {
-      +            passes += 1;
-      +            changed_any = false;
-      +
-      +            // 1) Normalize edges (drop exceptions equal to default).
-      +            if self.normalize_edges_inplace() {
-      +                changed_any = true;
-      +            }
-      +            // 2) Partition-refinement DFA minimization (language-preserving).
-      +            if self.minimize_partition_refinement() {
-      +                changed_any = true;
-      +            }
-      +            // 3) Safely collapse default-only non-final chains.
-      +            if self.collapse_simple_edges() {
-      +                changed_any = true;
-      +            }
-      +            // 4) Final tidy-up per pass.
-      +            if self.normalize_edges_inplace() {
-      +                changed_any = true;
-      +            }
-      +            if self.prune_unreachable() {
-      +                changed_any = true;
-      +            }
-      +        }
-           }
-       
-           /// Rewire transitions to "skip" over simple default-only states.
-           /// A state S is considered simple if `S.simple_default_target().is_some()`.
-           /// After rewiring, any exception that equals the (new) default target is removed.
-      @@ -466,25 +484,42 @@
-               }
-               // Build a jump table that follows default-only "simple" chains to their first non-simple endpoint.
-               let n = self.states.len();
-               let mut cache: Vec<Option<StateID>> = vec![None; n];
-               let mut visiting: Vec<bool> = vec![false; n];
-      -        fn dfs(
-      +        fn dfs(
-                   i: StateID,
-                   states: &Vec<DWAState>,
-                   cache: &mut Vec<Option<StateID>>,
-                   visiting: &mut Vec<bool>,
-               ) -> StateID {
-                   if let Some(v) = cache[i] {
-                       return v;
-                   }
-                   if visiting[i] {
-                       // Cycle among "simple" states; pick self as representative to break the loop.
-                       cache[i] = Some(i);
-                       return i;
-                   }
-                   visiting[i] = true;
-      -            let next = states[i]
-      -                .simple_default_target()
-      -                .map(|nx| dfs(nx, states, cache, visiting));
-      +            // A state is skippable if:
-      +            //  - it has no final_weight,
-      +            //  - it has no exception transitions,
-      +            //  - it has a default transition to nx,
-      +            //  - and the default target is also non-final.
-      +            // This preserves language semantics even for strings ending right after entering i.
-      +            let next = {
-      +                let st = &states[i];
-      +                if st.final_weight.is_none()
-      +                    && st.transitions.exceptions.is_empty()
-      +                {
-      +                    if let Some(nx) = st.transitions.default {
-      +                        let tgt = &states[nx];
-      +                        if tgt.final_weight.is_none() {
-      +                            Some(dfs(nx, states, cache, visiting))
-      +                        } else {
-      +                            None
-      +                        }
-      +                    } else { None }
-      +                } else { None }
-      +            };
-                   visiting[i] = false;
-                   let res = next.unwrap_or(i);
-                   cache[i] = Some(res);
-                   res
-               }
-      @@ -506,6 +541,9 @@
-                       .map(|(k, v)| (*k, *v))
-                       .collect();
-                   for (ch, to_old) in mapped {
-                       let to_new = jump[to_old];
-                       if to_new != to_old {
-      +                    // Update edge target
-                           self.states[i]
-                               .transitions
-                               .exceptions
-                               .insert(ch, to_new);
-                           changed = true;
-      @@ -521,9 +559,155 @@
-                       for ch in to_remove {
-                           self.states[i].transitions.exceptions.remove(&ch);
-                           changed = true;
-                       }
-                   }
-      +            // Also drop associated per-exception weights that no longer exist.
-      +            if let Some(def) = self.states[i].transitions.default {
-      +                let to_remove: Vec<u16> = self.states[i]
-      +                    .transitions
-      +                    .exceptions
-      +                    .iter()
-      +                    .filter_map(|(k, v)| if *v == def { Some(*k) } else { None })
-      +                    .collect();
-      +                for ch in to_remove {
-      +                    self.states[i].transitions.exceptions.remove(&ch);
-      +                    self.states[i].trans_weights_exceptions.remove(&ch);
-      +                }
-      +            }
-               }
-               changed
-           }
-       
-      +    /// Drop exceptions that point to the default target and clean up their weights.
-      +    ///
-      +    /// Returns true if any exception was removed.
-      +    pub fn normalize_edges_inplace(&mut self) -> bool {
-      +        let mut changed = false;
-      +        for st in &mut self.states {
-      +            if let Some(def) = st.transitions.default {
-      +                let to_remove: Vec<u16> = st
-      +                    .transitions
-      +                    .exceptions
-      +                    .iter()
-      +                    .filter_map(|(ch, tgt)| if *tgt == def { Some(*ch) } else { None })
-      +                    .collect();
-      +                if !to_remove.is_empty() {
-      +                    changed = true;
-      +                }
-      +                for ch in to_remove {
-      +                    st.transitions.exceptions.remove(&ch);
-      +                    st.trans_weights_exceptions.remove(&ch);
-      +                }
-      +            }
-      +        }
-      +        changed
-      +    }
-      +
-      +    /// Partition-refinement DFA minimization that preserves:
-      +    /// - state.weight
-      +    /// - state.final_weight
-      +    /// - transition structure up to character classes (default + exceptions that differ from default)
-      +    ///
-      +    /// Missing transitions are treated as going to an implicit sink partition,
-      +    /// enabling merging of partial and explicit-sink behaviors when equivalent.
-      +    ///
-      +    /// Returns true if any merge happened.
-      +    pub fn minimize_partition_refinement(&mut self) -> bool {
-      +        let n = self.states.len();
-      +        if n <= 1 {
-      +            return false;
-      +        }
-      +        // Use an implicit sink partition id for "no transition".
-      +        let sink_pid: usize = n; // one beyond valid state indices
-      +
-      +        // Initial partition by observable outputs: (weight, final_weight)
-      +        use std::collections::hash_map::Entry;
-      +        let mut part: Vec<usize> = vec![0; n];
-      +        let mut canon0: std::collections::HashMap<(Weight, Option<Weight>), usize> =
-      +            std::collections::HashMap::new();
-      +        for i in 0..n {
-      +            let key = (self.states[i].weight.clone(), self.states[i].final_weight.clone());
-      +            let pid = match canon0.entry(key) {
-      +                Entry::Occupied(o) => *o.get(),
-      +                Entry::Vacant(v) => {
-      +                    let id = v.len();
-      +                    v.insert(id);
-      +                    id
-      +                }
-      +            };
-      +            part[i] = pid;
-      +        }
-      +
-      +        // Refine until stable
-      +        let mut changed = true;
-      +        let mut rounds = 0usize;
-      +        while changed && rounds < 30 {
-      +            rounds += 1;
-      +            changed = false;
-      +            let mut next_part: Vec<usize> = vec![0; n];
-      +            let mut sig2pid: std::collections::HashMap<
-      +                (Weight, Option<Weight>, usize, Vec<(u16, usize)>),
-      +                usize,
-      +            > = std::collections::HashMap::new();
-      +
-      +            for i in 0..n {
-      +                let st = &self.states[i];
-      +                let def_cls = if let Some(d) = st.transitions.default {
-      +                    part[d]
-      +                } else {
-      +                    sink_pid
-      +                };
-      +                // Only keep exceptions whose class differs from default class.
-      +                let mut ex: Vec<(u16, usize)> = Vec::with_capacity(st.transitions.exceptions.len());
-      +                for (ch, tgt) in &st.transitions.exceptions {
-      +                    let cls = part[*tgt];
-      +                    if cls != def_cls {
-      +                        ex.push((*ch, cls));
-      +                    }
-      +                }
-      +                // ex is already in key order due to BTreeMap iteration.
-      +                let sig = (
-      +                    st.weight.clone(),
-      +                    st.final_weight.clone(),
-      +                    def_cls,
-      +                    ex,
-      +                );
-      +                let pid = match sig2pid.entry(sig) {
-      +                    Entry::Occupied(o) => *o.get(),
-      +                    Entry::Vacant(v) => {
-      +                        let id = v.len();
-      +                        v.insert(id);
-      +                        id
-      +                    }
-      +                };
-      +                next_part[i] = pid;
-      +            }
-      +            if next_part != part {
-      +                part = next_part;
-      +                changed = true;
-      +            }
-      +        }
-      +
-      +        let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
-      +        for (i, p) in part.iter().enumerate() {
-      +            groups.entry(*p).or_default().push(i);
-      +        }
-      +        if groups.len() == n {
-      +            return false; // nothing to merge
-      +        }
-      +
-      +        // Build mapping from partition -> new state id
-      +        let mut pid_to_new: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-      +        let mut new_states: Vec<DWAState> = Vec::with_capacity(groups.len());
-      +        for (pid, members) in &groups {
-      +            let rep = members[0];
-      +            let rep_state = &self.states[rep];
-      +            // Representative default class (after refinement, all members share it)
-      +            let def_cls = if let Some(d) = rep_state.transitions.default {
-      +                part[d]
-      +            } else {
-      +                sink_pid
-      +            };
-      +            let mut st = DWAState::default();
-      +            st.weight = rep_state.weight.clone();
-      +            st.final_weight = rep_state.final_weight.clone();
-      +            st.transitions.default = if def_cls == sink_pid {
-      +                None
-      +            } else {
-      +                Some(0) // will be fixed after pid_to_new is filled
-      +            };
-      +            // Exceptions differing from default class
-      +            for (ch, tgt) in &rep_state.transitions.exceptions {
-      +                let cls = part[*tgt];
-      +                if cls != def_cls {
-      +                    st.transitions.exceptions.insert(*ch, 0); // placeholder
-      +                }
-      +            }
-      +            // Aggregate per-edge weights across all members.
-      +            if st.transitions.default.is_some() {
-      +                let mut agg_def: Option<Weight> = None;
-      +                for &old in members {
-      +                    if let Some(w) = self.states[old].trans_weight_default.as_ref() {
-      +                        if let Some(ref mut a) = agg_def {
-      +                            *a |= w;
-      +                        } else {
-      +                            agg_def = Some(w.clone());
-      +                        }
-      +                    }
-      +                }
-      +                st.trans_weight_default = agg_def;
-      +            }
-      +            let ex_keys: Vec<u16> = st.transitions.exceptions.keys().cloned().collect();
-      +            for ch in ex_keys {
-      +                let mut agg: Option<Weight> = None;
-      +                for &old in members {
-      +                    if let Some(w) = self.states[old].trans_weights_exceptions.get(&ch) {
-      +                        if let Some(ref mut a) = agg {
-      +                            *a |= w;
-      +                        } else {
-      +                            agg = Some(w.clone());
-      +                        }
-      +                    }
-      +                }
-      +                if let Some(w) = agg {
-      +                    st.trans_weights_exceptions.insert(ch, w);
-      +                }
-      +            }
-      +            let new_id = new_states.len();
-      +            pid_to_new.insert(*pid, new_id);
-      +            new_states.push(st);
-      +        }
-      +        // Fix transition targets now that we have pid_to_new.
-      +        for (pid, members) in &groups {
-      +            let new_id = *pid_to_new.get(pid).unwrap();
-      +            let rep = members[0];
-      +            let rep_state = &self.states[rep];
-      +            // Default
-      +            let def_cls = if let Some(d) = rep_state.transitions.default {
-      +                part[d]
-      +            } else {
-      +                sink_pid
-      +            };
-      +            if let Some(ref mut d) = new_states[new_id].transitions.default {
-      +                *d = *pid_to_new.get(&def_cls).unwrap();
-      +            }
-      +            // Exceptions
-      +            let ex_old = new_states[new_id].transitions.exceptions.clone();
-      +            new_states[new_id].transitions.exceptions.clear();
-      +            for (ch, _) in ex_old {
-      +                // For representative, we already know the class to use.
-      +                let cls = part[*rep_state.transitions.exceptions.get(&ch).unwrap()];
-      +                new_states[new_id]
-      +                    .transitions
-      +                    .exceptions
-      +                    .insert(ch, *pid_to_new.get(&cls).unwrap());
-      +            }
-      +        }
-      +        self.states = new_states;
-      +        // Normalize edges (drop redundant exceptions)
-      +        self.normalize_edges_inplace();
-      +        // Remap start state
-      +        let start_pid = part[self.start_state];
-      +        self.start_state = *pid_to_new.get(&start_pid).unwrap();
-      +        true
-      +    }
-      +
-           /// Remove states that are unreachable from `start_state` and renumber densely.
-           ///
-           /// Returns true if any state was removed.
-           pub fn prune_unreachable(&mut self) -> bool {
-               if self.states.is_empty() {
-      @@ -592,7 +876,7 @@
-                   return false; // nothing to merge
-               }
-       
-      -        // Build (repr -> new id) and construct new state vector from representatives.
-      +        // Build (repr -> new id) and construct new state vector from representatives.
-               let mut repr_to_new: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-               let mut new_states: Vec<DWAState> = Vec::with_capacity(unique.len());
-               for r in unique.iter().cloned() {
-                   let new_id = new_states.len();
-                   repr_to_new.insert(r, new_id);
-      @@ -618,6 +902,12 @@
-                       for k in to_remove {
-                           st.transitions.exceptions.remove(&k);
-                       }
-                   }
-               }
-      +        // Also normalize stray per-exception weights that might be dangling.
-      +        for st in &mut new_states {
-      +            let keys: Vec<u16> = st.trans_weights_exceptions.keys().cloned().collect();
-      +            for k in keys {
-      +                if !st.transitions.exceptions.contains_key(&k) { st.trans_weights_exceptions.remove(&k); }
-      +            }
-      +        }
-               self.start_state = *repr_to_new.get(&repr[self.start_state]).unwrap();
-               self.states = new_states;
-               true
+      @@ -702,15 +702,6 @@
            }
        }
+       
+      -// New: convenience helper to determinize and simplify in one call.
+      -impl NWA {
+      -    pub fn determinize_simplified(&self) -> DWA {
+      -        let mut dwa = self.determinize();
+      -        dwa.simplify();
+      -        dwa
+      -    }
+      -}
+      -
+       // --- Display Implementations for Debugging ---
+       
+       // --- Display Implementations for Debugging ---
       ```
     metadata:
   - user: |
@@ -4705,7 +4825,7 @@ messages:
       Applying patch to 'src/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement aggressive DWA minimization
-      using partition refinement and stricter state collapsing"'
+  - user: 'Changes committed with message: "Remove convenience method `determinize_simplified`
+      from `NWA`"'
     metadata:
 ...

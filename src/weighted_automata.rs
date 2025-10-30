@@ -1092,15 +1092,6 @@ impl DWA {
     }
 }
 
-// New: convenience helper to determinize and simplify in one call.
-impl NWA {
-    pub fn determinize_simplified(&self) -> DWA {
-        let mut dwa = self.determinize();
-        dwa.simplify();
-        dwa
-    }
-}
-
 // --- Display Implementations for Debugging ---
 
 // --- Display Implementations for Debugging ---
