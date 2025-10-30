@@ -85,7 +85,6 @@ impl NwaDwaRoundtripPass {
                     // The last step is not a default transition, but specific to the SIDs.
                     let nwa_dst = map_mt_to_nwa[&mt_dst];
                     let weight = SimpleBitset::from_iter(ek.tokens.iter());
-                    if weight.is_empty() { continue; }
                     for sid in sids.iter() {
                         // State IDs are the alphabet.
                         nwa.add_transition(cur, sid as u16, nwa_dst, weight.clone());
