@@ -53,7 +53,7 @@ pub struct CoordinatorConfig {
 
 fn get_default_config_impl() -> CoordinatorConfig {
     CoordinatorConfig {
-        num_passes: 2,
+        num_passes: 1,
         prune_dead_paths: false,
         prune_unproductive_paths: false,
         canonicalize_end_nodes: false,
