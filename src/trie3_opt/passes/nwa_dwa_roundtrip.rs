@@ -19,80 +19,60 @@ use crate::weighted_automata::{NWA, SimpleBitset};
 pub struct NwaDwaRoundtripPass;
 
 impl NwaDwaRoundtripPass {
-    fn reachable_from_one(trie: &MiniTrie, start: NodeId) -> BTreeSet<NodeId> {
-        let mut seen: BTreeSet<NodeId> = BTreeSet::new();
-        let mut q: VecDeque<NodeId> = VecDeque::new();
-        q.push_back(start);
-        while let Some(u) = q.pop_front() {
-            if !seen.insert(u) {
-                continue;
-            }
-            if let Some(node) = trie.get_node(u) {
-                for (_ek, dm) in node.children() {
-                    for (v, _) in dm {
-                        if !seen.contains(v) {
-                            q.push_back(*v);
-                        }
-                    }
-                }
-            }
-        }
-        seen
-    }
-
-    fn build_nwa_for_root(
+    fn build_nwa_for_trie(
         mini: &MiniTrie,
-        root: NodeId,
+        roots: &[NodeId],
         _ctx: &OptimizationContext,
-    ) -> (NWA, BTreeMap<NodeId, usize>) {
-        let mut nwa = NWA::new();
-        // Collect subgraph nodes reachable from this root.
-        let sub_nodes = Self::reachable_from_one(mini, root);
+    ) -> NWA {
+        let mut nwa = NWA::new(); // Has start_state = 0
         // Map MiniTrie node -> NWA state
         let mut map_mt_to_nwa: BTreeMap<NodeId, usize> = BTreeMap::new();
-        for n_id in sub_nodes.iter() {
+        for n_id in mini.node_ids() {
             let s = nwa.add_state();
-            map_mt_to_nwa.insert(*n_id, s);
+            map_mt_to_nwa.insert(n_id, s);
         }
-        // Root state is the NWA start
-        if let Some(&start_id) = map_mt_to_nwa.get(&root) {
-            nwa.start_state = start_id;
+
+        // From NWA start (state 0), add transitions to each root's NWA state.
+        for (i, &root_id) in roots.iter().enumerate() {
+            if let Some(&nwa_root_state) = map_mt_to_nwa.get(&root_id) {
+                // The alphabet for these initial transitions is the root index.
+                nwa.add_transition(nwa.start_state, i as u16, nwa_root_state, SimpleBitset::all());
+            }
         }
+
         // Mark final weights for ends
-        for (mt_id, nwa_id) in map_mt_to_nwa.iter() {
+        for (mt_id, &nwa_id) in &map_mt_to_nwa {
             if let Some(node) = mini.get_node(*mt_id) {
                 if node.is_end() {
-                    nwa.set_final_weight(*nwa_id, SimpleBitset::all());
+                    nwa.set_final_weight(nwa_id, SimpleBitset::all());
                 }
             }
         }
 
-        for (mt_id, &nwa_src) in map_mt_to_nwa.iter() {
+        // Translate all MiniTrie edges to NWA transitions
+        for (mt_id, &nwa_src) in &map_mt_to_nwa {
             let node = mini.get_node(*mt_id).unwrap();
             for (ek, dm) in node.children() {
                 if ek.pop < 0 { continue; }
                 let pop = ek.pop as usize;
                 let mut cur = nwa_src;
-                // Create pop chain using default transitions. A pop `m` operation has `m-1` intermediate
-                // steps that consume any SID, followed by one SID-specific step.
+                // Create pop chain
                 for _ in 0..pop.saturating_sub(1) {
                     let inter = nwa.add_state();
-                    // Pop steps consume any SID and don't constrain tokens.
                     nwa.add_default_transition(cur, inter, SimpleBitset::all());
                     cur = inter;
                 }
                 for (&mt_dst, sids) in dm {
-                    // The last step is not a default transition, but specific to the SIDs.
                     let nwa_dst = map_mt_to_nwa[&mt_dst];
                     let weight = SimpleBitset::from_iter(ek.tokens.iter());
                     for sid in sids.iter() {
-                        // State IDs are the alphabet.
+                        // The alphabet here is the State ID from the MiniTrie.
                         nwa.add_transition(cur, sid as u16, nwa_dst, weight.clone());
                     }
                 }
             }
         }
-        (nwa, map_mt_to_nwa)
+        nwa
     }
 
     /// Follows a chain of 'simple' states via default transitions, returning:
@@ -303,51 +283,43 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         }
 
         let original_roots = trie.root_ids.clone();
-        // Build per-root roundtrip and merge results into a single MiniTrie.
-        let mut merged = MiniTrie::new();
-        let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
 
-        // println!("{}", trie);
-        for &root in &original_roots {
-            println!("Processing root {}", root);
-            let (nwa, _map_mt_to_nwa) = Self::build_nwa_for_root(trie, root, ctx);
-            println!("Determinizing NWA");
-            // println!("NWA for root {}: {}", root, nwa);
-            let mut dwa = nwa.determinize();
-            dwa.simplify();
-            println!("Converting DWA to MiniTrie");
-            // println!("DWA for root {}: {}", root, dwa);
-            let (partial, partial_root) = Self::convert_dwa_to_minitrie(dwa, ctx);
-            println!("Done!");
+        // Build one NWA for the entire trie.
+        let nwa = Self::build_nwa_for_trie(trie, &original_roots, ctx);
 
-            // Merge partial into merged
-            // Build map: partial NodeId -> merged NodeId
-            let mut id_map: BTreeMap<NodeId, NodeId> = BTreeMap::new();
-            for node in partial.nodes() {
-                let nid = merged.add_node(node.is_end());
-                id_map.insert(node.id(), nid);
-            }
-            // Edges
-            for node in partial.nodes() {
-                let src_new = *id_map.get(&node.id()).unwrap();
-                for (ek, dm) in node.children() {
-                    let mut new_dm: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
-                    for (dst, sids) in dm {
-                        let dst_new = *id_map.get(dst).unwrap();
-                        new_dm.insert(dst_new, sids.clone());
-                    }
-                    for (dst_new, sids) in new_dm {
-                        merged.add_edge(src_new, ek.clone(), dst_new, sids);
+        // Determinize and simplify.
+        let mut dwa = nwa.determinize();
+        dwa.simplify();
+
+        // Convert back to a MiniTrie. This trie will have a single "super root".
+        let (mut result_trie, super_root_id) = Self::convert_dwa_to_minitrie(dwa, ctx);
+
+        // Reconstruct the ordered list of roots from the super_root's children.
+        // The transition character (encoded as a SID) tells us the original root index.
+        let mut new_roots = vec![NodeId::default(); original_roots.len()];
+        if let Some(super_root_node) = result_trie.get_node(super_root_id) {
+            for (_ek, dm) in super_root_node.children() {
+                for (dst_id, sids) in dm {
+                    for sid in sids.iter() {
+                        // The 'sid' here is the root index we used as an alphabet character.
+                        if sid < new_roots.len() {
+                            new_roots[sid] = *dst_id;
+                        }
                     }
                 }
             }
-            // Root
-            new_roots.push(*id_map.get(&partial_root).unwrap());
         }
 
-        merged.root_ids = new_roots;
-        // Replace input trie with merged result
-        *trie = merged;
-        // println!("{}", trie);
+        // Some roots may have been optimized away if they accept an empty language.
+        // We must preserve the root count, so we create new empty nodes for them.
+        for i in 0..original_roots.len() {
+            if new_roots[i] == NodeId::default() {
+                new_roots[i] = result_trie.add_node(false);
+            }
+        }
+
+        result_trie.root_ids = new_roots;
+        *trie = result_trie;
     }
 }
+
