@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
+use crate::datastructures::trie::Trie;
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::{EdgeKey, MiniTrie, Node, NodeId, SortedSet};
 use crate::trie3_opt::passes::OptimizationPass;
