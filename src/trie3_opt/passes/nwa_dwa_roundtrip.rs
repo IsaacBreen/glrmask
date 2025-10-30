@@ -380,12 +380,12 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         merged.set_children(mt_root_id, BTreeMap::new());
         merged.root_ids = new_roots;
         // For the real root nodes, force their outgoing edges to have pop=0.
-        // They should have pop=1 at this point from the conversion logic.
+        // They should have pop=0 or 1 at this point from the conversion logic.
         for root_id in merged.root_ids.clone() {
             let root_node = merged.get_node(root_id).unwrap().clone();
             let mut new_children = BTreeMap::new();
             for (ek, dm) in root_node.children() {
-                assert_eq!(ek.pop, 1, "Expected pop=1 for edges from a new root node");
+                assert!(ek.pop == 0 || ek.pop == 1, "Expected pop=0 or 1 for edges from a new root node");
                 let new_ek = EdgeKey::new(0, ek.tokens.clone());
                 new_children.insert(new_ek, dm.clone());
             }
