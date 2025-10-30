@@ -482,7 +482,7 @@ pub fn run_pipeline_on_precompute3<'a>(
         if ctx.debug_level > 0 {
             let metrics = run_all_metrics(&mini);
             crate::debug!(
-                1,
+                3,
                 "[Trie3 Opt] Metrics after '{}': {}",
                 pass.name(),
                 crate::trie3_opt::metrics::pretty_print_metrics_map(&metrics)
