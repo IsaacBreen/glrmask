@@ -2501,6 +2501,7 @@ fn test_constraint_expression_trivial_direct() {
     // Commit "("
     state.commit(LLMTokenID(1));
     let mask = state.get_mask();
+    state.print_gss();
     // After '(', we expect another E, so the mask should be the same
     assert_eq!(mask, HybridBitset::from_iter(vec![0, 1, 2]));
 
