@@ -560,6 +560,279 @@ impl NWA {
     }
 }
 
+// New: DWA simplification utilities (collapse simple edges, prune unreachable, merge equivalents)
+impl DWA {
+    /// Simplify the DWA by repeatedly:
+    /// 1) collapsing chains of "simple" default-only states,
+    /// 2) merging equivalent states,
+    /// 3) pruning unreachable states,
+    /// until a small fixed-point is reached.
+    ///
+    /// determinize() is intentionally left unchanged; call this afterwards if you want a smaller DWA.
+    pub fn simplify(&mut self) {
+        if self.states.is_empty() {
+            return;
+        }
+        let mut changed = true;
+        let mut passes = 0usize;
+        while changed && passes < 10 {
+            passes += 1;
+            changed = false;
+            if self.collapse_simple_edges() {
+                changed = true;
+            }
+            if self.merge_equivalent_states() {
+                changed = true;
+            }
+            if self.prune_unreachable() {
+                changed = true;
+            }
+        }
+    }
+
+    /// Rewire transitions to "skip" over simple default-only states.
+    /// A state S is considered simple if `S.simple_default_target().is_some()`.
+    /// After rewiring, any exception that equals the (new) default target is removed.
+    ///
+    /// Returns true if any transition changed.
+    pub fn collapse_simple_edges(&mut self) -> bool {
+        if self.states.is_empty() {
+            return false;
+        }
+        // Build a jump table that follows default-only "simple" chains to their first non-simple endpoint.
+        let n = self.states.len();
+        let mut cache: Vec<Option<StateID>> = vec![None; n];
+        let mut visiting: Vec<bool> = vec![false; n];
+        fn dfs(
+            i: StateID,
+            states: &Vec<DWAState>,
+            cache: &mut Vec<Option<StateID>>,
+            visiting: &mut Vec<bool>,
+        ) -> StateID {
+            if let Some(v) = cache[i] {
+                return v;
+            }
+            if visiting[i] {
+                // Cycle among "simple" states; pick self as representative to break the loop.
+                cache[i] = Some(i);
+                return i;
+            }
+            visiting[i] = true;
+            let next = states[i]
+                .simple_default_target()
+                .map(|nx| dfs(nx, states, cache, visiting));
+            visiting[i] = false;
+            let res = next.unwrap_or(i);
+            cache[i] = Some(res);
+            res
+        }
+        let mut jump: Vec<StateID> = Vec::with_capacity(n);
+        for i in 0..n {
+            jump.push(dfs(i, &self.states, &mut cache, &mut visiting));
+        }
+
+        let mut changed = false;
+        for i in 0..n {
+            // Rewire default
+            if let Some(d) = self.states[i].transitions.default {
+                let nd = jump[d];
+                if nd != d {
+                    self.states[i].transitions.default = Some(nd);
+                    changed = true;
+                }
+            }
+            // Rewire exceptions
+            let mapped: Vec<(u16, StateID)> = self.states[i]
+                .transitions
+                .exceptions
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            for (ch, to_old) in mapped {
+                let to_new = jump[to_old];
+                if to_new != to_old {
+                    self.states[i]
+                        .transitions
+                        .exceptions
+                        .insert(ch, to_new);
+                    changed = true;
+                }
+            }
+            // Drop exceptions that now equal the default
+            if let Some(def) = self.states[i].transitions.default {
+                let to_remove: Vec<u16> = self.states[i]
+                    .transitions
+                    .exceptions
+                    .iter()
+                    .filter_map(|(k, v)| if *v == def { Some(*k) } else { None })
+                    .collect();
+                for ch in to_remove {
+                    self.states[i].transitions.exceptions.remove(&ch);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Remove states that are unreachable from `start_state` and renumber densely.
+    ///
+    /// Returns true if any state was removed.
+    pub fn prune_unreachable(&mut self) -> bool {
+        if self.states.is_empty() {
+            return false;
+        }
+        let n = self.states.len();
+        let mut visited = vec![false; n];
+        let mut q = std::collections::VecDeque::new();
+        visited[self.start_state] = true;
+        q.push_back(self.start_state);
+        while let Some(u) = q.pop_front() {
+            if let Some(d) = self.states[u].transitions.default {
+                if !visited[d] {
+                    visited[d] = true;
+                    q.push_back(d);
+                }
+            }
+            for &v in self.states[u].transitions.exceptions.values() {
+                if !visited[v] {
+                    visited[v] = true;
+                    q.push_back(v);
+                }
+            }
+        }
+        if visited.iter().all(|&b| b) {
+            return false;
+        }
+
+        // Build old->new mapping for reachable states (dense numbering).
+        let mut map = vec![usize::MAX; n];
+        let mut next_id = 0usize;
+        for i in 0..n {
+            if visited[i] {
+                map[i] = next_id;
+                next_id += 1;
+            }
+        }
+        // Rebuild states
+        let mut new_states: Vec<DWAState> = Vec::with_capacity(next_id);
+        for old in 0..n {
+            if !visited[old] {
+                continue;
+            }
+            let mut st = self.states[old].clone();
+            if let Some(d) = st.transitions.default {
+                st.transitions.default = Some(map[d]);
+            }
+            let ex = st.transitions.exceptions.clone();
+            st.transitions.exceptions.clear();
+            for (ch, tgt) in ex {
+                st.transitions.exceptions.insert(ch, map[tgt]);
+            }
+            new_states.push(st);
+        }
+        self.states = new_states;
+        self.start_state = map[self.start_state];
+        true
+    }
+
+    /// Merge states that are identical in structure and weights.
+    /// Two states are considered equivalent when all of the following are equal:
+    /// - `weight`
+    /// - `final_weight`
+    /// - `transitions.default` (target id)
+    /// - `transitions.exceptions` (map of char -> target id)
+    ///
+    /// Returns true if any merge happened.
+    pub fn merge_equivalent_states(&mut self) -> bool {
+        let n = self.states.len();
+        if n <= 1 {
+            return false;
+        }
+        use std::collections::hash_map::Entry;
+
+        // Signature: (weight, final_weight, default_target, exceptions_vec)
+        let mut canonical: std::collections::HashMap<
+            (Weight, Option<Weight>, Option<usize>, Vec<(u16, usize)>),
+            usize,
+        > = std::collections::HashMap::new();
+        let mut repr: Vec<usize> = vec![0; n];
+        for i in 0..n {
+            let default = self.states[i].transitions.default;
+            // BTreeMap iteration is sorted, so this Vec is in a stable order.
+            let exceptions: Vec<(u16, usize)> = self.states[i]
+                .transitions
+                .exceptions
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            let sig = (
+                self.states[i].weight.clone(),
+                self.states[i].final_weight.clone(),
+                default,
+                exceptions,
+            );
+            match canonical.entry(sig) {
+                Entry::Occupied(o) => repr[i] = *o.get(),
+                Entry::Vacant(v) => {
+                    repr[i] = i;
+                    v.insert(i);
+                }
+            }
+        }
+        let unique: std::collections::BTreeSet<usize> = repr.iter().cloned().collect();
+        if unique.len() == n {
+            return false; // nothing to merge
+        }
+
+        // Build (repr -> new id) and construct new state vector from representatives.
+        let mut repr_to_new: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut new_states: Vec<DWAState> = Vec::with_capacity(unique.len());
+        for r in unique.iter().cloned() {
+            let new_id = new_states.len();
+            repr_to_new.insert(r, new_id);
+            new_states.push(self.states[r].clone());
+        }
+        // Remap transitions inside the new states to representative indices.
+        for st in &mut new_states {
+            if let Some(d_old) = st.transitions.default {
+                let r = repr[d_old];
+                st.transitions.default = Some(*repr_to_new.get(&r).unwrap());
+            }
+            let ex_old = st.transitions.exceptions.clone();
+            st.transitions.exceptions.clear();
+            for (ch, t_old) in ex_old {
+                let r = repr[t_old];
+                st.transitions.exceptions.insert(ch, *repr_to_new.get(&r).unwrap());
+            }
+            // Drop exceptions that match the (new) default target.
+            if let Some(def) = st.transitions.default {
+                let to_remove: Vec<u16> = st
+                    .transitions
+                    .exceptions
+                    .iter()
+                    .filter_map(|(k, v)| if *v == def { Some(*k) } else { None })
+                    .collect();
+                for k in to_remove {
+                    st.transitions.exceptions.remove(&k);
+                }
+            }
+        }
+        self.start_state = *repr_to_new.get(&repr[self.start_state]).unwrap();
+        self.states = new_states;
+        true
+    }
+}
+
+// New: convenience helper to determinize and simplify in one call.
+impl NWA {
+    pub fn determinize_simplified(&self) -> DWA {
+        let mut dwa = self.determinize();
+        dwa.simplify();
+        dwa
+    }
+}
+
 // --- Display Implementations for Debugging ---
 
 // --- Display Implementations for Debugging ---
