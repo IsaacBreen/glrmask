@@ -10,7 +10,7 @@ local_system:
       #![allow(dead_code)] // Allow unused code for this library module example
 
       use range_set_blaze::RangeSetBlaze;
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
       use std::fmt::{Debug, Display, Formatter};
       use std::iter::FromIterator;
       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
@@ -347,41 +347,58 @@ local_system:
           ///    reachable states without consuming input.
           /// 5. The alphabet is partitioned based on character exceptions in the NWA states to
           ///    build the DWA's transition map.
+          /// The alphabet is partitioned based on character exceptions in the NWA states to
+          /// build the DWA's transition map.
           pub fn determinize(&self) -> DWA {
               let mut dwa = DWA::default();
               if self.states.is_empty() {
                   return dwa;
               }
 
-              // Map from a DWA state's composition to its StateID in the new DWA.
-              // A composition is a map from NWA StateID -> Path Weight.
-              let mut known_states: BTreeMap<BTreeMap<StateID, Weight>, StateID> = BTreeMap::new();
-              let mut worklist: VecDeque<BTreeMap<StateID, Weight>> = VecDeque::new();
+              // Fast-path: check once if the NWA has any epsilon transitions.
+              let has_epsilons = self
+                  .states
+                  .iter()
+                  .any(|s| !s.epsilon_transitions.is_empty());
 
-              // The initial DWA state is the epsilon closure of the NWA start state.
-              // The initial path has a weight of `all()`, representing no constraints yet.
-              let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
-              let start_composition = self.epsilon_closure(start_composition_raw);
+              // Use a compact canonical composition key: Vec<(StateID, Weight)> sorted by StateID.
+              // This drastically reduces memory and makes hashing/lookup much faster than nested maps.
+              let to_key = |comp: BTreeMap<StateID, Weight>| -> Vec<(StateID, Weight)> {
+                  // BTreeMap iteration is sorted by key, so the resulting Vec is sorted too.
+                  comp.into_iter().filter(|(_, w)| !w.is_empty()).collect()
+              };
+
+              // Map from a DWA state's composition key to its StateID in the new DWA.
+              let mut known_states: HashMap<Vec<(StateID, Weight)>, StateID> = HashMap::new();
+              // Worklist holds canonical composition keys.
+              let mut worklist: VecDeque<Vec<(StateID, Weight)>> = VecDeque::new();
 
               // Helper function to create a new DWA state if it's not already known.
               let mut get_or_create_dwa_state =
-                  |comp: BTreeMap<StateID, Weight>,
+                  |comp_key: Vec<(StateID, Weight)>,
                    dwa: &mut DWA,
-                   known: &mut BTreeMap<_, _>,
-                   work: &mut VecDeque<_>|
+                   known: &mut HashMap<Vec<(StateID, Weight)>, StateID>,
+                   work: &mut VecDeque<Vec<(StateID, Weight)>>|
                    -> Option<StateID> {
-                      if comp.is_empty() {
+                      if comp_key.is_empty() {
                           return None;
                       }
-                      if let Some(&id) = known.get(&comp) {
+                      if let Some(&id) = known.get(&comp_key) {
                           return Some(id);
                       }
                       let new_id = dwa.states.len();
                       dwa.states.push(DWAState::default());
-                      known.insert(comp.clone(), new_id);
-                      work.push_back(comp);
+                      known.insert(comp_key.clone(), new_id);
+                      work.push_back(comp_key);
                       Some(new_id)
                   };
+
+              // The initial DWA state is the epsilon closure of the NWA start state.
+              // The initial path has a weight of `all()`, representing no constraints yet.
+              let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
+              let start_composition_map =
+                  self.epsilon_closure_with_flag(start_composition_raw, has_epsilons);
+              let start_composition = to_key(start_composition_map);
 
               if let Some(start_id) = get_or_create_dwa_state(
                   start_composition,
@@ -436,7 +453,9 @@ local_system:
                           }
                       }
                   }
-                  let default_next_composition = self.epsilon_closure(default_next_raw);
+                  let default_next_composition_map =
+                      self.epsilon_closure_with_flag(default_next_raw, has_epsilons);
+                  let default_next_composition = to_key(default_next_composition_map);
                   let default_target_dwa_id = get_or_create_dwa_state(
                       default_next_composition,
                       &mut dwa,
@@ -464,7 +483,14 @@ local_system:
                               }
                           }
                       }
-                      let exception_next_composition = self.epsilon_closure(exception_next_raw);
+                      // Skip work if there are no outgoing transitions on this character.
+                      if exception_next_raw.is_empty() {
+                          continue;
+                      }
+
+                      let exception_next_composition_map =
+                          self.epsilon_closure_with_flag(exception_next_raw, has_epsilons);
+                      let exception_next_composition = to_key(exception_next_composition_map);
                       let exception_target_dwa_id = get_or_create_dwa_state(
                           exception_next_composition,
                           &mut dwa,
@@ -496,6 +522,21 @@ local_system:
           /// This function transitively follows all epsilon transitions, combining weights
           /// until a fixed point is reached.
           fn epsilon_closure(&self, initial_states: BTreeMap<StateID, Weight>) -> BTreeMap<StateID, Weight> {
+              // Preserve original behavior; determinize() uses the fast-path helper.
+              self.epsilon_closure_with_flag(initial_states, true)
+          }
+
+          /// Same as epsilon_closure, but with a fast-path: when has_epsilons is false,
+          /// return the input as-is to avoid needless work and allocations.
+          fn epsilon_closure_with_flag(
+              &self,
+              initial_states: BTreeMap<StateID, Weight>,
+              has_epsilons: bool,
+          ) -> BTreeMap<StateID, Weight> {
+              if !has_epsilons {
+                  return initial_states;
+              }
+
               let mut closure = initial_states;
               let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
 
@@ -525,6 +566,8 @@ local_system:
               closure
           }
       }
+
+      // --- Display Implementations for Debugging ---
 
       // --- Display Implementations for Debugging ---
 
@@ -717,6 +760,8 @@ local_system:
               nwa.set_final_weight(s2, SimpleBitset::from_item(3));
 
               let dwa = nwa.determinize();
+              println!("NWA:\n{}", nwa);
+              println!("DWA:\n{}", dwa);
               // Expected DWA:
               // S0 (start): weight=ALL
               //   'a' -> S1
@@ -1739,17 +1784,19 @@ local_system:
               let mut nwa = NWA::new();
               let s1 = nwa.add_state();
               let s2 = nwa.add_state();
-              nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
-              nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_item(2));
-              nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+              nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 4]));
+              nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_iter(vec![1, 5]));
+              nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 6]));
 
               let dwa = nwa.determinize();
+              println!("NWA:\n{}", nwa);
+              println!("DWA:\n{}", dwa);
               // Expected DWA:
               // S0 (start): weight=ALL
               //   'a' -> S1
               // S1: weight={1}
               //   'b' -> S2
-              // S2: weight={1} & {2} = {}, final_weight=({1}&{2})&{3} = {}
+              // S2: weight={1,4}&{1,5}={1}, final_weight=({1})&{1,6}={1}
               assert_eq!(dwa.states.len(), 3);
               let start_state = &dwa.states[dwa.start_state];
               assert_eq!(start_state.weight, SimpleBitset::all());
@@ -1757,14 +1804,14 @@ local_system:
 
               let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
               let state1 = &dwa.states[s1_id];
-              assert_eq!(state1.weight, SimpleBitset::from_item(1));
+              assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 4]));
               assert!(state1.final_weight.is_none());
 
               let s2_id = *state1.transitions.get(b'b' as u16).unwrap();
               let state2 = &dwa.states[s2_id];
-              let expected_s2_weight = SimpleBitset::from_iter(vec![1]) & SimpleBitset::from_iter(vec![2]);
+              let expected_s2_weight = SimpleBitset::from_iter(vec![1, 4]) & SimpleBitset::from_iter(vec![1, 5]);
               assert_eq!(state2.weight, expected_s2_weight);
-              let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_item(3);
+              let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_iter(vec![1, 6]);
               assert_eq!(state2.final_weight, Some(expected_final_weight));
           }
 
@@ -1776,10 +1823,10 @@ local_system:
               let mut nwa = NWA::new();
               let s1 = nwa.add_state();
               let s2 = nwa.add_state();
-              nwa.add_epsilon_transition(0, s1, SimpleBitset::from_item(1));
-              nwa.add_transition(s1, b'a' as u16, s2, SimpleBitset::from_item(2));
+              nwa.add_epsilon_transition(0, s1, SimpleBitset::from_iter(vec![1, 5]));
+              nwa.add_transition(s1, b'a' as u16, s2, SimpleBitset::from_iter(vec![1, 6]));
               nwa.set_final_weight(0, SimpleBitset::from_item(4));
-              nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+              nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 7]));
 
               let dwa = nwa.determinize();
               // Expected DWA:
@@ -1789,14 +1836,14 @@ local_system:
               assert_eq!(dwa.states.len(), 2);
 
               let start_state = &dwa.states[dwa.start_state];
-              assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1]) | SimpleBitset::all());
+              assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::all());
               assert_eq!(start_state.final_weight, Some(SimpleBitset::from_item(4)));
 
               let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
               let state1 = &dwa.states[s1_id];
-              let expected_s1_weight = &SimpleBitset::from_item(1) & &SimpleBitset::from_item(2);
+              let expected_s1_weight = &SimpleBitset::from_iter(vec![1, 5]) & &SimpleBitset::from_iter(vec![1, 6]);
               assert_eq!(state1.weight, expected_s1_weight);
-              let expected_final = &expected_s1_weight & &SimpleBitset::from_item(3);
+              let expected_final = &expected_s1_weight & &SimpleBitset::from_iter(vec![1, 7]);
               assert_eq!(state1.final_weight, Some(expected_final));
           }
 
@@ -1808,10 +1855,10 @@ local_system:
               let mut nwa = NWA::new();
               let s1 = nwa.add_state();
               let s2 = nwa.add_state();
-              nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
-              nwa.add_default_transition(0, s2, SimpleBitset::from_item(2));
-              nwa.set_final_weight(s1, SimpleBitset::from_item(10));
-              nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+              nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 5]));
+              nwa.add_default_transition(0, s2, SimpleBitset::from_iter(vec![2, 5]));
+              nwa.set_final_weight(s1, SimpleBitset::from_iter(vec![1, 10]));
+              nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![2, 20]));
 
               let dwa = nwa.determinize();
               // Expected DWA:
@@ -1828,12 +1875,12 @@ local_system:
               assert_ne!(s1_id, s2_id);
 
               let state1 = &dwa.states[s1_id];
-              assert_eq!(state1.weight, SimpleBitset::from_item(1));
-              assert_eq!(state1.final_weight, Some(SimpleBitset::from_item(1) & SimpleBitset::from_item(10)));
+              assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 5]));
+              assert_eq!(state1.final_weight, Some(SimpleBitset::from_iter(vec![1, 5]) & SimpleBitset::from_iter(vec![1, 10])));
 
               let state2 = &dwa.states[s2_id];
-              assert_eq!(state2.weight, SimpleBitset::from_item(2));
-              assert_eq!(state2.final_weight, Some(SimpleBitset::from_item(2) & SimpleBitset::from_item(20)));
+              assert_eq!(state2.weight, SimpleBitset::from_iter(vec![2, 5]));
+              assert_eq!(state2.final_weight, Some(SimpleBitset::from_iter(vec![2, 5]) & SimpleBitset::from_iter(vec![2, 20])));
           }
 
           #[test]
@@ -1844,10 +1891,10 @@ local_system:
               let mut nwa = NWA::new();
               let s1 = nwa.add_state();
               let s2 = nwa.add_state();
-              nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
-              nwa.add_transition(0, b'a' as u16, s2, SimpleBitset::from_item(2));
-              nwa.set_final_weight(s1, SimpleBitset::from_item(10));
-              nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+              nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 5]));
+              nwa.add_transition(0, b'a' as u16, s2, SimpleBitset::from_iter(vec![2, 5]));
+              nwa.set_final_weight(s1, SimpleBitset::from_iter(vec![1, 10]));
+              nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![2, 20]));
 
               let dwa = nwa.determinize();
               // Expected DWA:
@@ -1860,11 +1907,11 @@ local_system:
               let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
               let state1 = &dwa.states[s1_id];
 
-              let expected_weight = SimpleBitset::from_item(1) | SimpleBitset::from_item(2);
+              let expected_weight = SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::from_iter(vec![2, 5]);
               assert_eq!(state1.weight, expected_weight);
 
-              let final1 = SimpleBitset::from_item(1) & SimpleBitset::from_item(10);
-              let final2 = SimpleBitset::from_item(2) & SimpleBitset::from_item(20);
+              let final1 = SimpleBitset::from_iter(vec![1, 5]) & SimpleBitset::from_iter(vec![1, 10]);
+              let final2 = SimpleBitset::from_iter(vec![2, 5]) & SimpleBitset::from_iter(vec![2, 20]);
               let expected_final = final1 | &final2;
               assert_eq!(state1.final_weight, Some(expected_final));
           }
@@ -2025,7 +2072,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -2063,7 +2110,7 @@ messages:
       #![allow(dead_code)] // Allow unused code for this library module example
 
       use range_set_blaze::RangeSetBlaze;
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
       use std::fmt::{Debug, Display, Formatter};
       use std::iter::FromIterator;
       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
@@ -2400,41 +2447,58 @@ messages:
           ///    reachable states without consuming input.
           /// 5. The alphabet is partitioned based on character exceptions in the NWA states to
           ///    build the DWA's transition map.
+          /// The alphabet is partitioned based on character exceptions in the NWA states to
+          /// build the DWA's transition map.
           pub fn determinize(&self) -> DWA {
               let mut dwa = DWA::default();
               if self.states.is_empty() {
                   return dwa;
               }
 
-              // Map from a DWA state's composition to its StateID in the new DWA.
-              // A composition is a map from NWA StateID -> Path Weight.
-              let mut known_states: BTreeMap<BTreeMap<StateID, Weight>, StateID> = BTreeMap::new();
-              let mut worklist: VecDeque<BTreeMap<StateID, Weight>> = VecDeque::new();
+              // Fast-path: check once if the NWA has any epsilon transitions.
+              let has_epsilons = self
+                  .states
+                  .iter()
+                  .any(|s| !s.epsilon_transitions.is_empty());
 
-              // The initial DWA state is the epsilon closure of the NWA start state.
-              // The initial path has a weight of `all()`, representing no constraints yet.
-              let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
-              let start_composition = self.epsilon_closure(start_composition_raw);
+              // Use a compact canonical composition key: Vec<(StateID, Weight)> sorted by StateID.
+              // This drastically reduces memory and makes hashing/lookup much faster than nested maps.
+              let to_key = |comp: BTreeMap<StateID, Weight>| -> Vec<(StateID, Weight)> {
+                  // BTreeMap iteration is sorted by key, so the resulting Vec is sorted too.
+                  comp.into_iter().filter(|(_, w)| !w.is_empty()).collect()
+              };
+
+              // Map from a DWA state's composition key to its StateID in the new DWA.
+              let mut known_states: HashMap<Vec<(StateID, Weight)>, StateID> = HashMap::new();
+              // Worklist holds canonical composition keys.
+              let mut worklist: VecDeque<Vec<(StateID, Weight)>> = VecDeque::new();
 
               // Helper function to create a new DWA state if it's not already known.
               let mut get_or_create_dwa_state =
-                  |comp: BTreeMap<StateID, Weight>,
+                  |comp_key: Vec<(StateID, Weight)>,
                    dwa: &mut DWA,
-                   known: &mut BTreeMap<_, _>,
-                   work: &mut VecDeque<_>|
+                   known: &mut HashMap<Vec<(StateID, Weight)>, StateID>,
+                   work: &mut VecDeque<Vec<(StateID, Weight)>>|
                    -> Option<StateID> {
-                      if comp.is_empty() {
+                      if comp_key.is_empty() {
                           return None;
                       }
-                      if let Some(&id) = known.get(&comp) {
+                      if let Some(&id) = known.get(&comp_key) {
                           return Some(id);
                       }
                       let new_id = dwa.states.len();
                       dwa.states.push(DWAState::default());
-                      known.insert(comp.clone(), new_id);
-                      work.push_back(comp);
+                      known.insert(comp_key.clone(), new_id);
+                      work.push_back(comp_key);
                       Some(new_id)
                   };
+
+              // The initial DWA state is the epsilon closure of the NWA start state.
+              // The initial path has a weight of `all()`, representing no constraints yet.
+              let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
+              let start_composition_map =
+                  self.epsilon_closure_with_flag(start_composition_raw, has_epsilons);
+              let start_composition = to_key(start_composition_map);
 
               if let Some(start_id) = get_or_create_dwa_state(
                   start_composition,
@@ -2489,7 +2553,9 @@ messages:
                           }
                       }
                   }
-                  let default_next_composition = self.epsilon_closure(default_next_raw);
+                  let default_next_composition_map =
+                      self.epsilon_closure_with_flag(default_next_raw, has_epsilons);
+                  let default_next_composition = to_key(default_next_composition_map);
                   let default_target_dwa_id = get_or_create_dwa_state(
                       default_next_composition,
                       &mut dwa,
@@ -2517,7 +2583,14 @@ messages:
                               }
                           }
                       }
-                      let exception_next_composition = self.epsilon_closure(exception_next_raw);
+                      // Skip work if there are no outgoing transitions on this character.
+                      if exception_next_raw.is_empty() {
+                          continue;
+                      }
+
+                      let exception_next_composition_map =
+                          self.epsilon_closure_with_flag(exception_next_raw, has_epsilons);
+                      let exception_next_composition = to_key(exception_next_composition_map);
                       let exception_target_dwa_id = get_or_create_dwa_state(
                           exception_next_composition,
                           &mut dwa,
@@ -2549,6 +2622,21 @@ messages:
           /// This function transitively follows all epsilon transitions, combining weights
           /// until a fixed point is reached.
           fn epsilon_closure(&self, initial_states: BTreeMap<StateID, Weight>) -> BTreeMap<StateID, Weight> {
+              // Preserve original behavior; determinize() uses the fast-path helper.
+              self.epsilon_closure_with_flag(initial_states, true)
+          }
+
+          /// Same as epsilon_closure, but with a fast-path: when has_epsilons is false,
+          /// return the input as-is to avoid needless work and allocations.
+          fn epsilon_closure_with_flag(
+              &self,
+              initial_states: BTreeMap<StateID, Weight>,
+              has_epsilons: bool,
+          ) -> BTreeMap<StateID, Weight> {
+              if !has_epsilons {
+                  return initial_states;
+              }
+
               let mut closure = initial_states;
               let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
 
@@ -2578,6 +2666,8 @@ messages:
               closure
           }
       }
+
+      // --- Display Implementations for Debugging ---
 
       // --- Display Implementations for Debugging ---
 
@@ -2770,6 +2860,8 @@ messages:
               nwa.set_final_weight(s2, SimpleBitset::from_item(3));
 
               let dwa = nwa.determinize();
+              println!("NWA:\n{}", nwa);
+              println!("DWA:\n{}", dwa);
               // Expected DWA:
               // S0 (start): weight=ALL
               //   'a' -> S1
@@ -3044,9 +3136,9 @@ messages:
       ```
     metadata:
       filename: src/weighted_automata.rs
-  - user: For very large NWAs with lots of states/transitions and large weight sets,
-      determinization can take a very long time and use prohibitive amounts of RAM
-      (hundreds of gigabytes). Make it much more efficient.
+  - user: Some of the tests don't really make sense. e.g. in test_determinize_simple_nwa
+      we have sets `[1]` and `[2]` and final set `[3]`. The intersection of those
+      is nothing, so the DWA will be nothing.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3066,452 +3158,314 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are concrete steps to significantly improve determinization performance and memory usage by:
-      - Representing compositions with a compact, hashable Vec key instead of nested BTreeMaps.
-      - Using a HashMap for known states instead of a BTreeMap.
-      - Avoiding repeated epsilon-closure work when the NWA has no epsilon transitions.
-      - Skipping empty exception transitions early.
+      You've made a sharp observation. The tests are technically correct in that they verify the determinization algorithm produces an automaton with empty weights when the inputs are disjoint. However, as you noted, this doesn't make for very illustrative or confidence-inspiring tests. The logic is better tested when there are actual overlaps in the weights, demonstrating that the intersections and unions are calculated correctly.
 
-      Step-by-step instructions
+      I'll update the tests to use weights that have non-empty intersections, which will provide a more robust validation of the implementation.
 
-      1. Edit file: src/weighted_automata.rs
-         - Update imports to include HashMap:
-           - Find the line that reads:
-             use std::collections::{BTreeMap, BTreeSet, VecDeque};
-           - Replace it with:
-             use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
+      Here are the step-by-step changes:
 
-      2. Edit the determinize method in impl NWA
-         - Replace the entire body of NWA::determinize with an optimized version that:
-           - Uses a Vec<(StateID, Weight)> as the canonical composition key (sorted by StateID).
-           - Uses a HashMap<Vec<(StateID, Weight)>, StateID> for known_states.
-           - Uses a VecDeque<Vec<(StateID, Weight)>> for the worklist.
-           - Computes has_epsilons once and passes it into epsilon_closure invocations.
-           - Skips creating exception transitions when the raw next set is empty (no work to do).
+      ### File: `src/weighted_automata.rs`
 
-      3. Add a fast-path epsilon closure helper
-         - Below the determinize function (still inside impl NWA), add a new helper:
-           - fn epsilon_closure_with_flag(&self, initial_states: BTreeMap<StateID, Weight>, has_epsilons: bool) -> BTreeMap<StateID, Weight>
-         - This function immediately returns initial_states unchanged if there are no epsilon transitions (has_epsilons == false).
-         - Modify the existing epsilon_closure method to call epsilon_closure_with_flag(initial_states, true), so external behavior is unchanged, but determinize will use the fast path.
+      1.  **In `test_determinize_simple_nwa`:**
+          *   I will update the transition and final weights to use sets with overlapping elements.
+          *   The assertions will be adjusted to check for the correct intersection of these new weights.
 
-      4. Ensure you call epsilon_closure_with_flag instead of epsilon_closure inside determinize
-         - For all closures (start composition, default edge, exception edges), call epsilon_closure_with_flag(..., has_epsilons), and then canonicalize into Vec<(StateID, Weight)> using an inline to_key closure:
-           - to_key: converts BTreeMap<StateID, Weight> into a Vec<(StateID, Weight)> via into_iter(), automatically sorted by StateID.
+      2.  **In `test_determinize_with_epsilon`:**
+          *   Similarly, I will modify the weights on the epsilon transition, the character transition, and the final state to ensure they have common elements.
+          *   The assertions will be updated to reflect the new expected results.
 
-      5. Save the file and run your tests/benchmarks
-         - These changes preserve correctness (tests should pass) while substantially reducing CPU and memory usage for very large automata.
+      3.  **In `test_determinize_with_default`:**
+          *   I will change the weights for the `'a'` transition and the default transition to have some overlap, and do the same for their respective final states.
+          *   The assertions will be modified to verify the correct final weights after intersection.
 
-      Git diff patches
+      4.  **In `test_determinize_nondeterministic_choice`:**
+          *   I will adjust the weights for the two non-deterministic transitions on `'a'` and their final states to have overlaps.
+          *   The assertions will be updated to check that both the state weight (union of path weights) and the final weight (union of intersected final weights) are calculated correctly.
+
+      Here is the git diff with the necessary changes:
 
       ```diff
-      diff --git a/src/weighted_automata.rs b/src/weighted_automata.rs
       --- a/src/weighted_automata.rs
       +++ b/src/weighted_automata.rs
-      @@ -4,7 +4,7 @@
+      @@ -700,10 +700,10 @@
+               let mut nwa = NWA::new();
+               let s1 = nwa::add_state();
+               let s2 = nwa::add_state();
+      -        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
+      -        nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_item(2));
+      -        nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+      +        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 4]));
+      +        nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_iter(vec![1, 5]));
+      +        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 6]));
        
-       use range_set_blaze::RangeSetBlaze;
-      -use std::collections::{BTreeMap, BTreeSet, VecDeque};
-      +use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
-       use std::fmt::{Debug, Display, Formatter};
-       use std::iter::FromIterator;
-       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
-      @@ -232,75 +232,113 @@ impl NWA {
-           /// The alphabet is partitioned based on character exceptions in the NWA states to
-           /// build the DWA's transition map.
-           pub fn determinize(&self) -> DWA {
-      -        let mut dwa = DWA::default();
-      -        if self.states.is_empty() {
-      -            return dwa;
-      -        }
-      -
-      -        // Map from a DWA state's composition to its StateID in the new DWA.
-      -        // A composition is a map from NWA StateID -> Path Weight.
-      -        let mut known_states: BTreeMap<BTreeMap<StateID, Weight>, StateID> = BTreeMap::new();
-      -        let mut worklist: VecDeque<BTreeMap<StateID, Weight>> = VecDeque::new();
-      -
-      -        // The initial DWA state is the epsilon closure of the NWA start state.
-      -        // The initial path has a weight of `all()`, representing no constraints yet.
-      -        let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
-      -        let start_composition = self.epsilon_closure(start_composition_raw);
-      -
-      -        // Helper function to create a new DWA state if it's not already known.
-      -        let mut get_or_create_dwa_state =
-      -            |comp: BTreeMap<StateID, Weight>,
-      -             dwa: &mut DWA,
-      -             known: &mut BTreeMap<_, _>,
-      -             work: &mut VecDeque<_>|
-      -             -> Option<StateID> {
-      -                if comp.is_empty() {
-      -                    return None;
-      -                }
-      -                if let Some(&id) = known.get(&comp) {
-      -                    return Some(id);
-      -                }
-      -                let new_id = dwa.states.len();
-      -                dwa.states.push(DWAState::default());
-      -                known.insert(comp.clone(), new_id);
-      -                work.push_back(comp);
-      -                Some(new_id)
-      -            };
-      -
-      -        if let Some(start_id) = get_or_create_dwa_state(
-      -            start_composition,
-      -            &mut dwa,
-      -            &mut known_states,
-      -            &mut worklist,
-      -        ) {
-      -            dwa.start_state = start_id;
-      -        } else {
-      -            // The start state leads to nothing, so the DWA is empty.
-      -            return dwa;
-      -        }
-      -
-      -        while let Some(current_composition) = worklist.pop_front() {
-      -            let current_dwa_id = *known_states.get(&current_composition).unwrap();
-      -
-      -            // --- 1. Aggregate weights for the current DWA state ---
-      -            let mut aggregate_weight = Weight::zeros();
-      -            let mut aggregate_final_weight = Weight::zeros();
-      -            let mut critical_points = BTreeSet::new();
-      -            let mut is_final = false; // Flag to track if we encountered any final NWA state
-      -
-      -            for (nwa_id, path_weight) in &current_composition {
-      -                aggregate_weight |= path_weight;
-      -                if let Some(final_w) = &self.states[*nwa_id].final_weight {
-      -                    is_final = true; // We found a final state
-      -                    aggregate_final_weight |= &(path_weight & final_w);
-      -                }
-      -                // Collect all exception characters that define alphabet partitions.
-      -                for &char_code in self.states[*nwa_id].transitions.exceptions.keys() {
-      -                    critical_points.insert(char_code);
-      -                }
-      -            }
-      -            dwa.states[current_dwa_id].weight = aggregate_weight;
-      -            if is_final {
-      -                dwa.states[current_dwa_id].final_weight = Some(aggregate_final_weight);
-      -            }
-      -
-      -            // --- 2. Calculate the default transition for the DWA state ---
-      -            let mut default_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
-      -            // Aggregate weight for default edge from this state.
-      -            let mut default_weight_agg = Weight::zeros();
-      -            for (nwa_id, path_weight) in &current_composition {
-      -                if let Some(transitions) = self.states[*nwa_id].transitions.get_default() {
-      -                    for (next_nwa_id, trans_weight) in transitions {
-      -                        let next_path_weight = path_weight & trans_weight;
-      -                        default_next_raw
-      -                            .entry(*next_nwa_id)
-      -                            .or_default()
-      -                            .bitor_assign(&next_path_weight);
-      -                        default_weight_agg |= &next_path_weight;
-      -                    }
-      -                }
-      -            }
-      -            let default_next_composition = self.epsilon_closure(default_next_raw);
-      -            let default_target_dwa_id = get_or_create_dwa_state(
-      -                default_next_composition,
-      -                &mut dwa,
-      -                &mut known_states,
-      -                &mut worklist,
-      -            );
-      -            dwa.states[current_dwa_id].transitions.default = default_target_dwa_id;
-      -            if default_target_dwa_id.is_some() {
-      -                dwa.states[current_dwa_id].trans_weight_default = Some(default_weight_agg);
-      -            }
-      -
-      -            // --- 3. Calculate transitions for all critical points (exceptions) ---
-      -            for char_code in critical_points {
-      -                let mut exception_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
-      -                let mut exception_weight_agg = Weight::zeros();
-      -                for (nwa_id, path_weight) in &current_composition {
-      -                    if let Some(transitions) = self.states[*nwa_id].transitions.get(char_code) {
-      -                        for (next_nwa_id, trans_weight) in transitions {
-      -                            let next_path_weight = path_weight & trans_weight;
-      -                            exception_next_raw
-      -                                .entry(*next_nwa_id)
-      -                                .or_default()
-      -                                .bitor_assign(&next_path_weight);
-      -                            exception_weight_agg |= &next_path_weight;
-      -                        }
-      -                    }
-      -                }
-      -                let exception_next_composition = self.epsilon_closure(exception_next_raw);
-      -                let exception_target_dwa_id = get_or_create_dwa_state(
-      -                    exception_next_composition,
-      -                    &mut dwa,
-      -                    &mut known_states,
-      -                    &mut worklist,
-      -                );
-      -
-      -                // Add an exception if it differs from the default transition.
-      -                if exception_target_dwa_id != default_target_dwa_id {
-      -                    if let Some(target_id) = exception_target_dwa_id {
-      -                        dwa.states[current_dwa_id]
-      -                            .transitions
-      -                            .exceptions
-      -                            .insert(char_code, target_id);
-      -                        // Record the aggregate weight for this exception transition.
-      -                        dwa.states[current_dwa_id]
-      -                            .trans_weights_exceptions
-      -                            .insert(char_code, exception_weight_agg);
-      -                    }
-      -                }
-      -            }
-      -        }
-      -
-      -        dwa
-      +        let mut dwa = DWA::default();
-      +        if self.states.is_empty() {
-      +            return dwa;
-      +        }
-      +
-      +        // Fast-path: check once if the NWA has any epsilon transitions.
-      +        let has_epsilons = self
-      +            .states
-      +            .iter()
-      +            .any(|s| !s.epsilon_transitions.is_empty());
-      +
-      +        // Use a compact canonical composition key: Vec<(StateID, Weight)> sorted by StateID.
-      +        // This drastically reduces memory and makes hashing/lookup much faster than nested maps.
-      +        let to_key = |comp: BTreeMap<StateID, Weight>| -> Vec<(StateID, Weight)> {
-      +            // BTreeMap iteration is sorted by key, so the resulting Vec is sorted too.
-      +            comp.into_iter().filter(|(_, w)| !w.is_empty()).collect()
-      +        };
-      +
-      +        // Map from a DWA state's composition key to its StateID in the new DWA.
-      +        let mut known_states: HashMap<Vec<(StateID, Weight)>, StateID> = HashMap::new();
-      +        // Worklist holds canonical composition keys.
-      +        let mut worklist: VecDeque<Vec<(StateID, Weight)>> = VecDeque::new();
-      +
-      +        // Helper function to create a new DWA state if it's not already known.
-      +        let mut get_or_create_dwa_state =
-      +            |comp_key: Vec<(StateID, Weight)>,
-      +             dwa: &mut DWA,
-      +             known: &mut HashMap<Vec<(StateID, Weight)>, StateID>,
-      +             work: &mut VecDeque<Vec<(StateID, Weight)>>|
-      +             -> Option<StateID> {
-      +                if comp_key.is_empty() {
-      +                    return None;
-      +                }
-      +                if let Some(&id) = known.get(&comp_key) {
-      +                    return Some(id);
-      +                }
-      +                let new_id = dwa.states.len();
-      +                dwa.states.push(DWAState::default());
-      +                known.insert(comp_key.clone(), new_id);
-      +                work.push_back(comp_key);
-      +                Some(new_id)
-      +            };
-      +
-      +        // The initial DWA state is the epsilon closure of the NWA start state.
-      +        // The initial path has a weight of `all()`, representing no constraints yet.
-      +        let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
-      +        let start_composition_map =
-      +            self.epsilon_closure_with_flag(start_composition_raw, has_epsilons);
-      +        let start_composition = to_key(start_composition_map);
-      +
-      +        if let Some(start_id) = get_or_create_dwa_state(
-      +            start_composition,
-      +            &mut dwa,
-      +            &mut known_states,
-      +            &mut worklist,
-      +        ) {
-      +            dwa.start_state = start_id;
-      +        } else {
-      +            // The start state leads to nothing, so the DWA is empty.
-      +            return dwa;
-      +        }
-      +
-      +        while let Some(current_composition) = worklist.pop_front() {
-      +            let current_dwa_id = *known_states.get(&current_composition).unwrap();
-      +
-      +            // --- 1. Aggregate weights for the current DWA state ---
-      +            let mut aggregate_weight = Weight::zeros();
-      +            let mut aggregate_final_weight = Weight::zeros();
-      +            let mut critical_points = BTreeSet::new();
-      +            let mut is_final = false; // Flag to track if we encountered any final NWA state
-      +
-      +            for (nwa_id, path_weight) in &current_composition {
-      +                aggregate_weight |= path_weight;
-      +                if let Some(final_w) = &self.states[*nwa_id].final_weight {
-      +                    is_final = true; // We found a final state
-      +                    aggregate_final_weight |= &(path_weight & final_w);
-      +                }
-      +                // Collect all exception characters that define alphabet partitions.
-      +                for &char_code in self.states[*nwa_id].transitions.exceptions.keys() {
-      +                    critical_points.insert(char_code);
-      +                }
-      +            }
-      +            dwa.states[current_dwa_id].weight = aggregate_weight;
-      +            if is_final {
-      +                dwa.states[current_dwa_id].final_weight = Some(aggregate_final_weight);
-      +            }
-      +
-      +            // --- 2. Calculate the default transition for the DWA state ---
-      +            let mut default_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
-      +            // Aggregate weight for default edge from this state.
-      +            let mut default_weight_agg = Weight::zeros();
-      +            for (nwa_id, path_weight) in &current_composition {
-      +                if let Some(transitions) = self.states[*nwa_id].transitions.get_default() {
-      +                    for (next_nwa_id, trans_weight) in transitions {
-      +                        let next_path_weight = path_weight & trans_weight;
-      +                        default_next_raw
-      +                            .entry(*next_nwa_id)
-      +                            .or_default()
-      +                            .bitor_assign(&next_path_weight);
-      +                        default_weight_agg |= &next_path_weight;
-      +                    }
-      +                }
-      +            }
-      +            let default_next_composition_map =
-      +                self.epsilon_closure_with_flag(default_next_raw, has_epsilons);
-      +            let default_next_composition = to_key(default_next_composition_map);
-      +            let default_target_dwa_id = get_or_create_dwa_state(
-      +                default_next_composition,
-      +                &mut dwa,
-      +                &mut known_states,
-      +                &mut worklist,
-      +            );
-      +            dwa.states[current_dwa_id].transitions.default = default_target_dwa_id;
-      +            if default_target_dwa_id.is_some() {
-      +                dwa.states[current_dwa_id].trans_weight_default = Some(default_weight_agg);
-      +            }
-      +
-      +            // --- 3. Calculate transitions for all critical points (exceptions) ---
-      +            for char_code in critical_points {
-      +                let mut exception_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
-      +                let mut exception_weight_agg = Weight::zeros();
-      +                for (nwa_id, path_weight) in &current_composition {
-      +                    if let Some(transitions) = self.states[*nwa_id].transitions.get(char_code) {
-      +                        for (next_nwa_id, trans_weight) in transitions {
-      +                            let next_path_weight = path_weight & trans_weight;
-      +                            exception_next_raw
-      +                                .entry(*next_nwa_id)
-      +                                .or_default()
-      +                                .bitor_assign(&next_path_weight);
-      +                            exception_weight_agg |= &next_path_weight;
-      +                        }
-      +                    }
-      +                }
-      +                // Skip work if there are no outgoing transitions on this character.
-      +                if exception_next_raw.is_empty() {
-      +                    continue;
-      +                }
-      +
-      +                let exception_next_composition_map =
-      +                    self.epsilon_closure_with_flag(exception_next_raw, has_epsilons);
-      +                let exception_next_composition = to_key(exception_next_composition_map);
-      +                let exception_target_dwa_id = get_or_create_dwa_state(
-      +                    exception_next_composition,
-      +                    &mut dwa,
-      +                    &mut known_states,
-      +                    &mut worklist,
-      +                );
-      +
-      +                // Add an exception if it differs from the default transition.
-      +                if exception_target_dwa_id != default_target_dwa_id {
-      +                    if let Some(target_id) = exception_target_dwa_id {
-      +                        dwa.states[current_dwa_id]
-      +                            .transitions
-      +                            .exceptions
-      +                            .insert(char_code, target_id);
-      +                        // Record the aggregate weight for this exception transition.
-      +                        dwa.states[current_dwa_id]
-      +                            .trans_weights_exceptions
-      +                            .insert(char_code, exception_weight_agg);
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        dwa
+               let dwa = nwa.determinize();
+               println!("NWA:\n{}", nwa);
+      @@ -713,20 +713,20 @@
+               //   'a' -> S1
+               // S1: weight={1}
+               //   'b' -> S2
+      -        // S2: weight={1} & {2} = {}, final_weight=({1}&{2})&{3} = {}
+      +        // S2: weight={1,4}&{1,5}={1}, final_weight=({1})&{1,6}={1}
+               assert_eq!(dwa.states.len(), 3);
+               let start_state = &dwa.states[dwa.start_state];
+               assert_eq!(start_state.weight, SimpleBitset::all());
+               assert!(start_state.final_weight.is_none());
+       
+               let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
+               let state1 = &dwa.states[s1_id];
+      -        assert_eq!(state1.weight, SimpleBitset::from_item(1));
+      +        assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 4]));
+               assert!(state1.final_weight.is_none());
+       
+               let s2_id = *state1.transitions.get(b'b' as u16).unwrap();
+               let state2 = &dwa.states[s2_id];
+      -        let expected_s2_weight = SimpleBitset::from_iter(vec![1]) & SimpleBitset::from_iter(vec![2]);
+      +        let expected_s2_weight = SimpleBitset::from_iter(vec![1, 4]) & SimpleBitset::from_iter(vec![1, 5]);
+               assert_eq!(state2.weight, expected_s2_weight);
+      -        let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_item(3);
+      +        let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_iter(vec![1, 6]);
+               assert_eq!(state2.final_weight, Some(expected_final_weight));
            }
        
-      -    /// Computes the epsilon closure for a set of NWA states and their path weights.
-      -    ///
-      -    /// This function transitively follows all epsilon transitions, combining weights
-      -    /// until a fixed point is reached.
-      -    fn epsilon_closure(&self, initial_states: BTreeMap<StateID, Weight>) -> BTreeMap<StateID, Weight> {
-      -        let mut closure = initial_states;
-      -        let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
-      -
-      -        while let Some(u_id) = worklist.pop_front() {
-      -            // This clone is necessary because we might modify `closure` inside the loop.
-      -            let u_weight = closure.get(&u_id).unwrap().clone();
-      -            if u_weight.is_empty() {
-      -                continue;
-      -            }
-      -
-      -            for (v_id, trans_weight) in &self.states[u_id].epsilon_transitions {
-      -                let new_v_weight = &u_weight & trans_weight;
-      -                if new_v_weight.is_empty() {
-      -                    continue;
-      -                }
-      -
-      -                let current_v_weight = closure.entry(*v_id).or_insert_with(Weight::zeros);
-      -                let old_len = current_v_weight.len();
-      -                *current_v_weight |= &new_v_weight;
-      -
-      -                // If the weight for v changed, we need to re-process its epsilon transitions.
-      -                if current_v_weight.len() > old_len {
-      -                    worklist.push_back(*v_id);
-      -                }
-      -            }
-      -        }
-      -        closure
-      -    }
-      +    /// Computes the epsilon closure for a set of NWA states and their path weights.
-      +    ///
-      +    /// This function transitively follows all epsilon transitions, combining weights
-      +    /// until a fixed point is reached.
-      +    fn epsilon_closure(&self, initial_states: BTreeMap<StateID, Weight>) -> BTreeMap<StateID, Weight> {
-      +        // Preserve original behavior; determinize() uses the fast-path helper.
-      +        self.epsilon_closure_with_flag(initial_states, true)
-      +    }
-      +
-      +    /// Same as epsilon_closure, but with a fast-path: when has_epsilons is false,
-      +    /// return the input as-is to avoid needless work and allocations.
-      +    fn epsilon_closure_with_flag(
-      +        &self,
-      +        initial_states: BTreeMap<StateID, Weight>,
-      +        has_epsilons: bool,
-      +    ) -> BTreeMap<StateID, Weight> {
-      +        if !has_epsilons {
-      +            return initial_states;
-      +        }
-      +
-      +        let mut closure = initial_states;
-      +        let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
-      +
-      +        while let Some(u_id) = worklist.pop_front() {
-      +            // This clone is necessary because we might modify `closure` inside the loop.
-      +            let u_weight = closure.get(&u_id).unwrap().clone();
-      +            if u_weight.is_empty() {
-      +                continue;
-      +            }
-      +
-      +            for (v_id, trans_weight) in &self.states[u_id].epsilon_transitions {
-      +                let new_v_weight = &u_weight & trans_weight;
-      +                if new_v_weight.is_empty() {
-      +                    continue;
-      +                }
-      +
-      +                let current_v_weight = closure.entry(*v_id).or_insert_with(Weight::zeros);
-      +                let old_len = current_v_weight.len();
-      +                *current_v_weight |= &new_v_weight;
-      +
-      +                // If the weight for v changed, we need to re-process its epsilon transitions.
-      +                if current_v_weight.len() > old_len {
-      +                    worklist.push_back(*v_id);
-      +                }
-      +            }
-      +        }
-      +        closure
-      +    }
-       }
+      @@ -738,10 +738,10 @@
+               let mut nwa = NWA::new();
+               let s1 = nwa.add_state();
+               let s2 = nwa.add_state();
+      -        nwa.add_epsilon_transition(0, s1, SimpleBitset::from_item(1));
+      -        nwa.add_transition(s1, b'a' as u16, s2, SimpleBitset::from_item(2));
+      +        nwa.add_epsilon_transition(0, s1, SimpleBitset::from_iter(vec![1, 5]));
+      +        nwa.add_transition(s1, b'a' as u16, s2, SimpleBitset::from_iter(vec![1, 6]));
+               nwa.set_final_weight(0, SimpleBitset::from_item(4));
+      -        nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+      +        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 7]));
        
-       // --- Display Implementations for Debugging ---
+               let dwa = nwa.determinize();
+               // Expected DWA:
+      @@ -751,13 +751,13 @@
+               assert_eq!(dwa.states.len(), 2);
+       
+               let start_state = &dwa.states[dwa.start_state];
+      -        assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1]) | SimpleBitset::all());
+      +        assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::all());
+               assert_eq!(start_state.final_weight, Some(SimpleBitset::from_item(4)));
+       
+               let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
+               let state1 = &dwa.states[s1_id];
+      -        let expected_s1_weight = &SimpleBitset::from_item(1) & &SimpleBitset::from_item(2);
+      +        let expected_s1_weight = &SimpleBitset::from_iter(vec![1, 5]) & &SimpleBitset::from_iter(vec![1, 6]);
+               assert_eq!(state1.weight, expected_s1_weight);
+      -        let expected_final = &expected_s1_weight & &SimpleBitset::from_item(3);
+      +        let expected_final = &expected_s1_weight & &SimpleBitset::from_iter(vec![1, 7]);
+               assert_eq!(state1.final_weight, Some(expected_final));
+           }
+       
+      @@ -769,10 +769,10 @@
+               let mut nwa = NWA::new();
+               let s1 = nwa.add_state();
+               let s2 = nwa.add_state();
+      -        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
+      -        nwa.add_default_transition(0, s2, SimpleBitset::from_item(2));
+      -        nwa.set_final_weight(s1, SimpleBitset::from_item(10));
+      -        nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+      +        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 5]));
+      +        nwa.add_default_transition(0, s2, SimpleBitset::from_iter(vec![2, 5]));
+      +        nwa.set_final_weight(s1, SimpleBitset::from_iter(vec![1, 10]));
+      +        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![2, 20]));
+       
+               let dwa = nwa.determinize();
+               // Expected DWA:
+      @@ -789,12 +789,12 @@
+               assert_ne!(s1_id, s2_id);
+       
+               let state1 = &dwa.states[s1_id];
+      -        assert_eq!(state1.weight, SimpleBitset::from_item(1));
+      -        assert_eq!(state1.final_weight, Some(SimpleBitset::from_item(1) & SimpleBitset::from_item(10)));
+      +        assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 5]));
+      +        assert_eq!(state1.final_weight, Some(SimpleBitset::from_iter(vec![1, 5]) & SimpleBitset::from_iter(vec![1, 10])));
+       
+               let state2 = &dwa.states[s2_id];
+      -        assert_eq!(state2.weight, SimpleBitset::from_item(2));
+      -        assert_eq!(state2.final_weight, Some(SimpleBitset::from_item(2) & SimpleBitset::from_item(20)));
+      +        assert_eq!(state2.weight, SimpleBitset::from_iter(vec![2, 5]));
+      +        assert_eq!(state2.final_weight, Some(SimpleBitset::from_iter(vec![2, 5]) & SimpleBitset::from_iter(vec![2, 20])));
+           }
+       
+           #[test]
+      @@ -805,10 +805,10 @@
+               let mut nwa = NWA::new();
+               let s1 = nwa.add_state();
+               let s2 = nwa.add_state();
+      -        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
+      -        nwa.add_transition(0, b'a' as u16, s2, SimpleBitset::from_item(2));
+      -        nwa.set_final_weight(s1, SimpleBitset::from_item(10));
+      -        nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+      +        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 5]));
+      +        nwa.add_transition(0, b'a' as u16, s2, SimpleBitset::from_iter(vec![2, 5]));
+      +        nwa.set_final_weight(s1, SimpleBitset::from_iter(vec![1, 10]));
+      +        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![2, 20]));
+       
+               let dwa = nwa.determinize();
+               // Expected DWA:
+      @@ -821,11 +821,11 @@
+               let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
+               let state1 = &dwa.states[s1_id];
+       
+      -        let expected_weight = SimpleBitset::from_item(1) | SimpleBitset::from_item(2);
+      +        let expected_weight = SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::from_iter(vec![2, 5]);
+               assert_eq!(state1.weight, expected_weight);
+       
+      -        let final1 = SimpleBitset::from_item(1) & SimpleBitset::from_item(10);
+      -        let final2 = SimpleBitset::from_item(2) & SimpleBitset::from_item(20);
+      +        let final1 = SimpleBitset::from_iter(vec![1, 5]) & SimpleBitset::from_iter(vec![1, 10]);
+      +        let final2 = SimpleBitset::from_iter(vec![2, 5]) & SimpleBitset::from_iter(vec![2, 20]);
+               let expected_final = final1 | &final2;
+               assert_eq!(state1.final_weight, Some(expected_final));
+           }
+
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      --- a/src/weighted_automata.rs
+      +++ b/src/weighted_automata.rs
+      @@ -752,9 +752,9 @@
+               let mut nwa = NWA::new();
+               let s1 = nwa.add_state();
+               let s2 = nwa.add_state();
+      -        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
+      -        nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_item(2));
+      -        nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+      +        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 4]));
+      +        nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_iter(vec![1, 5]));
+      +        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 6]));
+       
+               let dwa = nwa.determinize();
+               println!("NWA:\n{}", nwa);
+      @@ -713,20 +713,20 @@
+               //   'a' -> S1
+               // S1: weight={1}
+               //   'b' -> S2
+      -        // S2: weight={1} & {2} = {}, final_weight=({1}&{2})&{3} = {}
+      +        // S2: weight={1,4}&{1,5}={1}, final_weight=({1})&{1,6}={1}
+               assert_eq!(dwa.states.len(), 3);
+               let start_state = &dwa.states[dwa.start_state];
+               assert_eq!(start_state.weight, SimpleBitset::all());
+               assert!(start_state.final_weight.is_none());
+       
+               let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
+               let state1 = &dwa.states[s1_id];
+      -        assert_eq!(state1.weight, SimpleBitset::from_item(1));
+      +        assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 4]));
+               assert!(state1.final_weight.is_none());
+       
+               let s2_id = *state1.transitions.get(b'b' as u16).unwrap();
+               let state2 = &dwa.states[s2_id];
+      -        let expected_s2_weight = SimpleBitset::from_iter(vec![1]) & SimpleBitset::from_iter(vec![2]);
+      +        let expected_s2_weight = SimpleBitset::from_iter(vec![1, 4]) & SimpleBitset::from_iter(vec![1, 5]);
+               assert_eq!(state2.weight, expected_s2_weight);
+      -        let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_item(3);
+      +        let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_iter(vec![1, 6]);
+               assert_eq!(state2.final_weight, Some(expected_final_weight));
+           }
+       
+      @@ -738,10 +738,10 @@
+               let mut nwa = NWA::new();
+               let s1 = nwa.add_state();
+               let s2 = nwa.add_state();
+      -        nwa.add_epsilon_transition(0, s1, SimpleBitset::from_item(1));
+      -        nwa.add_transition(s1, b'a' as u16, s2, SimpleBitset::from_item(2));
+      +        nwa.add_epsilon_transition(0, s1, SimpleBitset::from_iter(vec![1, 5]));
+      +        nwa.add_transition(s1, b'a' as u16, s2, SimpleBitset::from_iter(vec![1, 6]));
+               nwa.set_final_weight(0, SimpleBitset::from_item(4));
+      -        nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+      +        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 7]));
+       
+               let dwa = nwa.determinize();
+               // Expected DWA:
+      @@ -751,13 +751,13 @@
+               assert_eq!(dwa.states.len(), 2);
+       
+               let start_state = &dwa.states[dwa.start_state];
+      -        assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1]) | SimpleBitset::all());
+      +        assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::all());
+               assert_eq!(start_state.final_weight, Some(SimpleBitset::from_item(4)));
+       
+               let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
+               let state1 = &dwa.states[s1_id];
+      -        let expected_s1_weight = &SimpleBitset::from_item(1) & &SimpleBitset::from_item(2);
+      +        let expected_s1_weight = &SimpleBitset::from_iter(vec![1, 5]) & &SimpleBitset::from_iter(vec![1, 6]);
+               assert_eq!(state1.weight, expected_s1_weight);
+      -        let expected_final = &expected_s1_weight & &SimpleBitset::from_item(3);
+      +        let expected_final = &expected_s1_weight & &SimpleBitset::from_iter(vec![1, 7]);
+               assert_eq!(state1.final_weight, Some(expected_final));
+           }
+       
+      @@ -769,10 +769,10 @@
+               let mut nwa = NWA::new();
+               let s1 = nwa.add_state();
+               let s2 = nwa.add_state();
+      -        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
+      -        nwa.add_default_transition(0, s2, SimpleBitset::from_item(2));
+      -        nwa.set_final_weight(s1, SimpleBitset::from_item(10));
+      -        nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+      +        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 5]));
+      +        nwa.add_default_transition(0, s2, SimpleBitset::from_iter(vec![2, 5]));
+      +        nwa.set_final_weight(s1, SimpleBitset::from_iter(vec![1, 10]));
+      +        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![2, 20]));
+       
+               let dwa = nwa.determinize();
+               // Expected DWA:
+      @@ -789,12 +789,12 @@
+               assert_ne!(s1_id, s2_id);
+       
+               let state1 = &dwa.states[s1_id];
+      -        assert_eq!(state1.weight, SimpleBitset::from_item(1));
+      -        assert_eq!(state1.final_weight, Some(SimpleBitset::from_item(1) & SimpleBitset::from_item(10)));
+      +        assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 5]));
+      +        assert_eq!(state1.final_weight, Some(SimpleBitset::from_iter(vec![1, 5]) & SimpleBitset::from_iter(vec![1, 10])));
+       
+               let state2 = &dwa.states[s2_id];
+      -        assert_eq!(state2.weight, SimpleBitset::from_item(2));
+      -        assert_eq!(state2.final_weight, Some(SimpleBitset::from_item(2) & SimpleBitset::from_item(20)));
+      +        assert_eq!(state2.weight, SimpleBitset::from_iter(vec![2, 5]));
+      +        assert_eq!(state2.final_weight, Some(SimpleBitset::from_iter(vec![2, 5]) & SimpleBitset::from_iter(vec![2, 20])));
+           }
+       
+           #[test]
+      @@ -805,10 +805,10 @@
+               let mut nwa = NWA::new();
+               let s1 = nwa.add_state();
+               let s2 = nwa.add_state();
+      -        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
+      -        nwa.add_transition(0, b'a' as u16, s2, SimpleBitset::from_item(2));
+      -        nwa.set_final_weight(s1, SimpleBitset::from_item(10));
+      -        nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+      +        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 5]));
+      +        nwa.add_transition(0, b'a' as u16, s2, SimpleBitset::from_iter(vec![2, 5]));
+      +        nwa.set_final_weight(s1, SimpleBitset::from_iter(vec![1, 10]));
+      +        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![2, 20]));
+       
+               let dwa = nwa.determinize();
+               // Expected DWA:
+      @@ -821,11 +821,11 @@
+               let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
+               let state1 = &dwa.states[s1_id];
+       
+      -        let expected_weight = SimpleBitset::from_item(1) | SimpleBitset::from_item(2);
+      +        let expected_weight = SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::from_iter(vec![2, 5]);
+               assert_eq!(state1.weight, expected_weight);
+       
+      -        let final1 = SimpleBitset::from_item(1) & SimpleBitset::from_item(10);
+      -        let final2 = SimpleBitset::from_item(2) & SimpleBitset::from_item(20);
+      +        let final1 = SimpleBitset::from_iter(vec![1, 5]) & SimpleBitset::from_iter(vec![1, 10]);
+      +        let final2 = SimpleBitset::from_iter(vec![2, 5]) & SimpleBitset::from_iter(vec![2, 20]);
+               let expected_final = final1 | &final2;
+               assert_eq!(state1.final_weight, Some(expected_final));
+           }
+
       ```
     metadata:
   - user: |
@@ -3523,8 +3477,7 @@ messages:
       Applying patch to 'src/weighted_automata.rs' using custom patcher...
       Successfully applied patch and wrote to src/weighted_automata.rs.
     metadata:
-  - user: 'Changes committed with message: "Optimize NWA determinization by using
-      HashMap for state tracking, compact Vec keys, and adding a fast-path for epsilon
-      closure when no epsilon transitions exist."'
+  - user: 'Changes committed with message: "Improve weighted automaton determinization
+      tests by using overlapping weights"'
     metadata:
 ...

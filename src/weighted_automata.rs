@@ -748,17 +748,19 @@ mod tests {
         let mut nwa = NWA::new();
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
-        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
-        nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_item(2));
-        nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 4]));
+        nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_iter(vec![1, 5]));
+        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 6]));
 
         let dwa = nwa.determinize();
+        println!("NWA:\n{}", nwa);
+        println!("DWA:\n{}", dwa);
         // Expected DWA:
         // S0 (start): weight=ALL
         //   'a' -> S1
         // S1: weight={1}
         //   'b' -> S2
-        // S2: weight={1} & {2} = {}, final_weight=({1}&{2})&{3} = {}
+        // S2: weight={1,4}&{1,5}={1}, final_weight=({1})&{1,6}={1}
         assert_eq!(dwa.states.len(), 3);
         let start_state = &dwa.states[dwa.start_state];
         assert_eq!(start_state.weight, SimpleBitset::all());
@@ -766,14 +768,14 @@ mod tests {
 
         let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
         let state1 = &dwa.states[s1_id];
-        assert_eq!(state1.weight, SimpleBitset::from_item(1));
+        assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 4]));
         assert!(state1.final_weight.is_none());
 
         let s2_id = *state1.transitions.get(b'b' as u16).unwrap();
         let state2 = &dwa.states[s2_id];
-        let expected_s2_weight = SimpleBitset::from_iter(vec![1]) & SimpleBitset::from_iter(vec![2]);
+        let expected_s2_weight = SimpleBitset::from_iter(vec![1, 4]) & SimpleBitset::from_iter(vec![1, 5]);
         assert_eq!(state2.weight, expected_s2_weight);
-        let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_item(3);
+        let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_iter(vec![1, 6]);
         assert_eq!(state2.final_weight, Some(expected_final_weight));
     }
 
@@ -785,10 +787,10 @@ mod tests {
         let mut nwa = NWA::new();
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
-        nwa.add_epsilon_transition(0, s1, SimpleBitset::from_item(1));
-        nwa.add_transition(s1, b'a' as u16, s2, SimpleBitset::from_item(2));
+        nwa.add_epsilon_transition(0, s1, SimpleBitset::from_iter(vec![1, 5]));
+        nwa.add_transition(s1, b'a' as u16, s2, SimpleBitset::from_iter(vec![1, 6]));
         nwa.set_final_weight(0, SimpleBitset::from_item(4));
-        nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 7]));
 
         let dwa = nwa.determinize();
         // Expected DWA:
@@ -798,14 +800,14 @@ mod tests {
         assert_eq!(dwa.states.len(), 2);
 
         let start_state = &dwa.states[dwa.start_state];
-        assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1]) | SimpleBitset::all());
+        assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::all());
         assert_eq!(start_state.final_weight, Some(SimpleBitset::from_item(4)));
 
         let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
         let state1 = &dwa.states[s1_id];
-        let expected_s1_weight = &SimpleBitset::from_item(1) & &SimpleBitset::from_item(2);
+        let expected_s1_weight = &SimpleBitset::from_iter(vec![1, 5]) & &SimpleBitset::from_iter(vec![1, 6]);
         assert_eq!(state1.weight, expected_s1_weight);
-        let expected_final = &expected_s1_weight & &SimpleBitset::from_item(3);
+        let expected_final = &expected_s1_weight & &SimpleBitset::from_iter(vec![1, 7]);
         assert_eq!(state1.final_weight, Some(expected_final));
     }
 
@@ -817,10 +819,10 @@ mod tests {
         let mut nwa = NWA::new();
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
-        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
-        nwa.add_default_transition(0, s2, SimpleBitset::from_item(2));
-        nwa.set_final_weight(s1, SimpleBitset::from_item(10));
-        nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 5]));
+        nwa.add_default_transition(0, s2, SimpleBitset::from_iter(vec![2, 5]));
+        nwa.set_final_weight(s1, SimpleBitset::from_iter(vec![1, 10]));
+        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![2, 20]));
 
         let dwa = nwa.determinize();
         // Expected DWA:
@@ -837,12 +839,12 @@ mod tests {
         assert_ne!(s1_id, s2_id);
 
         let state1 = &dwa.states[s1_id];
-        assert_eq!(state1.weight, SimpleBitset::from_item(1));
-        assert_eq!(state1.final_weight, Some(SimpleBitset::from_item(1) & SimpleBitset::from_item(10)));
+        assert_eq!(state1.weight, SimpleBitset::from_iter(vec![1, 5]));
+        assert_eq!(state1.final_weight, Some(SimpleBitset::from_iter(vec![1, 5]) & SimpleBitset::from_iter(vec![1, 10])));
 
         let state2 = &dwa.states[s2_id];
-        assert_eq!(state2.weight, SimpleBitset::from_item(2));
-        assert_eq!(state2.final_weight, Some(SimpleBitset::from_item(2) & SimpleBitset::from_item(20)));
+        assert_eq!(state2.weight, SimpleBitset::from_iter(vec![2, 5]));
+        assert_eq!(state2.final_weight, Some(SimpleBitset::from_iter(vec![2, 5]) & SimpleBitset::from_iter(vec![2, 20])));
     }
 
     #[test]
@@ -853,10 +855,10 @@ mod tests {
         let mut nwa = NWA::new();
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
-        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
-        nwa.add_transition(0, b'a' as u16, s2, SimpleBitset::from_item(2));
-        nwa.set_final_weight(s1, SimpleBitset::from_item(10));
-        nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 5]));
+        nwa.add_transition(0, b'a' as u16, s2, SimpleBitset::from_iter(vec![2, 5]));
+        nwa.set_final_weight(s1, SimpleBitset::from_iter(vec![1, 10]));
+        nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![2, 20]));
 
         let dwa = nwa.determinize();
         // Expected DWA:
@@ -869,11 +871,11 @@ mod tests {
         let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
         let state1 = &dwa.states[s1_id];
 
-        let expected_weight = SimpleBitset::from_item(1) | SimpleBitset::from_item(2);
+        let expected_weight = SimpleBitset::from_iter(vec![1, 5]) | SimpleBitset::from_iter(vec![2, 5]);
         assert_eq!(state1.weight, expected_weight);
 
-        let final1 = SimpleBitset::from_item(1) & SimpleBitset::from_item(10);
-        let final2 = SimpleBitset::from_item(2) & SimpleBitset::from_item(20);
+        let final1 = SimpleBitset::from_iter(vec![1, 5]) & SimpleBitset::from_iter(vec![1, 10]);
+        let final2 = SimpleBitset::from_iter(vec![2, 5]) & SimpleBitset::from_iter(vec![2, 20]);
         let expected_final = final1 | &final2;
         assert_eq!(state1.final_weight, Some(expected_final));
     }
