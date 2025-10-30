@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - src/weighted_automata.rs
     - src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/weighted_automata.rs: |
@@ -3362,6 +3362,13 @@ local_system:
           /// Pop semantics:
           /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
           /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
+          /// (terminal_state_id, number_of_simple_default_steps).
+          /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
+          /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+          ///
+          /// Pop semantics:
+          /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
+          /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
           fn follow_simple_chain(
               dwa: &crate::weighted_automata::DWA,
               start: usize,
@@ -3413,18 +3420,26 @@ local_system:
 
                   // Group by (pop, tokens, dst) to build MiniTrie edges.
                   let mut edge_groups: BTreeMap<(isize, SortedSet, NodeId), SortedSet> = BTreeMap::new();
-                  // Aggregate direct edges to END by pop (union tokens across contributions at the same pop).
-                  let mut end_tokens_by_pop: BTreeMap<isize, SimpleBitset> = BTreeMap::new();
+                  // Direct-to-END edges accumulated by (pop, tokens) -> sids.
+                  let mut end_edge_groups: BTreeMap<(isize, SortedSet), SortedSet> = BTreeMap::new();
 
                   // 2.a Emit final edges from the terminal of the default-only chain (defers finality correctly).
                   if let Some(final_weight) = &dwa_term_state.final_weight {
                       if !final_weight.is_empty() {
-                          end_tokens_by_pop
-                              .entry(pop_final)
-                              .and_modify(|acc| *acc |= final_weight)
-                              .or_insert_with(|| final_weight.clone());
+                          let tokens_set = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
+                          if !tokens_set.is_empty() {
+                              let key = (pop_final, tokens_set);
+                              let sids_entry = end_edge_groups.entry(key).or_default();
+                              for sid in 0..=ctx.max_state_id {
+                                  sids_entry.insert(sid);
+                              }
+                          }
                       }
                   }
+
+                  // Precompute the set of exception SIDs at the terminal state (used in multiple places).
+                  let exception_sids: BTreeSet<u16> =
+                      dwa_term_state.transitions.exceptions.keys().cloned().collect();
 
                   // Helper: returns true if 'u' (terminal via simple default chain) has no outgoing transitions
                   // and has a non-empty final weight, enabling compression s -> ... -> u -> END into s -> END.
@@ -5945,6 +5960,1241 @@ messages:
            }
        }
        
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      Applying patch to 'src/trie3_opt/passes/nwa_dwa_roundtrip.rs' using custom patcher...
+      Successfully applied patch and wrote to src/trie3_opt/passes/nwa_dwa_roundtrip.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor: Simplify DWA to MiniTrie conversion
+      by deferring edge creation and enabling path compression to END node"'
+    metadata:
+  - user: |-
+      Diff of src/weighted_automata.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/trie3_opt/passes/nwa_dwa_roundtrip.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |2-
+
+      `````ad-attachment
+      collapse: closed
+      title: Before
+
+      ```
+      [DEBUG] 2] src/interface/interface.rs:746: Augmented start_production_name: "start'"
+      Removing always-null terminals: {}
+      Processing may-be-null terminals: {}
+      [DEBUG] 2] src/interface/interface.rs:1111: Building tokenizer from definition
+      [DEBUG] 2] src/interface/interface.rs:1116: Building GLR parser from definition
+      [DEBUG] 2] src/glr/table.rs:1455: Validating initial grammar
+      [DEBUG] 2] src/glr/table.rs:1461: Removing productions with undefined non-terminals
+      [DEBUG] 2] src/glr/table.rs:1497: Stage 1
+      [DEBUG] 2] src/glr/table.rs:1500: Stage 2
+      [DEBUG] 2] src/glr/table.rs:1503: Stage 3
+      [DEBUG] 2] src/glr/table.rs:1506: Stage 4
+      [DEBUG] 2] src/glr/table.rs:1509: Stage 5
+      [DEBUG] 2] src/glr/table.rs:1512: Stage 6
+      [DEBUG] 2] src/glr/table.rs:1515: Stage 7
+      [DEBUG] 2] src/glr/table.rs:1518: Stage 8
+      [DEBUG] 2] src/glr/table.rs:1522: Stage 9: Precomputing substring gotos
+      [DEBUG] 2] src/glr/table.rs:1525: Stage 10: Precomputing reduce goto map
+      [DEBUG] 2] src/glr/table.rs:1528: Finalizing table
+
+      --- Combined States Statistics ---
+      Total combined states: 1
+      Sole Shift actions: Total: 2, Min/Max per state: 2/2, Avg per state: 2.00
+        Distribution (count -> #states): 2: 1
+      Sole Reduce actions: Total: 4, Min/Max per state: 4/4, Avg per state: 4.00
+        Distribution (count -> #states): 4: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 1
+      Goto actions: Total: 1, Min/Max per state: 1/1, Avg per state: 1.00
+        Distribution (count -> #states): 1: 1
+      ------------------------------------
+      Number of combined states: 1
+      [DEBUG] 2] src/glr/table.rs:1537: Done generating GLR parser
+      [DEBUG] 2] src/equivalence_analysis_finite_automata.rs:274: Starting LLM token equivalence analysis (on-demand) for 2 strings...
+      [DEBUG] 2] src/constraint.rs:1047: LLM Token Equivalence Analysis:
+      [DEBUG] 2] src/constraint.rs:1048:   - Original LLM tokens: 2
+      [DEBUG] 2] src/constraint.rs:1049:   - Equivalence classes: 2
+      [DEBUG] 2] src/constraint.rs:1051:   - Reduction factor: 1.00x
+      [DEBUG] 2] src/constraint.rs:1068:   - Class size distribution (top 10 largest):
+          - size 1: 2 classes
+      [optimize_intermediate_trie3] End-reachability: total=22, productive=10, prunable=12
+      [optimize_intermediate_trie3] Reachable nodes: 6, edges: 4, unique edge-keys: 4
+      [optimize_intermediate_trie3] Initial classes: 2
+      [optimize_intermediate_trie3] WL iteration 1: classes=5, changed=5
+      [optimize_intermediate_trie3] WL iteration 2: classes=5, changed=0
+      [DEBUG] 2] src/constraint.rs:1181: Creating first group for terminal 'A'
+      [DEBUG] 2] src/constraint.rs:1161: Grouping terminal 'EOF' with group represented by 'A' (distance: 0.00)
+
+      --- Dummy Terminal Groups ---
+      - __DUMMY_TERMINAL_0__: (penalty: 3)
+        - A
+        - EOF
+      ---------------------------
+
+      [DEBUG] 1] src/constraint.rs:1235: Recompiling grammar with 1 new dummy terminals.
+      GrammarDefinition:
+        Start Production ID: 0
+        Productions (2):
+          start' -> s
+          s -> __DUMMY_TERMINAL_0__ A __DUMMY_TERMINAL_0__ EOF
+
+
+      [DEBUG] 2] src/interface/interface.rs:1111: Building tokenizer from definition
+      [DEBUG] 2] src/interface/interface.rs:1116: Building GLR parser from definition
+      [DEBUG] 2] src/glr/table.rs:1455: Validating initial grammar
+      [DEBUG] 2] src/glr/table.rs:1461: Removing productions with undefined non-terminals
+      [DEBUG] 2] src/glr/table.rs:1497: Stage 1
+      [DEBUG] 2] src/glr/table.rs:1500: Stage 2
+      [DEBUG] 2] src/glr/table.rs:1503: Stage 3
+      [DEBUG] 2] src/glr/table.rs:1506: Stage 4
+      [DEBUG] 2] src/glr/table.rs:1509: Stage 5
+      [DEBUG] 2] src/glr/table.rs:1512: Stage 6
+      [DEBUG] 2] src/glr/table.rs:1515: Stage 7
+      [DEBUG] 2] src/glr/table.rs:1518: Stage 8
+      [DEBUG] 2] src/glr/table.rs:1522: Stage 9: Precomputing substring gotos
+      [DEBUG] 2] src/glr/table.rs:1525: Stage 10: Precomputing reduce goto map
+      [DEBUG] 2] src/glr/table.rs:1528: Finalizing table
+
+      --- Combined States Statistics ---
+      Total combined states: 2
+      Sole Shift actions: Total: 5, Min/Max per state: 2/3, Avg per state: 2.50
+        Distribution (count -> #states): 2: 1, 3: 1
+      Sole Reduce actions: Total: 6, Min/Max per state: 0/6, Avg per state: 3.00
+        Distribution (count -> #states): 0: 1, 6: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 2
+      Goto actions: Total: 1, Min/Max per state: 0/1, Avg per state: 0.50
+        Distribution (count -> #states): 0: 1, 1: 1
+      ------------------------------------
+      Number of combined states: 2
+      [DEBUG] 2] src/glr/table.rs:1537: Done generating GLR parser
+      [DEBUG] 2] src/equivalence_analysis_finite_automata.rs:274: Starting LLM token equivalence analysis (on-demand) for 2 strings...
+      [DEBUG] 2] src/constraint.rs:1047: LLM Token Equivalence Analysis:
+      [DEBUG] 2] src/constraint.rs:1048:   - Original LLM tokens: 2
+      [DEBUG] 2] src/constraint.rs:1049:   - Equivalence classes: 2
+      [DEBUG] 2] src/constraint.rs:1051:   - Reduction factor: 1.00x
+      [DEBUG] 2] src/constraint.rs:1068:   - Class size distribution (top 10 largest):
+          - size 1: 2 classes
+      [DEBUG] 2] src/constraint.rs:1628: Building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree (fast builder)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:303: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:307: Done computing reachable IDs in 7.834µs
+      [DEBUG] 2] src/constraint.rs:1630: Done building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/constraint.rs:1636: Computing possible_matches for all 3 tokenizer states
+      [DEBUG] 2] src/constraint.rs:1646: Finished computing possible_matches
+      [DEBUG] 2] src/constraint.rs:1649: Building state_map_by_llm and terminal_map_by_llm
+      [DEBUG] 2] src/constraint.rs:1651: Built state_map_by_llm with 2 entries
+      [DEBUG] 2] src/constraint.rs:1657: Computing terminal follow sets
+      [DEBUG] 2] src/constraint.rs:1677: Computed terminal_follow_map_ids with 2 entries.
+      [DEBUG] 2] src/constraint.rs:3245: Building vocab prefix tree
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree (fast builder)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:303: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:307: Done computing reachable IDs in 4.25µs
+      [DEBUG] 2] src/constraint.rs:3247: Done building vocab prefix tree
+      [DEBUG] 2] src/constraint.rs:3257: Created trie1 roots for 3 tokenizer states
+      [DEBUG] 2] src/constraint.rs:3259: Counting vocab nodes for progress bar...
+      [DEBUG] 2] src/constraint.rs:3261: Counted 3 vocab nodes
+      [DEBUG] 2] src/constraint.rs:3274: Created trie1 leaf node
+      [DEBUG] 2] src/constraint.rs:3443: Starting precompute DFS
+
+      --- Precomputer1 DFS Stats ---
+      Total pending edges processed: 0
+      Unique src nodes: 0
+      Unique dst nodes: 0
+      Unique keys: 0
+      --- End Precomputer1 DFS Stats ---
+
+      [DEBUG] 2] src/constraint.rs:3454: Finished precompute DFS
+      [DEBUG] 2] src/constraint.rs:3457: Precomputation complete
+      [DEBUG] 2] src/constraint_extra.rs:1039: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1150: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 5 unique nodes, of which
+          - 3 are roots
+          - 2 are non-roots, of which
+              - 1 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 5
+        Total Edges: 3
+          Edges with None Key: 0
+          Edges with Some Key: 3
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    1.00
+        Average edge occupancy for None-key edges:    0.00
+        Total ranges in all HybridBitsets: 3
+      [DEBUG] 2] src/constraint.rs:2491: Precomputing Trie 3 (template-driven)...
+      [optimize_intermediate_trie3] End-reachability: total=36, productive=18, prunable=18
+      [optimize_intermediate_trie3] Reachable nodes: 10, edges: 8, unique edge-keys: 8
+      [optimize_intermediate_trie3] Initial classes: 3
+      [optimize_intermediate_trie3] WL iteration 1: classes=8, changed=9
+      [optimize_intermediate_trie3] WL iteration 2: classes=8, changed=0
+
+      --- Intermediate Trie3 Template Statistics ---
+      Terminal Name             ID         Nodes      Edges Cyclic Nodes
+      ------------------------- ----- ---------- ---------- ------------
+      'A'                       0              3          2           No
+      'EOF'                     1              3          2           No
+      '__DUMMY_TERMINAL_0__'    2              4          4           No
+      -----------------------------------------------------------------
+
+      Union Across All Templates:
+        Unique nodes: 8
+        Total edges: 8
+        Nodes shared by >= 2 templates: 1 (12.5%)
+      --------------------------------------------
+
+      [DEBUG] 2] src/constraint.rs:2638: Entering precompute3 special_map_grouped
+      [DEBUG] 2] src/constraint.rs:2750: Optimizing intermediate trie3...
+      [optimize_intermediate_trie3] End-reachability: total=20, productive=18, prunable=2
+      [optimize_intermediate_trie3] Reachable nodes: 16, edges: 15, unique edge-keys: 12
+      [optimize_intermediate_trie3] Initial classes: 4
+      [optimize_intermediate_trie3] WL iteration 1: classes=15, changed=12
+      [optimize_intermediate_trie3] WL iteration 2: classes=15, changed=0
+      [DEBUG] 2] src/constraint.rs:2775: Processing and rebuilding trie3 paths...
+      Starting push/pop elimination... nodes: 15
+      Intermediate graph node count: 15
+      Finished elimination. Final intermediate nodes: 13
+      Final graph node count: 13
+      [DEBUG] 2] src/constraint.rs:2790: Optimizing intermediate trie3 again...
+      [optimize_intermediate_trie3] End-reachability: total=13, productive=12, prunable=1
+      [optimize_intermediate_trie3] Reachable nodes: 13, edges: 12, unique edge-keys: 10
+      [optimize_intermediate_trie3] Initial classes: 4
+      [optimize_intermediate_trie3] WL iteration 1: classes=12, changed=12
+      [optimize_intermediate_trie3] WL iteration 2: classes=13, changed=4
+      [optimize_intermediate_trie3] WL iteration 3: classes=13, changed=0
+      [DEBUG] 2] src/constraint.rs:2807: Converting intermediate trie3 to final Trie3 format...
+      [DEBUG] 2] src/constraint.rs:2822: Finished precomputing Trie 3.
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:21: Optimizing Trie 3 size (using new pipeline)...
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:442: [Trie3 Opt] Metrics before optimization: {
+        "all_fanout": { count: 13, sum: 12.00, mean: 0.92, stdev: 0.47, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 2.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 11, sum: 11.00, mean: 1.00, stdev: 0.43, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 2.00 },
+        "non_root_state_fanout": { count: 56, sum: 56.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "num_edges": 12,
+        "num_end_nodes": 1,
+        "num_nodes": 13,
+        "num_productive_nodes": 12,
+        "num_reachable_nodes": 13,
+        "num_roots": 3,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 2, sum: 1.00, mean: 0.50, stdev: 0.50, min: 0.00, p25: 0.00, median: 0.00, p75: 0.00, p95: 0.00, max: 1.00 },
+        "root_state_fanout": { count: 6, sum: 6.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "state_fanout": { count: 62, sum: 62.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 }
+      }
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: PruneDeadPaths
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: PruneUnproductivePaths
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: MergeEquivalentLLMTokens
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: ReorderLLMTokens
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: NwaDwaRoundtrip
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: PruneDeadPaths
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:472: [Trie3 Opt] GC after 'PruneDeadPaths': nodes 6 -> 5
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: PruneUnproductivePaths
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: MergeEquivalentLLMTokens
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: ReorderLLMTokens
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: NwaDwaRoundtrip
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:496: [Trie3 Opt] Metrics after optimization: {
+        "all_fanout": { count: 6, sum: 4.00, mean: 0.67, stdev: 0.75, min: 0.00, p25: 0.00, median: 0.00, p75: 1.00, p95: 1.00, max: 2.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 4, sum: 2.00, mean: 0.50, stdev: 0.50, min: 0.00, p25: 0.00, median: 0.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "non_root_state_fanout": { count: 12, sum: 12.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "num_edges": 4,
+        "num_end_nodes": 1,
+        "num_nodes": 6,
+        "num_productive_nodes": 4,
+        "num_reachable_nodes": 5,
+        "num_roots": 3,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 2, sum: 2.00, mean: 1.00, stdev: 1.00, min: 0.00, p25: 0.00, median: 0.00, p75: 0.00, p95: 0.00, max: 2.00 },
+        "root_state_fanout": { count: 2, sum: 2.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "state_fanout": { count: 14, sum: 14.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 }
+      }
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:59: Finished optimizing Trie 3 size in 5.032125ms
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 5 unique nodes, of which
+          - 2 are roots
+          - 3 are non-roots, of which
+              - 2 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 5
+        Total Edges: 4
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 4
+      ---------------------------------
+      Parser: Parse Table:
+        Start State: 4
+        State 0:
+          Items:
+            - [s -> __DUMMY_TERMINAL_0__ • A __DUMMY_TERMINAL_0__ EOF]
+          Actions (full):
+            - On A: Shift 1
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [s -> __DUMMY_TERMINAL_0__ A • __DUMMY_TERMINAL_0__ EOF]
+          Actions (full):
+            - On __DUMMY_TERMINAL_0__: Shift 2
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 2:
+          Items:
+            - [s -> __DUMMY_TERMINAL_0__ A __DUMMY_TERMINAL_0__ • EOF]
+          Actions (full):
+            - On EOF: Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [s -> __DUMMY_TERMINAL_0__ A __DUMMY_TERMINAL_0__ EOF •]
+          Actions (full):
+            - On A: Reduce s (len 4) via rules [1]
+            - On EOF: Reduce s (len 4) via rules [1]
+            - On __DUMMY_TERMINAL_0__: Reduce s (len 4) via rules [1]
+          Default Action:
+            - Default Reduce s (len 4) via rules [1]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 4:
+          Items:
+            - [start' -> • s]
+          Actions (full):
+            - On __DUMMY_TERMINAL_0__: Shift 0
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - s -> 5
+            - start' -> accept
+        State 5:
+          Items:
+            - [start' -> s •]
+          Actions (full):
+            - On A: Reduce start' (len 1) via rules [0]
+            - On EOF: Reduce start' (len 1) via rules [0]
+            - On __DUMMY_TERMINAL_0__: Reduce start' (len 1) via rules [0]
+          Default Action:
+            - Default Reduce start' (len 1) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 6 (Combined):
+          Items: (State ID not found in item set map)
+          Items: (Combined state)
+          Actions (combined):
+          - On A: Shift 1 [states: HybridBitset { inner: 0..=0 }]
+          - On A: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On A: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          - On EOF: Shift 3 [states: HybridBitset { inner: 2..=2 }]
+          - On EOF: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On EOF: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          - On __DUMMY_TERMINAL_0__: Shift 7 [states: HybridBitset { inner: 1..=1, 4..=4 }]
+          - On __DUMMY_TERMINAL_0__: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On __DUMMY_TERMINAL_0__: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (combined):
+            - s -> 5 [states: HybridBitset { inner: 4..=4 }]
+        State 7 (Combined):
+          Items: (State ID not found in item set map)
+          Items: (Combined state)
+          Actions (combined):
+          - On A: Shift 1 [states: HybridBitset { inner: 4..=4 }]
+          - On EOF: Shift 3 [states: HybridBitset { inner: 1..=1 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (combined):
+            (No goto actions)
+        State 18446744073709551615 (Hallucinated):
+          Items: (Hallucinated state)
+          Actions (hallucinated):
+          - On A: Shift 1 [states: HybridBitset { inner: 0..=0 }]
+          - On A: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On A: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          - On EOF: Shift 3 [states: HybridBitset { inner: 2..=2 }]
+          - On EOF: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On EOF: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          - On __DUMMY_TERMINAL_0__: Shift 0 [states: HybridBitset { inner: 4..=4 }]
+          - On __DUMMY_TERMINAL_0__: Shift 2 [states: HybridBitset { inner: 1..=1 }]
+          - On __DUMMY_TERMINAL_0__: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On __DUMMY_TERMINAL_0__: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (hallucinated):
+            - s -> 5 [states: HybridBitset { inner: 4..=4 }]
+            - start' -> accept [states: HybridBitset { inner: 4..=4 }]
+
+      Terminal Map (name to terminal ID):
+        A -> 0
+        EOF -> 1
+        __DUMMY_TERMINAL_0__ -> 2
+
+      Non-Terminal Map:
+        s -> 1
+        start' -> 0
+
+      Dumping Precomputed Trie 0 Structure (showing original LLM Token IDs):
+      ===================================
+
+      ===================================
+      Dump Complete.
+      Dumping Precomputed Trie 1 Structure (showing original LLM Token IDs):
+      ===================================
+
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(0) (MaxDepth: 18446744073709551615) [Live: [0..=1] (e.g., ["$", "a"])]
+      └── Edge '__DUMMY_TERMINAL_0__': [0..=1] (e.g., ["$", "a"]) -> Node Trie2Index(1) (MaxDepth: 18446744073709551615) [Live: []]
+         ├── Edge 'A': [1] (e.g., ["a"]) -> Node Trie2Index(2) (MaxDepth: 18446744073709551615) [END] [Live: [0..=1] (e.g., ["$", "a"])]
+         └── Edge 'EOF': [0] (e.g., ["$"]) -> Node Trie2Index(2) (MaxDepth: 18446744073709551615) [END] [Live: [0..=1] (e.g., ["$", "a"])]
+
+      --- Tokenizer State ID: 1 ---
+      Root Node Trie2Index(3) (MaxDepth: 18446744073709551615) [Live: [0..=1] (e.g., ["$", "a"])]
+
+      --- Tokenizer State ID: 2 ---
+      Root Node Trie2Index(4) (MaxDepth: 18446744073709551615) [Live: [0..=1] (e.g., ["$", "a"])]
+
+      ===================================
+      Dump Complete.
+      Dumping Precomputed Trie 3 Structure (showing original LLM Token IDs):
+      ===================================
+
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(15) (MaxDepth: 0)
+      ├── Edge (pop: 0, tokens: [0] (e.g., ["$"])): states [1] -> Node Trie2Index(17) (MaxDepth: 1)
+      │  └── Edge (pop: 0, tokens: [0] (e.g., ["$"])): states [0..=5] -> Node Trie2Index(13) (MaxDepth: 2) [END]
+      └── Edge (pop: 0, tokens: [1] (e.g., ["a"])): states [4] -> Node Trie2Index(18) (MaxDepth: 1)
+         └── Edge (pop: 0, tokens: [1] (e.g., ["a"])): states [0..=5] -> Node Trie2Index(13) (MaxDepth: 2) [END]
+
+      --- Tokenizer State ID: 1 ---
+      Root Node Trie2Index(16) (MaxDepth: 0)
+
+      --- Tokenizer State ID: 2 ---
+      Root Node Trie2Index(16) (MaxDepth: 0)
+        (Root already visited)
+
+      ===================================
+      Dump Complete.
+      --- Special Precomputation (new spec) ---
+      Tokenizer roots cached: 3
+      pci1 end nodes: 1
+      Reduce edges: 9
+      Shift edges: 4
+      Super edges: 0
+      --- End Special Precomputation ---
+      Initializing constraint state...
+
+      ```
+
+      `````
+
+      `````ad-attachment
+      collapse: closed
+      title: After
+
+      ```
+      [DEBUG] 2] src/interface/interface.rs:746: Augmented start_production_name: "start'"
+      Removing always-null terminals: {}
+      Processing may-be-null terminals: {}
+      [DEBUG] 2] src/interface/interface.rs:1111: Building tokenizer from definition
+      [DEBUG] 2] src/interface/interface.rs:1116: Building GLR parser from definition
+      [DEBUG] 2] src/glr/table.rs:1455: Validating initial grammar
+      [DEBUG] 2] src/glr/table.rs:1461: Removing productions with undefined non-terminals
+      [DEBUG] 2] src/glr/table.rs:1497: Stage 1
+      [DEBUG] 2] src/glr/table.rs:1500: Stage 2
+      [DEBUG] 2] src/glr/table.rs:1503: Stage 3
+      [DEBUG] 2] src/glr/table.rs:1506: Stage 4
+      [DEBUG] 2] src/glr/table.rs:1509: Stage 5
+      [DEBUG] 2] src/glr/table.rs:1512: Stage 6
+      [DEBUG] 2] src/glr/table.rs:1515: Stage 7
+      [DEBUG] 2] src/glr/table.rs:1518: Stage 8
+      [DEBUG] 2] src/glr/table.rs:1522: Stage 9: Precomputing substring gotos
+      [DEBUG] 2] src/glr/table.rs:1525: Stage 10: Precomputing reduce goto map
+      [DEBUG] 2] src/glr/table.rs:1528: Finalizing table
+
+      --- Combined States Statistics ---
+      Total combined states: 1
+      Sole Shift actions: Total: 2, Min/Max per state: 2/2, Avg per state: 2.00
+        Distribution (count -> #states): 2: 1
+      Sole Reduce actions: Total: 4, Min/Max per state: 4/4, Avg per state: 4.00
+        Distribution (count -> #states): 4: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 1
+      Goto actions: Total: 1, Min/Max per state: 1/1, Avg per state: 1.00
+        Distribution (count -> #states): 1: 1
+      ------------------------------------
+      Number of combined states: 1
+      [DEBUG] 2] src/glr/table.rs:1537: Done generating GLR parser
+      [DEBUG] 2] src/equivalence_analysis_finite_automata.rs:274: Starting LLM token equivalence analysis (on-demand) for 2 strings...
+      [DEBUG] 2] src/constraint.rs:1047: LLM Token Equivalence Analysis:
+      [DEBUG] 2] src/constraint.rs:1048:   - Original LLM tokens: 2
+      [DEBUG] 2] src/constraint.rs:1049:   - Equivalence classes: 2
+      [DEBUG] 2] src/constraint.rs:1051:   - Reduction factor: 1.00x
+      [DEBUG] 2] src/constraint.rs:1068:   - Class size distribution (top 10 largest):
+          - size 1: 2 classes
+      [optimize_intermediate_trie3] End-reachability: total=22, productive=10, prunable=12
+      [optimize_intermediate_trie3] Reachable nodes: 6, edges: 4, unique edge-keys: 4
+      [optimize_intermediate_trie3] Initial classes: 2
+      [optimize_intermediate_trie3] WL iteration 1: classes=5, changed=5
+      [optimize_intermediate_trie3] WL iteration 2: classes=5, changed=0
+      [DEBUG] 2] src/constraint.rs:1181: Creating first group for terminal 'A'
+      [DEBUG] 2] src/constraint.rs:1161: Grouping terminal 'EOF' with group represented by 'A' (distance: 0.00)
+
+      --- Dummy Terminal Groups ---
+      - __DUMMY_TERMINAL_0__: (penalty: 3)
+        - A
+        - EOF
+      ---------------------------
+
+      [DEBUG] 1] src/constraint.rs:1235: Recompiling grammar with 1 new dummy terminals.
+      GrammarDefinition:
+        Start Production ID: 0
+        Productions (2):
+          start' -> s
+          s -> __DUMMY_TERMINAL_0__ A __DUMMY_TERMINAL_0__ EOF
+
+
+      [DEBUG] 2] src/interface/interface.rs:1111: Building tokenizer from definition
+      [DEBUG] 2] src/interface/interface.rs:1116: Building GLR parser from definition
+      [DEBUG] 2] src/glr/table.rs:1455: Validating initial grammar
+      [DEBUG] 2] src/glr/table.rs:1461: Removing productions with undefined non-terminals
+      [DEBUG] 2] src/glr/table.rs:1497: Stage 1
+      [DEBUG] 2] src/glr/table.rs:1500: Stage 2
+      [DEBUG] 2] src/glr/table.rs:1503: Stage 3
+      [DEBUG] 2] src/glr/table.rs:1506: Stage 4
+      [DEBUG] 2] src/glr/table.rs:1509: Stage 5
+      [DEBUG] 2] src/glr/table.rs:1512: Stage 6
+      [DEBUG] 2] src/glr/table.rs:1515: Stage 7
+      [DEBUG] 2] src/glr/table.rs:1518: Stage 8
+      [DEBUG] 2] src/glr/table.rs:1522: Stage 9: Precomputing substring gotos
+      [DEBUG] 2] src/glr/table.rs:1525: Stage 10: Precomputing reduce goto map
+      [DEBUG] 2] src/glr/table.rs:1528: Finalizing table
+
+      --- Combined States Statistics ---
+      Total combined states: 2
+      Sole Shift actions: Total: 5, Min/Max per state: 2/3, Avg per state: 2.50
+        Distribution (count -> #states): 2: 1, 3: 1
+      Sole Reduce actions: Total: 6, Min/Max per state: 0/6, Avg per state: 3.00
+        Distribution (count -> #states): 0: 1, 6: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 2
+      Goto actions: Total: 1, Min/Max per state: 0/1, Avg per state: 0.50
+        Distribution (count -> #states): 0: 1, 1: 1
+      ------------------------------------
+      Number of combined states: 2
+      [DEBUG] 2] src/glr/table.rs:1537: Done generating GLR parser
+      [DEBUG] 2] src/equivalence_analysis_finite_automata.rs:274: Starting LLM token equivalence analysis (on-demand) for 2 strings...
+      [DEBUG] 2] src/constraint.rs:1047: LLM Token Equivalence Analysis:
+      [DEBUG] 2] src/constraint.rs:1048:   - Original LLM tokens: 2
+      [DEBUG] 2] src/constraint.rs:1049:   - Equivalence classes: 2
+      [DEBUG] 2] src/constraint.rs:1051:   - Reduction factor: 1.00x
+      [DEBUG] 2] src/constraint.rs:1068:   - Class size distribution (top 10 largest):
+          - size 1: 2 classes
+      [DEBUG] 2] src/constraint.rs:1628: Building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree (fast builder)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:303: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:307: Done computing reachable IDs in 8.584µs
+      [DEBUG] 2] src/constraint.rs:1630: Done building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/constraint.rs:1636: Computing possible_matches for all 3 tokenizer states
+      [DEBUG] 2] src/constraint.rs:1646: Finished computing possible_matches
+      [DEBUG] 2] src/constraint.rs:1649: Building state_map_by_llm and terminal_map_by_llm
+      [DEBUG] 2] src/constraint.rs:1651: Built state_map_by_llm with 2 entries
+      [DEBUG] 2] src/constraint.rs:1657: Computing terminal follow sets
+      [DEBUG] 2] src/constraint.rs:1677: Computed terminal_follow_map_ids with 2 entries.
+      [DEBUG] 2] src/constraint.rs:3245: Building vocab prefix tree
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree (fast builder)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:303: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:307: Done computing reachable IDs in 7.292µs
+      [DEBUG] 2] src/constraint.rs:3247: Done building vocab prefix tree
+      [DEBUG] 2] src/constraint.rs:3257: Created trie1 roots for 3 tokenizer states
+      [DEBUG] 2] src/constraint.rs:3259: Counting vocab nodes for progress bar...
+      [DEBUG] 2] src/constraint.rs:3261: Counted 3 vocab nodes
+      [DEBUG] 2] src/constraint.rs:3274: Created trie1 leaf node
+      [DEBUG] 2] src/constraint.rs:3443: Starting precompute DFS
+
+      --- Precomputer1 DFS Stats ---
+      Total pending edges processed: 0
+      Unique src nodes: 0
+      Unique dst nodes: 0
+      Unique keys: 0
+      --- End Precomputer1 DFS Stats ---
+
+      [DEBUG] 2] src/constraint.rs:3454: Finished precompute DFS
+      [DEBUG] 2] src/constraint.rs:3457: Precomputation complete
+      [DEBUG] 2] src/constraint_extra.rs:1039: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1150: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 5 unique nodes, of which
+          - 3 are roots
+          - 2 are non-roots, of which
+              - 1 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 5
+        Total Edges: 3
+          Edges with None Key: 0
+          Edges with Some Key: 3
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    1.00
+        Average edge occupancy for None-key edges:    0.00
+        Total ranges in all HybridBitsets: 3
+      [DEBUG] 2] src/constraint.rs:2491: Precomputing Trie 3 (template-driven)...
+      [optimize_intermediate_trie3] End-reachability: total=36, productive=18, prunable=18
+      [optimize_intermediate_trie3] Reachable nodes: 10, edges: 8, unique edge-keys: 8
+      [optimize_intermediate_trie3] Initial classes: 3
+      [optimize_intermediate_trie3] WL iteration 1: classes=8, changed=9
+      [optimize_intermediate_trie3] WL iteration 2: classes=8, changed=0
+
+      --- Intermediate Trie3 Template Statistics ---
+      Terminal Name             ID         Nodes      Edges Cyclic Nodes
+      ------------------------- ----- ---------- ---------- ------------
+      'A'                       0              3          2           No
+      'EOF'                     1              3          2           No
+      '__DUMMY_TERMINAL_0__'    2              4          4           No
+      -----------------------------------------------------------------
+
+      Union Across All Templates:
+        Unique nodes: 8
+        Total edges: 8
+        Nodes shared by >= 2 templates: 1 (12.5%)
+      --------------------------------------------
+
+      [DEBUG] 2] src/constraint.rs:2638: Entering precompute3 special_map_grouped
+      [DEBUG] 2] src/constraint.rs:2750: Optimizing intermediate trie3...
+      [optimize_intermediate_trie3] End-reachability: total=20, productive=18, prunable=2
+      [optimize_intermediate_trie3] Reachable nodes: 16, edges: 15, unique edge-keys: 12
+      [optimize_intermediate_trie3] Initial classes: 4
+      [optimize_intermediate_trie3] WL iteration 1: classes=15, changed=12
+      [optimize_intermediate_trie3] WL iteration 2: classes=15, changed=0
+      [DEBUG] 2] src/constraint.rs:2775: Processing and rebuilding trie3 paths...
+      Starting push/pop elimination... nodes: 15
+      Intermediate graph node count: 15
+      Finished elimination. Final intermediate nodes: 13
+      Final graph node count: 13
+      [DEBUG] 2] src/constraint.rs:2790: Optimizing intermediate trie3 again...
+      [optimize_intermediate_trie3] End-reachability: total=13, productive=12, prunable=1
+      [optimize_intermediate_trie3] Reachable nodes: 13, edges: 12, unique edge-keys: 10
+      [optimize_intermediate_trie3] Initial classes: 4
+      [optimize_intermediate_trie3] WL iteration 1: classes=12, changed=12
+      [optimize_intermediate_trie3] WL iteration 2: classes=13, changed=4
+      [optimize_intermediate_trie3] WL iteration 3: classes=13, changed=0
+      [DEBUG] 2] src/constraint.rs:2807: Converting intermediate trie3 to final Trie3 format...
+      [DEBUG] 2] src/constraint.rs:2822: Finished precomputing Trie 3.
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:21: Optimizing Trie 3 size (using new pipeline)...
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:442: [Trie3 Opt] Metrics before optimization: {
+        "all_fanout": { count: 13, sum: 12.00, mean: 0.92, stdev: 0.47, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 2.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 11, sum: 11.00, mean: 1.00, stdev: 0.43, min: 0.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 2.00 },
+        "non_root_state_fanout": { count: 56, sum: 56.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "num_edges": 12,
+        "num_end_nodes": 1,
+        "num_nodes": 13,
+        "num_productive_nodes": 12,
+        "num_reachable_nodes": 13,
+        "num_roots": 3,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 2, sum: 1.00, mean: 0.50, stdev: 0.50, min: 0.00, p25: 0.00, median: 0.00, p75: 0.00, p95: 0.00, max: 1.00 },
+        "root_state_fanout": { count: 6, sum: 6.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "state_fanout": { count: 62, sum: 62.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 }
+      }
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: PruneDeadPaths
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: PruneUnproductivePaths
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: MergeEquivalentLLMTokens
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: ReorderLLMTokens
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: NwaDwaRoundtrip
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: PruneDeadPaths
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:472: [Trie3 Opt] GC after 'PruneDeadPaths': nodes 6 -> 3
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: PruneUnproductivePaths
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: MergeEquivalentLLMTokens
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: ReorderLLMTokens
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:454: [Trie3 Opt] Running pass: NwaDwaRoundtrip
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:496: [Trie3 Opt] Metrics after optimization: {
+        "all_fanout": { count: 5, sum: 2.00, mean: 0.40, stdev: 0.49, min: 0.00, p25: 0.00, median: 0.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 3, sum: 1.00, mean: 0.33, stdev: 0.47, min: 0.00, p25: 0.00, median: 0.00, p75: 0.00, p95: 0.00, max: 1.00 },
+        "non_root_state_fanout": { count: 6, sum: 6.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "num_edges": 2,
+        "num_end_nodes": 1,
+        "num_nodes": 5,
+        "num_productive_nodes": 3,
+        "num_reachable_nodes": 3,
+        "num_roots": 3,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 2, sum: 1.00, mean: 0.50, stdev: 0.50, min: 0.00, p25: 0.00, median: 0.00, p75: 0.00, p95: 0.00, max: 1.00 },
+        "root_state_fanout": { count: 6, sum: 6.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "state_fanout": { count: 12, sum: 12.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 }
+      }
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:59: Finished optimizing Trie 3 size in 3.668709ms
+      [DEBUG] 2] src/constraint.rs:1851: Remapping LLM token IDs in auxiliary structures due to Trie3 optimization (2 changed).
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 3 unique nodes, of which
+          - 2 are roots
+          - 1 are non-roots, of which
+              - 0 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 3
+        Total Edges: 1
+        Nodes with End Marker: 1
+        Average edge fanout:    1.00
+        Total ranges in all HybridBitsets: 1
+      ---------------------------------
+      Parser: Parse Table:
+        Start State: 4
+        State 0:
+          Items:
+            - [s -> __DUMMY_TERMINAL_0__ • A __DUMMY_TERMINAL_0__ EOF]
+          Actions (full):
+            - On A: Shift 1
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [s -> __DUMMY_TERMINAL_0__ A • __DUMMY_TERMINAL_0__ EOF]
+          Actions (full):
+            - On __DUMMY_TERMINAL_0__: Shift 2
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 2:
+          Items:
+            - [s -> __DUMMY_TERMINAL_0__ A __DUMMY_TERMINAL_0__ • EOF]
+          Actions (full):
+            - On EOF: Shift 3
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 3:
+          Items:
+            - [s -> __DUMMY_TERMINAL_0__ A __DUMMY_TERMINAL_0__ EOF •]
+          Actions (full):
+            - On A: Reduce s (len 4) via rules [1]
+            - On EOF: Reduce s (len 4) via rules [1]
+            - On __DUMMY_TERMINAL_0__: Reduce s (len 4) via rules [1]
+          Default Action:
+            - Default Reduce s (len 4) via rules [1]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 4:
+          Items:
+            - [start' -> • s]
+          Actions (full):
+            - On __DUMMY_TERMINAL_0__: Shift 0
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - s -> 5
+            - start' -> accept
+        State 5:
+          Items:
+            - [start' -> s •]
+          Actions (full):
+            - On A: Reduce start' (len 1) via rules [0]
+            - On EOF: Reduce start' (len 1) via rules [0]
+            - On __DUMMY_TERMINAL_0__: Reduce start' (len 1) via rules [0]
+          Default Action:
+            - Default Reduce start' (len 1) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 6 (Combined):
+          Items: (State ID not found in item set map)
+          Items: (Combined state)
+          Actions (combined):
+          - On A: Shift 1 [states: HybridBitset { inner: 0..=0 }]
+          - On A: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On A: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          - On EOF: Shift 3 [states: HybridBitset { inner: 2..=2 }]
+          - On EOF: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On EOF: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          - On __DUMMY_TERMINAL_0__: Shift 7 [states: HybridBitset { inner: 1..=1, 4..=4 }]
+          - On __DUMMY_TERMINAL_0__: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On __DUMMY_TERMINAL_0__: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (combined):
+            - s -> 5 [states: HybridBitset { inner: 4..=4 }]
+        State 7 (Combined):
+          Items: (State ID not found in item set map)
+          Items: (Combined state)
+          Actions (combined):
+          - On A: Shift 1 [states: HybridBitset { inner: 4..=4 }]
+          - On EOF: Shift 3 [states: HybridBitset { inner: 1..=1 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (combined):
+            (No goto actions)
+        State 18446744073709551615 (Hallucinated):
+          Items: (Hallucinated state)
+          Actions (hallucinated):
+          - On A: Shift 1 [states: HybridBitset { inner: 0..=0 }]
+          - On A: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On A: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          - On EOF: Shift 3 [states: HybridBitset { inner: 2..=2 }]
+          - On EOF: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On EOF: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          - On __DUMMY_TERMINAL_0__: Shift 0 [states: HybridBitset { inner: 4..=4 }]
+          - On __DUMMY_TERMINAL_0__: Shift 2 [states: HybridBitset { inner: 1..=1 }]
+          - On __DUMMY_TERMINAL_0__: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 5..=5 }]
+          - On __DUMMY_TERMINAL_0__: Reduce s (len 4) via rules [1] [states: HybridBitset { inner: 3..=3 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (hallucinated):
+            - s -> 5 [states: HybridBitset { inner: 4..=4 }]
+            - start' -> accept [states: HybridBitset { inner: 4..=4 }]
+
+      Terminal Map (name to terminal ID):
+        A -> 0
+        EOF -> 1
+        __DUMMY_TERMINAL_0__ -> 2
+
+      Non-Terminal Map:
+        s -> 1
+        start' -> 0
+
+      Dumping Precomputed Trie 0 Structure (showing original LLM Token IDs):
+      ===================================
+
+      ===================================
+      Dump Complete.
+      Dumping Precomputed Trie 1 Structure (showing original LLM Token IDs):
+      ===================================
+
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(0) (MaxDepth: 18446744073709551615) [Live: [0..=1] (e.g., ["$", "a"])]
+      └── Edge '__DUMMY_TERMINAL_0__': [0..=1] (e.g., ["$", "a"]) -> Node Trie2Index(1) (MaxDepth: 18446744073709551615) [Live: []]
+         ├── Edge 'A': [1] (e.g., ["a"]) -> Node Trie2Index(2) (MaxDepth: 18446744073709551615) [END] [Live: [0..=1] (e.g., ["$", "a"])]
+         └── Edge 'EOF': [0] (e.g., ["$"]) -> Node Trie2Index(2) (MaxDepth: 18446744073709551615) [END] [Live: [0..=1] (e.g., ["$", "a"])]
+
+      --- Tokenizer State ID: 1 ---
+      Root Node Trie2Index(3) (MaxDepth: 18446744073709551615) [Live: [0..=1] (e.g., ["$", "a"])]
+
+      --- Tokenizer State ID: 2 ---
+      Root Node Trie2Index(4) (MaxDepth: 18446744073709551615) [Live: [0..=1] (e.g., ["$", "a"])]
+
+      ===================================
+      Dump Complete.
+      Dumping Precomputed Trie 3 Structure (showing original LLM Token IDs):
+      ===================================
+
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(15) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0] (e.g., ["a", "$"])): states [0..=5] -> Node Trie2Index(13) (MaxDepth: 1) [END]
+
+      --- Tokenizer State ID: 1 ---
+      Root Node Trie2Index(16) (MaxDepth: 0)
+
+      --- Tokenizer State ID: 2 ---
+      Root Node Trie2Index(16) (MaxDepth: 0)
+        (Root already visited)
+
+      ===================================
+      Dump Complete.
+      --- Special Precomputation (new spec) ---
+      Tokenizer roots cached: 3
+      pci1 end nodes: 1
+      Reduce edges: 9
+      Shift edges: 4
+      Super edges: 0
+      --- End Special Precomputation ---
+      Initializing constraint state...
+
+
+      thread 'test_constraint_basic::test_trivial' (34225159) panicked at src/test_constraint_basic.rs:70:5:
+      assertion `left == right` failed
+        left: HybridBitset { inner: 0..=1 }
+       right: HybridBitset { inner: 0..=0 }
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::test_constraint_basic::test_trivial
+                   at ./src/test_constraint_basic.rs:70:5
+         5: sep1::test_constraint_basic::test_trivial::{{closure}}
+                   at ./src/test_constraint_basic.rs:35:18
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+      ```
+
+      `````
+
+      Something about what you did is now causing mismatches. Fix it. Don't just revert everything you've done; that'd be cowardly. Think about why the mismatch occurs, find the root cause, fix it. We still need to achieve the original mission, obviously.
+    metadata:
+  - assistant: |-
+      Below are the concrete steps to fix the mismatch while keeping the deferred-edge design and path compression. The core issue is that compressed “direct-to-END” edges were aggregated per-pop with universal SIDs, which merged distinct SID classes and changed semantics. We’ll instead accumulate compressed END edges by (pop, tokens) and keep the precise SID sets that lead to those edges.
+
+      Step-by-step instructions
+
+      1) Root cause
+      - In convert_dwa_to_minitrie, we aggregated compressed edges to END in end_tokens_by_pop: BTreeMap<isize, SimpleBitset>.
+      - When we finally emitted those edges, we used universal SIDs [0..=max] for each pop, collapsing different SID classes (e.g., SID=1 edge and SID=4 edge) into a single edge with SIDs [0..=max]. This caused the “states [0..=5]” fanout in a place where the test expected a single SID (e.g., [0]).
+
+      2) Fix: track SIDs precisely for compressed “direct-to-END” edges
+      - Replace end_tokens_by_pop with end_edge_groups: BTreeMap<(isize, SortedSet), SortedSet>.
+      - Key by (pop, tokens) and accumulate the exact SIDs for each contribution:
+        - For exception compression: add only that single sid.
+        - For default compression: add the complement of exceptions (as before).
+        - For final edges at the terminal (no SID consumption): still add universal SIDs, but now per (pop, tokens) rather than per pop. This preserves “final with no SID” semantics.
+
+      3) Concrete edits in src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      - In convert_dwa_to_minitrie:
+        - Replace end_tokens_by_pop with end_edge_groups defined as BTreeMap<(isize, SortedSet), SortedSet>.
+        - In 2.a: convert final_weight at the terminal to tokens_set (SortedSet), then accumulate into end_edge_groups at key (pop_final, tokens_set) with SIDs [0..=ctx.max_state_id].
+        - In 2.b (exception compression): compute accept_tokens_set and accumulate (pop, tokens_set) -> add that specific sid.
+        - In 2.c (default compression): compute accept_tokens_set and accumulate (pop, tokens_set) -> add all non-exception SIDs.
+        - Build new_children: add regular grouped edges to DWA destinations, then add end_edge_groups edges to the canonical end node. Remove the previous “end_tokens_by_pop” emission loop.
+
+      4) Why this is correct (rigorous sketch)
+      - Deterministic weights:
+        - DWA stores unioned path weights per state and per-edge. Our compression computes accept_tokens = trans_weight ∧ dest.final_weight at the correct target (after following “simple default” chains), matching the tokens that would be active after consuming that symbol and reaching a final state.
+      - SID-precise acceptance:
+        - Each deterministic edge was originally bound to a precise set of SIDs (the specific exception SID, or the complement for the default). Using per-(pop, tokens) aggregation with SID sets preserves these distinctions while still deferring the edge creation.
+      - Finality over default chains:
+        - For “final without consuming an additional SID”, using pop_final = steps (no SID step) is faithful to the NWA encoding: pop = m corresponds to m default transitions. Finality is emitted at (pop_final, tokens_set) and only affects acceptance without a SID operation, which is correct and does not interfere with SID-guarded paths.
+      - Effectiveness:
+        - We still avoid creating intermediate nodes solely for forwarding to END, and we keep edges minimal without losing SID partitioning.
+
+      Git diffs
+
+      ```diff
+      diff --git a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      --- a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      +++ b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      @@ -99,6 +99,10 @@
+           /// (terminal_state_id, number_of_simple_default_steps).
+           /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
+           /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+      +    ///
+      +    /// Pop semantics:
+      +    /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
+      +    /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
+           fn follow_simple_chain(
+               dwa: &crate::weighted_automata::DWA,
+               start: usize,
+      @@ -145,66 +149,146 @@
+                   // Accumulate simple default-only states into the pop count.
+                   let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
+                   let dwa_term_state = &dwa.states[terminal_dwa_id];
+      -            let pop_base = 1isize;
+      -            let pop = pop_base + (simple_steps as isize);
+      -
+      -            // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
+      -            let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
+      -
+      -            // Handle exception transitions
+      +            let pop_trans: isize = (simple_steps as isize) + 1; // transitions (default steps + 1 SID step)
+      +            let pop_final: isize = simple_steps as isize;       // final edges at terminal (no SID step)
+      +
+      +            // Group by (pop, tokens, dst) to build MiniTrie edges.
+      +            let mut edge_groups: BTreeMap<(isize, SortedSet, NodeId), SortedSet> = BTreeMap::new();
+      +            // Direct-to-END edges accumulated by (pop, tokens) -> sids.
+      +            let mut end_edge_groups: BTreeMap<(isize, SortedSet), SortedSet> = BTreeMap::new();
+      +
+      +            // 2.a Emit final edges from the terminal of the default-only chain (defers finality correctly).
+      +            if let Some(final_weight) = &dwa_term_state.final_weight {
+      +                if !final_weight.is_empty() {
+      +                    let tokens_set = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
+      +                    if !tokens_set.is_empty() {
+      +                        let key = (pop_final, tokens_set);
+      +                        let sids_entry = end_edge_groups.entry(key).or_default();
+      +                        for sid in 0..=ctx.max_state_id {
+      +                            sids_entry.insert(sid);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Precompute the set of exception SIDs at the terminal state (used in multiple places).
+      +            let exception_sids: BTreeSet<u16> =
+      +                dwa_term_state.transitions.exceptions.keys().cloned().collect();
+      +
+      +            // Helper: returns Some((final_weight, extra_steps)) if the destination's terminal is
+      +            // pure-final (no outgoing transitions and non-empty final weight). Otherwise None.
+      +            let mut pure_final_terminal = |u: usize| -> Option<(&SimpleBitset, usize)> {
+      +                let (u_term, extra_steps) = Self::follow_simple_chain(&dwa, u);
+      +                let st = &dwa.states[u_term];
+      +                let has_transitions = st.transitions.default.is_some() || !st.transitions.exceptions.is_empty();
+      +                if has_transitions {
+      +                    return None;
+      +                }
+      +                if let Some(w) = &st.final_weight {
+      +                    if !w.is_empty() {
+      +                        return Some((w, extra_steps));
+      +                    }
+      +                }
+      +                None
+      +            };
+      +
+      +            // 2.b Handle exception transitions from the terminal state.
+                   for (&sid, &dwa_dst_id) in &dwa_term_state.transitions.exceptions {
+      -                if let Some(tokens) = dwa_term_state.trans_weights_exceptions.get(&sid) {
+      -                    if tokens.is_empty() {
+      +                if let Some(tokens_w) = dwa_term_state.trans_weights_exceptions.get(&sid) {
+      +                    if tokens_w.is_empty() {
+                               continue;
+                           }
+       
+      -                    let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
+      +                    // Try to compress to END if destination is pure-final (after its simple default chain).
+      +                    if let Some((dest_final_w, extra_steps)) = pure_final_terminal(dwa_dst_id) {
+      +                        let accept_tokens = tokens_w & dest_final_w;
+      +                        if !accept_tokens.is_empty() {
+      +                            let total_pop = pop_trans + (extra_steps as isize);
+      +                            let tokens_set = SortedSet::from_iter(accept_tokens.iter_up_to(ctx.max_llm_token_id));
+      +                            if !tokens_set.is_empty() {
+      +                                let key = (total_pop, tokens_set);
+      +                                // Only this SID leads to acceptance for this (pop, tokens).
+      +                                end_edge_groups.entry(key).or_default().insert(sid as usize);
+      +                            }
+      +                            // Skip emitting the intermediate s -> dest edge in this case.
+      +                            continue;
+      +                        }
+      +                    }
+      +
+      +                    // Regular s -> dest edge when not compressed.
+      +                    let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+                           let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+      -
+      -                    let key = (tokens_set, mt_dst_id);
+      -                    edge_groups.entry(key).or_default().insert(sid as usize);
+      +                    let key = (pop_trans, tokens_set, mt_dst_id);
+      +                    edge_groups.entry(key).or_default().insert(sid as usize);
+                       }
+                   }
+       
+      -            // Handle default transition
+      +            // 2.c Handle default transition from the terminal state.
+                   if let Some(dwa_dst_id) = dwa_term_state.transitions.default {
+      -                if let Some(tokens) = &dwa_term_state.trans_weight_default {
+      -                    if !tokens.is_empty() {
+      -                        let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
+      -                        let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+      -                        let key = (tokens_set, mt_dst_id);
+      -
+      -                        let exception_sids: BTreeSet<u16> =
+      -                            dwa_term_state.transitions.exceptions.keys().cloned().collect();
+      -
+      -                        let default_sids_entry = edge_groups.entry(key).or_default();
+      -                        for sid in 0..=ctx.max_state_id {
+      -                            if !exception_sids.contains(&(sid as u16)) {
+      -                                default_sids_entry.insert(sid);
+      +                if let Some(tokens_w) = &dwa_term_state.trans_weight_default {
+      +                    if !tokens_w.is_empty() {
+      +                        // Try to compress default to END if destination is pure-final.
+      +                        if let Some((dest_final_w, extra_steps)) = pure_final_terminal(dwa_dst_id) {
+      +                            let accept_tokens = tokens_w & dest_final_w;
+      +                            if !accept_tokens.is_empty() {
+      +                                let total_pop = pop_trans + (extra_steps as isize);
+      +                                let tokens_set = SortedSet::from_iter(accept_tokens.iter_up_to(ctx.max_llm_token_id));
+      +                                if !tokens_set.is_empty() {
+      +                                    let key = (total_pop, tokens_set);
+      +                                    let sids_entry = end_edge_groups.entry(key).or_default();
+      +                                    for sid in 0..=ctx.max_state_id {
+      +                                        if !exception_sids.contains(&(sid as u16)) {
+      +                                            sids_entry.insert(sid);
+      +                                        }
+      +                                    }
+      +                                }
+      +                                // Skip emitting s -> dest default edges in this case.
+      +                            } else {
+      +                                // No acceptance after destination; fall back to regular default edges.
+      +                                let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+      +                                let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+      +                                let key = (pop_trans, tokens_set, mt_dst_id);
+      +                                let default_sids_entry = edge_groups.entry(key).or_default();
+      +                                for sid in 0..=ctx.max_state_id {
+      +                                    if !exception_sids.contains(&(sid as u16)) {
+      +                                        default_sids_entry.insert(sid);
+      +                                    }
+      +                                }
+                                   }
+      +                        } else {
+      +                            // Destination is not pure-final; emit regular default edges.
+      +                            let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+      +                            let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+      +                            let key = (pop_trans, tokens_set, mt_dst_id);
+      +                            let default_sids_entry = edge_groups.entry(key).or_default();
+      +                            for sid in 0..=ctx.max_state_id {
+      +                                if !exception_sids.contains(&(sid as u16)) {
+      +                                    default_sids_entry.insert(sid);
+      +                                }
+      +                            }
+                               }
+                           }
+                       }
+                   }
+       
+      -            // Now build the new children for the MiniTrie node
+      +            // 2.d Build the new children for the MiniTrie node from accumulated groups.
+                   let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
+      -            for ((tokens, dst), sids) in edge_groups {
+      -                if sids.is_empty() {
+      -                    continue;
+      -                }
+      -                let ek = EdgeKey::new(pop, tokens);
+      -                new_children.entry(ek).or_default().insert(dst, sids);
+      -            }
+      -
+      -            // If the DWA state has a final weight, create an edge to a canonical end node.
+      -            // This encodes the conditional finality.
+      -            if let Some(final_weight) = &dwa_src_state.final_weight {
+      -                if !final_weight.is_empty() {
+      -                    let tokens = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
+      -                    let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
+      -                    new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
+      -                }
+      -            }
+      +            for ((pop, tokens, dst), sids) in edge_groups {
+      +                if sids.is_empty() { continue; }
+      +                let ek = EdgeKey::new(pop, tokens);
+      +                new_children.entry(ek).or_default().insert(dst, sids);
+      +            }
+      +            // Add direct-to-END edges grouped by (pop, tokens) with precise SIDs.
+      +            for ((pop, tokens), sids) in end_edge_groups {
+      +                if sids.is_empty() { continue; }
+      +                let ek = EdgeKey::new(pop, tokens);
+      +                new_children.entry(ek).or_default().insert(end_node_id, sids);
+      +            }
+                   mini.set_children(mt_src_id, new_children);
+               }
+       
+               (mini, mt_root_id)
+           }
+       }
+       
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      --- a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      +++ b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      @@ -99,6 +99,10 @@
+           /// (terminal_state_id, number_of_simple_default_steps).
+           /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
+           /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+      +    ///
+      +    /// Pop semantics:
+      +    /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
+      +    /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
+           fn follow_simple_chain(
+               dwa: &crate::weighted_automata::DWA,
+               start: usize,
+      @@ -152,19 +152,24 @@
+       
+                   // Group by (pop, tokens, dst) to build MiniTrie edges.
+                   let mut edge_groups: BTreeMap<(isize, SortedSet, NodeId), SortedSet> = BTreeMap::new();
+      -            // Aggregate direct edges to END by pop (union tokens across contributions at the same pop).
+      -            let mut end_tokens_by_pop: BTreeMap<isize, SimpleBitset> = BTreeMap::new();
+      +            // Direct-to-END edges accumulated by (pop, tokens) -> sids.
+      +            let mut end_edge_groups: BTreeMap<(isize, SortedSet), SortedSet> = BTreeMap::new();
+       
+                   // 2.a Emit final edges from the terminal of the default-only chain (defers finality correctly).
+                   if let Some(final_weight) = &dwa_term_state.final_weight {
+                       if !final_weight.is_empty() {
+      -                    end_tokens_by_pop
+      -                        .entry(pop_final)
+      -                        .and_modify(|acc| *acc |= final_weight)
+      -                        .or_insert_with(|| final_weight.clone());
+      -                }
+      -            }
+      +                    let tokens_set = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
+      +                    if !tokens_set.is_empty() {
+      +                        let key = (pop_final, tokens_set);
+      +                        let sids_entry = end_edge_groups.entry(key).or_default();
+      +                        for sid in 0..=ctx.max_state_id {
+      +                            sids_entry.insert(sid);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +
+      +            // Precompute the set of exception SIDs at the terminal state (used in multiple places).
+      +            let exception_sids: BTreeSet<u16> =
+      +                dwa_term_state.transitions.exceptions.keys().cloned().collect();
+       
+                   // Helper: returns true if 'u' (terminal via simple default chain) has no outgoing transitions
+                   // and has a non-empty final weight, enabling compression s -> ... -> u -> END into s -> END.
+
       ```
     metadata:
   - user: |

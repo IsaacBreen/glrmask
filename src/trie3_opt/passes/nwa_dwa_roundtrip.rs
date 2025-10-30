@@ -103,6 +103,13 @@ impl NwaDwaRoundtripPass {
     /// Pop semantics:
     /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
     /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
+    /// (terminal_state_id, number_of_simple_default_steps).
+    /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
+    /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+    ///
+    /// Pop semantics:
+    /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
+    /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
     fn follow_simple_chain(
         dwa: &crate::weighted_automata::DWA,
         start: usize,
@@ -154,18 +161,26 @@ impl NwaDwaRoundtripPass {
 
             // Group by (pop, tokens, dst) to build MiniTrie edges.
             let mut edge_groups: BTreeMap<(isize, SortedSet, NodeId), SortedSet> = BTreeMap::new();
-            // Aggregate direct edges to END by pop (union tokens across contributions at the same pop).
-            let mut end_tokens_by_pop: BTreeMap<isize, SimpleBitset> = BTreeMap::new();
+            // Direct-to-END edges accumulated by (pop, tokens) -> sids.
+            let mut end_edge_groups: BTreeMap<(isize, SortedSet), SortedSet> = BTreeMap::new();
 
             // 2.a Emit final edges from the terminal of the default-only chain (defers finality correctly).
             if let Some(final_weight) = &dwa_term_state.final_weight {
                 if !final_weight.is_empty() {
-                    end_tokens_by_pop
-                        .entry(pop_final)
-                        .and_modify(|acc| *acc |= final_weight)
-                        .or_insert_with(|| final_weight.clone());
+                    let tokens_set = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
+                    if !tokens_set.is_empty() {
+                        let key = (pop_final, tokens_set);
+                        let sids_entry = end_edge_groups.entry(key).or_default();
+                        for sid in 0..=ctx.max_state_id {
+                            sids_entry.insert(sid);
+                        }
+                    }
                 }
             }
+
+            // Precompute the set of exception SIDs at the terminal state (used in multiple places).
+            let exception_sids: BTreeSet<u16> =
+                dwa_term_state.transitions.exceptions.keys().cloned().collect();
 
             // Helper: returns true if 'u' (terminal via simple default chain) has no outgoing transitions
             // and has a non-empty final weight, enabling compression s -> ... -> u -> END into s -> END.
