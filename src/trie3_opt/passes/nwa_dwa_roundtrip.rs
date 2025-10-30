@@ -98,7 +98,7 @@ impl NwaDwaRoundtripPass {
     }
     fn convert_dwa_to_minitrie(
         dwa: crate::weighted_automata::DWA,
-        _ctx: &OptimizationContext,
+        ctx: &OptimizationContext,
     ) -> (MiniTrie, NodeId) {
         let mut mini = MiniTrie::new();
         if dwa.states.is_empty() {
@@ -138,7 +138,7 @@ impl NwaDwaRoundtripPass {
                         continue;
                     }
 
-                    let tokens_set = SortedSet::from_iter(tokens.iter());
+                    let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
                     let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
 
                     let key = (tokens_set, mt_dst_id);
@@ -150,7 +150,7 @@ impl NwaDwaRoundtripPass {
             if let Some(dwa_dst_id) = dwa_term_state.transitions.default {
                 if let Some(tokens) = &dwa_term_state.trans_weight_default {
                     if !tokens.is_empty() {
-                        let tokens_set = SortedSet::from_iter(tokens.iter());
+                        let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
                         let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
                         let key = (tokens_set, mt_dst_id);
 
@@ -158,7 +158,7 @@ impl NwaDwaRoundtripPass {
                             dwa_term_state.transitions.exceptions.keys().cloned().collect();
 
                         let default_sids_entry = edge_groups.entry(key).or_default();
-                        for sid in 0..=_ctx.max_state_id {
+                        for sid in 0..=ctx.max_state_id {
                             if !exception_sids.contains(&(sid as u16)) {
                                 default_sids_entry.insert(sid);
                             }
@@ -181,8 +181,8 @@ impl NwaDwaRoundtripPass {
             // This encodes the conditional finality.
             if let Some(final_weight) = &dwa_src_state.final_weight {
                 if !final_weight.is_empty() {
-                    let tokens = SortedSet::from_iter(final_weight.iter());
-                    let sids = SortedSet::from_iter(0..=_ctx.max_state_id);  // TODO: VERY INEFFICIENT
+                    let tokens = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
+                    let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
                     new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
                 }
             }

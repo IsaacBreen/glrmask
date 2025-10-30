@@ -49,9 +49,10 @@ impl SimpleBitset {
         self.0.contains(index)
     }
 
-    /// Returns an iterator over the numbers in the set.
-    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.0.iter()
+    /// Returns an iterator over the numbers in the set, up to a given maximum.
+    /// This is to avoid accidentally iterating over a huge set like `0..=usize::MAX`.
+    pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> {
+        (&self.0 & &RangeSetBlaze::from_iter([0..=max])).into_iter()
     }
 }
 
@@ -1119,8 +1120,8 @@ mod tests {
         let all = SimpleBitset::all();
         let zeros = SimpleBitset::zeros();
 
-        assert_eq!((&set1 & &set2).iter().collect::<Vec<_>>(), vec![2, 5]);
-        assert_eq!((&set1 | &set2).iter().collect::<Vec<_>>(), vec![1, 2, 3, 5, 6]);
+        assert_eq!((&set1 & &set2).iter_up_to(10).collect::<Vec<_>>(), vec![2, 5]);
+        assert_eq!((&set1 | &set2).iter_up_to(10).collect::<Vec<_>>(), vec![1, 2, 3, 5, 6]);
         assert!((&set1 & &all).contains(1));
         assert!((&set1 | &zeros).contains(1));
         assert_eq!((&set1 | &zeros).len(), 3);
