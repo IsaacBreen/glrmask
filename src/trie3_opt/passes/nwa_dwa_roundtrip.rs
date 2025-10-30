@@ -12,14 +12,12 @@ use crate::weighted_automata::{NWA, SimpleBitset};
 /// - Merges all per-root results into a single MiniTrie, preserving root order.
 ///
 /// Encoding:
-/// - `pop = m` is modeled as a chain of `m` transitions on a special `POP_SYMBOL`.
+/// - `pop = m` is modeled as a chain of `m-1` default transitions followed by a SID-specific transition.
 /// - State IDs from the `MiniTrie` are used as alphabet symbols in the NWA.
 /// - LLM token sets from the `MiniTrie` are used as weights in the NWA.
 pub struct NwaDwaRoundtripPass;
 
 impl NwaDwaRoundtripPass {
-    const POP_SYMBOL: u16 = u16::MAX;
-
     fn reachable_from_one(trie: &MiniTrie, start: NodeId) -> BTreeSet<NodeId> {
         let mut seen: BTreeSet<NodeId> = BTreeSet::new();
         let mut q: VecDeque<NodeId> = VecDeque::new();
@@ -75,14 +73,16 @@ impl NwaDwaRoundtripPass {
                 let pop = ek.pop as usize;
                 for (&mt_dst, sids) in dm {
                     let mut cur = nwa_src;
-                    // Create pop chain
-                    for _ in 0..pop {
+                    // Create pop chain using default transitions. A pop `m` operation has `m-1` intermediate
+                    // steps that consume any SID, followed by one SID-specific step.
+                    for _ in 0..pop.saturating_sub(1) {
                         let inter = nwa.add_state();
-                        // Pop transitions don't constrain tokens.
-                        nwa.add_transition(cur, Self::POP_SYMBOL, inter, SimpleBitset::all());
+                        // Pop steps consume any SID and don't constrain tokens.
+                        nwa.add_default_transition(cur, inter, SimpleBitset::all());
                         cur = inter;
                     }
 
+                    // The last step is not a default transition, but specific to the SIDs.
                     if let Some(&nwa_dst) = map_mt_to_nwa.get(&mt_dst) {
                         let weight = SimpleBitset::from_iter(ek.tokens.iter());
                         if weight.is_empty() { continue; }
@@ -115,32 +115,29 @@ impl NwaDwaRoundtripPass {
 
         for (state_id, st) in dwa.states.iter().enumerate() {
             let src_mt = *map_dwa_to_mt.get(&state_id).unwrap();
-            // Walk POP_SYMBOL chain; at each step, check for SID exceptions.
+            // Walk default transition chain; at each step, check for SID exceptions.
             let mut pop = 0;
             let mut cur = state_id;
             let mut seen: BTreeSet<usize> = BTreeSet::new();
             loop {
-                if !seen.insert(cur) { break; } // Cycle in POP chain
+                if !seen.insert(cur) { break; } // Cycle in default chain
 
                 let current_dwa_state = &dwa.states[cur];
 
-                // Check for SID transitions from this point in the pop chain.
+                // Check for SID transitions (exceptions) from this point in the pop chain.
                 for (&char_code, &next_dwa_id) in current_dwa_state.transitions.iter_exceptions() {
-                    if char_code == Self::POP_SYMBOL { continue; }
-
                     let sid = char_code as usize;
                     let weight = current_dwa_state.trans_weights_exceptions.get(&char_code).unwrap();
                     let tokens = SortedSet::from_iter(weight.iter());
                     if tokens.is_empty() { continue; }
 
                     let dst_mt = *map_dwa_to_mt.get(&next_dwa_id).unwrap();
-
                     let key = (src_mt, pop, tokens, dst_mt);
                     new_edges.entry(key).or_default().insert(sid);
                 }
 
-                // Follow POP transition to continue the chain.
-                if let Some(&next) = current_dwa_state.transitions.get(Self::POP_SYMBOL) {
+                // Follow default transition to continue the chain.
+                if let Some(next) = current_dwa_state.transitions.default {
                     cur = next;
                     pop += 1;
                 } else {
