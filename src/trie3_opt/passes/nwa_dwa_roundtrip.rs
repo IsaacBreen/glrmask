@@ -100,57 +100,7 @@ impl NwaDwaRoundtripPass {
         dwa: crate::weighted_automata::DWA,
         _ctx: &OptimizationContext,
     ) -> (MiniTrie, NodeId) {
-        let mut out = MiniTrie::new();
-        let mut map_dwa_to_mt: BTreeMap<usize, NodeId> = BTreeMap::new();
-        // Create nodes
-        for (state_id, st) in dwa.states.iter().enumerate() {
-            let is_end = st.final_weight.is_some();
-            let nid = out.add_node(is_end);
-            map_dwa_to_mt.insert(state_id, nid);
-        }
-        // Add edges
-        // Collect all potential MiniTrie edges before adding them to group SIDs.
-        // Key: (src_mt, pop, tokens, dst_mt), Value: sids
-        let mut new_edges: BTreeMap<(NodeId, isize, SortedSet, NodeId), SortedSet> = BTreeMap::new();
-
-        for (state_id, st) in dwa.states.iter().enumerate() {
-            let src_mt = *map_dwa_to_mt.get(&state_id).unwrap();
-            // Walk default transition chain; at each step, check for SID exceptions.
-            let mut pop = 0;
-            let mut cur = state_id;
-            let mut seen: BTreeSet<usize> = BTreeSet::new();
-            loop {
-                if !seen.insert(cur) { break; } // Cycle in default chain
-
-                let current_dwa_state = &dwa.states[cur];
-
-                // Check for SID transitions (exceptions) from this point in the pop chain.
-                for (&char_code, &next_dwa_id) in current_dwa_state.transitions.iter_exceptions() {
-                    let sid = char_code as usize;
-                    let weight = current_dwa_state.trans_weights_exceptions.get(&char_code).unwrap();
-                    let tokens = SortedSet::from_iter(weight.iter());
-                    if tokens.is_empty() { continue; }
-
-                    let dst_mt = *map_dwa_to_mt.get(&next_dwa_id).unwrap();
-                    let key = (src_mt, pop, tokens, dst_mt);
-                    new_edges.entry(key).or_default().insert(sid);
-                }
-
-                // Follow default transition to continue the chain.
-                if let Some(next) = current_dwa_state.transitions.default {
-                    cur = next;
-                    pop += 1;
-                } else {
-                    break;
-                }
-            }
-        }
-        for ((src_mt, pop, tokens, dst_mt), sids) in new_edges {
-            out.add_edge(src_mt, EdgeKey::new(pop, tokens), dst_mt, sids);
-        }
-        // Return constructed trie and the start node for use as this root's root
-        let root_mt = *map_dwa_to_mt.get(&dwa.start_state).unwrap();
-        (out, root_mt)
+        todo!();
     }
 }
 
