@@ -68,12 +68,12 @@ fn get_default_config_impl() -> CoordinatorConfig {
         merge_global_atoms: true,
         merge_global_atoms_max_iters: 2,
         merge_global_atoms_max_atoms_per_pop: 4096,
-        eliminate_pop0_except_roots: true,
+        eliminate_pop0_except_roots: false,
         merge_equivalent_llm_tokens: true,
         reorder_llm_tokens: true,
         generalize_sids: true,
         nwa_dwa_roundtrip: false,
-        assert_no_pop0_except_roots: true,
+        assert_no_pop0_except_roots: false,
     }
 }
 

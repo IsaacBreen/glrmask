@@ -42,8 +42,8 @@ pub fn optimize_trie3_size(
         merge_equivalent_llm_tokens: config.merge_equivalent_llm_tokens,
         reorder_llm_tokens: config.reorder_llm_tokens,
         generalize_sids: config.generalize_sids,
-        nwa_dwa_roundtrip: true,
-        assert_no_pop0_except_roots: true,
+        nwa_dwa_roundtrip: config.nwa_dwa_roundtrip,
+        assert_no_pop0_except_roots: config.assert_no_pop0_except_roots,
     };
 
     run_pipeline_on_precompute3(
