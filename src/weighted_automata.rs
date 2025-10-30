@@ -546,7 +546,11 @@ impl Display for DWA {
                 writeln!(f, "    final_weight: {}", w)?;
             }
             if let Some(to) = &state.transitions.default {
-                writeln!(f, "    * -> {}", to)?;
+                if let Some(w) = &state.trans_weight_default {
+                    writeln!(f, "    * -> {} (trans_weight: {})", to, w)?;
+                } else {
+                    writeln!(f, "    * -> {}", to)?;
+                }
             }
             for (on, to) in &state.transitions.exceptions {
                 let char_repr = if let Some(c) = char::from_u32(*on as u32) {
@@ -558,7 +562,11 @@ impl Display for DWA {
                 } else {
                     format!("{}", *on)
                 };
-                writeln!(f, "    {} -> {}", char_repr, to)?;
+                if let Some(w) = state.trans_weights_exceptions.get(on) {
+                    writeln!(f, "    {} -> {} (trans_weight: {})", char_repr, to, w)?;
+                } else {
+                    writeln!(f, "    {} -> {}", char_repr, to)?;
+                }
             }
         }
         Ok(())
