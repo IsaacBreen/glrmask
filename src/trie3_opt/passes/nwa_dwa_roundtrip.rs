@@ -149,7 +149,8 @@ impl NwaDwaRoundtripPass {
                 let tokens_set = SortedSet::from_iter(tokens.iter());
                 let sids_set = SortedSet::from_iter(sids.into_iter().map(|s| s as usize));
 
-                let ek = EdgeKey::new(1, tokens_set);
+                let n = todo!();
+                let ek = EdgeKey::new(n, tokens_set);
 
                 let dest_map = new_children.entry(ek).or_default();
                 dest_map.entry(mt_dst_id).or_default().union_inplace(&sids_set);
