@@ -313,7 +313,8 @@ impl OptimizationPass for NwaDwaRoundtripPass {
             let (nwa, _map_mt_to_nwa) = Self::build_nwa_for_root(trie, root, ctx);
             println!("Determinizing NWA");
             // println!("NWA for root {}: {}", root, nwa);
-            let dwa = nwa.determinize();
+            let mut dwa = nwa.determinize();
+            dwa.simplify();
             println!("Converting DWA to MiniTrie");
             // println!("DWA for root {}: {}", root, dwa);
             let (partial, partial_root) = Self::convert_dwa_to_minitrie(dwa, ctx);
