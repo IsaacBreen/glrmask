@@ -100,7 +100,72 @@ impl NwaDwaRoundtripPass {
         dwa: crate::weighted_automata::DWA,
         _ctx: &OptimizationContext,
     ) -> (MiniTrie, NodeId) {
-        todo!();
+        let mut mini = MiniTrie::new();
+        if dwa.states.is_empty() {
+            // Should not happen if NWA was non-empty, as DWA gets at least a start state.
+            let root_id = mini.add_node(false);
+            return (mini, root_id);
+        }
+
+        // 1. Create MiniTrie nodes for each DWA state.
+        let mut dwa_to_mt_map: BTreeMap<usize, NodeId> = BTreeMap::new();
+        for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+            let is_end = dwa_state.final_weight.as_ref().map_or(false, |fw| !fw.is_empty());
+            let mt_id = mini.add_node(is_end);
+            dwa_to_mt_map.insert(dwa_id, mt_id);
+        }
+
+        // 2. Create MiniTrie edges.
+        for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
+            let mt_src_id = dwa_to_mt_map[&dwa_src_id];
+
+            // Group SIDs by their target DWA state.
+            let mut transitions_by_dest: BTreeMap<usize, BTreeSet<u16>> = BTreeMap::new();
+            for (&sid, &dwa_dst_id) in &dwa_src_state.transitions.exceptions {
+                transitions_by_dest.entry(dwa_dst_id).or_default().insert(sid);
+            }
+
+            if let Some(default_dst_id) = dwa_src_state.transitions.default {
+                let exception_sids: BTreeSet<u16> =
+                    dwa_src_state.transitions.exceptions.keys().cloned().collect();
+                let default_sids_entry = transitions_by_dest.entry(default_dst_id).or_default();
+                // The alphabet is StateIDs from the original MiniTrie.
+                for sid in 0..=_ctx.max_state_id {
+                    if !exception_sids.contains(&(sid as u16)) {
+                        default_sids_entry.insert(sid as u16);
+                    }
+                }
+            }
+
+            let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
+
+            for (dwa_dst_id, sids) in transitions_by_dest {
+                if sids.is_empty() { continue; }
+                let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                let dwa_dst_state = &dwa.states[dwa_dst_id];
+
+                // If the destination is a final state, the tokens are its final_weight.
+                // Otherwise, they are its path weight.
+                let tokens = dwa_dst_state.final_weight.as_ref().filter(|fw| !fw.is_empty()).unwrap_or(&dwa_dst_state.weight).clone();
+                if tokens.is_empty() { continue; }
+
+                let tokens_set = SortedSet::from_iter(tokens.iter());
+                let sids_set = SortedSet::from_iter(sids.into_iter().map(|s| s as usize));
+
+                // A DWA transition consumes one SID. In `aici` semantics, this would normally
+                // correspond to `pop=1`. However, the NWA construction in this pass loses the
+                // distinction between `pop=0` and `pop=1`. We use `pop=0` to align with the
+                // example output structure provided in the prompt.
+                let ek = EdgeKey::new(0, tokens_set);
+
+                let dest_map = new_children.entry(ek).or_default();
+                dest_map.entry(mt_dst_id).or_default().union_inplace(&sids_set);
+            }
+            mini.set_children(mt_src_id, new_children);
+        }
+
+        let mt_root_id = dwa_to_mt_map[&dwa.start_state];
+        (mini, mt_root_id)
     }
 }
 
