@@ -771,7 +771,8 @@ impl DWA {
             std::collections::HashMap::new();
         for i in 0..n {
             let key = (self.states[i].weight.clone(), self.states[i].final_weight.clone());
-            part[i] = *canon0.entry(key).or_insert_with(|| canon0.len());
+            let next_id = canon0.len();
+            part[i] = *canon0.entry(key).or_insert(next_id);
         }
 
         // Refine until stable
@@ -808,7 +809,8 @@ impl DWA {
                     def_cls,
                     ex,
                 );
-                next_part[i] = *sig2pid.entry(sig).or_insert_with(|| sig2pid.len());
+                let next_pid = sig2pid.len();
+                next_part[i] = *sig2pid.entry(sig).or_insert(next_pid);
             }
             if next_part != part {
                 part = next_part;
