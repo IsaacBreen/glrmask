@@ -1,0 +1,697 @@
+// src/weighted_automata.rs
+
+#![allow(dead_code)] // Allow unused code for this library module example
+
+use range_set_blaze::RangeSetBlaze;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::{Debug, Display, Formatter};
+use std::iter::FromIterator;
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
+
+// --- Part 1: SimpleBitset ---
+
+/// A simple wrapper around `RangeSetBlaze<usize>` for representing sets of numbers as weights.
+///
+/// This version is a straightforward, owned data structure without the complexities of
+/// interning or caching found in `HybridBitset`. It's suitable for tracking sets of
+/// properties, IDs, or other numerical data through automaton transitions.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
+pub struct SimpleBitset(pub RangeSetBlaze<usize>);
+
+impl SimpleBitset {
+    /// Creates a new, empty bitset (the "zero" weight).
+    pub fn zeros() -> Self {
+        SimpleBitset(RangeSetBlaze::new())
+    }
+
+    /// Creates a new bitset containing all possible `usize` values (the "unit" or "identity" weight).
+    pub fn all() -> Self {
+        SimpleBitset(RangeSetBlaze::from_iter([0..=usize::MAX]))
+    }
+
+    /// Creates a bitset from a single item.
+    pub fn from_item(item: usize) -> Self {
+        SimpleBitset(RangeSetBlaze::from_iter([item]))
+    }
+
+    /// Returns the number of elements in the set. Saturates at `usize::MAX`.
+    pub fn len(&self) -> usize {
+        self.0.len().try_into().unwrap_or(usize::MAX)
+    }
+
+    /// Returns `true` if the set contains no elements.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Checks if a specific number is present in the set.
+    pub fn contains(&self, index: usize) -> bool {
+        self.0.contains(index)
+    }
+
+    /// Returns an iterator over the numbers in the set.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.iter()
+    }
+}
+
+impl Debug for SimpleBitset {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self == &Self::all() {
+            write!(f, "SimpleBitset(ALL)")
+        } else {
+            Debug::fmt(&self.0, f)
+        }
+    }
+}
+
+impl Display for SimpleBitset {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self == &Self::all() {
+            return write!(f, "ALL");
+        }
+        write!(f, "[")?;
+        let mut ranges = self.0.ranges().peekable();
+        while let Some(range) = ranges.next() {
+            if range.start() == range.end() {
+                write!(f, "{}", range.start())?;
+            } else {
+                write!(f, "{}..={}", range.start(), range.end())?;
+            }
+            if ranges.peek().is_some() {
+                write!(f, ", ")?;
+            }
+        }
+        write!(f, "]")
+    }
+}
+
+impl FromIterator<usize> for SimpleBitset {
+    fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
+        SimpleBitset(RangeSetBlaze::from_iter(iter))
+    }
+}
+
+impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
+    type Output = SimpleBitset;
+    fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+        SimpleBitset(&self.0 & &rhs.0)
+    }
+}
+
+impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
+    type Output = SimpleBitset;
+    fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+        SimpleBitset(&self.0 | &rhs.0)
+    }
+}
+
+impl BitAndAssign<&SimpleBitset> for SimpleBitset {
+    fn bitand_assign(&mut self, rhs: &SimpleBitset) {
+        // range-set-blaze does not implement BitAndAssign, so we emulate it.
+        self.0 = &self.0 & &rhs.0;
+    }
+}
+
+impl BitOrAssign<&SimpleBitset> for SimpleBitset {
+    fn bitor_assign(&mut self, rhs: &SimpleBitset) {
+        self.0 |= &rhs.0;
+    }
+}
+
+// --- Bitwise Operations (for owned and mixed owned/borrowed values) ---
+impl BitAnd<SimpleBitset> for SimpleBitset {
+    type Output = SimpleBitset;
+    fn bitand(self, rhs: SimpleBitset) -> Self::Output {
+        &self & &rhs
+    }
+}
+impl BitOr<SimpleBitset> for SimpleBitset {
+    type Output = SimpleBitset;
+    fn bitor(self, rhs: SimpleBitset) -> Self::Output {
+        &self | &rhs
+    }
+}
+
+impl<'a> BitAnd<&'a SimpleBitset> for SimpleBitset {
+    type Output = SimpleBitset;
+    fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+        &self & rhs
+    }
+}
+impl<'a> BitOr<&'a SimpleBitset> for SimpleBitset {
+    type Output = SimpleBitset;
+    fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+        &self | rhs
+    }
+}
+
+impl<'a> BitAnd<SimpleBitset> for &'a SimpleBitset {
+    type Output = SimpleBitset;
+    fn bitand(self, rhs: SimpleBitset) -> Self::Output {
+        self & &rhs
+    }
+}
+impl<'a> BitOr<SimpleBitset> for &'a SimpleBitset {
+    type Output = SimpleBitset;
+    fn bitor(self, rhs: SimpleBitset) -> Self::Output {
+        self | &rhs
+    }
+}
+
+
+// --- Part 2: U16Map ---
+
+/// A map for `u16` keys, generic over the value type `T`.
+///
+/// It supports a `default` value for all keys not explicitly present as an `exception`.
+/// This is efficient for representing transitions where most characters lead to a
+/// common state, with only a few special cases.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
+pub struct U16Map<T> {
+    pub exceptions: BTreeMap<u16, T>,
+    pub default: Option<T>,
+}
+
+impl<T> U16Map<T> {
+    /// Creates a new, empty map with no default value.
+    pub fn new() -> Self {
+        Self {
+            exceptions: BTreeMap::new(),
+            default: None,
+        }
+    }
+
+    /// Creates a new map with a specified default value.
+    pub fn with_default(default_value: T) -> Self {
+        Self {
+            exceptions: BTreeMap::new(),
+            default: Some(default_value),
+        }
+    }
+
+    /// Gets the value for a given key, falling back to the default if no exception exists.
+    pub fn get(&self, key: u16) -> Option<&T> {
+        self.exceptions.get(&key).or(self.default.as_ref())
+    }
+
+    /// Returns an iterator over the explicit `(key, value)` exceptions.
+    pub fn iter_exceptions(&self) -> impl Iterator<Item = (&u16, &T)> {
+        self.exceptions.iter()
+    }
+
+    /// Returns a reference to the default value, if it exists.
+    pub fn get_default(&self) -> Option<&T> {
+        self.default.as_ref()
+    }
+}
+
+// --- Part 3 & 4: Automata Definitions ---
+
+pub type StateID = usize;
+pub type Weight = SimpleBitset;
+
+// --- Nondeterministic Weighted Automaton (NWA) ---
+
+#[derive(Clone, Debug, Default)]
+pub struct NWAState {
+    /// Transitions on specific `u16` characters. The `Vec` handles nondeterminism.
+    pub transitions: U16Map<Vec<(StateID, Weight)>>,
+    /// Epsilon transitions that can be taken without consuming a character.
+    pub epsilon_transitions: Vec<(StateID, Weight)>,
+    /// The weight associated with this state if it's a final/accepting state.
+    pub final_weight: Option<Weight>,
+}
+
+impl NWAState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NWA {
+    pub states: Vec<NWAState>,
+    pub start_state: StateID,
+}
+
+impl NWA {
+    /// Creates a new NWA with a single start state.
+    pub fn new() -> Self {
+        let mut nwa = Self::default();
+        nwa.add_state(); // Add start state 0
+        nwa
+    }
+
+    /// Adds a new, empty state and returns its ID.
+    pub fn add_state(&mut self) -> StateID {
+        let id = self.states.len();
+        self.states.push(NWAState::new());
+        id
+    }
+
+    /// Adds a transition for a specific character.
+    pub fn add_transition(&mut self, from: StateID, on: u16, to: StateID, weight: Weight) {
+        self.states[from]
+            .transitions
+            .exceptions
+            .entry(on)
+            .or_default()
+            .push((to, weight));
+    }
+
+    /// Adds a default transition for all characters without an explicit exception.
+    pub fn add_default_transition(&mut self, from: StateID, to: StateID, weight: Weight) {
+        let default_trans = self.states[from].transitions.default.get_or_insert_with(Vec::new);
+        default_trans.push((to, weight));
+    }
+
+    /// Adds an epsilon transition.
+    pub fn add_epsilon_transition(&mut self, from: StateID, to: StateID, weight: Weight) {
+        self.states[from]
+            .epsilon_transitions
+            .push((to, weight));
+    }
+
+    /// Sets the final weight for a state, marking it as an accepting state.
+    pub fn set_final_weight(&mut self, state: StateID, weight: Weight) {
+        self.states[state].final_weight = Some(weight);
+    }
+}
+
+// --- Deterministic Weighted Automaton (DWA) ---
+
+#[derive(Clone, Debug, Default)]
+pub struct DWAState {
+    /// Deterministic transitions: one character leads to at most one state.
+    pub transitions: U16Map<StateID>,
+    /// The aggregated weight of being in this state.
+    pub weight: Weight,
+    /// The aggregated final weight of this state.
+    pub final_weight: Option<Weight>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DWA {
+    pub states: Vec<DWAState>,
+    pub start_state: StateID,
+}
+
+// --- Part 5: Determinization ---
+
+impl NWA {
+    /// Determinizes the Nondeterministic Weighted Automaton (NWA) into a
+    /// Deterministic Weighted Automaton (DWA) using a weighted subset construction algorithm.
+    ///
+    /// The algorithm works as follows:
+    /// 1. Each DWA state corresponds to a set of NWA states, where each NWA state has an
+    ///    associated `Weight`. This weight represents the combined weight of all paths
+    ///    from the start state to that NWA state.
+    /// 2. Path weights are combined with `BitAnd` (&) along a sequence of transitions.
+    /// 3. When multiple paths converge (nondeterminism), their weights are combined with `BitOr` (|).
+    /// 4. Epsilon transitions are handled by computing an "epsilon closure" to find all
+    ///    reachable states without consuming input.
+    /// 5. The alphabet is partitioned based on character exceptions in the NWA states to
+    ///    build the DWA's transition map.
+    pub fn determinize(&self) -> DWA {
+        let mut dwa = DWA::default();
+        if self.states.is_empty() {
+            return dwa;
+        }
+
+        // Map from a DWA state's composition to its StateID in the new DWA.
+        // A composition is a map from NWA StateID -> Path Weight.
+        let mut known_states: BTreeMap<BTreeMap<StateID, Weight>, StateID> = BTreeMap::new();
+        let mut worklist: VecDeque<BTreeMap<StateID, Weight>> = VecDeque::new();
+
+        // The initial DWA state is the epsilon closure of the NWA start state.
+        // The initial path has a weight of `all()`, representing no constraints yet.
+        let start_composition_raw = BTreeMap::from([(self.start_state, Weight::all())]);
+        let start_composition = self.epsilon_closure(start_composition_raw);
+
+        // Helper function to create a new DWA state if it's not already known.
+        let mut get_or_create_dwa_state =
+            |comp: BTreeMap<StateID, Weight>,
+             dwa: &mut DWA,
+             known: &mut BTreeMap<_, _>,
+             work: &mut VecDeque<_>|
+             -> Option<StateID> {
+                if comp.is_empty() {
+                    return None;
+                }
+                if let Some(&id) = known.get(&comp) {
+                    return Some(id);
+                }
+                let new_id = dwa.states.len();
+                dwa.states.push(DWAState::default());
+                known.insert(comp.clone(), new_id);
+                work.push_back(comp);
+                Some(new_id)
+            };
+
+        if let Some(start_id) = get_or_create_dwa_state(
+            start_composition,
+            &mut dwa,
+            &mut known_states,
+            &mut worklist,
+        ) {
+            dwa.start_state = start_id;
+        } else {
+            // The start state leads to nothing, so the DWA is empty.
+            return dwa;
+        }
+
+        while let Some(current_composition) = worklist.pop_front() {
+            let current_dwa_id = *known_states.get(&current_composition).unwrap();
+
+            // --- 1. Aggregate weights for the current DWA state ---
+            let mut aggregate_weight = Weight::zeros();
+            let mut aggregate_final_weight = Weight::zeros();
+            let mut critical_points = BTreeSet::new();
+
+            for (nwa_id, path_weight) in &current_composition {
+                aggregate_weight |= path_weight;
+                if let Some(final_w) = &self.states[*nwa_id].final_weight {
+                    aggregate_final_weight |= &(path_weight & final_w);
+                }
+                // Collect all exception characters that define alphabet partitions.
+                for &char_code in self.states[*nwa_id].transitions.exceptions.keys() {
+                    critical_points.insert(char_code);
+                }
+            }
+            dwa.states[current_dwa_id].weight = aggregate_weight;
+            if !aggregate_final_weight.is_empty() {
+                dwa.states[current_dwa_id].final_weight = Some(aggregate_final_weight);
+            }
+
+            // --- 2. Calculate the default transition for the DWA state ---
+            let mut default_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+            for (nwa_id, path_weight) in &current_composition {
+                if let Some(transitions) = self.states[*nwa_id].transitions.get_default() {
+                    for (next_nwa_id, trans_weight) in transitions {
+                        let next_path_weight = path_weight & trans_weight;
+                        default_next_raw
+                            .entry(*next_nwa_id)
+                            .or_default()
+                            .bitor_assign(&next_path_weight);
+                    }
+                }
+            }
+            let default_next_composition = self.epsilon_closure(default_next_raw);
+            let default_target_dwa_id = get_or_create_dwa_state(
+                default_next_composition,
+                &mut dwa,
+                &mut known_states,
+                &mut worklist,
+            );
+            dwa.states[current_dwa_id].transitions.default = default_target_dwa_id;
+
+            // --- 3. Calculate transitions for all critical points (exceptions) ---
+            for char_code in critical_points {
+                let mut exception_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+                for (nwa_id, path_weight) in &current_composition {
+                    if let Some(transitions) = self.states[*nwa_id].transitions.get(char_code) {
+                        for (next_nwa_id, trans_weight) in transitions {
+                            let next_path_weight = path_weight & trans_weight;
+                            exception_next_raw
+                                .entry(*next_nwa_id)
+                                .or_default()
+                                .bitor_assign(&next_path_weight);
+                        }
+                    }
+                }
+                let exception_next_composition = self.epsilon_closure(exception_next_raw);
+                let exception_target_dwa_id = get_or_create_dwa_state(
+                    exception_next_composition,
+                    &mut dwa,
+                    &mut known_states,
+                    &mut worklist,
+                );
+
+                // Add an exception if it differs from the default transition.
+                if exception_target_dwa_id != default_target_dwa_id {
+                    if let Some(target_id) = exception_target_dwa_id {
+                        dwa.states[current_dwa_id]
+                            .transitions
+                            .exceptions
+                            .insert(char_code, target_id);
+                    }
+                }
+            }
+        }
+
+        dwa
+    }
+
+    /// Computes the epsilon closure for a set of NWA states and their path weights.
+    ///
+    /// This function transitively follows all epsilon transitions, combining weights
+    /// until a fixed point is reached.
+    fn epsilon_closure(&self, initial_states: BTreeMap<StateID, Weight>) -> BTreeMap<StateID, Weight> {
+        let mut closure = initial_states;
+        let mut worklist: VecDeque<StateID> = closure.keys().cloned().collect();
+
+        while let Some(u_id) = worklist.pop_front() {
+            // This clone is necessary because we might modify `closure` inside the loop.
+            let u_weight = closure.get(&u_id).unwrap().clone();
+            if u_weight.is_empty() {
+                continue;
+            }
+
+            for (v_id, trans_weight) in &self.states[u_id].epsilon_transitions {
+                let new_v_weight = &u_weight & trans_weight;
+                if new_v_weight.is_empty() {
+                    continue;
+                }
+
+                let current_v_weight = closure.entry(*v_id).or_insert_with(Weight::zeros);
+                let old_len = current_v_weight.len();
+                *current_v_weight |= &new_v_weight;
+
+                // If the weight for v changed, we need to re-process its epsilon transitions.
+                if current_v_weight.len() > old_len {
+                    worklist.push_back(*v_id);
+                }
+            }
+        }
+        closure
+    }
+}
+
+// --- Display Implementations for Debugging ---
+
+impl Display for NWA {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "NWA (start: {})", self.start_state)?;
+        for (id, state) in self.states.iter().enumerate() {
+            writeln!(f, "  State {}:", id)?;
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", w)?;
+            }
+            for (to, weight) in &state.epsilon_transitions {
+                writeln!(f, "    ε -> {} (weight: {})", to, weight)?;
+            }
+            if let Some(default) = &state.transitions.default {
+                for (to, weight) in default {
+                    writeln!(f, "    * -> {} (weight: {})", to, weight)?;
+                }
+            }
+            for (on, transitions) in &state.transitions.exceptions {
+                for (to, weight) in transitions {
+                    writeln!(f, "    '{}' -> {} (weight: {})", *on as u8 as char, to, weight)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Display for DWA {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "DWA (start: {})", self.start_state)?;
+        for (id, state) in self.states.iter().enumerate() {
+            writeln!(f, "  State {}:", id)?;
+            writeln!(f, "    weight: {}", state.weight)?;
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", w)?;
+            }
+            if let Some(to) = &state.transitions.default {
+                writeln!(f, "    * -> {}", to)?;
+            }
+            for (on, to) in &state.transitions.exceptions {
+                writeln!(f, "    '{}' -> {}", *on as u8 as char, to)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+
+// --- Tests ---
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_bitset_ops() {
+        let set1 = SimpleBitset::from_iter(vec![1, 2, 5]);
+        let set2 = SimpleBitset::from_iter(vec![2, 3, 5, 6]);
+        let all = SimpleBitset::all();
+        let zeros = SimpleBitset::zeros();
+
+        assert_eq!((&set1 & &set2).iter().collect::<Vec<_>>(), vec![2, 5]);
+        assert_eq!((&set1 | &set2).iter().collect::<Vec<_>>(), vec![1, 2, 3, 5, 6]);
+        assert!((&set1 & &all).contains(1));
+        assert!((&set1 | &zeros).contains(1));
+        assert_eq!((&set1 | &zeros).len(), 3);
+        assert!((&set1 & &zeros).is_empty());
+    }
+
+    #[test]
+    fn test_u16_map() {
+        let mut map = U16Map::with_default(100);
+        map.exceptions.insert(b'a' as u16, 10);
+        map.exceptions.insert(b'b' as u16, 20);
+
+        assert_eq!(map.get(b'a' as u16), Some(&10));
+        assert_eq!(map.get(b'c' as u16), Some(&100)); // default
+        assert_eq!(map.get(b'b' as u16), Some(&20));
+    }
+
+    #[test]
+    fn test_determinize_simple_nwa() {
+        // NWA for "ab"
+        // 0 --a, {1}--> 1 --b, {2}--> 2 (final, {3})
+        let mut nwa = NWA::new();
+        let s1 = nwa.add_state();
+        let s2 = nwa.add_state();
+        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
+        nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_item(2));
+        nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+
+        let dwa = nwa.determinize();
+        // Expected DWA:
+        // S0 (start): weight=ALL
+        //   'a' -> S1
+        // S1: weight={1}
+        //   'b' -> S2
+        // S2: weight={1,2}, final_weight={1,2,3}
+        assert_eq!(dwa.states.len(), 3);
+        let start_state = &dwa.states[dwa.start_state];
+        assert_eq!(start_state.weight, SimpleBitset::all());
+        assert!(start_state.final_weight.is_none());
+
+        let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
+        let state1 = &dwa.states[s1_id];
+        assert_eq!(state1.weight, SimpleBitset::from_item(1));
+        assert!(state1.final_weight.is_none());
+
+        let s2_id = *state1.transitions.get(b'b' as u16).unwrap();
+        let state2 = &dwa.states[s2_id];
+        let expected_s2_weight = SimpleBitset::from_iter(vec![1]) & SimpleBitset::from_iter(vec![2]);
+        assert_eq!(state2.weight, expected_s2_weight);
+        let expected_final_weight = &expected_s2_weight & &SimpleBitset::from_item(3);
+        assert_eq!(state2.final_weight, Some(expected_final_weight));
+    }
+
+    #[test]
+    fn test_determinize_with_epsilon() {
+        // NWA for "a?"
+        // 0 --ε, {1}--> 1 --a, {2}--> 2 (final, {3})
+        // 0 is also final with weight {4}
+        let mut nwa = NWA::new();
+        let s1 = nwa.add_state();
+        let s2 = nwa.add_state();
+        nwa.add_epsilon_transition(0, s1, SimpleBitset::from_item(1));
+        nwa.add_transition(s1, b'a' as u16, s2, SimpleBitset::from_item(2));
+        nwa.set_final_weight(0, SimpleBitset::from_item(4));
+        nwa.set_final_weight(s2, SimpleBitset::from_item(3));
+
+        let dwa = nwa.determinize();
+        // Expected DWA:
+        // S0 (start): composition={0:ALL, 1:{1}}. weight=ALL|{1}. final_weight={4}
+        //   'a' -> S1
+        // S1: composition={2:{1,2}}. weight={1,2}. final_weight={1,2,3}
+        assert_eq!(dwa.states.len(), 2);
+
+        let start_state = &dwa.states[dwa.start_state];
+        assert_eq!(start_state.weight, SimpleBitset::from_iter(vec![1]) | SimpleBitset::all());
+        assert_eq!(start_state.final_weight, Some(SimpleBitset::from_item(4)));
+
+        let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
+        let state1 = &dwa.states[s1_id];
+        let expected_s1_weight = &SimpleBitset::from_item(1) & &SimpleBitset::from_item(2);
+        assert_eq!(state1.weight, expected_s1_weight);
+        let expected_final = &expected_s1_weight & &SimpleBitset::from_item(3);
+        assert_eq!(state1.final_weight, Some(expected_final));
+    }
+
+    #[test]
+    fn test_determinize_with_default() {
+        // NWA:
+        // 0 --'a', {1}--> 1 (final, {10})
+        // 0 --*, {2}--> 2 (final, {20})
+        let mut nwa = NWA::new();
+        let s1 = nwa.add_state();
+        let s2 = nwa.add_state();
+        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
+        nwa.add_default_transition(0, s2, SimpleBitset::from_item(2));
+        nwa.set_final_weight(s1, SimpleBitset::from_item(10));
+        nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+
+        let dwa = nwa.determinize();
+        // Expected DWA:
+        // S0 (start): weight=ALL
+        //   'a' -> S1 (exception)
+        //   * -> S2 (default)
+        // S1: weight={1}, final_weight={1,10}
+        // S2: weight={2}, final_weight={2,20}
+        assert_eq!(dwa.states.len(), 3);
+
+        let start_state = &dwa.states[dwa.start_state];
+        let s1_id = *start_state.transitions.exceptions.get(&(b'a' as u16)).unwrap();
+        let s2_id = start_state.transitions.default.unwrap();
+        assert_ne!(s1_id, s2_id);
+
+        let state1 = &dwa.states[s1_id];
+        assert_eq!(state1.weight, SimpleBitset::from_item(1));
+        assert_eq!(state1.final_weight, Some(SimpleBitset::from_item(1) & SimpleBitset::from_item(10)));
+
+        let state2 = &dwa.states[s2_id];
+        assert_eq!(state2.weight, SimpleBitset::from_item(2));
+        assert_eq!(state2.final_weight, Some(SimpleBitset::from_item(2) & SimpleBitset::from_item(20)));
+    }
+
+    #[test]
+    fn test_determinize_nondeterministic_choice() {
+        // NWA for "a" | "a"
+        // 0 --a, {1}--> 1 (final, {10})
+        // 0 --a, {2}--> 2 (final, {20})
+        let mut nwa = NWA::new();
+        let s1 = nwa.add_state();
+        let s2 = nwa.add_state();
+        nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_item(1));
+        nwa.add_transition(0, b'a' as u16, s2, SimpleBitset::from_item(2));
+        nwa.set_final_weight(s1, SimpleBitset::from_item(10));
+        nwa.set_final_weight(s2, SimpleBitset::from_item(20));
+
+        let dwa = nwa.determinize();
+        // Expected DWA:
+        // S0 (start): weight=ALL
+        //   'a' -> S1
+        // S1: composition={1:{1}, 2:{2}}. weight={1}|{2}. final_weight=({1}&{10})|({2}&{20})
+        assert_eq!(dwa.states.len(), 2);
+
+        let start_state = &dwa.states[dwa.start_state];
+        let s1_id = *start_state.transitions.get(b'a' as u16).unwrap();
+        let state1 = &dwa.states[s1_id];
+
+        let expected_weight = SimpleBitset::from_item(1) | SimpleBitset::from_item(2);
+        assert_eq!(state1.weight, expected_weight);
+
+        let final1 = SimpleBitset::from_item(1) & SimpleBitset::from_item(10);
+        let final2 = SimpleBitset::from_item(2) & SimpleBitset::from_item(20);
+        let expected_final = final1 | &final2;
+        assert_eq!(state1.final_weight, Some(expected_final));
+    }
+}
