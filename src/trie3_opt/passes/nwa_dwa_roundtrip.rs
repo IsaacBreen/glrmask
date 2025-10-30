@@ -99,6 +99,10 @@ impl NwaDwaRoundtripPass {
     /// (terminal_state_id, number_of_simple_default_steps).
     /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
     /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+    ///
+    /// Pop semantics:
+    /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
+    /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
     fn follow_simple_chain(
         dwa: &crate::weighted_automata::DWA,
         start: usize,
@@ -145,66 +149,131 @@ impl NwaDwaRoundtripPass {
             // Accumulate simple default-only states into the pop count.
             let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
             let dwa_term_state = &dwa.states[terminal_dwa_id];
-            let pop_base = 1isize;
-            let pop = pop_base + (simple_steps as isize);
+            let pop_trans: isize = (simple_steps as isize) + 1; // transitions (default steps + 1 SID step)
+            let pop_final: isize = simple_steps as isize;       // final edges at terminal (no SID step)
 
-            // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
-            let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
+            // Group by (pop, tokens, dst) to build MiniTrie edges.
+            let mut edge_groups: BTreeMap<(isize, SortedSet, NodeId), SortedSet> = BTreeMap::new();
+            // Aggregate direct edges to END by pop (union tokens across contributions at the same pop).
+            let mut end_tokens_by_pop: BTreeMap<isize, SimpleBitset> = BTreeMap::new();
 
-            // Handle exception transitions
+            // 2.a Emit final edges from the terminal of the default-only chain (defers finality correctly).
+            if let Some(final_weight) = &dwa_term_state.final_weight {
+                if !final_weight.is_empty() {
+                    end_tokens_by_pop
+                        .entry(pop_final)
+                        .and_modify(|acc| *acc |= final_weight)
+                        .or_insert_with(|| final_weight.clone());
+                }
+            }
+
+            // Helper: returns true if 'u' (terminal via simple default chain) has no outgoing transitions
+            // and has a non-empty final weight, enabling compression s -> ... -> u -> END into s -> END.
+            let mut pure_final_terminal = |u: usize| -> Option<(&SimpleBitset, usize)> {
+                let (u_term, extra_steps) = Self::follow_simple_chain(&dwa, u);
+                let st = &dwa.states[u_term];
+                let has_transitions = st.transitions.default.is_some() || !st.transitions.exceptions.is_empty();
+                if has_transitions {
+                    return None;
+                }
+                if let Some(w) = &st.final_weight {
+                    if !w.is_empty() {
+                        return Some((w, extra_steps));
+                    }
+                }
+                None
+            };
+
+            // 2.b Handle exception transitions from the terminal state.
             for (&sid, &dwa_dst_id) in &dwa_term_state.transitions.exceptions {
-                if let Some(tokens) = dwa_term_state.trans_weights_exceptions.get(&sid) {
-                    if tokens.is_empty() {
+                if let Some(tokens_w) = dwa_term_state.trans_weights_exceptions.get(&sid) {
+                    if tokens_w.is_empty() {
                         continue;
                     }
 
-                    let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
-                    let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                    // Try to compress to END if destination is pure-final (after its simple default chain).
+                    if let Some((dest_final_w, extra_steps)) = pure_final_terminal(dwa_dst_id) {
+                        let accept_tokens = tokens_w & dest_final_w;
+                        if !accept_tokens.is_empty() {
+                            let total_pop = pop_trans + (extra_steps as isize);
+                            end_tokens_by_pop
+                                .entry(total_pop)
+                                .and_modify(|acc| *acc |= &accept_tokens)
+                                .or_insert(accept_tokens);
+                            // Skip emitting the intermediate s -> dest edge in this case.
+                            continue;
+                        }
+                    }
 
-                    let key = (tokens_set, mt_dst_id);
+                    // Regular s -> dest edge when not compressed.
+                    let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+                    let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                    let key = (pop_trans, tokens_set, mt_dst_id);
                     edge_groups.entry(key).or_default().insert(sid as usize);
                 }
             }
 
-            // Handle default transition
+            // 2.c Handle default transition from the terminal state.
             if let Some(dwa_dst_id) = dwa_term_state.transitions.default {
-                if let Some(tokens) = &dwa_term_state.trans_weight_default {
-                    if !tokens.is_empty() {
-                        let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
-                        let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-                        let key = (tokens_set, mt_dst_id);
-
-                        let exception_sids: BTreeSet<u16> =
-                            dwa_term_state.transitions.exceptions.keys().cloned().collect();
-
-                        let default_sids_entry = edge_groups.entry(key).or_default();
-                        for sid in 0..=ctx.max_state_id {
-                            if !exception_sids.contains(&(sid as u16)) {
-                                default_sids_entry.insert(sid);
+                if let Some(tokens_w) = &dwa_term_state.trans_weight_default {
+                    if !tokens_w.is_empty() {
+                        // Try to compress default to END if destination is pure-final.
+                        if let Some((dest_final_w, extra_steps)) = pure_final_terminal(dwa_dst_id) {
+                            let accept_tokens = tokens_w & dest_final_w;
+                            if !accept_tokens.is_empty() {
+                                let total_pop = pop_trans + (extra_steps as isize);
+                                end_tokens_by_pop
+                                    .entry(total_pop)
+                                    .and_modify(|acc| *acc |= &accept_tokens)
+                                    .or_insert(accept_tokens);
+                                // Skip emitting s -> dest default edges in this case.
+                            } else {
+                                // No acceptance after destination; fall back to regular default edges.
+                                let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+                                let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                                let key = (pop_trans, tokens_set, mt_dst_id);
+                                let exception_sids: BTreeSet<u16> =
+                                    dwa_term_state.transitions.exceptions.keys().cloned().collect();
+                                let default_sids_entry = edge_groups.entry(key).or_default();
+                                for sid in 0..=ctx.max_state_id {
+                                    if !exception_sids.contains(&(sid as u16)) {
+                                        default_sids_entry.insert(sid);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Destination is not pure-final; emit regular default edges.
+                            let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+                            let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                            let key = (pop_trans, tokens_set, mt_dst_id);
+                            let exception_sids: BTreeSet<u16> =
+                                dwa_term_state.transitions.exceptions.keys().cloned().collect();
+                            let default_sids_entry = edge_groups.entry(key).or_default();
+                            for sid in 0..=ctx.max_state_id {
+                                if !exception_sids.contains(&(sid as u16)) {
+                                    default_sids_entry.insert(sid);
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // Now build the new children for the MiniTrie node
+            // 2.d Build the new children for the MiniTrie node from accumulated groups.
             let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
-            for ((tokens, dst), sids) in edge_groups {
-                if sids.is_empty() {
-                    continue;
-                }
+            for ((pop, tokens, dst), sids) in edge_groups {
+                if sids.is_empty() { continue; }
                 let ek = EdgeKey::new(pop, tokens);
                 new_children.entry(ek).or_default().insert(dst, sids);
             }
-
-            // If the DWA state has a final weight, create an edge to a canonical end node.
-            // This encodes the conditional finality.
-            if let Some(final_weight) = &dwa_src_state.final_weight {
-                if !final_weight.is_empty() {
-                    let tokens = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
-                    let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
-                    new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
-                }
+            // Add direct-to-END edges per-pop (tokens aggregated).
+            for (pop, tokens_w) in end_tokens_by_pop {
+                if tokens_w.is_empty() { continue; }
+                let tokens = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+                if tokens.is_empty() { continue; }
+                let ek = EdgeKey::new(pop, tokens);
+                let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
+                new_children.entry(ek).or_default().insert(end_node_id, sids);
             }
             mini.set_children(mt_src_id, new_children);
         }

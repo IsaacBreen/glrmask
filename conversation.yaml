@@ -1,364 +1,10 @@
 local_system:
   attached_files:
-    - src/trie3_opt/passes/nwa_dwa_roundtrip.rs
     - src/weighted_automata.rs
-  conversation_file: conversation.yaml
+    - src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+  conversation_file:
   compile_command:
   initial_file_contents:
-    src/trie3_opt/passes/nwa_dwa_roundtrip.rs: |
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
-      use crate::datastructures::trie::Trie;
-      use crate::trie3_opt::context::OptimizationContext;
-      use crate::weighted_automata::DWAState;
-      use crate::trie3_opt::core::{EdgeKey, MiniTrie, Node, NodeId, SortedSet};
-      use crate::trie3_opt::passes::OptimizationPass;
-      use crate::weighted_automata::{NWA, SimpleBitset};
-
-      /// A roundtrip pass that:
-      /// - Converts the MiniTrie subgraph for each root into a weighted NWA,
-      /// - Determinizes it into a DWA,
-      /// - Converts the DWA back into a MiniTrie,
-      /// - Merges all per-root results into a single MiniTrie, preserving root order.
-      ///
-      /// Encoding:
-      /// - `pop = m` is modeled as a chain of `m-1` default transitions followed by a SID-specific transition.
-      /// - State IDs from the `MiniTrie` are used as alphabet symbols in the NWA.
-      /// - LLM token sets from the `MiniTrie` are used as weights in the NWA.
-      pub struct NwaDwaRoundtripPass;
-
-      impl NwaDwaRoundtripPass {
-          fn reachable_from_one(trie: &MiniTrie, start: NodeId) -> BTreeSet<NodeId> {
-              let mut seen: BTreeSet<NodeId> = BTreeSet::new();
-              let mut q: VecDeque<NodeId> = VecDeque::new();
-              q.push_back(start);
-              while let Some(u) = q.pop_front() {
-                  if !seen.insert(u) {
-                      continue;
-                  }
-                  if let Some(node) = trie.get_node(u) {
-                      for (_ek, dm) in node.children() {
-                          for (v, _) in dm {
-                              if !seen.contains(v) {
-                                  q.push_back(*v);
-                              }
-                          }
-                      }
-                  }
-              }
-              seen
-          }
-
-          fn build_nwa_for_root(
-              mini: &MiniTrie,
-              root: NodeId,
-              _ctx: &OptimizationContext,
-          ) -> (NWA, BTreeMap<NodeId, usize>) {
-              let mut nwa = NWA::new();
-              // Collect subgraph nodes reachable from this root.
-              let sub_nodes = Self::reachable_from_one(mini, root);
-              // Map MiniTrie node -> NWA state
-              let mut map_mt_to_nwa: BTreeMap<NodeId, usize> = BTreeMap::new();
-              for n_id in sub_nodes.iter() {
-                  let s = nwa.add_state();
-                  map_mt_to_nwa.insert(*n_id, s);
-              }
-              // Root state is the NWA start
-              if let Some(&start_id) = map_mt_to_nwa.get(&root) {
-                  nwa.start_state = start_id;
-              }
-              // Mark final weights for ends
-              for (mt_id, nwa_id) in map_mt_to_nwa.iter() {
-                  if let Some(node) = mini.get_node(*mt_id) {
-                      if node.is_end() {
-                          nwa.set_final_weight(*nwa_id, SimpleBitset::all());
-                      }
-                  }
-              }
-
-              for (mt_id, &nwa_src) in map_mt_to_nwa.iter() {
-                  let node = mini.get_node(*mt_id).unwrap();
-                  for (ek, dm) in node.children() {
-                      if ek.pop < 0 { continue; }
-                      let pop = ek.pop as usize;
-                      let mut cur = nwa_src;
-                      // Create pop chain using default transitions. A pop `m` operation has `m-1` intermediate
-                      // steps that consume any SID, followed by one SID-specific step.
-                      for _ in 0..pop.saturating_sub(1) {
-                          let inter = nwa.add_state();
-                          // Pop steps consume any SID and don't constrain tokens.
-                          nwa.add_default_transition(cur, inter, SimpleBitset::all());
-                          cur = inter;
-                      }
-                      for (&mt_dst, sids) in dm {
-                          // The last step is not a default transition, but specific to the SIDs.
-                          let nwa_dst = map_mt_to_nwa[&mt_dst];
-                          let weight = SimpleBitset::from_iter(ek.tokens.iter());
-                          for sid in sids.iter() {
-                              // State IDs are the alphabet.
-                              nwa.add_transition(cur, sid as u16, nwa_dst, weight.clone());
-                          }
-                      }
-                  }
-              }
-              (nwa, map_mt_to_nwa)
-          }
-
-          /// Follows a chain of 'simple' states via default transitions, returning:
-          /// (terminal_state_id, number_of_simple_default_steps).
-          /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
-          /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
-          fn follow_simple_chain(
-              dwa: &crate::weighted_automata::DWA,
-              start: usize,
-          ) -> (usize, usize) {
-              let mut steps = 0usize;
-              let mut u = start;
-              let mut visited: BTreeSet<usize> = BTreeSet::new();
-              loop {
-                  let state = &dwa.states[u];
-                  if let Some(next) = state.simple_default_target() {
-                      if !visited.insert(u) { break; }
-                      steps += 1;
-                      u = next;
-                  } else { break; }
-              }
-              (u, steps)
-          }
-          fn convert_dwa_to_minitrie(
-              dwa: crate::weighted_automata::DWA,
-              ctx: &OptimizationContext,
-          ) -> (MiniTrie, NodeId) {
-              let mut mini = MiniTrie::new();
-              if dwa.states.is_empty() {
-                  // Should not happen if NWA was non-empty, as DWA gets at least a start state.
-                  let root_id = mini.add_node(false);
-                  return (mini, root_id);
-              }
-
-              // 1. Create MiniTrie nodes for each DWA state.
-              let mut dwa_to_mt_map: BTreeMap<usize, NodeId> = BTreeMap::new();
-              let end_node_id = mini.add_node(true);
-              for (dwa_id, _dwa_state) in dwa.states.iter().enumerate() {
-                  // DWA states are not end nodes themselves. Finality is modeled by an edge to a canonical end node.
-                  let mt_id = mini.add_node(false);
-                  dwa_to_mt_map.insert(dwa_id, mt_id);
-              }
-
-              let mt_root_id = dwa_to_mt_map[&dwa.start_state];
-
-              // 2. Create MiniTrie edges.
-              for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
-                  let mt_src_id = dwa_to_mt_map[&dwa_src_id];
-
-                  // Accumulate simple default-only states into the pop count.
-                  let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
-                  let dwa_term_state = &dwa.states[terminal_dwa_id];
-                  let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-                  let pop = pop_base + (simple_steps as isize);
-
-                  // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
-                  let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
-
-                  // Handle exception transitions
-                  for (&sid, &dwa_dst_id) in &dwa_term_state.transitions.exceptions {
-                      if let Some(tokens) = dwa_term_state.trans_weights_exceptions.get(&sid) {
-                          if tokens.is_empty() {
-                              continue;
-                          }
-
-                          let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
-                          let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-
-                          let key = (tokens_set, mt_dst_id);
-                          edge_groups.entry(key).or_default().insert(sid as usize);
-                      }
-                  }
-
-                  // Handle default transition
-                  if let Some(dwa_dst_id) = dwa_term_state.transitions.default {
-                      if let Some(tokens) = &dwa_term_state.trans_weight_default {
-                          if !tokens.is_empty() {
-                              let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
-                              let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-                              let key = (tokens_set, mt_dst_id);
-
-                              let exception_sids: BTreeSet<u16> =
-                                  dwa_term_state.transitions.exceptions.keys().cloned().collect();
-
-                              let default_sids_entry = edge_groups.entry(key).or_default();
-                              for sid in 0..=ctx.max_state_id {
-                                  if !exception_sids.contains(&(sid as u16)) {
-                                      default_sids_entry.insert(sid);
-                                  }
-                              }
-                          }
-                      }
-                  }
-
-                  // Now build the new children for the MiniTrie node
-                  let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
-                  for ((tokens, dst), sids) in edge_groups {
-                      if sids.is_empty() {
-                          continue;
-                      }
-                      let ek = EdgeKey::new(pop, tokens);
-                      new_children.entry(ek).or_default().insert(dst, sids);
-                  }
-
-                  // If the DWA state has a final weight, create an edge to a canonical end node.
-                  // This encodes the conditional finality.
-                  if let Some(final_weight) = &dwa_src_state.final_weight {
-                      if !final_weight.is_empty() {
-                          let tokens = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
-                          let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
-                          new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
-                      }
-                  }
-                  mini.set_children(mt_src_id, new_children);
-              }
-
-              (mini, mt_root_id)
-          }
-      }
-
-      impl OptimizationPass for NwaDwaRoundtripPass {
-          fn name(&self) -> &'static str {
-              "NwaDwaRoundtrip"
-          }
-
-          fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
-              if trie.num_nodes() == 0 {
-                  return;
-              }
-
-              // println!("{}", trie);
-
-              // Eliminate pop=0 edges on non-root nodes by merging them into predecessors.
-              // This is a prerequisite for NWA conversion, which has simplified handling for pop>0.
-              // After this loop, only root nodes may have pop=0 edges.
-              let mut changed = true;
-              while changed {
-                  changed = false;
-                  let node_ids: Vec<_> = trie.node_ids().collect();
-                  let root_set: BTreeSet<_> = trie.root_ids.iter().copied().collect();
-
-                  for b_id in node_ids {
-                      if root_set.contains(&b_id) {
-                          continue;
-                      }
-
-                      // Must clone, as we will be modifying the trie.
-                      let b_node = if let Some(n) = trie.get_node(b_id) {
-                          n.clone()
-                      } else {
-                          continue;
-                      };
-
-                      let mut pop0_edges = BTreeMap::new();
-                      let mut non_pop0_edges = BTreeMap::new();
-
-                      for (ek, dm) in b_node.children() {
-                          if ek.pop == 0 {
-                              pop0_edges.insert(ek.clone(), dm.clone());
-                          } else {
-                              non_pop0_edges.insert(ek.clone(), dm.clone());
-                          }
-                      }
-
-                      if pop0_edges.is_empty() {
-                          continue;
-                      }
-
-                      changed = true;
-                      let parents_of_b = b_node.parents().clone();
-
-                      for (pop0_ek, pop0_dm) in &pop0_edges {
-                          for (c_id, sids_bc) in pop0_dm {
-                              for (a_id, edges_from_a_to_b) in &parents_of_b {
-                                  for (ek_ab, sids_ab) in edges_from_a_to_b {
-                                      let new_tokens = ek_ab.tokens.intersect(&pop0_ek.tokens);
-                                      let new_sids = sids_ab.intersect(sids_bc);
-                                      let new_ek = EdgeKey::new(ek_ab.pop, new_tokens);
-                                      trie.add_edge(*a_id, new_ek, *c_id, new_sids);
-                                  }
-                              }
-                          }
-                      }
-                      trie.set_children(b_id, non_pop0_edges);
-                  }
-              }
-
-              // Prune edges that don't lead to an end node.
-              let productive_nodes = trie.can_reach_end();
-              let all_node_ids: Vec<_> = trie.node_ids().collect();
-              for node_id in all_node_ids {
-                  let node = if let Some(n) = trie.get_node(node_id) {
-                      n.clone()
-                  } else {
-                      continue;
-                  };
-                  let mut to_remove = Vec::new();
-                  for (ek, dm) in node.children() {
-                      for dst in dm.keys() {
-                          if !productive_nodes.contains(dst) {
-                              to_remove.push((ek.clone(), *dst));
-                          }
-                      }
-                  }
-                  for (ek, dst) in to_remove {
-                      trie.remove_edge_dest(node_id, &ek, dst);
-                  }
-              }
-
-              let original_roots = trie.root_ids.clone();
-              // Build per-root roundtrip and merge results into a single MiniTrie.
-              let mut merged = MiniTrie::new();
-              let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
-
-              // println!("{}", trie);
-              for &root in &original_roots {
-                  println!("Processing root {}", root);
-                  let (nwa, _map_mt_to_nwa) = Self::build_nwa_for_root(trie, root, ctx);
-                  println!("Determinizing NWA");
-                  // println!("NWA for root {}: {}", root, nwa);
-                  let mut dwa = nwa.determinize();
-                  dwa.simplify();
-                  println!("Converting DWA to MiniTrie");
-                  // println!("DWA for root {}: {}", root, dwa);
-                  let (partial, partial_root) = Self::convert_dwa_to_minitrie(dwa, ctx);
-                  println!("Done!");
-
-                  // Merge partial into merged
-                  // Build map: partial NodeId -> merged NodeId
-                  let mut id_map: BTreeMap<NodeId, NodeId> = BTreeMap::new();
-                  for node in partial.nodes() {
-                      let nid = merged.add_node(node.is_end());
-                      id_map.insert(node.id(), nid);
-                  }
-                  // Edges
-                  for node in partial.nodes() {
-                      let src_new = *id_map.get(&node.id()).unwrap();
-                      for (ek, dm) in node.children() {
-                          let mut new_dm: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
-                          for (dst, sids) in dm {
-                              let dst_new = *id_map.get(dst).unwrap();
-                              new_dm.insert(dst_new, sids.clone());
-                          }
-                          for (dst_new, sids) in new_dm {
-                              merged.add_edge(src_new, ek.clone(), dst_new, sids);
-                          }
-                      }
-                  }
-                  // Root
-                  new_roots.push(*id_map.get(&partial_root).unwrap());
-              }
-
-              merged.root_ids = new_roots;
-              // Replace input trie with merged result
-              *trie = merged;
-              // println!("{}", trie);
-          }
-      }
     src/weighted_automata.rs: |
       // src/weighted_automata.rs
 
@@ -1785,7 +1431,6 @@ local_system:
               assert!(s7.transitions.default.is_none());
           }
       }
-  prev_file_contents:
     src/trie3_opt/passes/nwa_dwa_roundtrip.rs: |+
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use crate::datastructures::trie::Trie;
@@ -2169,13 +1814,12 @@ local_system:
               merged.set_children(mt_root_id, BTreeMap::new());
               merged.root_ids = new_roots;
               // For the real root nodes, force their outgoing edges to have pop=0.
-              // They should have pop=1 at this point from the conversion logic.
-              let roots_to_fix = merged.root_ids.clone();
-              for &root_id in &roots_to_fix {
+              // They should have pop=0 or 1 at this point from the conversion logic.
+              for root_id in merged.root_ids.clone() {
                   let root_node = merged.get_node(root_id).unwrap().clone();
                   let mut new_children = BTreeMap::new();
                   for (ek, dm) in root_node.children() {
-                      assert_eq!(ek.pop, 1, "Expected pop=1 for edges from a new root node");
+                      assert!(ek.pop == 0 || ek.pop == 1, "Expected pop=0 or 1 for edges from a new root node");
                       let new_ek = EdgeKey::new(0, ek.tokens.clone());
                       new_children.insert(new_ek, dm.clone());
                   }
@@ -2185,6 +1829,7 @@ local_system:
           }
       }
 
+  prev_file_contents:
     src/weighted_automata.rs: |
       // src/weighted_automata.rs
 
@@ -3611,50 +3256,7 @@ local_system:
               assert!(s7.transitions.default.is_none());
           }
       }
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-  default_end_line:
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - gf
-  code_completion_model:
-    - cp
-  commit_message_model:
-    - gemini/gemini-flash-lite-latest
-  diff_correction_model:
-    - gf
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```rust "src/trie3_opt/passes/nwa_dwa_roundtrip.rs"
+    src/trie3_opt/passes/nwa_dwa_roundtrip.rs: |+
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use crate::datastructures::trie::Trie;
       use crate::trie3_opt::context::OptimizationContext;
@@ -3756,6 +3358,10 @@ messages:
           /// (terminal_state_id, number_of_simple_default_steps).
           /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
           /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+          ///
+          /// Pop semantics:
+          /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
+          /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
           fn follow_simple_chain(
               dwa: &crate::weighted_automata::DWA,
               start: usize,
@@ -3802,66 +3408,131 @@ messages:
                   // Accumulate simple default-only states into the pop count.
                   let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
                   let dwa_term_state = &dwa.states[terminal_dwa_id];
-                  let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-                  let pop = pop_base + (simple_steps as isize);
+                  let pop_trans: isize = (simple_steps as isize) + 1; // transitions (default steps + 1 SID step)
+                  let pop_final: isize = simple_steps as isize;       // final edges at terminal (no SID step)
 
-                  // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
-                  let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
+                  // Group by (pop, tokens, dst) to build MiniTrie edges.
+                  let mut edge_groups: BTreeMap<(isize, SortedSet, NodeId), SortedSet> = BTreeMap::new();
+                  // Aggregate direct edges to END by pop (union tokens across contributions at the same pop).
+                  let mut end_tokens_by_pop: BTreeMap<isize, SimpleBitset> = BTreeMap::new();
 
-                  // Handle exception transitions
+                  // 2.a Emit final edges from the terminal of the default-only chain (defers finality correctly).
+                  if let Some(final_weight) = &dwa_term_state.final_weight {
+                      if !final_weight.is_empty() {
+                          end_tokens_by_pop
+                              .entry(pop_final)
+                              .and_modify(|acc| *acc |= final_weight)
+                              .or_insert_with(|| final_weight.clone());
+                      }
+                  }
+
+                  // Helper: returns true if 'u' (terminal via simple default chain) has no outgoing transitions
+                  // and has a non-empty final weight, enabling compression s -> ... -> u -> END into s -> END.
+                  let mut pure_final_terminal = |u: usize| -> Option<(&SimpleBitset, usize)> {
+                      let (u_term, extra_steps) = Self::follow_simple_chain(&dwa, u);
+                      let st = &dwa.states[u_term];
+                      let has_transitions = st.transitions.default.is_some() || !st.transitions.exceptions.is_empty();
+                      if has_transitions {
+                          return None;
+                      }
+                      if let Some(w) = &st.final_weight {
+                          if !w.is_empty() {
+                              return Some((w, extra_steps));
+                          }
+                      }
+                      None
+                  };
+
+                  // 2.b Handle exception transitions from the terminal state.
                   for (&sid, &dwa_dst_id) in &dwa_term_state.transitions.exceptions {
-                      if let Some(tokens) = dwa_term_state.trans_weights_exceptions.get(&sid) {
-                          if tokens.is_empty() {
+                      if let Some(tokens_w) = dwa_term_state.trans_weights_exceptions.get(&sid) {
+                          if tokens_w.is_empty() {
                               continue;
                           }
 
-                          let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
-                          let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                          // Try to compress to END if destination is pure-final (after its simple default chain).
+                          if let Some((dest_final_w, extra_steps)) = pure_final_terminal(dwa_dst_id) {
+                              let accept_tokens = tokens_w & dest_final_w;
+                              if !accept_tokens.is_empty() {
+                                  let total_pop = pop_trans + (extra_steps as isize);
+                                  end_tokens_by_pop
+                                      .entry(total_pop)
+                                      .and_modify(|acc| *acc |= &accept_tokens)
+                                      .or_insert(accept_tokens);
+                                  // Skip emitting the intermediate s -> dest edge in this case.
+                                  continue;
+                              }
+                          }
 
-                          let key = (tokens_set, mt_dst_id);
+                          // Regular s -> dest edge when not compressed.
+                          let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+                          let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                          let key = (pop_trans, tokens_set, mt_dst_id);
                           edge_groups.entry(key).or_default().insert(sid as usize);
                       }
                   }
 
-                  // Handle default transition
+                  // 2.c Handle default transition from the terminal state.
                   if let Some(dwa_dst_id) = dwa_term_state.transitions.default {
-                      if let Some(tokens) = &dwa_term_state.trans_weight_default {
-                          if !tokens.is_empty() {
-                              let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
-                              let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-                              let key = (tokens_set, mt_dst_id);
-
-                              let exception_sids: BTreeSet<u16> =
-                                  dwa_term_state.transitions.exceptions.keys().cloned().collect();
-
-                              let default_sids_entry = edge_groups.entry(key).or_default();
-                              for sid in 0..=ctx.max_state_id {
-                                  if !exception_sids.contains(&(sid as u16)) {
-                                      default_sids_entry.insert(sid);
+                      if let Some(tokens_w) = &dwa_term_state.trans_weight_default {
+                          if !tokens_w.is_empty() {
+                              // Try to compress default to END if destination is pure-final.
+                              if let Some((dest_final_w, extra_steps)) = pure_final_terminal(dwa_dst_id) {
+                                  let accept_tokens = tokens_w & dest_final_w;
+                                  if !accept_tokens.is_empty() {
+                                      let total_pop = pop_trans + (extra_steps as isize);
+                                      end_tokens_by_pop
+                                          .entry(total_pop)
+                                          .and_modify(|acc| *acc |= &accept_tokens)
+                                          .or_insert(accept_tokens);
+                                      // Skip emitting s -> dest default edges in this case.
+                                  } else {
+                                      // No acceptance after destination; fall back to regular default edges.
+                                      let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+                                      let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                                      let key = (pop_trans, tokens_set, mt_dst_id);
+                                      let exception_sids: BTreeSet<u16> =
+                                          dwa_term_state.transitions.exceptions.keys().cloned().collect();
+                                      let default_sids_entry = edge_groups.entry(key).or_default();
+                                      for sid in 0..=ctx.max_state_id {
+                                          if !exception_sids.contains(&(sid as u16)) {
+                                              default_sids_entry.insert(sid);
+                                          }
+                                      }
+                                  }
+                              } else {
+                                  // Destination is not pure-final; emit regular default edges.
+                                  let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+                                  let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                                  let key = (pop_trans, tokens_set, mt_dst_id);
+                                  let exception_sids: BTreeSet<u16> =
+                                      dwa_term_state.transitions.exceptions.keys().cloned().collect();
+                                  let default_sids_entry = edge_groups.entry(key).or_default();
+                                  for sid in 0..=ctx.max_state_id {
+                                      if !exception_sids.contains(&(sid as u16)) {
+                                          default_sids_entry.insert(sid);
+                                      }
                                   }
                               }
                           }
                       }
                   }
 
-                  // Now build the new children for the MiniTrie node
+                  // 2.d Build the new children for the MiniTrie node from accumulated groups.
                   let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
-                  for ((tokens, dst), sids) in edge_groups {
-                      if sids.is_empty() {
-                          continue;
-                      }
+                  for ((pop, tokens, dst), sids) in edge_groups {
+                      if sids.is_empty() { continue; }
                       let ek = EdgeKey::new(pop, tokens);
                       new_children.entry(ek).or_default().insert(dst, sids);
                   }
-
-                  // If the DWA state has a final weight, create an edge to a canonical end node.
-                  // This encodes the conditional finality.
-                  if let Some(final_weight) = &dwa_src_state.final_weight {
-                      if !final_weight.is_empty() {
-                          let tokens = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
-                          let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
-                          new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
-                      }
+                  // Add direct-to-END edges per-pop (tokens aggregated).
+                  for (pop, tokens_w) in end_tokens_by_pop {
+                      if tokens_w.is_empty() { continue; }
+                      let tokens = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+                      if tokens.is_empty() { continue; }
+                      let ek = EdgeKey::new(pop, tokens);
+                      let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
+                      new_children.entry(ek).or_default().insert(end_node_id, sids);
                   }
                   mini.set_children(mt_src_id, new_children);
               }
@@ -3960,58 +3631,140 @@ messages:
               }
 
               let original_roots = trie.root_ids.clone();
-              // Build per-root roundtrip and merge results into a single MiniTrie.
-              let mut merged = MiniTrie::new();
-              let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
-
-              // println!("{}", trie);
-              for &root in &original_roots {
-                  println!("Processing root {}", root);
-                  let (nwa, _map_mt_to_nwa) = Self::build_nwa_for_root(trie, root, ctx);
-                  println!("Determinizing NWA");
-                  // println!("NWA for root {}: {}", root, nwa);
-                  let mut dwa = nwa.determinize();
-                  dwa.simplify();
-                  println!("Converting DWA to MiniTrie");
-                  // println!("DWA for root {}: {}", root, dwa);
-                  let (partial, partial_root) = Self::convert_dwa_to_minitrie(dwa, ctx);
-                  println!("Done!");
-
-                  // Merge partial into merged
-                  // Build map: partial NodeId -> merged NodeId
-                  let mut id_map: BTreeMap<NodeId, NodeId> = BTreeMap::new();
-                  for node in partial.nodes() {
-                      let nid = merged.add_node(node.is_end());
-                      id_map.insert(node.id(), nid);
+              // Build a single shared NWA that covers all roots and add a synthetic
+              // first-step edge per root (edge key = enumerate index).
+              let mut nwa = NWA::new();
+              // Collect all nodes reachable from any root.
+              let mut sub_nodes: BTreeSet<NodeId> = BTreeSet::new();
+              for &r in &original_roots {
+                  sub_nodes.extend(Self::reachable_from_one(trie, r));
+              }
+              // Map MiniTrie node -> NWA state
+              let mut map_mt_to_nwa: BTreeMap<NodeId, usize> = BTreeMap::new();
+              for n_id in sub_nodes.iter() {
+                  let s = nwa.add_state();
+                  map_mt_to_nwa.insert(*n_id, s);
+              }
+              // Synthetic transitions from start to each root (weight = ALL).
+              for (i, &root) in original_roots.iter().enumerate() {
+                  if let Some(&dst) = map_mt_to_nwa.get(&root) {
+                      nwa.add_transition(nwa.start_state, i as u16, dst, SimpleBitset::all());
                   }
-                  // Edges
-                  for node in partial.nodes() {
-                      let src_new = *id_map.get(&node.id()).unwrap();
-                      for (ek, dm) in node.children() {
-                          let mut new_dm: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
-                          for (dst, sids) in dm {
-                              let dst_new = *id_map.get(dst).unwrap();
-                              new_dm.insert(dst_new, sids.clone());
-                          }
-                          for (dst_new, sids) in new_dm {
-                              merged.add_edge(src_new, ek.clone(), dst_new, sids);
+              }
+              // Mark final weights for end nodes.
+              for (mt_id, nwa_id) in map_mt_to_nwa.iter() {
+                  if let Some(node) = trie.get_node(*mt_id) {
+                      if node.is_end() {
+                          nwa.set_final_weight(*nwa_id, SimpleBitset::all());
+                      }
+                  }
+              }
+              // Encode MiniTrie edges (pop chains and SID-specific steps).
+              for (mt_id, &nwa_src) in map_mt_to_nwa.iter() {
+                  let node = trie.get_node(*mt_id).unwrap();
+                  for (ek, dm) in node.children() {
+                      if ek.pop < 0 { continue; }
+                      let pop = ek.pop as usize;
+                      let mut cur = nwa_src;
+                      for _ in 0..pop.saturating_sub(1) {
+                          let inter = nwa.add_state();
+                          nwa.add_default_transition(cur, inter, SimpleBitset::all());
+                          cur = inter;
+                      }
+                      let weight = SimpleBitset::from_iter(ek.tokens.iter());
+                      for (&mt_dst, sids) in dm {
+                          let nwa_dst = map_mt_to_nwa[&mt_dst];
+                          for sid in sids.iter() {
+                              nwa.add_transition(cur, sid as u16, nwa_dst, weight.clone());
                           }
                       }
                   }
-                  // Root
-                  new_roots.push(*id_map.get(&partial_root).unwrap());
               }
-
+              // Determinize + simplify once
+              let mut dwa = nwa.determinize();
+              dwa.simplify();
+              // Convert back into a MiniTrie
+              let (mut merged, mt_root_id) = Self::convert_dwa_to_minitrie(dwa, ctx);
+              // Derive final roots by following the synthetic first edges (0..N).
+              let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
+              let root_node = merged.get_node(mt_root_id).unwrap().clone();
+              for i in 0..original_roots.len() {
+                  let mut chosen: Option<NodeId> = None;
+                  for (_ek, dm) in root_node.children() {
+                      for (dst, sids) in dm {
+                          for sid in sids.iter() {
+                              if sid == i {
+                                  chosen = Some(*dst);
+                                  break;
+                              }
+                          }
+                          if chosen.is_some() { break; }
+                      }
+                      if chosen.is_some() { break; }
+                  }
+                  new_roots.push(chosen.expect("missing synthetic root edge during roundtrip"));
+              }
+              // Drop the synthetic edges from the artificial root node and set root order.
+              merged.set_children(mt_root_id, BTreeMap::new());
               merged.root_ids = new_roots;
-              // Replace input trie with merged result
+              // For the real root nodes, force their outgoing edges to have pop=0.
+              // They should have pop=0 or 1 at this point from the conversion logic.
+              for root_id in merged.root_ids.clone() {
+                  let root_node = merged.get_node(root_id).unwrap().clone();
+                  let mut new_children = BTreeMap::new();
+                  for (ek, dm) in root_node.children() {
+                      assert!(ek.pop == 0 || ek.pop == 1, "Expected pop=0 or 1 for edges from a new root node");
+                      let new_ek = EdgeKey::new(0, ek.tokens.clone());
+                      new_children.insert(new_ek, dm.clone());
+                  }
+                  merged.set_children(root_id, new_children);
+              }
               *trie = merged;
-              // println!("{}", trie);
           }
       }
 
-      ```
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+  default_end_line:
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - gpt-5
+  code_completion_model:
+    - cp
+  commit_message_model:
+    - gemini/gemini-flash-lite-latest
+  diff_correction_model:
+    - gf
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
     metadata:
-      filename: src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      kind: core-guidance
+      role: developer
+      ephemeral: false
   - user: |-
       ```rust "src/weighted_automata.rs"
       // src/weighted_automata.rs
@@ -5444,10 +5197,434 @@ messages:
     metadata:
       filename: src/weighted_automata.rs
   - user: |-
-      Avoid creating a separate NWA for each root in nwa_dwa_roundtrip.rs. Create one shared NWA.
-      Keep it super simple.
-      Create one initial transition from the start NWA state to a state for each root node. Enumerate through the root nodes. Use the enumerate number as the transition's edge key.
-      Then, when converting back, it's guaranteed that the first edge will match up. Easy peasy.
+      ```rust "src/trie3_opt/passes/nwa_dwa_roundtrip.rs"
+      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use crate::datastructures::trie::Trie;
+      use crate::trie3_opt::context::OptimizationContext;
+      use crate::weighted_automata::DWAState;
+      use crate::trie3_opt::core::{EdgeKey, MiniTrie, Node, NodeId, SortedSet};
+      use crate::trie3_opt::passes::OptimizationPass;
+      use crate::weighted_automata::{NWA, SimpleBitset};
+
+      /// A roundtrip pass that:
+      /// - Converts the MiniTrie subgraph for each root into a weighted NWA,
+      /// - Determinizes it into a DWA,
+      /// - Converts the DWA back into a MiniTrie,
+      /// - Merges all per-root results into a single MiniTrie, preserving root order.
+      ///
+      /// Encoding:
+      /// - `pop = m` is modeled as a chain of `m-1` default transitions followed by a SID-specific transition.
+      /// - State IDs from the `MiniTrie` are used as alphabet symbols in the NWA.
+      /// - LLM token sets from the `MiniTrie` are used as weights in the NWA.
+      pub struct NwaDwaRoundtripPass;
+
+      impl NwaDwaRoundtripPass {
+          fn reachable_from_one(trie: &MiniTrie, start: NodeId) -> BTreeSet<NodeId> {
+              let mut seen: BTreeSet<NodeId> = BTreeSet::new();
+              let mut q: VecDeque<NodeId> = VecDeque::new();
+              q.push_back(start);
+              while let Some(u) = q.pop_front() {
+                  if !seen.insert(u) {
+                      continue;
+                  }
+                  if let Some(node) = trie.get_node(u) {
+                      for (_ek, dm) in node.children() {
+                          for (v, _) in dm {
+                              if !seen.contains(v) {
+                                  q.push_back(*v);
+                              }
+                          }
+                      }
+                  }
+              }
+              seen
+          }
+
+          fn build_nwa_for_root(
+              mini: &MiniTrie,
+              root: NodeId,
+              _ctx: &OptimizationContext,
+          ) -> (NWA, BTreeMap<NodeId, usize>) {
+              let mut nwa = NWA::new();
+              // Collect subgraph nodes reachable from this root.
+              let sub_nodes = Self::reachable_from_one(mini, root);
+              // Map MiniTrie node -> NWA state
+              let mut map_mt_to_nwa: BTreeMap<NodeId, usize> = BTreeMap::new();
+              for n_id in sub_nodes.iter() {
+                  let s = nwa.add_state();
+                  map_mt_to_nwa.insert(*n_id, s);
+              }
+              // Root state is the NWA start
+              if let Some(&start_id) = map_mt_to_nwa.get(&root) {
+                  nwa.start_state = start_id;
+              }
+              // Mark final weights for ends
+              for (mt_id, nwa_id) in map_mt_to_nwa.iter() {
+                  if let Some(node) = mini.get_node(*mt_id) {
+                      if node.is_end() {
+                          nwa.set_final_weight(*nwa_id, SimpleBitset::all());
+                      }
+                  }
+              }
+
+              for (mt_id, &nwa_src) in map_mt_to_nwa.iter() {
+                  let node = mini.get_node(*mt_id).unwrap();
+                  for (ek, dm) in node.children() {
+                      if ek.pop < 0 { continue; }
+                      let pop = ek.pop as usize;
+                      let mut cur = nwa_src;
+                      // Create pop chain using default transitions. A pop `m` operation has `m-1` intermediate
+                      // steps that consume any SID, followed by one SID-specific step.
+                      for _ in 0..pop.saturating_sub(1) {
+                          let inter = nwa.add_state();
+                          // Pop steps consume any SID and don't constrain tokens.
+                          nwa.add_default_transition(cur, inter, SimpleBitset::all());
+                          cur = inter;
+                      }
+                      for (&mt_dst, sids) in dm {
+                          // The last step is not a default transition, but specific to the SIDs.
+                          let nwa_dst = map_mt_to_nwa[&mt_dst];
+                          let weight = SimpleBitset::from_iter(ek.tokens.iter());
+                          for sid in sids.iter() {
+                              // State IDs are the alphabet.
+                              nwa.add_transition(cur, sid as u16, nwa_dst, weight.clone());
+                          }
+                      }
+                  }
+              }
+              (nwa, map_mt_to_nwa)
+          }
+
+          /// Follows a chain of 'simple' states via default transitions, returning:
+          /// (terminal_state_id, number_of_simple_default_steps).
+          /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
+          /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+          fn follow_simple_chain(
+              dwa: &crate::weighted_automata::DWA,
+              start: usize,
+          ) -> (usize, usize) {
+              let mut steps = 0usize;
+              let mut u = start;
+              let mut visited: BTreeSet<usize> = BTreeSet::new();
+              loop {
+                  let state = &dwa.states[u];
+                  if let Some(next) = state.simple_default_target() {
+                      if !visited.insert(u) { break; }
+                      steps += 1;
+                      u = next;
+                  } else { break; }
+              }
+              (u, steps)
+          }
+          fn convert_dwa_to_minitrie(
+              dwa: crate::weighted_automata::DWA,
+              ctx: &OptimizationContext,
+          ) -> (MiniTrie, NodeId) {
+              let mut mini = MiniTrie::new();
+              if dwa.states.is_empty() {
+                  // Should not happen if NWA was non-empty, as DWA gets at least a start state.
+                  let root_id = mini.add_node(false);
+                  return (mini, root_id);
+              }
+
+              // 1. Create MiniTrie nodes for each DWA state.
+              let mut dwa_to_mt_map: BTreeMap<usize, NodeId> = BTreeMap::new();
+              let end_node_id = mini.add_node(true);
+              for (dwa_id, _dwa_state) in dwa.states.iter().enumerate() {
+                  // DWA states are not end nodes themselves. Finality is modeled by an edge to a canonical end node.
+                  let mt_id = mini.add_node(false);
+                  dwa_to_mt_map.insert(dwa_id, mt_id);
+              }
+
+              let mt_root_id = dwa_to_mt_map[&dwa.start_state];
+
+              // 2. Create MiniTrie edges.
+              for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
+                  let mt_src_id = dwa_to_mt_map[&dwa_src_id];
+
+                  // Accumulate simple default-only states into the pop count.
+                  let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
+                  let dwa_term_state = &dwa.states[terminal_dwa_id];
+                  let pop_base = 1isize;
+                  let pop = pop_base + (simple_steps as isize);
+
+                  // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
+                  let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
+
+                  // Handle exception transitions
+                  for (&sid, &dwa_dst_id) in &dwa_term_state.transitions.exceptions {
+                      if let Some(tokens) = dwa_term_state.trans_weights_exceptions.get(&sid) {
+                          if tokens.is_empty() {
+                              continue;
+                          }
+
+                          let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
+                          let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+
+                          let key = (tokens_set, mt_dst_id);
+                          edge_groups.entry(key).or_default().insert(sid as usize);
+                      }
+                  }
+
+                  // Handle default transition
+                  if let Some(dwa_dst_id) = dwa_term_state.transitions.default {
+                      if let Some(tokens) = &dwa_term_state.trans_weight_default {
+                          if !tokens.is_empty() {
+                              let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
+                              let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                              let key = (tokens_set, mt_dst_id);
+
+                              let exception_sids: BTreeSet<u16> =
+                                  dwa_term_state.transitions.exceptions.keys().cloned().collect();
+
+                              let default_sids_entry = edge_groups.entry(key).or_default();
+                              for sid in 0..=ctx.max_state_id {
+                                  if !exception_sids.contains(&(sid as u16)) {
+                                      default_sids_entry.insert(sid);
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  // Now build the new children for the MiniTrie node
+                  let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
+                  for ((tokens, dst), sids) in edge_groups {
+                      if sids.is_empty() {
+                          continue;
+                      }
+                      let ek = EdgeKey::new(pop, tokens);
+                      new_children.entry(ek).or_default().insert(dst, sids);
+                  }
+
+                  // If the DWA state has a final weight, create an edge to a canonical end node.
+                  // This encodes the conditional finality.
+                  if let Some(final_weight) = &dwa_src_state.final_weight {
+                      if !final_weight.is_empty() {
+                          let tokens = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
+                          let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
+                          new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
+                      }
+                  }
+                  mini.set_children(mt_src_id, new_children);
+              }
+
+              (mini, mt_root_id)
+          }
+      }
+
+      impl OptimizationPass for NwaDwaRoundtripPass {
+          fn name(&self) -> &'static str {
+              "NwaDwaRoundtrip"
+          }
+
+          fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext) {
+              if trie.num_nodes() == 0 {
+                  return;
+              }
+
+              // println!("{}", trie);
+
+              // Eliminate pop=0 edges on non-root nodes by merging them into predecessors.
+              // This is a prerequisite for NWA conversion, which has simplified handling for pop>0.
+              // After this loop, only root nodes may have pop=0 edges.
+              let mut changed = true;
+              while changed {
+                  changed = false;
+                  let node_ids: Vec<_> = trie.node_ids().collect();
+                  let root_set: BTreeSet<_> = trie.root_ids.iter().copied().collect();
+
+                  for b_id in node_ids {
+                      if root_set.contains(&b_id) {
+                          continue;
+                      }
+
+                      // Must clone, as we will be modifying the trie.
+                      let b_node = if let Some(n) = trie.get_node(b_id) {
+                          n.clone()
+                      } else {
+                          continue;
+                      };
+
+                      let mut pop0_edges = BTreeMap::new();
+                      let mut non_pop0_edges = BTreeMap::new();
+
+                      for (ek, dm) in b_node.children() {
+                          if ek.pop == 0 {
+                              pop0_edges.insert(ek.clone(), dm.clone());
+                          } else {
+                              non_pop0_edges.insert(ek.clone(), dm.clone());
+                          }
+                      }
+
+                      if pop0_edges.is_empty() {
+                          continue;
+                      }
+
+                      changed = true;
+                      let parents_of_b = b_node.parents().clone();
+
+                      for (pop0_ek, pop0_dm) in &pop0_edges {
+                          for (c_id, sids_bc) in pop0_dm {
+                              for (a_id, edges_from_a_to_b) in &parents_of_b {
+                                  for (ek_ab, sids_ab) in edges_from_a_to_b {
+                                      let new_tokens = ek_ab.tokens.intersect(&pop0_ek.tokens);
+                                      let new_sids = sids_ab.intersect(sids_bc);
+                                      let new_ek = EdgeKey::new(ek_ab.pop, new_tokens);
+                                      trie.add_edge(*a_id, new_ek, *c_id, new_sids);
+                                  }
+                              }
+                          }
+                      }
+                      trie.set_children(b_id, non_pop0_edges);
+                  }
+              }
+
+              // Prune edges that don't lead to an end node.
+              let productive_nodes = trie.can_reach_end();
+              let all_node_ids: Vec<_> = trie.node_ids().collect();
+              for node_id in all_node_ids {
+                  let node = if let Some(n) = trie.get_node(node_id) {
+                      n.clone()
+                  } else {
+                      continue;
+                  };
+                  let mut to_remove = Vec::new();
+                  for (ek, dm) in node.children() {
+                      for dst in dm.keys() {
+                          if !productive_nodes.contains(dst) {
+                              to_remove.push((ek.clone(), *dst));
+                          }
+                      }
+                  }
+                  for (ek, dst) in to_remove {
+                      trie.remove_edge_dest(node_id, &ek, dst);
+                  }
+              }
+
+              let original_roots = trie.root_ids.clone();
+              // Build a single shared NWA that covers all roots and add a synthetic
+              // first-step edge per root (edge key = enumerate index).
+              let mut nwa = NWA::new();
+              // Collect all nodes reachable from any root.
+              let mut sub_nodes: BTreeSet<NodeId> = BTreeSet::new();
+              for &r in &original_roots {
+                  sub_nodes.extend(Self::reachable_from_one(trie, r));
+              }
+              // Map MiniTrie node -> NWA state
+              let mut map_mt_to_nwa: BTreeMap<NodeId, usize> = BTreeMap::new();
+              for n_id in sub_nodes.iter() {
+                  let s = nwa.add_state();
+                  map_mt_to_nwa.insert(*n_id, s);
+              }
+              // Synthetic transitions from start to each root (weight = ALL).
+              for (i, &root) in original_roots.iter().enumerate() {
+                  if let Some(&dst) = map_mt_to_nwa.get(&root) {
+                      nwa.add_transition(nwa.start_state, i as u16, dst, SimpleBitset::all());
+                  }
+              }
+              // Mark final weights for end nodes.
+              for (mt_id, nwa_id) in map_mt_to_nwa.iter() {
+                  if let Some(node) = trie.get_node(*mt_id) {
+                      if node.is_end() {
+                          nwa.set_final_weight(*nwa_id, SimpleBitset::all());
+                      }
+                  }
+              }
+              // Encode MiniTrie edges (pop chains and SID-specific steps).
+              for (mt_id, &nwa_src) in map_mt_to_nwa.iter() {
+                  let node = trie.get_node(*mt_id).unwrap();
+                  for (ek, dm) in node.children() {
+                      if ek.pop < 0 { continue; }
+                      let pop = ek.pop as usize;
+                      let mut cur = nwa_src;
+                      for _ in 0..pop.saturating_sub(1) {
+                          let inter = nwa.add_state();
+                          nwa.add_default_transition(cur, inter, SimpleBitset::all());
+                          cur = inter;
+                      }
+                      let weight = SimpleBitset::from_iter(ek.tokens.iter());
+                      for (&mt_dst, sids) in dm {
+                          let nwa_dst = map_mt_to_nwa[&mt_dst];
+                          for sid in sids.iter() {
+                              nwa.add_transition(cur, sid as u16, nwa_dst, weight.clone());
+                          }
+                      }
+                  }
+              }
+              // Determinize + simplify once
+              let mut dwa = nwa.determinize();
+              dwa.simplify();
+              // Convert back into a MiniTrie
+              let (mut merged, mt_root_id) = Self::convert_dwa_to_minitrie(dwa, ctx);
+              // Derive final roots by following the synthetic first edges (0..N).
+              let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
+              let root_node = merged.get_node(mt_root_id).unwrap().clone();
+              for i in 0..original_roots.len() {
+                  let mut chosen: Option<NodeId> = None;
+                  for (_ek, dm) in root_node.children() {
+                      for (dst, sids) in dm {
+                          for sid in sids.iter() {
+                              if sid == i {
+                                  chosen = Some(*dst);
+                                  break;
+                              }
+                          }
+                          if chosen.is_some() { break; }
+                      }
+                      if chosen.is_some() { break; }
+                  }
+                  new_roots.push(chosen.expect("missing synthetic root edge during roundtrip"));
+              }
+              // Drop the synthetic edges from the artificial root node and set root order.
+              merged.set_children(mt_root_id, BTreeMap::new());
+              merged.root_ids = new_roots;
+              // For the real root nodes, force their outgoing edges to have pop=0.
+              // They should have pop=0 or 1 at this point from the conversion logic.
+              for root_id in merged.root_ids.clone() {
+                  let root_node = merged.get_node(root_id).unwrap().clone();
+                  let mut new_children = BTreeMap::new();
+                  for (ek, dm) in root_node.children() {
+                      assert!(ek.pop == 0 || ek.pop == 1, "Expected pop=0 or 1 for edges from a new root node");
+                      let new_ek = EdgeKey::new(0, ek.tokens.clone());
+                      new_children.insert(new_ek, dm.clone());
+                  }
+                  merged.set_children(root_id, new_children);
+              }
+              *trie = merged;
+          }
+      }
+
+
+      ```
+    metadata:
+      filename: src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+  - user: |-
+      I think we could make a lot of the logic in src/trie3_opt/passes/nwa_dwa_roundtrip.rs substantially simpler.
+      e.g. When converting from DWA back to mini trie instead of trying to add edges eagerly, we can accumulate stuff until we're ready to add them.
+
+      For one, this makes it much simpler to handle pop chains.
+
+      It also makes for cleaner edges to end nodes. Right now, we always create an edge in the mini trie to the canonical end node when we see a state with final weights. This can be a bit of a waste, though, and can lead to things like this
+      ```
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(15) (MaxDepth: 0)
+      ├── Edge (pop: 0, tokens: [0] (e.g., ["$"])): states [1] -> Node Trie2Index(17) (MaxDepth: 1)
+      │  └── Edge (pop: 0, tokens: [0] (e.g., ["$"])): states [0..=5] -> Node Trie2Index(13) (MaxDepth: 2) [END]
+      └── Edge (pop: 0, tokens: [1] (e.g., ["a"])): states [4] -> Node Trie2Index(18) (MaxDepth: 1)
+         └── Edge (pop: 0, tokens: [1] (e.g., ["a"])): states [0..=5] -> Node Trie2Index(13) (MaxDepth: 2) [END]
+      ```
+      which really just simplifies down to
+      ```
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(0) (MaxDepth: 0) [Live: [0..=1] (e.g., ["$", "a"])]
+      ├── Edge 'A': [1] (e.g., ["a"]) -> Node Trie2Index(2) (MaxDepth: 1) [END] [Live: [0..=1] (e.g., ["$", "a"])]
+      └── Edge 'EOF': [0] (e.g., ["$"]) -> Node Trie2Index(2) (MaxDepth: 1) [END] [Live: [0..=1] (e.g., ["$", "a"])]
+      ```
+      i.e. we didn't need to add 15 -> 17 and 17 -> 13, just could have added 15 -> 13. But right now since we don't look ahead or anything we can't know.
+      Now, since we defer actually creating edges until we know we need them, we can get this right.
+
+      Think mathematically. Rigorously prove the correctness and effectiveness of your changes.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5467,158 +5644,304 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s a minimal change set to switch the pass to a single shared NWA, with synthetic first-step transitions for each root, and then recover the root order from those first edges during conversion back.
+      Here’s a focused plan to simplify and improve the DWA → MiniTrie conversion by deferring edge creation, collapsing pop-chains more cleanly, and emitting direct end edges when possible. After the instructions, I’ve included the exact patch as a git diff.
 
       Step-by-step instructions
 
-      1) Edit src/trie3_opt/passes/nwa_dwa_roundtrip.rs
+      1) Goal and high-level changes
+      - We will modify convert_dwa_to_minitrie to:
+        - Defer edge emission by accumulating edges per MiniTrie source node first.
+        - Follow simple default-only chains (already implemented via follow_simple_chain) and compute:
+          - pop for transitions: pop_trans = simple_steps + 1
+          - pop for final edges: pop_final = simple_steps
+        - Emit final edges using the terminal state of the default-chain, not the raw source state. This prevents creating an intermediate MiniTrie node that only exists to forward to END.
+        - When a transition’s destination deterministically leads (through default-only simple states) to a state that has no outgoing transitions and only a final weight, compress s → t → … → END into a single s → END edge with the correct accumulated pop and token set (intersection).
+        - Aggregate final-to-END tokens per-pop and emit them as a single edge per pop value to keep edges small.
 
-      - In NwaDwaRoundtripPass::run, replace the per-root loop and merge code with a single shared NWA construction:
-        - Build one NWA containing the union of all nodes reachable from any root.
-        - Add a synthetic transition from NWA start to each root’s corresponding state using the enumerate index (0..N-1) as the transition character. Use SimpleBitset::all() as the weight.
-        - Determinize and simplify once.
-        - Convert back to a MiniTrie once.
-        - Determine the final MiniTrie roots by scanning the synthetic first-step edges from the artificial root (DWA start’s MiniTrie node): for i in 0..roots.len(), find the destination whose sids set contains i, in order.
-        - Clear the children of the artificial root node to drop the synthetic edges and set merged.root_ids to the derived new root order.
-        - Replace *trie with this merged MiniTrie.
+      2) Concrete code edits
+      - In src/trie3_opt/passes/nwa_dwa_roundtrip.rs, in convert_dwa_to_minitrie:
+        - Change grouping to key edges by (pop, tokens, dst) rather than only (tokens, dst), because final edges (pop_final) and transition edges (pop_trans) differ.
+        - Add a BTreeMap<isize, SimpleBitset> end_tokens_by_pop accumulator to union token sets for direct edges to the canonical END node.
+        - Move final edge emission from using dwa_src_state.final_weight to using the terminal state’s final weight (dwa_term_state.final_weight) with pop = pop_final.
+        - Add a “look-ahead compression” for transitions:
+          - For each exception/default edge from the terminal state, follow the destination’s simple default chain.
+          - If the destination’s terminal state has no outgoing transitions and has a non-empty final weight, emit a direct s → END edge with pop = pop_trans + steps_from_dest_to_terminal and tokens = (edge tokens) ∧ (destination final weight), and skip creating the intermediate s → dest edge for these SIDs.
+          - Otherwise, emit the regular s → dest edges with pop = pop_trans, as before.
+        - Build new_children once after accumulating all contributions.
+        - Keep the existing behavior for SIDs on final edges (universal [0..=ctx.max_state_id], as before).
 
-      - Remove the old per-root loop, partial merging with id_map, and println! debugging.
+      3) Why this is correct (proof sketch)
+      - Determinize(NWA) produces DWA states where:
+        - state.weight is the union of path weights to this state.
+        - state.final_weight is the union of (path_weight & nwa_final_weight) for constituent NWA states.
+        - trans_weight_default/exceptions are unions of (path_weight & trans_weight) and represent the new path weight after consuming a symbol.
+      - For transitions:
+        - Follow the simple default-only chain for pop semantics. Each simple default-only edge corresponds to one pop in the original MiniTrie encoding. The final SID-specific step adds one more pop. Hence pop for transitions is pop_trans = simple_steps + 1. This matches the NWA encoding (pop=m = m−1 defaults + 1 SID step).
+      - For final edges:
+        - If the terminal state t of the default-only chain has final_weight T_final, then acceptance at t with no additional symbol consumption is correctly encoded by a final edge with pop_final = simple_steps. This corresponds to performing the pop-only chain (m defaults) and stopping (no SID step).
+        - Using t.final_weight is correct because DWAState.final_weight already equals the union of all (path_weight_at_t & final_weight_of_nwa_state), so we do not need to re-apply the path weight again.
+      - Compression of s → dest → … → END into s → END when the destination’s terminal state is pure-final (no outgoing transitions and a non-empty final weight):
+        - Let the edge s → dest carry tokens W_step = union(path_weight_at_s & trans_weight) for that symbol/class; after one symbol, the path weight is precisely W_step.
+        - Final tokens at dest_terminal are W_step ∧ dest_terminal.final_weight, which is exactly what we compute and emit on s → END. Since the destination terminal has no transitions, skipping the intermediate node preserves language and reduces the graph.
+      - The aggregation by pop preserves correctness because pop only counts the number of default-only steps, and we never merge edges of different pops.
 
-      That’s it. No changes are required in weighted_automata.rs.
+      4) Effectiveness
+      - This change reduces the number of edges and intermediate nodes by:
+        - Propagating finality along simple default chains (preventing s → t → END if t is reached solely via default chain).
+        - Collapsing “transition-to-pure-final” one-step chains directly into s → END edges when safe.
+      - It retains the same accepted language/weights, by construction:
+        - Edges from s to END encode exactly the tokens that would be obtained after following the same DWA steps and applying final weights.
 
-      Git diff
+      5) Apply the patch
+      - Apply the patch below to src/trie3_opt/passes/nwa_dwa_roundtrip.rs. No other files need to change.
+      - Rebuild and run your existing tests; they should continue to pass, and you should see fewer redundant intermediate nodes/edges in the converted MiniTrie.
+
+      Git diffs
 
       ```diff
       diff --git a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
       --- a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
       +++ b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      @@ -221,74 +221,79 @@ impl OptimizationPass for NwaDwaRoundtripPass {
+      @@ -1,4 +1,4 @@
+      -use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      +use std::collections::{BTreeMap, BTreeSet, VecDeque};
+       use crate::datastructures::trie::Trie;
+       use crate::trie3_opt::context::OptimizationContext;
+       use crate::weighted_automata::DWAState;
+      @@ -84,11 +84,14 @@
+               (nwa, map_mt_to_nwa)
+           }
+       
+      -    /// Follows a chain of 'simple' states via default transitions, returning:
+      -    /// (terminal_state_id, number_of_simple_default_steps).
+      -    /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
+      -    /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+      +    /// Follows a chain of 'simple' states via default transitions, returning:
+      +    /// (terminal_state_id, number_of_simple_default_steps).
+      +    /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
+      +    /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+      +    ///
+      +    /// Pop semantics:
+      +    /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
+      +    /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
+           fn follow_simple_chain(
+               dwa: &crate::weighted_automata::DWA,
+               start: usize,
+      @@ -103,77 +106,136 @@
+               }
+               (u, steps)
+           }
+           fn convert_dwa_to_minitrie(
+               dwa: crate::weighted_automata::DWA,
+               ctx: &OptimizationContext,
+           ) -> (MiniTrie, NodeId) {
+               let mut mini = MiniTrie::new();
+               if dwa.states.is_empty() {
+                   // Should not happen if NWA was non-empty, as DWA gets at least a start state.
+                   let root_id = mini.add_node(false);
+                   return (mini, root_id);
                }
        
-               let original_roots = trie.root_ids.clone();
-      -        // Build per-root roundtrip and merge results into a single MiniTrie.
-      -        let mut merged = MiniTrie::new();
-      -        let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
+               // 1. Create MiniTrie nodes for each DWA state.
+               let mut dwa_to_mt_map: BTreeMap<usize, NodeId> = BTreeMap::new();
+               let end_node_id = mini.add_node(true);
+               for (dwa_id, _dwa_state) in dwa.states.iter().enumerate() {
+                   // DWA states are not end nodes themselves. Finality is modeled by an edge to a canonical end node.
+                   let mt_id = mini.add_node(false);
+                   dwa_to_mt_map.insert(dwa_id, mt_id);
+               }
+       
+               let mt_root_id = dwa_to_mt_map[&dwa.start_state];
+       
+               // 2. Create MiniTrie edges.
+               for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
+                   let mt_src_id = dwa_to_mt_map[&dwa_src_id];
+       
+      -            // Accumulate simple default-only states into the pop count.
+      +            // Accumulate simple default-only states into the pop count.
+                   let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
+                   let dwa_term_state = &dwa.states[terminal_dwa_id];
+      -            let pop_base = 1isize;
+      -            let pop = pop_base + (simple_steps as isize);
+      +            let pop_trans: isize = (simple_steps as isize) + 1; // transitions (default steps + 1 SID step)
+      +            let pop_final: isize = simple_steps as isize;       // final edges at terminal (no SID step)
+       
+      -            // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
+      -            let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
+      +            // Group by (pop, tokens, dst) to build MiniTrie edges.
+      +            let mut edge_groups: BTreeMap<(isize, SortedSet, NodeId), SortedSet> = BTreeMap::new();
+      +            // Aggregate direct edges to END by pop (union tokens across contributions at the same pop).
+      +            let mut end_tokens_by_pop: BTreeMap<isize, SimpleBitset> = BTreeMap::new();
+      +
+      +            // 2.a Emit final edges from the terminal of the default-only chain (defers finality correctly).
+      +            if let Some(final_weight) = &dwa_term_state.final_weight {
+      +                if !final_weight.is_empty() {
+      +                    end_tokens_by_pop
+      +                        .entry(pop_final)
+      +                        .and_modify(|acc| *acc |= final_weight)
+      +                        .or_insert_with(|| final_weight.clone());
+      +                }
+      +            }
+       
+      -            // Handle exception transitions
+      +            // Helper: returns true if 'u' (terminal via simple default chain) has no outgoing transitions
+      +            // and has a non-empty final weight, enabling compression s -> ... -> u -> END into s -> END.
+      +            let mut pure_final_terminal = |u: usize| -> Option<(&SimpleBitset, usize)> {
+      +                let (u_term, extra_steps) = Self::follow_simple_chain(&dwa, u);
+      +                let st = &dwa.states[u_term];
+      +                let has_transitions = st.transitions.default.is_some() || !st.transitions.exceptions.is_empty();
+      +                if has_transitions {
+      +                    return None;
+      +                }
+      +                if let Some(w) = &st.final_weight {
+      +                    if !w.is_empty() {
+      +                        return Some((w, extra_steps));
+      +                    }
+      +                }
+      +                None
+      +            };
+      +
+      +            // 2.b Handle exception transitions from the terminal state.
+                   for (&sid, &dwa_dst_id) in &dwa_term_state.transitions.exceptions {
+      -                if let Some(tokens) = dwa_term_state.trans_weights_exceptions.get(&sid) {
+      -                    if tokens.is_empty() {
+      +                if let Some(tokens_w) = dwa_term_state.trans_weights_exceptions.get(&sid) {
+      +                    if tokens_w.is_empty() {
+                               continue;
+                           }
+       
+      -                    let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
+      -                    let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
       -
-      -        // println!("{}", trie);
-      -        for &root in &original_roots {
-      -            println!("Processing root {}", root);
-      -            let (nwa, _map_mt_to_nwa) = Self::build_nwa_for_root(trie, root, ctx);
-      -            println!("Determinizing NWA");
-      -            // println!("NWA for root {}: {}", root, nwa);
-      -            let mut dwa = nwa.determinize();
-      -            dwa.simplify();
-      -            println!("Converting DWA to MiniTrie");
-      -            // println!("DWA for root {}: {}", root, dwa);
-      -            let (partial, partial_root) = Self::convert_dwa_to_minitrie(dwa, ctx);
-      -            println!("Done!");
+      -                    let key = (tokens_set, mt_dst_id);
+      -                    edge_groups.entry(key).or_default().insert(sid as usize);
+      +                    // Try to compress to END if destination is pure-final (after its simple default chain).
+      +                    if let Some((dest_final_w, extra_steps)) = pure_final_terminal(dwa_dst_id) {
+      +                        let accept_tokens = tokens_w & dest_final_w;
+      +                        if !accept_tokens.is_empty() {
+      +                            let total_pop = pop_trans + (extra_steps as isize);
+      +                            end_tokens_by_pop
+      +                                .entry(total_pop)
+      +                                .and_modify(|acc| *acc |= &accept_tokens)
+      +                                .or_insert(accept_tokens);
+      +                            // Skip emitting the intermediate s -> dest edge in this case.
+      +                            continue;
+      +                        }
+      +                    }
+      +
+      +                    // Regular s -> dest edge when not compressed.
+      +                    let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+      +                    let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+      +                    let key = (pop_trans, tokens_set, mt_dst_id);
+      +                    edge_groups.entry(key).or_default().insert(sid as usize);
+                       }
+                   }
+       
+      -            // Handle default transition
+      +            // 2.c Handle default transition from the terminal state.
+                   if let Some(dwa_dst_id) = dwa_term_state.transitions.default {
+      -                if let Some(tokens) = &dwa_term_state.trans_weight_default {
+      -                    if !tokens.is_empty() {
+      -                        let tokens_set = SortedSet::from_iter(tokens.iter_up_to(ctx.max_llm_token_id));
+      -                        let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+      -                        let key = (tokens_set, mt_dst_id);
       -
-      -            // Merge partial into merged
-      -            // Build map: partial NodeId -> merged NodeId
-      -            let mut id_map: BTreeMap<NodeId, NodeId> = BTreeMap::new();
-      -            for node in partial.nodes() {
-      -                let nid = merged.add_node(node.is_end());
-      -                id_map.insert(node.id(), nid);
-      -            }
-      -            // Edges
-      -            for node in partial.nodes() {
-      -                let src_new = *id_map.get(&node.id()).unwrap();
-      -                for (ek, dm) in node.children() {
-      -                    let mut new_dm: BTreeMap<NodeId, SortedSet> = BTreeMap::new();
-      -                    for (dst, sids) in dm {
-      -                        let dst_new = *id_map.get(dst).unwrap();
-      -                        new_dm.insert(dst_new, sids.clone());
-      -                    }
-      -                    for (dst_new, sids) in new_dm {
-      -                        merged.add_edge(src_new, ek.clone(), dst_new, sids);
+      -                        let exception_sids: BTreeSet<u16> =
+      -                            dwa_term_state.transitions.exceptions.keys().cloned().collect();
+      -
+      -                        let default_sids_entry = edge_groups.entry(key).or_default();
+      -                        for sid in 0..=ctx.max_state_id {
+      -                            if !exception_sids.contains(&(sid as u16)) {
+      -                                default_sids_entry.insert(sid);
+      -                            }
+      -                        }
       -                    }
       -                }
       -            }
-      -            // Root
-      -            new_roots.push(*id_map.get(&partial_root).unwrap());
-      -        }
       -
-      -        merged.root_ids = new_roots;
-      -        // Replace input trie with merged result
-      -        *trie = merged;
-      -        // println!("{}", trie);
-      +        // Build a single shared NWA that covers all roots and add a synthetic
-      +        // first-step edge per root (edge key = enumerate index).
-      +        let mut nwa = NWA::new();
-      +        // Collect all nodes reachable from any root.
-      +        let mut sub_nodes: BTreeSet<NodeId> = BTreeSet::new();
-      +        for &r in &original_roots {
-      +            sub_nodes.extend(Self::reachable_from_one(trie, r));
-      +        }
-      +        // Map MiniTrie node -> NWA state
-      +        let mut map_mt_to_nwa: BTreeMap<NodeId, usize> = BTreeMap::new();
-      +        for n_id in sub_nodes.iter() {
-      +            let s = nwa.add_state();
-      +            map_mt_to_nwa.insert(*n_id, s);
-      +        }
-      +        // Synthetic transitions from start to each root (weight = ALL).
-      +        for (i, &root) in original_roots.iter().enumerate() {
-      +            if let Some(&dst) = map_mt_to_nwa.get(&root) {
-      +                nwa.add_transition(nwa.start_state, i as u16, dst, SimpleBitset::all());
-      +            }
-      +        }
-      +        // Mark final weights for end nodes.
-      +        for (mt_id, nwa_id) in map_mt_to_nwa.iter() {
-      +            if let Some(node) = trie.get_node(*mt_id) {
-      +                if node.is_end() {
-      +                    nwa.set_final_weight(*nwa_id, SimpleBitset::all());
-      +                }
-      +            }
-      +        }
-      +        // Encode MiniTrie edges (pop chains and SID-specific steps).
-      +        for (mt_id, &nwa_src) in map_mt_to_nwa.iter() {
-      +            let node = trie.get_node(*mt_id).unwrap();
-      +            for (ek, dm) in node.children() {
-      +                if ek.pop < 0 { continue; }
-      +                let pop = ek.pop as usize;
-      +                let mut cur = nwa_src;
-      +                for _ in 0..pop.saturating_sub(1) {
-      +                    let inter = nwa.add_state();
-      +                    nwa.add_default_transition(cur, inter, SimpleBitset::all());
-      +                    cur = inter;
-      +                }
-      +                let weight = SimpleBitset::from_iter(ek.tokens.iter());
-      +                for (&mt_dst, sids) in dm {
-      +                    let nwa_dst = map_mt_to_nwa[&mt_dst];
-      +                    for sid in sids.iter() {
-      +                        nwa.add_transition(cur, sid as u16, nwa_dst, weight.clone());
-      +                    }
-      +                }
-      +            }
-      +        }
-      +        // Determinize + simplify once
-      +        let mut dwa = nwa.determinize();
-      +        dwa.simplify();
-      +        // Convert back into a MiniTrie
-      +        let (mut merged, mt_root_id) = Self::convert_dwa_to_minitrie(dwa, ctx);
-      +        // Derive final roots by following the synthetic first edges (0..N).
-      +        let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
-      +        let root_node = merged.get_node(mt_root_id).unwrap().clone();
-      +        for i in 0..original_roots.len() {
-      +            let mut chosen: Option<NodeId> = None;
-      +            for (_ek, dm) in root_node.children() {
-      +                for (dst, sids) in dm {
-      +                    for sid in sids.iter() {
-      +                        if sid == i {
-      +                            chosen = Some(*dst);
-      +                            break;
+      -            // Now build the new children for the MiniTrie node
+      -            let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
+      -            for ((tokens, dst), sids) in edge_groups {
+      -                if sids.is_empty() {
+      -                    continue;
+      -                }
+      -                let ek = EdgeKey::new(pop, tokens);
+      -                new_children.entry(ek).or_default().insert(dst, sids);
+      -            }
+      -
+      -            // If the DWA state has a final weight, create an edge to a canonical end node.
+      -            // This encodes the conditional finality.
+      -            if let Some(final_weight) = &dwa_src_state.final_weight {
+      -                if !final_weight.is_empty() {
+      -                    let tokens = SortedSet::from_iter(final_weight.iter_up_to(ctx.max_llm_token_id));
+      -                    let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
+      -                    new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
+      -                }
+      -            }
+      +                if let Some(tokens_w) = &dwa_term_state.trans_weight_default {
+      +                    if !tokens_w.is_empty() {
+      +                        // Try to compress default to END if destination is pure-final.
+      +                        if let Some((dest_final_w, extra_steps)) = pure_final_terminal(dwa_dst_id) {
+      +                            let accept_tokens = tokens_w & dest_final_w;
+      +                            if !accept_tokens.is_empty() {
+      +                                let total_pop = pop_trans + (extra_steps as isize);
+      +                                end_tokens_by_pop
+      +                                    .entry(total_pop)
+      +                                    .and_modify(|acc| *acc |= &accept_tokens)
+      +                                    .or_insert(accept_tokens);
+      +                                // Skip emitting s -> dest default edges in this case.
+      +                            } else {
+      +                                // No acceptance after destination; fall back to regular default edges.
+      +                                let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+      +                                let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+      +                                let key = (pop_trans, tokens_set, mt_dst_id);
+      +                                let exception_sids: BTreeSet<u16> =
+      +                                    dwa_term_state.transitions.exceptions.keys().cloned().collect();
+      +                                let default_sids_entry = edge_groups.entry(key).or_default();
+      +                                for sid in 0..=ctx.max_state_id {
+      +                                    if !exception_sids.contains(&(sid as u16)) {
+      +                                        default_sids_entry.insert(sid);
+      +                                    }
+      +                                }
+      +                            }
+      +                        } else {
+      +                            // Destination is not pure-final; emit regular default edges.
+      +                            let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+      +                            let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+      +                            let key = (pop_trans, tokens_set, mt_dst_id);
+      +                            let exception_sids: BTreeSet<u16> =
+      +                                dwa_term_state.transitions.exceptions.keys().cloned().collect();
+      +                            let default_sids_entry = edge_groups.entry(key).or_default();
+      +                            for sid in 0..=ctx.max_state_id {
+      +                                if !exception_sids.contains(&(sid as u16)) {
+      +                                    default_sids_entry.insert(sid);
+      +                                }
+      +                            }
       +                        }
       +                    }
-      +                    if chosen.is_some() { break; }
       +                }
-      +                if chosen.is_some() { break; }
       +            }
-      +            new_roots.push(chosen.expect("missing synthetic root edge during roundtrip"));
-      +        }
-      +        // Drop the synthetic edges from the artificial root node and set root order.
-      +        merged.set_children(mt_root_id, BTreeMap::new());
-      +        merged.root_ids = new_roots;
-      +        *trie = merged;
+      +
+      +            // 2.d Build the new children for the MiniTrie node from accumulated groups.
+      +            let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
+      +            for ((pop, tokens, dst), sids) in edge_groups {
+      +                if sids.is_empty() { continue; }
+      +                let ek = EdgeKey::new(pop, tokens);
+      +                new_children.entry(ek).or_default().insert(dst, sids);
+      +            }
+      +            // Add direct-to-END edges per-pop (tokens aggregated).
+      +            for (pop, tokens_w) in end_tokens_by_pop {
+      +                if tokens_w.is_empty() { continue; }
+      +                let tokens = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
+      +                if tokens.is_empty() { continue; }
+      +                let ek = EdgeKey::new(pop, tokens);
+      +                let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
+      +                new_children.entry(ek).or_default().insert(end_node_id, sids);
+      +            }
+                   mini.set_children(mt_src_id, new_children);
+               }
+       
+               (mini, mt_root_id)
            }
        }
        
@@ -5633,281 +5956,7 @@ messages:
       Applying patch to 'src/trie3_opt/passes/nwa_dwa_roundtrip.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/passes/nwa_dwa_roundtrip.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor NwaDwaRoundtripPass to use a
-      single shared NWA for all roots"'
-    metadata:
-  - user: |-
-      Diff of src/trie3_opt/passes/nwa_dwa_roundtrip.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/weighted_automata.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      There was a condition for just the first edges when converting back... It did pop0 for roots. Bring that little bit back.
-      Do it here, or just after it (I don't mind).
-      ```rust
-      for i in 0..original_roots.len() {
-          let mut chosen: Option<NodeId> = None;
-          for (_ek, dm) in root_node.children() {
-              for (dst, sids) in dm {
-                  for sid in sids.iter() {
-                      if sid == i {
-                          chosen = Some(*dst);
-                          break;
-                      }
-                  }
-                  if chosen.is_some() { break; }
-              }
-              if chosen.is_some() { break; }
-          }
-          new_roots.push(chosen.expect("missing synthetic root edge during roundtrip"));
-      }
-      ```
-      Basically, we wanna make the first edges all pop 0.
-      Actually, you can remove `let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };`, replace with just `let pop_base = 1isize;`.
-      Then, at the end of `run`, just literally go through each outgoing edge from a root node and change its pop n to 0 (it should be 1 right now - assert that this is the case before changing it). Yes. Keeps it simple. Do this.
-    metadata:
-  - assistant: |-
-      Of course. Here are the step-by-step instructions and the corresponding git diff to adjust the pop counts for root node edges.
-
-      ### Step-by-step Instructions
-
-      1.  **Edit `src/trie3_opt/passes/nwa_dwa_roundtrip.rs`:**
-          *   In the `convert_dwa_to_minitrie` function, find the line where `pop_base` is calculated. Replace the conditional logic with a constant `1isize` to ensure all non-simple steps contribute a pop of 1.
-              *   Change:
-                  ```rust
-                  let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-                  ```
-              *   To:
-                  ```rust
-                  let pop_base = 1isize;
-                  ```
-          *   In the `run` function, go to the end, just before the final assignment `*trie = merged;`.
-          *   Insert a new code block that iterates through the `merged.root_ids`. For each root, it will rebuild its children map, asserting that the original edges have `pop: 1` and setting the new edges to have `pop: 0`.
-
-      ### Git Diff
-
-      Here is the git diff for the changes.
-
-      ```diff
-      diff --git a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      --- a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      +++ b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      @@ -160,7 +160,7 @@
-                   // Accumulate simple default-only states into the pop count.
-                   let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
-                   let dwa_term_state = &dwa.states[terminal_dwa_id];
-      -            let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-      +            let pop_base = 1isize;
-                   let pop = pop_base + (simple_steps as isize);
-       
-                   // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
-      @@ -370,6 +370,18 @@
-               // Drop the synthetic edges from the artificial root node and set root order.
-               merged.set_children(mt_root_id, BTreeMap::new());
-               merged.root_ids = new_roots;
-      +        // For the real root nodes, force their outgoing edges to have pop=0.
-      +        // They should have pop=1 at this point from the conversion logic.
-      +        for &root_id in &merged.root_ids {
-      +            let root_node = merged.get_node(root_id).unwrap().clone();
-      +            let mut new_children = BTreeMap::new();
-      +            for (ek, dm) in root_node.children() {
-      +                assert_eq!(ek.pop, 1, "Expected pop=1 for edges from a new root node");
-      +                let new_ek = EdgeKey::new(0, ek.tokens.clone());
-      +                new_children.insert(new_ek, dm.clone());
-      +            }
-      +            merged.set_children(root_id, new_children);
-      +        }
-               *trie = merged;
-           }
-       }
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/trie3_opt/passes/nwa_dwa_roundtrip.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/weighted_automata.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      There was a condition for just the first edges when converting back... It did pop0 for roots. Bring that little bit back.
-      Do it here, or just after it (I don't mind).
-      ```rust
-      for i in 0..original_roots.len() {
-          let mut chosen: Option<NodeId> = None;
-          for (_ek, dm) in root_node.children() {
-              for (dst, sids) in dm {
-                  for sid in sids.iter() {
-                      if sid == i {
-                          chosen = Some(*dst);
-                          break;
-                      }
-                  }
-                  if chosen.is_some() { break; }
-              }
-              if chosen.is_some() { break; }
-          }
-          new_roots.push(chosen.expect("missing synthetic root edge during roundtrip"));
-      }
-      ```
-      Basically, we wanna make the first edges all pop 0.
-      Actually, you can remove `let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };`, replace with just `let pop_base = 1isize;`.
-      Then, at the end of `run`, just literally go through each outgoing edge from a root node and change its pop n to 0 (it should be 1 right now - assert that this is the case before changing it). Yes. Keeps it simple. Do this.
-    metadata:
-  - assistant: |-
-      Of course. Here are the step-by-step instructions and the corresponding git diff to adjust the pop counts for root node edges.
-
-      ### Step-by-step Instructions
-
-      1.  **Edit `src/trie3_opt/passes/nwa_dwa_roundtrip.rs`:**
-          *   In the `convert_dwa_to_minitrie` function, find the line where `pop_base` is calculated. Replace the conditional logic with a constant `1isize` to ensure all non-simple steps contribute a pop of 1.
-              *   Change:
-                  ```rust
-                  let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-                  ```
-              *   To:
-                  ```rust
-                  let pop_base = 1isize;
-                  ```
-          *   In the `run` function, go to the end, just before the final assignment `*trie = merged;`.
-          *   Insert a new code block that iterates through the `merged.root_ids`. For each root, it will rebuild its children map, asserting that the original edges have `pop: 1` and setting the new edges to have `pop: 0`.
-
-      ### Git Diff
-
-      Here is the git diff for the changes.
-
-      ```diff
-      diff --git a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      --- a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      +++ b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      @@ -160,7 +160,7 @@
-                   // Accumulate simple default-only states into the pop count.
-                   let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
-                   let dwa_term_state = &dwa.states[terminal_dwa_id];
-      -            let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-      +            let pop_base = 1isize;
-                   let pop = pop_base + (simple_steps as isize);
-       
-                   // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
-      @@ -370,6 +370,18 @@
-               // Drop the synthetic edges from the artificial root node and set root order.
-               merged.set_children(mt_root_id, BTreeMap::new());
-               merged.root_ids = new_roots;
-      +        // For the real root nodes, force their outgoing edges to have pop=0.
-      +        // They should have pop=1 at this point from the conversion logic.
-      +        for &root_id in &merged.root_ids {
-      +            let root_node = merged.get_node(root_id).unwrap().clone();
-      +            let mut new_children = BTreeMap::new();
-      +            for (ek, dm) in root_node.children() {
-      +                assert_eq!(ek.pop, 1, "Expected pop=1 for edges from a new root node");
-      +                let new_ek = EdgeKey::new(0, ek.tokens.clone());
-      +                new_children.insert(new_ek, dm.clone());
-      +            }
-      +            merged.set_children(root_id, new_children);
-      +        }
-               *trie = merged;
-           }
-       }
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      Applying patch to 'src/trie3_opt/passes/nwa_dwa_roundtrip.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/nwa_dwa_roundtrip.rs.
-    metadata:
-  - user: 'Changes committed with message: "Refactor NwaDwaRoundtripPass to use a
-      single shared NWA and set root outgoing pop to 0"'
-    metadata:
-  - user: |-
-      Diff of src/trie3_opt/passes/nwa_dwa_roundtrip.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/weighted_automata.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |
-      /Users/isaacbreen/.cargo/bin/cargo test --color=always --message-format=json-diagnostic-rendered-ansi --no-run --package sep1 --lib test_constraint_basic --profile test
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      error[E0502]: cannot borrow `merged` as mutable because it is also borrowed as immutable
-         --> src/trie3_opt/passes/nwa_dwa_roundtrip.rs:392:13
-          |
-      384 |         for &root_id in &merged.root_ids {
-          |                         ----------------
-          |                         |
-          |                         immutable borrow occurs here
-          |                         immutable borrow later used here
-      ...
-      392 |             merged.set_children(root_id, new_children);
-          |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
-
-      For more information about this error, try `rustc --explain E0502`.
-      error: could not compile `sep1` (lib test) due to 1 previous error
-      Process finished with exit code 101
-    metadata:
-  - assistant: |-
-      The error `E0502` ("cannot borrow `merged` as mutable because it is also borrowed as immutable") occurs because you are iterating over `merged.root_ids` (which is an immutable borrow of `merged`) and then calling `merged.set_children` (which requires a mutable borrow of `merged`) inside the same loop.
-
-      To fix this, you need to clone the `root_ids` vector before starting the iteration, which releases the immutable borrow of `merged` and allows the mutable borrow inside the loop.
-
-      Here are the step-by-step instructions and the corresponding git diff.
-
-      ### Step-by-step Instructions
-
-      1.  **Edit `src/trie3_opt/passes/nwa_dwa_roundtrip.rs`**:
-          *   In the `run` function, locate the loop that iterates over `merged.root_ids` to fix the `pop` values.
-          *   Change the loop to iterate over a clone of `merged.root_ids`.
-
-      ### Git Diff
-
-      ```diff
-      diff --git a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      --- a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      +++ b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      @@ -382,7 +382,8 @@
-               merged.root_ids = new_roots;
-               // For the real root nodes, force their outgoing edges to have pop=0.
-               // They should have pop=1 at this point from the conversion logic.
-      -        for &root_id in &merged.root_ids {
-      +        let roots_to_fix = merged.root_ids.clone();
-      +        for &root_id in &roots_to_fix {
-                   let root_node = merged.get_node(root_id).unwrap().clone();
-                   let mut new_children = BTreeMap::new();
-                   for (ek, dm) in root_node.children() {
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      Applying patch to 'src/trie3_opt/passes/nwa_dwa_roundtrip.rs' using custom patcher...
-      Successfully applied patch and wrote to src/trie3_opt/passes/nwa_dwa_roundtrip.rs.
-    metadata:
-  - user: 'Changes committed with message: "Fix E0502 in NwaDwaRoundtripPass by cloning
-      root_ids before modifying merged"'
+  - user: 'Changes committed with message: "Refactor: Simplify DWA to MiniTrie conversion
+      by deferring edge creation and enabling path compression to END node"'
     metadata:
 ...
