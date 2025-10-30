@@ -112,6 +112,8 @@ impl NwaDwaRoundtripPass {
             dwa_to_mt_map.insert(dwa_id, mt_id);
         }
 
+        let mt_root_id = dwa_to_mt_map[&dwa.start_state];
+
         // 2. Create MiniTrie edges.
         for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
             let mt_src_id = dwa_to_mt_map[&dwa_src_id];
@@ -149,7 +151,7 @@ impl NwaDwaRoundtripPass {
                 let tokens_set = SortedSet::from_iter(tokens.iter());
                 let sids_set = SortedSet::from_iter(sids.into_iter().map(|s| s as usize));
 
-                let n = todo!();
+                let n = if mt_src_id == mt_root_id { 0isize } else { 1isize };
                 let ek = EdgeKey::new(n, tokens_set);
 
                 let dest_map = new_children.entry(ek).or_default();
@@ -158,7 +160,6 @@ impl NwaDwaRoundtripPass {
             mini.set_children(mt_src_id, new_children);
         }
 
-        let mt_root_id = dwa_to_mt_map[&dwa.start_state];
         (mini, mt_root_id)
     }
 }
