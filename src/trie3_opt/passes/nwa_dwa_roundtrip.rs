@@ -233,6 +233,28 @@ impl OptimizationPass for NwaDwaRoundtripPass {
             }
         }
 
+        // Prune edges that don't lead to an end node.
+        let productive_nodes = trie.can_reach_end();
+        let all_node_ids: Vec<_> = trie.node_ids().collect();
+        for node_id in all_node_ids {
+            let node = if let Some(n) = trie.get_node(node_id) {
+                n.clone()
+            } else {
+                continue;
+            };
+            let mut to_remove = Vec::new();
+            for (ek, dm) in node.children() {
+                for dst in dm.keys() {
+                    if !productive_nodes.contains(dst) {
+                        to_remove.push((ek.clone(), *dst));
+                    }
+                }
+            }
+            for (ek, dst) in to_remove {
+                trie.remove_edge_dest(node_id, &ek, dst);
+            }
+        }
+
         let original_roots = trie.root_ids.clone();
         // Build per-root roundtrip and merge results into a single MiniTrie.
         let mut merged = MiniTrie::new();
