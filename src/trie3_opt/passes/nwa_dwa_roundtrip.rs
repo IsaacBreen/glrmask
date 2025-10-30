@@ -142,15 +142,11 @@ impl NwaDwaRoundtripPass {
         for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
             let mt_src_id = dwa_to_mt_map[&dwa_src_id];
 
-            let (dwa_term_state, pop) = if mt_src_id == mt_root_id {
-                // The synthetic root has special pop=0 edges and isn't part of a pop chain.
-                (dwa_src_state, 0)
-            } else {
-                // Accumulate simple default-only states into the pop count.
-                let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
-                let pop_base = 1isize;
-                (&dwa.states[terminal_dwa_id], pop_base + (simple_steps as isize))
-            };
+            // Accumulate simple default-only states into the pop count.
+            let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
+            let dwa_term_state = &dwa.states[terminal_dwa_id];
+            let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };
+            let pop = pop_base + (simple_steps as isize);
 
             // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
             let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
