@@ -192,34 +192,29 @@ impl OptimizationPass for NwaDwaRoundtripPass {
                     continue;
                 }
 
-                // Must clone, as we will be modifying the trie.
-                let b_node = if let Some(n) = trie.get_node(b_id) {
-                    n.clone()
+                // Get a snapshot of the node's connectivity.
+                let (children, parents) = if let Some(node) = trie.get_node(b_id) {
+                    (node.children().clone(), node.parents().clone())
                 } else {
                     continue;
                 };
 
-                let mut pop0_edges = BTreeMap::new();
-                let mut non_pop0_edges = BTreeMap::new();
-
-                for (ek, dm) in b_node.children() {
-                    if ek.pop == 0 {
-                        pop0_edges.insert(ek.clone(), dm.clone());
-                    } else {
-                        non_pop0_edges.insert(ek.clone(), dm.clone());
-                    }
-                }
+                let pop0_edges: BTreeMap<_, _> = children
+                    .iter()
+                    .filter(|(ek, _)| ek.pop == 0)
+                    .map(|(ek, dm)| (ek.clone(), dm.clone()))
+                    .collect();
 
                 if pop0_edges.is_empty() {
                     continue;
                 }
 
                 changed = true;
-                let parents_of_b = b_node.parents().clone();
 
+                // For each pop=0 edge B->C, and each parent A of B, add a direct edge A->C.
                 for (pop0_ek, pop0_dm) in &pop0_edges {
                     for (c_id, sids_bc) in pop0_dm {
-                        for (a_id, edges_from_a_to_b) in &parents_of_b {
+                        for (a_id, edges_from_a_to_b) in &parents {
                             for (ek_ab, sids_ab) in edges_from_a_to_b {
                                 let new_tokens = ek_ab.tokens.intersect(&pop0_ek.tokens);
                                 if new_tokens.is_empty() { continue; }
@@ -231,7 +226,14 @@ impl OptimizationPass for NwaDwaRoundtripPass {
                         }
                     }
                 }
-                trie.set_children(b_id, non_pop0_edges);
+
+                // Now, remove all pop=0 edges from B, leaving other edges intact.
+                // This is safer than the original implementation, which could revert B to a stale state.
+                let b_current_children = if let Some(node) = trie.get_node(b_id) {
+                    node.children().clone()
+                } else { BTreeMap::new() };
+                let b_new_children = b_current_children.into_iter().filter(|(ek, _)| ek.pop != 0).collect();
+                trie.set_children(b_id, b_new_children);
             }
         }
 
