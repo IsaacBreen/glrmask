@@ -297,5 +297,6 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         merged.root_ids = new_roots;
         // Replace input trie with merged result
         *trie = merged;
+        println!("{}", trie);
     }
 }
