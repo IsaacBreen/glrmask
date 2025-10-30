@@ -81,7 +81,6 @@ impl NwaDwaRoundtripPass {
                     cur = inter;
                 }
                 for (&mt_dst, sids) in dm {
-
                     // The last step is not a default transition, but specific to the SIDs.
                     let nwa_dst = map_mt_to_nwa[&mt_dst];
                     let weight = SimpleBitset::from_iter(ek.tokens.iter());
