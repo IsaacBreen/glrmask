@@ -149,11 +149,7 @@ impl NwaDwaRoundtripPass {
                 let tokens_set = SortedSet::from_iter(tokens.iter());
                 let sids_set = SortedSet::from_iter(sids.into_iter().map(|s| s as usize));
 
-                // A DWA transition consumes one SID. In `aici` semantics, this would normally
-                // correspond to `pop=1`. However, the NWA construction in this pass loses the
-                // distinction between `pop=0` and `pop=1`. We use `pop=0` to align with the
-                // example output structure provided in the prompt.
-                let ek = EdgeKey::new(0, tokens_set);
+                let ek = EdgeKey::new(1, tokens_set);
 
                 let dest_map = new_children.entry(ek).or_default();
                 dest_map.entry(mt_dst_id).or_default().union_inplace(&sids_set);
