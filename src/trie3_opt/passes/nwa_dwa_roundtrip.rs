@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::datastructures::trie::Trie;
 use crate::trie3_opt::context::OptimizationContext;
+use crate::weighted_automata::DWAState;
 use crate::trie3_opt::core::{EdgeKey, MiniTrie, Node, NodeId, SortedSet};
 use crate::trie3_opt::passes::OptimizationPass;
 use crate::weighted_automata::{NWA, SimpleBitset};
@@ -93,6 +94,28 @@ impl NwaDwaRoundtripPass {
         }
         (nwa, map_mt_to_nwa)
     }
+
+    /// Follows a chain of 'simple' states via default transitions, returning:
+    /// (terminal_state_id, number_of_simple_default_steps).
+    /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
+    /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
+    fn follow_simple_chain(
+        dwa: &crate::weighted_automata::DWA,
+        start: usize,
+    ) -> (usize, usize) {
+        let mut steps = 0usize;
+        let mut u = start;
+        let mut visited: BTreeSet<usize> = BTreeSet::new();
+        loop {
+            let state = &dwa.states[u];
+            if let Some(next) = state.simple_default_target() {
+                if !visited.insert(u) { break; }
+                steps += 1;
+                u = next;
+            } else { break; }
+        }
+        (u, steps)
+    }
     fn convert_dwa_to_minitrie(
         dwa: crate::weighted_automata::DWA,
         _ctx: &OptimizationContext,
@@ -119,14 +142,18 @@ impl NwaDwaRoundtripPass {
         for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
             let mt_src_id = dwa_to_mt_map[&dwa_src_id];
 
-            let pop = if mt_src_id == mt_root_id { 0isize } else { 1isize };
+            // Accumulate simple default-only states into the pop count.
+            let (terminal_dwa_id, simple_steps) = Self::follow_simple_chain(&dwa, dwa_src_id);
+            let dwa_term_state = &dwa.states[terminal_dwa_id];
+            let pop_base = if mt_src_id == mt_root_id { 0isize } else { 1isize };
+            let pop = pop_base + (simple_steps as isize);
 
             // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
             let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
 
             // Handle exception transitions
-            for (&sid, &dwa_dst_id) in &dwa_src_state.transitions.exceptions {
-                if let Some(tokens) = dwa_src_state.trans_weights_exceptions.get(&sid) {
+            for (&sid, &dwa_dst_id) in &dwa_term_state.transitions.exceptions {
+                if let Some(tokens) = dwa_term_state.trans_weights_exceptions.get(&sid) {
                     if tokens.is_empty() {
                         continue;
                     }
@@ -140,15 +167,15 @@ impl NwaDwaRoundtripPass {
             }
 
             // Handle default transition
-            if let Some(dwa_dst_id) = dwa_src_state.transitions.default {
-                if let Some(tokens) = &dwa_src_state.trans_weight_default {
+            if let Some(dwa_dst_id) = dwa_term_state.transitions.default {
+                if let Some(tokens) = &dwa_term_state.trans_weight_default {
                     if !tokens.is_empty() {
                         let tokens_set = SortedSet::from_iter(tokens.iter());
                         let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
                         let key = (tokens_set, mt_dst_id);
 
                         let exception_sids: BTreeSet<u16> =
-                            dwa_src_state.transitions.exceptions.keys().cloned().collect();
+                            dwa_term_state.transitions.exceptions.keys().cloned().collect();
 
                         let default_sids_entry = edge_groups.entry(key).or_default();
                         for sid in 0..=_ctx.max_state_id {

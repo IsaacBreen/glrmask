@@ -304,6 +304,26 @@ pub struct DWA {
     pub start_state: StateID,
 }
 
+impl DWAState {
+    /// Returns Some(target) if this state is 'simple':
+    /// - it has only a default transition (no exceptions),
+    /// - it has no final_weight,
+    /// - and the weight for that default transition equals the state's weight.
+    /// Otherwise returns None.
+    pub fn simple_default_target(&self) -> Option<StateID> {
+        if self.final_weight.is_none()
+            && self.transitions.exceptions.is_empty()
+        {
+            if let (Some(target), Some(w)) = (self.transitions.default, self.trans_weight_default.as_ref()) {
+                if &self.weight == w {
+                    return Some(target);
+                }
+            }
+        }
+        None
+    }
+}
+
 // --- Part 5: Determinization ---
 
 impl NWA {
