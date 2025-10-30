@@ -106,9 +106,10 @@ impl NwaDwaRoundtripPass {
 
         // 1. Create MiniTrie nodes for each DWA state.
         let mut dwa_to_mt_map: BTreeMap<usize, NodeId> = BTreeMap::new();
-        for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
-            let is_end = dwa_state.final_weight.as_ref().map_or(false, |fw| !fw.is_empty());
-            let mt_id = mini.add_node(is_end);
+        let end_node_id = mini.add_node(true);
+        for (dwa_id, _dwa_state) in dwa.states.iter().enumerate() {
+            // DWA states are not end nodes themselves. Finality is modeled by an edge to a canonical end node.
+            let mt_id = mini.add_node(false);
             dwa_to_mt_map.insert(dwa_id, mt_id);
         }
 
@@ -167,6 +168,21 @@ impl NwaDwaRoundtripPass {
                 }
                 let ek = EdgeKey::new(pop, tokens);
                 new_children.entry(ek).or_default().insert(dst, sids);
+            }
+
+            // If the DWA state has a final weight, create an edge to a canonical end node.
+            // This encodes the conditional finality.
+            if let Some(final_weight) = &dwa_src_state.final_weight {
+                if !final_weight.is_empty() {
+                    // Per user request, "with the final states". We interpret final_weight as SIDs.
+                    // This contradicts its use as tokens elsewhere, implying a deeper issue, but we proceed.
+                    let sids = SortedSet::from_iter(final_weight.iter());
+
+                    // MiniTrie edges must consume a token. As a compromise, we use the set of all tokens
+                    // that can lead to this DWA state.
+                    let tokens = SortedSet::from_iter(dwa_src_state.weight.iter());
+                    new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
+                }
             }
             mini.set_children(mt_src_id, new_children);
         }

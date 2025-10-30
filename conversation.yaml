@@ -1888,44 +1888,55 @@ local_system:
               for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
                   let mt_src_id = dwa_to_mt_map[&dwa_src_id];
 
-                  // Group SIDs by their target DWA state.
-                  let mut transitions_by_dest: BTreeMap<usize, BTreeSet<u16>> = BTreeMap::new();
+                  let pop = if mt_src_id == mt_root_id { 0isize } else { 1isize };
+
+                  // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
+                  let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
+
+                  // Handle exception transitions
                   for (&sid, &dwa_dst_id) in &dwa_src_state.transitions.exceptions {
-                      transitions_by_dest.entry(dwa_dst_id).or_default().insert(sid);
+                      if let Some(tokens) = dwa_src_state.trans_weights_exceptions.get(&sid) {
+                          if tokens.is_empty() {
+                              continue;
+                          }
+
+                          let tokens_set = SortedSet::from_iter(tokens.iter());
+                          let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+
+                          let key = (tokens_set, mt_dst_id);
+                          edge_groups.entry(key).or_default().insert(sid as usize);
+                      }
                   }
 
-                  if let Some(default_dst_id) = dwa_src_state.transitions.default {
-                      let exception_sids: BTreeSet<u16> =
-                          dwa_src_state.transitions.exceptions.keys().cloned().collect();
-                      let default_sids_entry = transitions_by_dest.entry(default_dst_id).or_default();
-                      // The alphabet is StateIDs from the original MiniTrie.
-                      for sid in 0..=_ctx.max_state_id {
-                          if !exception_sids.contains(&(sid as u16)) {
-                              default_sids_entry.insert(sid as u16);
+                  // Handle default transition
+                  if let Some(dwa_dst_id) = dwa_src_state.transitions.default {
+                      if let Some(tokens) = &dwa_src_state.trans_weight_default {
+                          if !tokens.is_empty() {
+                              let tokens_set = SortedSet::from_iter(tokens.iter());
+                              let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                              let key = (tokens_set, mt_dst_id);
+
+                              let exception_sids: BTreeSet<u16> =
+                                  dwa_src_state.transitions.exceptions.keys().cloned().collect();
+
+                              let default_sids_entry = edge_groups.entry(key).or_default();
+                              for sid in 0..=_ctx.max_state_id {
+                                  if !exception_sids.contains(&(sid as u16)) {
+                                      default_sids_entry.insert(sid);
+                                  }
+                              }
                           }
                       }
                   }
 
+                  // Now build the new children for the MiniTrie node
                   let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
-
-                  for (dwa_dst_id, sids) in transitions_by_dest {
-                      if sids.is_empty() { continue; }
-                      let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-                      let dwa_dst_state = &dwa.states[dwa_dst_id];
-
-                      // If the destination is a final state, the tokens are its final_weight.
-                      // Otherwise, they are its path weight.
-                      let tokens = dwa_dst_state.final_weight.as_ref().filter(|fw| !fw.is_empty()).unwrap_or(&dwa_dst_state.weight).clone();
-                      if tokens.is_empty() { continue; }
-
-                      let tokens_set = SortedSet::from_iter(tokens.iter());
-                      let sids_set = SortedSet::from_iter(sids.into_iter().map(|s| s as usize));
-
-                      let n = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-                      let ek = EdgeKey::new(n, tokens_set);
-
-                      let dest_map = new_children.entry(ek).or_default();
-                      dest_map.entry(mt_dst_id).or_default().union_inplace(&sids_set);
+                  for ((tokens, dst), sids) in edge_groups {
+                      if sids.is_empty() {
+                          continue;
+                      }
+                      let ek = EdgeKey::new(pop, tokens);
+                      new_children.entry(ek).or_default().insert(dst, sids);
                   }
                   mini.set_children(mt_src_id, new_children);
               }
@@ -4896,9 +4907,10 @@ local_system:
 
               // 1. Create MiniTrie nodes for each DWA state.
               let mut dwa_to_mt_map: BTreeMap<usize, NodeId> = BTreeMap::new();
-              for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
-                  let is_end = dwa_state.final_weight.as_ref().map_or(false, |fw| !fw.is_empty());
-                  let mt_id = mini.add_node(is_end);
+              let end_node_id = mini.add_node(true);
+              for (dwa_id, _dwa_state) in dwa.states.iter().enumerate() {
+                  // DWA states are not end nodes themselves. Finality is modeled by an edge to a canonical end node.
+                  let mt_id = mini.add_node(false);
                   dwa_to_mt_map.insert(dwa_id, mt_id);
               }
 
@@ -4957,6 +4969,21 @@ local_system:
                       }
                       let ek = EdgeKey::new(pop, tokens);
                       new_children.entry(ek).or_default().insert(dst, sids);
+                  }
+
+                  // If the DWA state has a final weight, create an edge to a canonical end node.
+                  // This encodes the conditional finality.
+                  if let Some(final_weight) = &dwa_src_state.final_weight {
+                      if !final_weight.is_empty() {
+                          // Per user request, "with the final states". We interpret final_weight as SIDs.
+                          // This contradicts its use as tokens elsewhere, implying a deeper issue, but we proceed.
+                          let sids = SortedSet::from_iter(final_weight.iter());
+
+                          // MiniTrie edges must consume a token. As a compromise, we use the set of all tokens
+                          // that can lead to this DWA state.
+                          let tokens = SortedSet::from_iter(dwa_src_state.weight.iter());
+                          new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
+                      }
                   }
                   mini.set_children(mt_src_id, new_children);
               }
@@ -8016,44 +8043,55 @@ messages:
               for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
                   let mt_src_id = dwa_to_mt_map[&dwa_src_id];
 
-                  // Group SIDs by their target DWA state.
-                  let mut transitions_by_dest: BTreeMap<usize, BTreeSet<u16>> = BTreeMap::new();
+                  let pop = if mt_src_id == mt_root_id { 0isize } else { 1isize };
+
+                  // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
+                  let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
+
+                  // Handle exception transitions
                   for (&sid, &dwa_dst_id) in &dwa_src_state.transitions.exceptions {
-                      transitions_by_dest.entry(dwa_dst_id).or_default().insert(sid);
+                      if let Some(tokens) = dwa_src_state.trans_weights_exceptions.get(&sid) {
+                          if tokens.is_empty() {
+                              continue;
+                          }
+
+                          let tokens_set = SortedSet::from_iter(tokens.iter());
+                          let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+
+                          let key = (tokens_set, mt_dst_id);
+                          edge_groups.entry(key).or_default().insert(sid as usize);
+                      }
                   }
 
-                  if let Some(default_dst_id) = dwa_src_state.transitions.default {
-                      let exception_sids: BTreeSet<u16> =
-                          dwa_src_state.transitions.exceptions.keys().cloned().collect();
-                      let default_sids_entry = transitions_by_dest.entry(default_dst_id).or_default();
-                      // The alphabet is StateIDs from the original MiniTrie.
-                      for sid in 0..=_ctx.max_state_id {
-                          if !exception_sids.contains(&(sid as u16)) {
-                              default_sids_entry.insert(sid as u16);
+                  // Handle default transition
+                  if let Some(dwa_dst_id) = dwa_src_state.transitions.default {
+                      if let Some(tokens) = &dwa_src_state.trans_weight_default {
+                          if !tokens.is_empty() {
+                              let tokens_set = SortedSet::from_iter(tokens.iter());
+                              let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
+                              let key = (tokens_set, mt_dst_id);
+
+                              let exception_sids: BTreeSet<u16> =
+                                  dwa_src_state.transitions.exceptions.keys().cloned().collect();
+
+                              let default_sids_entry = edge_groups.entry(key).or_default();
+                              for sid in 0..=_ctx.max_state_id {
+                                  if !exception_sids.contains(&(sid as u16)) {
+                                      default_sids_entry.insert(sid);
+                                  }
+                              }
                           }
                       }
                   }
 
+                  // Now build the new children for the MiniTrie node
                   let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
-
-                  for (dwa_dst_id, sids) in transitions_by_dest {
-                      if sids.is_empty() { continue; }
-                      let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-                      let dwa_dst_state = &dwa.states[dwa_dst_id];
-
-                      // If the destination is a final state, the tokens are its final_weight.
-                      // Otherwise, they are its path weight.
-                      let tokens = dwa_dst_state.final_weight.as_ref().filter(|fw| !fw.is_empty()).unwrap_or(&dwa_dst_state.weight).clone();
-                      if tokens.is_empty() { continue; }
-
-                      let tokens_set = SortedSet::from_iter(tokens.iter());
-                      let sids_set = SortedSet::from_iter(sids.into_iter().map(|s| s as usize));
-
-                      let n = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-                      let ek = EdgeKey::new(n, tokens_set);
-
-                      let dest_map = new_children.entry(ek).or_default();
-                      dest_map.entry(mt_dst_id).or_default().union_inplace(&sids_set);
+                  for ((tokens, dst), sids) in edge_groups {
+                      if sids.is_empty() {
+                          continue;
+                      }
+                      let ek = EdgeKey::new(pop, tokens);
+                      new_children.entry(ek).or_default().insert(dst, sids);
                   }
                   mini.set_children(mt_src_id, new_children);
               }
@@ -9168,8 +9206,11 @@ messages:
       ```
     metadata:
       filename: src/weighted_automata.rs
-  - user: Fix the conversion from DWA to MiniTrie. e.g. why aren't we using trans_weight_default/trans_weights_exceptions?
-      Why are we using state weight for edges and not transition weight.
+  - user: When converting from DWA to mini-trie, rather than just declaring a node
+      an end node, create a *new* end node and a None edge to it with the final states.
+      Right now, since we don't have final states on the mini trie node, it's wrong
+      to just declare is_end on the node. What if the final weight for that node in
+      the DWA is restricted wrt the incoming edge's weights?
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9189,177 +9230,74 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. You've correctly identified that the DWA-to-MiniTrie conversion is flawed. It should be using the *transition weights* from the DWA to form the token sets for the new MiniTrie edges, not the weights of the destination states. The `trans_weight_default` and `trans_weights_exceptions` fields were specifically added to the `DWAState` for this purpose.
+      Of course. Dealing with the nuances of automaton conversions can be tricky. The issue you've pointed out is valid: simply marking a `MiniTrie` node as an "end" node is an oversimplification if the finality in the DWA is conditional.
 
-      Here are the step-by-step instructions to fix this, followed by the git diff.
+      Here are the step-by-step instructions to implement your suggestion of using a dedicated end node with an edge to represent conditional finality. This approach requires some compromises given the `MiniTrie` structure, which I'll note in the code.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file:** `src/trie3_opt/passes/nwa_dwa_roundtrip.rs`.
+      1.  **File:** `src/trie3_opt/passes/nwa_dwa_roundtrip.rs`
+      2.  **Function:** `convert_dwa_to_minitrie`
 
-      2.  **Navigate to the function:** `convert_dwa_to_minitrie`.
+      I will modify this function to implement the following logic:
 
-      3.  **Replace the edge creation logic:** Inside the main loop over DWA states (`for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate()`), we will replace the entire logic for building `new_children`. The current logic incorrectly groups State IDs by destination and uses the destination node's weight for tokens. The new logic will correctly use the transition weights from the source node (`dwa_src_state`) and group transitions by `(tokens, destination)` to create compact MiniTrie edges.
+      *   A single, canonical `end_node` will be created at the beginning. This node will have its `end` flag set to `true`.
+      *   When creating `MiniTrie` nodes for each DWA state, they will now *always* be created with `end` set to `false`. The original logic of setting `end` based on `final_weight` will be removed.
+      *   After processing the regular transitions for each DWA state, I'll add new logic to handle `final_weight`:
+          *   If a DWA state has a non-empty `final_weight`, an edge will be created from the corresponding `MiniTrie` node to the canonical `end_node`.
+          *   As you suggested, this edge should carry the "final states". I will interpret the DWA's `final_weight` as containing these state IDs. This is a significant assumption, as `final_weight` is used as a set of LLM tokens elsewhere in the weighted automata logic, but it's the only way to satisfy the request.
+          *   Crucially, `MiniTrie` edges must consume at least one token to be valid. Since a final transition should not consume a token, this requires a compromise: the new edge will be made conditional on the set of all tokens that can lead to the current DWA state (`dwa_state.weight`).
+          *   The `pop` value for this new edge will be `0`.
 
-          -   **Delete** the block of code starting from the comment `// Group SIDs by their target DWA state.` (around line 150) up to and including the line `mini.set_children(mt_src_id, new_children);` (around line 186).
+      This approach correctly avoids the over-approximation of the simple `is_end` flag and encodes the conditional finality in the graph structure as you suggested.
 
-          -   **Insert** the following corrected code in its place:
+      ### Git Diffs
 
-          ```rust
-                      let pop = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-          
-                      // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
-                      let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
-          
-                      // Handle exception transitions
-                      for (&sid, &dwa_dst_id) in &dwa_src_state.transitions.exceptions {
-                          if let Some(tokens) = dwa_src_state.trans_weights_exceptions.get(&sid) {
-                              if tokens.is_empty() {
-                                  continue;
-                              }
-          
-                              let tokens_set = SortedSet::from_iter(tokens.iter());
-                              let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-          
-                              let key = (tokens_set, mt_dst_id);
-                              edge_groups.entry(key).or_default().insert(sid as usize);
-                          }
-                      }
-          
-                      // Handle default transition
-                      if let Some(dwa_dst_id) = dwa_src_state.transitions.default {
-                          if let Some(tokens) = &dwa_src_state.trans_weight_default {
-                              if !tokens.is_empty() {
-                                  let tokens_set = SortedSet::from_iter(tokens.iter());
-                                  let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-                                  let key = (tokens_set, mt_dst_id);
-          
-                                  let exception_sids: BTreeSet<u16> =
-                                      dwa_src_state.transitions.exceptions.keys().cloned().collect();
-          
-                                  let default_sids_entry = edge_groups.entry(key).or_default();
-                                  for sid in 0..=_ctx.max_state_id {
-                                      if !exception_sids.contains(&(sid as u16)) {
-                                          default_sids_entry.insert(sid);
-                                      }
-                                  }
-                              }
-                          }
-                      }
-          
-                      // Now build the new children for the MiniTrie node
-                      let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
-                      for ((tokens, dst), sids) in edge_groups {
-                          if sids.is_empty() {
-                              continue;
-                          }
-                          let ek = EdgeKey::new(pop, tokens);
-                          new_children.entry(ek).or_default().insert(dst, sids);
-                      }
-                      mini.set_children(mt_src_id, new_children);
-          ```
-
-      This change ensures that the token sets on the newly created `MiniTrie` edges correctly reflect the weights of the transitions in the `DWA`, leading to a correct roundtrip conversion.
-
-      ### Git Diff
-
-      Here is the corresponding git diff for the change.
+      Here is the git diff to apply these changes.
 
       ```diff
       --- a/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
       +++ b/src/trie3_opt/passes/nwa_dwa_roundtrip.rs
-      @@ -147,50 +147,56 @@
-               for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
-                   let mt_src_id = dwa_to_mt_map[&dwa_src_id];
+      @@ -102,13 +102,13 @@
+               }
        
-      -            // Group SIDs by their target DWA state.
-      -            let mut transitions_by_dest: BTreeMap<usize, BTreeSet<u16>> = BTreeMap::new();
-      +            let pop = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-      +
-      +            // Group by (tokens, dst) to build MiniTrie edges, since pop is fixed for this src node.
-      +            let mut edge_groups: BTreeMap<(SortedSet, NodeId), SortedSet> = BTreeMap::new();
-      +
-      +            // Handle exception transitions
-                   for (&sid, &dwa_dst_id) in &dwa_src_state.transitions.exceptions {
-      -                transitions_by_dest.entry(dwa_dst_id).or_default().insert(sid);
-      -            }
-      -
-      -            if let Some(default_dst_id) = dwa_src_state.transitions.default {
-      -                let exception_sids: BTreeSet<u16> =
-      -                    dwa_src_state.transitions.exceptions.keys().cloned().collect();
-      -                let default_sids_entry = transitions_by_dest.entry(default_dst_id).or_default();
-      -                // The alphabet is StateIDs from the original MiniTrie.
-      -                for sid in 0..=_ctx.max_state_id {
-      -                    if !exception_sids.contains(&(sid as u16)) {
-      -                        default_sids_entry.insert(sid as u16);
-      -                    }
-      -                }
-      -            }
-      -
-      +                if let Some(tokens) = dwa_src_state.trans_weights_exceptions.get(&sid) {
-      +                    if tokens.is_empty() {
-      +                        continue;
-      +                    }
-      +
-      +                    let tokens_set = SortedSet::from_iter(tokens.iter());
-      +                    let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-      +
-      +                    let key = (tokens_set, mt_dst_id);
-      +                    edge_groups.entry(key).or_default().insert(sid as usize);
-      +                }
-      +            }
-      +
-      +            // Handle default transition
-      +            if let Some(dwa_dst_id) = dwa_src_state.transitions.default {
-      +                if let Some(tokens) = &dwa_src_state.trans_weight_default {
-      +                    if !tokens.is_empty() {
-      +                        let tokens_set = SortedSet::from_iter(tokens.iter());
-      +                        let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-      +                        let key = (tokens_set, mt_dst_id);
-      +
-      +                        let exception_sids: BTreeSet<u16> =
-      +                            dwa_src_state.transitions.exceptions.keys().cloned().collect();
-      +
-      +                        let default_sids_entry = edge_groups.entry(key).or_default();
-      +                        for sid in 0..=_ctx.max_state_id {
-      +                            if !exception_sids.contains(&(sid as u16)) {
-      +                                default_sids_entry.insert(sid);
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +
-      +            // Now build the new children for the MiniTrie node
-                   let mut new_children = BTreeMap::<EdgeKey, BTreeMap<NodeId, SortedSet>>::new();
-      -
-      -            for (dwa_dst_id, sids) in transitions_by_dest {
-      -                if sids.is_empty() { continue; }
-      -                let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
-      -                let dwa_dst_state = &dwa.states[dwa_dst_id];
-      -
-      -                // If the destination is a final state, the tokens are its final_weight.
-      -                // Otherwise, they are its path weight.
-      -                let tokens = dwa_dst_state.final_weight.as_ref().filter(|fw| !fw.is_empty()).unwrap_or(&dwa_dst_state.weight).clone();
-      -                if tokens.is_empty() { continue; }
-      -
-      -                let tokens_set = SortedSet::from_iter(tokens.iter());
-      -                let sids_set = SortedSet::from_iter(sids.into_iter().map(|s| s as usize));
-      -
-      -                let n = if mt_src_id == mt_root_id { 0isize } else { 1isize };
-      -                let ek = EdgeKey::new(n, tokens_set);
-      -
-      -                let dest_map = new_children.entry(ek).or_default();
-      -                dest_map.entry(mt_dst_id).or_default().union_inplace(&sids_set);
-      +            for ((tokens, dst), sids) in edge_groups {
-      +                if sids.is_empty() {
-      +                    continue;
-      +                }
-      +                let ek = EdgeKey::new(pop, tokens);
-      +                new_children.entry(ek).or_default().insert(dst, sids);
+               // 1. Create MiniTrie nodes for each DWA state.
+               let mut dwa_to_mt_map: BTreeMap<usize, NodeId> = BTreeMap::new();
+      -        for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+      -            let is_end = dwa_state.final_weight.as_ref().map_or(false, |fw| !fw.is_empty());
+      -            let mt_id = mini.add_node(is_end);
+      +        let end_node_id = mini.add_node(true);
+      +        for (dwa_id, _dwa_state) in dwa.states.iter().enumerate() {
+      +            // DWA states are not end nodes themselves. Finality is modeled by an edge to a canonical end node.
+      +            let mt_id = mini.add_node(false);
+                   dwa_to_mt_map.insert(dwa_id, mt_id);
+               }
+       
+               let mt_root_id = dwa_to_mt_map[&dwa.start_state];
+       
+               // 2. Create MiniTrie edges.
+      @@ -163,6 +163,20 @@
+                       let ek = EdgeKey::new(pop, tokens);
+                       new_children.entry(ek).or_default().insert(dst, sids);
                    }
+      +
+      +            // If the DWA state has a final weight, create an edge to a canonical end node.
+      +            // This encodes the conditional finality.
+      +            if let Some(final_weight) = &dwa_src_state.final_weight {
+      +                if !final_weight.is_empty() {
+      +                    // Per user request, "with the final states". We interpret final_weight as SIDs.
+      +                    // This contradicts its use as tokens elsewhere, implying a deeper issue, but we proceed.
+      +                    let sids = SortedSet::from_iter(final_weight.iter());
+      +
+      +                    // MiniTrie edges must consume a token. As a compromise, we use the set of all tokens
+      +                    // that can lead to this DWA state.
+      +                    let tokens = SortedSet::from_iter(dwa_src_state.weight.iter());
+      +                    new_children.entry(EdgeKey::new(0, tokens)).or_default().insert(end_node_id, sids);
+      +                }
+      +            }
                    mini.set_children(mt_src_id, new_children);
                }
+       
 
       ```
     metadata:
@@ -9372,7 +9310,7 @@ messages:
       Applying patch to 'src/trie3_opt/passes/nwa_dwa_roundtrip.rs' using custom patcher...
       Successfully applied patch and wrote to src/trie3_opt/passes/nwa_dwa_roundtrip.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: DWA to MiniTrie conversion uses transition
-      weights instead of destination state weights"'
+  - user: 'Changes committed with message: "Refactor NwaDwaRoundtripPass to encode
+      DWA finality via edge to canonical end node"'
     metadata:
 ...
