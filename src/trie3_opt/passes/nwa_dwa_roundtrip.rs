@@ -120,7 +120,7 @@ impl NwaDwaRoundtripPass {
                 for (&mt_dst, sids) in dm {
                     let mut cur = nwa_src;
                     // Create pop default chain
-                    for _ in 0..pop {
+                    for _ in 0..pop.saturating_sub(1) {
                         let inter = nwa.add_state();
                         nwa.add_default_transition(cur, inter, SimpleBitset::all());
                         cur = inter;
