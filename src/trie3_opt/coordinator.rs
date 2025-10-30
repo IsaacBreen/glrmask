@@ -57,7 +57,7 @@ fn get_default_config_impl() -> CoordinatorConfig {
         prune_dead_paths: true,
         prune_unproductive_paths: true,
         canonicalize_end_nodes: true,
-        compress_edges: false,
+        compress_edges: true,
         compress_unary_chains: false,
         factor_common_destinations: true,
         factor_common_destinations_min_incoming: 12,
