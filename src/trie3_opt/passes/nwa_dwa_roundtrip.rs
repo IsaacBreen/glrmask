@@ -164,6 +164,8 @@ impl OptimizationPass for NwaDwaRoundtripPass {
             return;
         }
 
+        println!("{}", trie);
+
         // Eliminate pop=0 edges on non-root nodes by merging them into predecessors.
         // This is a prerequisite for NWA conversion, which has simplified handling for pop>0.
         // After this loop, only root nodes may have pop=0 edges.
