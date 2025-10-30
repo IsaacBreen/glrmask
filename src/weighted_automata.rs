@@ -289,6 +289,13 @@ pub struct DWAState {
     pub weight: Weight,
     /// The aggregated final weight of this state.
     pub final_weight: Option<Weight>,
+    /// Aggregate weight for the default transition (if any).
+    /// This captures the union of (path_weight & trans_weight) across NWA transitions that map to the default.
+    pub trans_weight_default: Option<Weight>,
+    /// Aggregate weights for exception transitions.
+    /// For each exception character, stores the union of (path_weight & trans_weight) that form that deterministic edge.
+    /// This is useful when reconstructing per-edge weights after determinization.
+    pub trans_weights_exceptions: BTreeMap<u16, Weight>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -388,6 +395,8 @@ impl NWA {
 
             // --- 2. Calculate the default transition for the DWA state ---
             let mut default_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+            // Aggregate weight for default edge from this state.
+            let mut default_weight_agg = Weight::zeros();
             for (nwa_id, path_weight) in &current_composition {
                 if let Some(transitions) = self.states[*nwa_id].transitions.get_default() {
                     for (next_nwa_id, trans_weight) in transitions {
@@ -396,6 +405,7 @@ impl NWA {
                             .entry(*next_nwa_id)
                             .or_default()
                             .bitor_assign(&next_path_weight);
+                        default_weight_agg |= &next_path_weight;
                     }
                 }
             }
@@ -407,10 +417,14 @@ impl NWA {
                 &mut worklist,
             );
             dwa.states[current_dwa_id].transitions.default = default_target_dwa_id;
+            if default_target_dwa_id.is_some() {
+                dwa.states[current_dwa_id].trans_weight_default = Some(default_weight_agg);
+            }
 
             // --- 3. Calculate transitions for all critical points (exceptions) ---
             for char_code in critical_points {
                 let mut exception_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+                let mut exception_weight_agg = Weight::zeros();
                 for (nwa_id, path_weight) in &current_composition {
                     if let Some(transitions) = self.states[*nwa_id].transitions.get(char_code) {
                         for (next_nwa_id, trans_weight) in transitions {
@@ -419,6 +433,7 @@ impl NWA {
                                 .entry(*next_nwa_id)
                                 .or_default()
                                 .bitor_assign(&next_path_weight);
+                            exception_weight_agg |= &next_path_weight;
                         }
                     }
                 }
@@ -437,6 +452,10 @@ impl NWA {
                             .transitions
                             .exceptions
                             .insert(char_code, target_id);
+                        // Record the aggregate weight for this exception transition.
+                        dwa.states[current_dwa_id]
+                            .trans_weights_exceptions
+                            .insert(char_code, exception_weight_agg);
                     }
                 }
             }

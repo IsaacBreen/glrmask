@@ -1,10 +1,10 @@
 use crate::trie3_opt::context::OptimizationContext;
 use crate::trie3_opt::core::MiniTrie;
 
-/// Trait implemented by each independent optimization pass over the MiniTrie.
+/// Trait every optimization pass must implement.
 pub trait OptimizationPass {
     fn name(&self) -> &'static str;
-    fn run(&self, trie: &mut MiniTrie, ctx: &mut OptimizationContext);
+    fn run(&self, trie: &mut crate::trie3_opt::core::MiniTrie, ctx: &mut crate::trie3_opt::context::OptimizationContext);
 }
 
 pub mod canonicalize_end_nodes;
@@ -20,6 +20,7 @@ pub mod merge_structural;
 pub mod prune_dead_paths;
 pub mod prune_unproductive_paths;
 pub mod reorder_llm_tokens;
+pub mod nwa_dwa_roundtrip;
 
 pub use canonicalize_end_nodes::CanonicalizeEndNodesPass;
 pub use compress_edges::CompressEdgesPass;
@@ -33,3 +34,4 @@ pub use merge_structural::MergeStructuralPass;
 pub use prune_dead_paths::PruneDeadPathsPass;
 pub use prune_unproductive_paths::PruneUnproductivePathsPass;
 pub use reorder_llm_tokens::ReorderLLMTokensPass;
+pub use nwa_dwa_roundtrip::NwaDwaRoundtripPass;

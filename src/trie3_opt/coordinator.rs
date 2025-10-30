@@ -47,6 +47,7 @@ pub struct CoordinatorConfig {
     pub merge_equivalent_llm_tokens: bool,
     pub reorder_llm_tokens: bool,
     pub generalize_sids: bool,
+    pub nwa_dwa_roundtrip: bool,
     pub assert_no_pop0_except_roots: bool,
 }
 
@@ -71,6 +72,7 @@ fn get_default_config_impl() -> CoordinatorConfig {
         merge_equivalent_llm_tokens: true,
         reorder_llm_tokens: true,
         generalize_sids: true,
+        nwa_dwa_roundtrip: false,
         assert_no_pop0_except_roots: true,
     }
 }
@@ -115,6 +117,7 @@ static EFFECTIVE_CONFIG: Lazy<CoordinatorConfig> = Lazy::new(|| {
                     override_field!(merge_equivalent_llm_tokens, as_bool);
                     override_field!(reorder_llm_tokens, as_bool);
                     override_field!(generalize_sids, as_bool);
+                    override_field!(nwa_dwa_roundtrip, as_bool);
                     override_field!(assert_no_pop0_except_roots, as_bool);
                 } else {
                     eprintln!("[Trie3 Opt] WARNING: AICI_TRIE3_CONFIG is not a JSON object. Using default config.");
@@ -156,6 +159,7 @@ impl CoordinatorConfig {
             merge_equivalent_llm_tokens: false,
             reorder_llm_tokens: false,
             generalize_sids: false,
+            nwa_dwa_roundtrip: false,
             assert_no_pop0_except_roots: false,
         }
     }
@@ -213,9 +217,13 @@ fn build_pipeline(config: &CoordinatorConfig) -> Vec<Box<dyn OptimizationPass>> 
             pipeline.push(Box::new(MergeStructuralPass::new(config.merge_structural_max_iters)));
         }
         if pass_num == config.num_passes - 1 && config.merge_bisimulation && config.merge_bisimulation_max_iters > 0 {
-             pipeline.push(Box::new(MergeBisimulationPass::new(config.merge_bisimulation_max_iters)));
+            pipeline.push(Box::new(MergeBisimulationPass::new(config.merge_bisimulation_max_iters)));
         }
 
+        // Optional weighted automata roundtrip pass (experimental)
+        if config.nwa_dwa_roundtrip {
+            pipeline.push(Box::new(NwaDwaRoundtripPass));
+        }
         // Phase 6: Final cleanup within the loop
         if config.eliminate_pop0_except_roots {
             pipeline.push(Box::new(EliminatePop0ExceptRootsPass));
