@@ -196,7 +196,7 @@ impl OptimizationPass for NwaDwaRoundtripPass {
             return;
         }
 
-        println!("{}", trie);
+        // println!("{}", trie);
 
         // Eliminate pop=0 edges on non-root nodes by merging them into predecessors.
         // This is a prerequisite for NWA conversion, which has simplified handling for pop>0.
@@ -280,13 +280,13 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         let mut merged = MiniTrie::new();
         let mut new_roots: Vec<NodeId> = Vec::with_capacity(original_roots.len());
 
-        println!("{}", trie);
+        // println!("{}", trie);
         for &root in &original_roots {
             dbg!(&root);
             let (nwa, _map_mt_to_nwa) = Self::build_nwa_for_root(trie, root, ctx);
-            println!("NWA for root {}: {}", root, nwa);
+            // println!("NWA for root {}: {}", root, nwa);
             let dwa = nwa.determinize();
-            println!("DWA for root {}: {}", root, dwa);
+            // println!("DWA for root {}: {}", root, dwa);
             let (partial, partial_root) = Self::convert_dwa_to_minitrie(dwa, ctx);
 
             // Merge partial into merged
@@ -317,6 +317,6 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         merged.root_ids = new_roots;
         // Replace input trie with merged result
         *trie = merged;
-        println!("{}", trie);
+        // println!("{}", trie);
     }
 }
