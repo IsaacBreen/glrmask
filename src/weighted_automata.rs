@@ -733,4 +733,74 @@ mod tests {
         let expected_final = final1 | &final2;
         assert_eq!(state1.final_weight, Some(expected_final));
     }
+
+    #[test]
+    fn test_determinize_complex_nondeterminism() {
+        // NWA from the user input:
+        // Start state: 1. Final state: 3 (weight: ALL).
+        // s1 transitions:
+        // 1 --0, [0..=1]--> 2
+        // 1 --1, [0]--> 3
+        // 1 --1, [0..=1]--> 2 (Nondeterminism)
+        // 1 --2, [0..=1]--> 2
+        // 1 --3, [0..=1]--> 2
+        // 1 --4, [0..=1]--> 2
+        // 1 --4, [1]--> 3 (Nondeterminism)
+        // 1 --5, [0..=1]--> 2
+        let mut nwa = NWA::default();
+        let s0 = nwa.add_state(); // 0
+        let s1 = nwa.add_state(); // 1 (Start)
+        let s2 = nwa.add_state(); // 2
+        let s3 = nwa.add_state(); // 3 (Final)
+        nwa.start_state = s1;
+
+        let w01 = SimpleBitset::from_iter(0..=1);
+        let w0 = SimpleBitset::from_item(0);
+        let w1 = SimpleBitset::from_item(1);
+        nwa.set_final_weight(s3, SimpleBitset::all());
+
+        // Transitions from s1 (1)
+        nwa.add_transition(s1, 0, s2, w01.clone());
+        nwa.add_transition(s1, 1, s3, w0.clone());
+        nwa.add_transition(s1, 1, s2, w01.clone());
+        nwa.add_transition(s1, 2, s2, w01.clone());
+        nwa.add_transition(s1, 3, s2, w01.clone());
+        nwa.add_transition(s1, 4, s2, w01.clone());
+        nwa.add_transition(s1, 4, s3, w1.clone());
+        nwa.add_transition(s1, 5, s2, w01.clone());
+
+        let dwa = nwa.determinize();
+
+        // Expected DWA: 4 states (S0, S1, S2, S3)
+        assert_eq!(dwa.states.len(), 4);
+        let s0_dwa = &dwa.states[dwa.start_state]; // S0: {1:ALL}
+        let w01_expected = SimpleBitset::from_iter(0..=1);
+
+        // S0 checks
+        assert_eq!(s0_dwa.weight, SimpleBitset::all());
+        assert!(s0_dwa.final_weight.is_none());
+
+        // S1: {2:[0..=1]}. Target for '0', '2', '3', '5'.
+        let s1_dwa_id = *s0_dwa.transitions.get(0).unwrap();
+        let s1_dwa = &dwa.states[s1_dwa_id];
+        assert_eq!(s1_dwa.weight, w01_expected);
+        assert!(s1_dwa.final_weight.is_none());
+
+        // S2: {3:[0], 2:[0..=1]}. Target for '1'.
+        let s2_dwa_id = *s0_dwa.transitions.get(1).unwrap();
+        let s2_dwa = &dwa.states[s2_dwa_id];
+        assert_eq!(s2_dwa.weight, w01_expected);
+        assert_eq!(s2_dwa.final_weight, Some(w0)); // [0] & ALL = [0]
+
+        // S3: {2:[0..=1], 3:[1]}. Target for '4'.
+        let s3_dwa_id = *s0_dwa.transitions.get(4).unwrap();
+        let s3_dwa = &dwa.states[s3_dwa_id];
+        assert_eq!(s3_dwa.weight, w01_expected);
+        assert_eq!(s3_dwa.final_weight, Some(w1)); // [1] & ALL = [1]
+
+        // Check that '2', '3', '5' also go to S1
+        assert_eq!(*s0_dwa.transitions.get(2).unwrap(), s1_dwa_id);
+        assert_eq!(*s0_dwa.transitions.get(3).unwrap(), s1_dwa_id);
+        assert_eq!(*s0_dwa.transitions.get(5).unwrap(), s1_dwa_id);
+    }
 }
