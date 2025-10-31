@@ -103,13 +103,6 @@ impl NwaDwaRoundtripPass {
     /// Pop semantics:
     /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
     /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
-    /// (terminal_state_id, number_of_simple_default_steps).
-    /// A 'simple' state is one where `DWAState::simple_default_target()` returns Some(_).
-    /// Cycle detection prevents infinite loops; in a cycle, we stop and return the current state.
-    ///
-    /// Pop semantics:
-    /// - For transitions out of the terminal, pop_trans = steps + 1 (m-1 defaults + 1 SID step).
-    /// - For final edges at the terminal, pop_final = steps (only the default steps, no SID step).
     fn follow_simple_chain(
         dwa: &crate::weighted_automata::DWA,
         start: usize,
@@ -150,7 +143,7 @@ impl NwaDwaRoundtripPass {
         let mt_root_id = dwa_to_mt_map[&dwa.start_state];
 
         // 2. Create MiniTrie edges.
-        for (dwa_src_id, dwa_src_state) in dwa.states.iter().enumerate() {
+        for (dwa_src_id, _) in dwa.states.iter().enumerate() {
             let mt_src_id = dwa_to_mt_map[&dwa_src_id];
 
             // Accumulate simple default-only states into the pop count.
@@ -182,8 +175,8 @@ impl NwaDwaRoundtripPass {
             let exception_sids: BTreeSet<u16> =
                 dwa_term_state.transitions.exceptions.keys().cloned().collect();
 
-            // Helper: returns true if 'u' (terminal via simple default chain) has no outgoing transitions
-            // and has a non-empty final weight, enabling compression s -> ... -> u -> END into s -> END.
+            // Helper: returns Some((final_weight, extra_steps)) if the destination's terminal is
+            // pure-final (no outgoing transitions and non-empty final weight). Otherwise None.
             let mut pure_final_terminal = |u: usize| -> Option<(&SimpleBitset, usize)> {
                 let (u_term, extra_steps) = Self::follow_simple_chain(&dwa, u);
                 let st = &dwa.states[u_term];
@@ -211,10 +204,12 @@ impl NwaDwaRoundtripPass {
                         let accept_tokens = tokens_w & dest_final_w;
                         if !accept_tokens.is_empty() {
                             let total_pop = pop_trans + (extra_steps as isize);
-                            end_tokens_by_pop
-                                .entry(total_pop)
-                                .and_modify(|acc| *acc |= &accept_tokens)
-                                .or_insert(accept_tokens);
+                            let tokens_set = SortedSet::from_iter(accept_tokens.iter_up_to(ctx.max_llm_token_id));
+                            if !tokens_set.is_empty() {
+                                let key = (total_pop, tokens_set);
+                                // Only this SID leads to acceptance for this (pop, tokens).
+                                end_edge_groups.entry(key).or_default().insert(sid as usize);
+                            }
                             // Skip emitting the intermediate s -> dest edge in this case.
                             continue;
                         }
@@ -237,18 +232,22 @@ impl NwaDwaRoundtripPass {
                             let accept_tokens = tokens_w & dest_final_w;
                             if !accept_tokens.is_empty() {
                                 let total_pop = pop_trans + (extra_steps as isize);
-                                end_tokens_by_pop
-                                    .entry(total_pop)
-                                    .and_modify(|acc| *acc |= &accept_tokens)
-                                    .or_insert(accept_tokens);
+                                let tokens_set = SortedSet::from_iter(accept_tokens.iter_up_to(ctx.max_llm_token_id));
+                                if !tokens_set.is_empty() {
+                                    let key = (total_pop, tokens_set);
+                                    let sids_entry = end_edge_groups.entry(key).or_default();
+                                    for sid_u16 in 0..=ctx.max_state_id {
+                                        if !exception_sids.contains(&(sid_u16 as u16)) {
+                                            sids_entry.insert(sid_u16);
+                                        }
+                                    }
+                                }
                                 // Skip emitting s -> dest default edges in this case.
                             } else {
                                 // No acceptance after destination; fall back to regular default edges.
                                 let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
                                 let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
                                 let key = (pop_trans, tokens_set, mt_dst_id);
-                                let exception_sids: BTreeSet<u16> =
-                                    dwa_term_state.transitions.exceptions.keys().cloned().collect();
                                 let default_sids_entry = edge_groups.entry(key).or_default();
                                 for sid in 0..=ctx.max_state_id {
                                     if !exception_sids.contains(&(sid as u16)) {
@@ -261,8 +260,6 @@ impl NwaDwaRoundtripPass {
                             let tokens_set = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
                             let mt_dst_id = dwa_to_mt_map[&dwa_dst_id];
                             let key = (pop_trans, tokens_set, mt_dst_id);
-                            let exception_sids: BTreeSet<u16> =
-                                dwa_term_state.transitions.exceptions.keys().cloned().collect();
                             let default_sids_entry = edge_groups.entry(key).or_default();
                             for sid in 0..=ctx.max_state_id {
                                 if !exception_sids.contains(&(sid as u16)) {
@@ -281,13 +278,10 @@ impl NwaDwaRoundtripPass {
                 let ek = EdgeKey::new(pop, tokens);
                 new_children.entry(ek).or_default().insert(dst, sids);
             }
-            // Add direct-to-END edges per-pop (tokens aggregated).
-            for (pop, tokens_w) in end_tokens_by_pop {
-                if tokens_w.is_empty() { continue; }
-                let tokens = SortedSet::from_iter(tokens_w.iter_up_to(ctx.max_llm_token_id));
-                if tokens.is_empty() { continue; }
+            // Add direct-to-END edges grouped by (pop, tokens) with precise SIDs.
+            for ((pop, tokens), sids) in end_edge_groups {
+                if sids.is_empty() { continue; }
                 let ek = EdgeKey::new(pop, tokens);
-                let sids = SortedSet::from_iter(0..=ctx.max_state_id);  // TODO: VERY INEFFICIENT
                 new_children.entry(ek).or_default().insert(end_node_id, sids);
             }
             mini.set_children(mt_src_id, new_children);
@@ -478,4 +472,3 @@ impl OptimizationPass for NwaDwaRoundtripPass {
         *trie = merged;
     }
 }
-
