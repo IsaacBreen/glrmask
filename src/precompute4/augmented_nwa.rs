@@ -484,4 +484,129 @@ mod tests {
         )]);
         assert_eq!(lhs.end_map, expected_end_map);
     }
+
+    // Helper to build the NWA for Terminal 1 from the prompt
+    fn build_terminal1_nwa() -> AugmentedNwa {
+        let mut nwa = WaNWA::new(); // state 0
+        let end_state = nwa.add_state(); // state 1
+        let nt0_state = nwa.add_state(); // state 2
+        let nt1_state = nwa.add_state(); // state 3
+        assert_eq!(end_state, 1);
+        assert_eq!(nt0_state, 2);
+        assert_eq!(nt1_state, 3);
+
+        nwa.add_transition(0, 0, end_state, WaWeight::all());
+        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+
+        let nt_nodes = BTreeMap::from([
+            (NonTerminalID(0), nt0_state),
+            (NonTerminalID(1), nt1_state),
+        ]);
+
+        let end_map = BTreeMap::from([(
+            end_state,
+            BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
+        )]);
+
+        AugmentedNwa {
+            nwa,
+            end_state,
+            nt_nodes,
+            end_map,
+        }
+    }
+
+    // Helper to build the NWA for Terminal 2 from the prompt
+    fn build_terminal2_nwa() -> AugmentedNwa {
+        let mut nwa = WaNWA::new(); // state 0
+        let end_state = nwa.add_state(); // state 1
+        let nt0_state = nwa.add_state(); // state 2
+        let nt1_state = nwa.add_state(); // state 3
+        assert_eq!(end_state, 1);
+        assert_eq!(nt0_state, 2);
+        assert_eq!(nt1_state, 3);
+
+        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+
+        let nt_nodes = BTreeMap::from([
+            (NonTerminalID(0), nt0_state),
+            (NonTerminalID(1), nt1_state),
+        ]);
+
+        AugmentedNwa {
+            nwa,
+            end_state,
+            nt_nodes,
+            end_map: BTreeMap::new(),
+        }
+    }
+
+    // Helper to build the NWA for Terminal 0 from the prompt
+    fn build_terminal0_nwa() -> AugmentedNwa {
+        let mut nwa = WaNWA::new(); // state 0
+        let end_state = nwa.add_state(); // state 1
+        let nt0_state = nwa.add_state(); // state 2
+        let nt1_state = nwa.add_state(); // state 3
+        assert_eq!(end_state, 1);
+        assert_eq!(nt0_state, 2);
+        assert_eq!(nt1_state, 3);
+
+        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+        nwa.add_transition(0, 2, end_state, WaWeight::all());
+        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+
+        let nt_nodes = BTreeMap::from([
+            (NonTerminalID(0), nt0_state),
+            (NonTerminalID(1), nt1_state),
+        ]);
+
+        let end_map = BTreeMap::from([(
+            end_state,
+            BTreeSet::from([vec![ParserStateID(2), ParserStateID(0)]]),
+        )]);
+
+        AugmentedNwa {
+            nwa,
+            end_state,
+            nt_nodes,
+            end_map,
+        }
+    }
+
+    #[test]
+    fn test_right_to_left_combination() {
+        // This test simulates the right-to-left combination of augmented NWAs
+        // as it happens during the precomputation traversal of the reversed trie.
+        // The sequence of terminals is term0, term2, term1.
+
+        // 1. Define the initial NWA, which represents the state after all tokens
+        // have been processed. It's a single final state with an empty stack.
+        let mut initial_nwa = WaNWA::new();
+        let initial_state = initial_nwa.start_state;
+        initial_nwa.set_final_weight(initial_state, WaWeight::all());
+        let mut current_aug_nwa = AugmentedNwa {
+            nwa: initial_nwa,
+            end_state: initial_state,
+            nt_nodes: BTreeMap::new(),
+            end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+        };
+
+        let terminal_nwas = vec![
+            build_terminal0_nwa(),
+            build_terminal2_nwa(),
+            build_terminal1_nwa(),
+        ];
+        let weight = WaWeight::all();
+
+        for term_nwa in terminal_nwas.iter().rev() {
+            let mut new_current = term_nwa.clone();
+            new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
+            current_aug_nwa = new_current;
+        }
+
+        assert_eq!(current_aug_nwa.nwa.states.len(), 13);
+        assert!(current_aug_nwa.end_map.is_empty());
+    }
 }

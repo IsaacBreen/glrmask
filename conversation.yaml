@@ -6,7 +6,7 @@ local_system:
     - src/precompute4/conversion.rs
     - src/precompute4/full_nwa.rs
     - src/precompute4/mod.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/weighted_automata.rs: |
@@ -2147,7 +2147,38 @@ local_system:
 
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
-              todo!()
+              // Expected structure:
+              // The original LHS NWA is preserved.
+              // The ignore NWA (1 state) is copied into LHS.
+              // An epsilon transition is added from the original LHS end state to the copied ignore NWA's start state.
+              // The new end_map contains the original LHS stack, but now associated with the copied ignore NWA's end state.
+
+              assert_eq!(lhs.nwa.states.len(), original_state_count + 1); // 2 + 1 = 3
+              let copied_rhs_start_id = original_state_count; // state 2
+
+              // Check original LHS structure is preserved
+              let lhs_start_state = &lhs.nwa.states[0];
+              let transitions = lhs_start_state.transitions.exceptions.get(&100).unwrap();
+              assert_eq!(transitions.len(), 1);
+              assert_eq!(
+                  transitions[0],
+                  (original_end_state_id, WaWeight::all())
+              );
+
+              // Check for epsilon transition from original end state to new state
+              let lhs_original_end_state = &lhs.nwa.states[original_end_state_id];
+              assert_eq!(lhs_original_end_state.epsilon_transitions.len(), 1);
+              assert_eq!(
+                  lhs_original_end_state.epsilon_transitions[0],
+                  (copied_rhs_start_id, WaWeight::all())
+              );
+
+              // Check the final end_map
+              let expected_end_map = BTreeMap::from([(
+                  copied_rhs_start_id,
+                  original_end_map.get(&original_end_state_id).unwrap().clone(),
+              )]);
+              assert_eq!(lhs.end_map, expected_end_map);
           }
       }
     src/precompute4/characterize.rs: |
@@ -2435,8 +2466,8 @@ local_system:
           let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
 
           println!("\n--- Augmented NWA Generation ---");
-          for aug_nwa in augmented_nwas.values() {
-              println!("{}", aug_nwa);
+          for (tid, aug_nwa) in &augmented_nwas {
+              println!("Terminal ID {:?}:\n{}", tid, aug_nwa);
           }
           println!("--- End Augmented NWA Generation ---\n");
 
@@ -2450,6 +2481,10 @@ local_system:
 
           let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
           let reversed_trie_root = leaf_node;
+              let options = crate::datastructures::trie::PrettyPrintOptions::default()
+                  .omit_depth()
+                  ;
+          println!("\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
 
           // 3. Traverse the reversed trie.
           let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
@@ -2492,6 +2527,12 @@ local_system:
                       new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
                           .expect("Combine failed");
                       results.push((*dest_idx, new_aug_nwa));
+                  }
+                  println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+                  println!("--- Incoming aug_nwa ---\n{}", current_aug_nwa);
+                  println!("--- Edge aug_nwa ---\n{}", aug_nwa);
+                  for (_, res_aug_nwa) in &results {
+                      println!("--- Resulting aug_nwa ---\n{}", res_aug_nwa);
                   }
                   results
               },
@@ -4273,7 +4314,6 @@ local_system:
       pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
           let mut nwa = WaNWA::new();
           let start_state = nwa.start_state;
-          nwa.set_final_weight(start_state, WaWeight::all());
 
           // For an ignore terminal, the stack is passed through. The end_map should
           // contain an empty stack at the end_state, which is also the start_state.
@@ -4708,6 +4748,131 @@ local_system:
               )]);
               assert_eq!(lhs.end_map, expected_end_map);
           }
+
+          // Helper to build the NWA for Terminal 1 from the prompt
+          fn build_terminal1_nwa() -> AugmentedNwa {
+              let mut nwa = WaNWA::new(); // state 0
+              let end_state = nwa.add_state(); // state 1
+              let nt0_state = nwa.add_state(); // state 2
+              let nt1_state = nwa.add_state(); // state 3
+              assert_eq!(end_state, 1);
+              assert_eq!(nt0_state, 2);
+              assert_eq!(nt1_state, 3);
+
+              nwa.add_transition(0, 0, end_state, WaWeight::all());
+              nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+              nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+
+              let nt_nodes = BTreeMap::from([
+                  (NonTerminalID(0), nt0_state),
+                  (NonTerminalID(1), nt1_state),
+              ]);
+
+              let end_map = BTreeMap::from([(
+                  end_state,
+                  BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
+              )]);
+
+              AugmentedNwa {
+                  nwa,
+                  end_state,
+                  nt_nodes,
+                  end_map,
+              }
+          }
+
+          // Helper to build the NWA for Terminal 2 from the prompt
+          fn build_terminal2_nwa() -> AugmentedNwa {
+              let mut nwa = WaNWA::new(); // state 0
+              let end_state = nwa.add_state(); // state 1
+              let nt0_state = nwa.add_state(); // state 2
+              let nt1_state = nwa.add_state(); // state 3
+              assert_eq!(end_state, 1);
+              assert_eq!(nt0_state, 2);
+              assert_eq!(nt1_state, 3);
+
+              nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+              nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+
+              let nt_nodes = BTreeMap::from([
+                  (NonTerminalID(0), nt0_state),
+                  (NonTerminalID(1), nt1_state),
+              ]);
+
+              AugmentedNwa {
+                  nwa,
+                  end_state,
+                  nt_nodes,
+                  end_map: BTreeMap::new(),
+              }
+          }
+
+          // Helper to build the NWA for Terminal 0 from the prompt
+          fn build_terminal0_nwa() -> AugmentedNwa {
+              let mut nwa = WaNWA::new(); // state 0
+              let end_state = nwa.add_state(); // state 1
+              let nt0_state = nwa.add_state(); // state 2
+              let nt1_state = nwa.add_state(); // state 3
+              assert_eq!(end_state, 1);
+              assert_eq!(nt0_state, 2);
+              assert_eq!(nt1_state, 3);
+
+              nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+              nwa.add_transition(0, 2, end_state, WaWeight::all());
+              nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+
+              let nt_nodes = BTreeMap::from([
+                  (NonTerminalID(0), nt0_state),
+                  (NonTerminalID(1), nt1_state),
+              ]);
+
+              let end_map = BTreeMap::from([(
+                  end_state,
+                  BTreeSet::from([vec![ParserStateID(2), ParserStateID(0)]]),
+              )]);
+
+              AugmentedNwa {
+                  nwa,
+                  end_state,
+                  nt_nodes,
+                  end_map,
+              }
+          }
+
+          #[test]
+          fn test_right_to_left_combination() {
+              // This test simulates the right-to-left combination of augmented NWAs
+              // as it happens during the precomputation traversal of the reversed trie.
+              // The sequence of terminals is term0, term2, term1.
+
+              // 1. Define the initial NWA, which represents the state after all tokens
+              // have been processed. It's a single final state with an empty stack.
+              let mut initial_nwa = WaNWA::new();
+              let initial_state = initial_nwa.start_state;
+              initial_nwa.set_final_weight(initial_state, WaWeight::all());
+              let mut current_aug_nwa = AugmentedNwa {
+                  nwa: initial_nwa,
+                  end_state: initial_state,
+                  nt_nodes: BTreeMap::new(),
+                  end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+              };
+
+              let terminal_nwas = vec![
+                  build_terminal0_nwa(),
+                  build_terminal2_nwa(),
+                  build_terminal1_nwa(),
+              ];
+              let weight = WaWeight::all();
+
+              for term_nwa in terminal_nwas.iter().rev() {
+                  let mut new_current = term_nwa.clone();
+                  new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
+                  current_aug_nwa = new_current;
+              }
+
+              assert_eq!(current_aug_nwa.nwa.states.len(), 13);
+              assert!(current_aug_nwa.end_map.is_empty());
+          }
       }
     src/precompute4/characterize.rs: |
       use crate::glr::parser::GLRParser;
@@ -4994,8 +5159,8 @@ local_system:
           let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
 
           println!("\n--- Augmented NWA Generation ---");
-          for aug_nwa in augmented_nwas.values() {
-              println!("{}", aug_nwa);
+          for (tid, aug_nwa) in &augmented_nwas {
+              println!("Terminal ID {:?}:\n{}", tid, aug_nwa);
           }
           println!("--- End Augmented NWA Generation ---\n");
 
@@ -5009,6 +5174,10 @@ local_system:
 
           let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
           let reversed_trie_root = leaf_node;
+              let options = crate::datastructures::trie::PrettyPrintOptions::default()
+                  .omit_depth()
+                  ;
+          println!("\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
 
           // 3. Traverse the reversed trie.
           let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
@@ -5051,6 +5220,12 @@ local_system:
                       new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
                           .expect("Combine failed");
                       results.push((*dest_idx, new_aug_nwa));
+                  }
+                  println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+                  println!("--- Incoming aug_nwa ---\n{}", current_aug_nwa);
+                  println!("--- Edge aug_nwa ---\n{}", aug_nwa);
+                  for (_, res_aug_nwa) in &results {
+                      println!("--- Resulting aug_nwa ---\n{}", res_aug_nwa);
                   }
                   results
               },
@@ -7280,7 +7455,38 @@ messages:
 
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
-              todo!()
+              // Expected structure:
+              // The original LHS NWA is preserved.
+              // The ignore NWA (1 state) is copied into LHS.
+              // An epsilon transition is added from the original LHS end state to the copied ignore NWA's start state.
+              // The new end_map contains the original LHS stack, but now associated with the copied ignore NWA's end state.
+
+              assert_eq!(lhs.nwa.states.len(), original_state_count + 1); // 2 + 1 = 3
+              let copied_rhs_start_id = original_state_count; // state 2
+
+              // Check original LHS structure is preserved
+              let lhs_start_state = &lhs.nwa.states[0];
+              let transitions = lhs_start_state.transitions.exceptions.get(&100).unwrap();
+              assert_eq!(transitions.len(), 1);
+              assert_eq!(
+                  transitions[0],
+                  (original_end_state_id, WaWeight::all())
+              );
+
+              // Check for epsilon transition from original end state to new state
+              let lhs_original_end_state = &lhs.nwa.states[original_end_state_id];
+              assert_eq!(lhs_original_end_state.epsilon_transitions.len(), 1);
+              assert_eq!(
+                  lhs_original_end_state.epsilon_transitions[0],
+                  (copied_rhs_start_id, WaWeight::all())
+              );
+
+              // Check the final end_map
+              let expected_end_map = BTreeMap::from([(
+                  copied_rhs_start_id,
+                  original_end_map.get(&original_end_state_id).unwrap().clone(),
+              )]);
+              assert_eq!(lhs.end_map, expected_end_map);
           }
       }
 
@@ -7583,8 +7789,8 @@ messages:
           let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
 
           println!("\n--- Augmented NWA Generation ---");
-          for aug_nwa in augmented_nwas.values() {
-              println!("{}", aug_nwa);
+          for (tid, aug_nwa) in &augmented_nwas {
+              println!("Terminal ID {:?}:\n{}", tid, aug_nwa);
           }
           println!("--- End Augmented NWA Generation ---\n");
 
@@ -7598,6 +7804,10 @@ messages:
 
           let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
           let reversed_trie_root = leaf_node;
+              let options = crate::datastructures::trie::PrettyPrintOptions::default()
+                  .omit_depth()
+                  ;
+          println!("\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
 
           // 3. Traverse the reversed trie.
           let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
@@ -7640,6 +7850,12 @@ messages:
                       new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
                           .expect("Combine failed");
                       results.push((*dest_idx, new_aug_nwa));
+                  }
+                  println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+                  println!("--- Incoming aug_nwa ---\n{}", current_aug_nwa);
+                  println!("--- Edge aug_nwa ---\n{}", aug_nwa);
+                  for (_, res_aug_nwa) in &results {
+                      println!("--- Resulting aug_nwa ---\n{}", res_aug_nwa);
                   }
                   results
               },
@@ -7692,9 +7908,76 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: test_combine_with_ignore_on_right
-    metadata:
-  - user: Complete test_combine_with_ignore_on_right
+  - user: |-
+      ```
+      --- Augmented NWA Generation ---
+      Terminal ID TerminalID(0):
+      Augmented NWA
+        End State: 1
+        Nonterminal Nodes:
+          - NT 0: State 2
+          - NT 1: State 3
+        End Map:
+          - State 1:
+            - [2, 0]
+        Underlying NWA:
+          NWA (start: 0)
+            State 0:
+              1 -> 3 (weight: ALL)
+              2 -> 1 (weight: ALL)
+              3 -> 2 (weight: ALL)
+            State 1:
+            State 2:
+            State 3:
+
+      Terminal ID TerminalID(2):
+      Augmented NWA
+        End State: 1
+        Nonterminal Nodes:
+          - NT 0: State 2
+          - NT 1: State 3
+        Underlying NWA:
+          NWA (start: 0)
+            State 0:
+              1 -> 3 (weight: ALL)
+              3 -> 2 (weight: ALL)
+            State 1:
+            State 2:
+            State 3:
+
+      Terminal ID TerminalID(1):
+      Augmented NWA
+        End State: 1
+        Nonterminal Nodes:
+          - NT 0: State 2
+          - NT 1: State 3
+        End Map:
+          - State 1:
+            - [0, 1]
+        Underlying NWA:
+          NWA (start: 0)
+            State 0:
+              0 -> 1 (weight: ALL)
+              1 -> 3 (weight: ALL)
+              3 -> 2 (weight: ALL)
+            State 1:
+            State 2:
+            State 3:
+      ```
+      I want to add a test combining these, using the initial NWA
+      ```rust
+      let mut initial_nwa = WaNWA::new();
+      let initial_state = initial_nwa.start_state;
+      initial_nwa.set_final_weight(initial_state, WaWeight::all());
+      let initial_aug_nwa = AugmentedNwa {
+          nwa: initial_nwa,
+          end_state: initial_state,
+          nt_nodes: BTreeMap::new(),
+          end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+      };
+      ```
+      But it should start with this initial NWA on the right and combine from right to left.
+      ie start with the initial NWA, then combine with terminal 1, then terminal 2, then terminal 0.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7714,104 +7997,158 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to complete the test case, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add the requested test, followed by the git diff.
 
       ### Step-by-step Instructions
 
       1.  **Open the file `src/precompute4/augmented_nwa.rs`**.
-      2.  **Navigate to the test function `test_combine_with_ignore_on_right`** at the end of the file. You will see it has a `todo!()` placeholder.
-      3.  **Replace the body of the function** (from the line after the opening brace `{` to the line before the closing brace `}`) with the following code. This new code defines the expected behavior when combining an augmented NWA with an "ignore" NWA on the right and adds assertions to verify it.
 
-          ```rust
-              let mut lhs = build_simple_aug_nwa();
-              let rhs = build_augmented_nwa_for_ignore_terminal();
-              let weight = WaWeight::all();
+      2.  **Navigate to the end of the file**, inside the `#[cfg(test)] mod tests { ... }` block.
 
-              let original_end_map = lhs.end_map.clone();
-              let original_state_count = lhs.nwa.states.len();
-              let original_end_state_id = lhs.end_state;
+      3.  **Add three new helper functions** after the existing `test_combine_with_ignore_on_right` test. These functions, `build_terminal1_nwa`, `build_terminal2_nwa`, and `build_terminal0_nwa`, will construct the `AugmentedNwa` structures based on the debug output you provided.
 
-              lhs.combine_right_into(&rhs, &weight).unwrap();
-
-              // Expected structure:
-              // The original LHS NWA is preserved.
-              // The ignore NWA (1 state) is copied into LHS.
-              // An epsilon transition is added from the original LHS end state to the copied ignore NWA's start state.
-              // The new end_map contains the original LHS stack, but now associated with the copied ignore NWA's end state.
-
-              assert_eq!(lhs.nwa.states.len(), original_state_count + 1); // 2 + 1 = 3
-              let copied_rhs_start_id = original_state_count; // state 2
-
-              // Check original LHS structure is preserved
-              let lhs_start_state = &lhs.nwa.states[0];
-              let transitions = lhs_start_state.transitions.exceptions.get(&100).unwrap();
-              assert_eq!(transitions.len(), 1);
-              assert_eq!(
-                  transitions[0],
-                  (original_end_state_id, WaWeight::all())
-              );
-
-              // Check for epsilon transition from original end state to new state
-              let lhs_original_end_state = &lhs.nwa.states[original_end_state_id];
-              assert_eq!(lhs_original_end_state.epsilon_transitions.len(), 1);
-              assert_eq!(
-                  lhs_original_end_state.epsilon_transitions[0],
-                  (copied_rhs_start_id, WaWeight::all())
-              );
-
-              // Check the final end_map
-              let expected_end_map = BTreeMap::from([(
-                  copied_rhs_start_id,
-                  original_end_map.get(&original_end_state_id).unwrap().clone(),
-              )]);
-              assert_eq!(lhs.end_map, expected_end_map);
-          ```
+      4.  **Add a new test function**, `test_right_to_left_combination`, after the helper functions. This test will:
+          *   Define the initial `AugmentedNwa` that represents the starting point of the right-to-left combination.
+          *   Use the helper functions to create the NWAs for the terminal sequence `term0, term2, term1`.
+          *   Combine these NWAs in the correct right-to-left order (`term1` first, then `term2`, then `term0`).
+          *   Assert that the final combined NWA has the expected number of states and an empty `end_map`, verifying the combination logic.
 
       ### Git Diff
 
-      Here is the git patch to apply the changes:
+      Here is the git diff to apply these changes:
 
       ```diff
       --- a/src/precompute4/augmented_nwa.rs
       +++ b/src/precompute4/augmented_nwa.rs
-      @@ -404,7 +404,33 @@
-       
-               lhs.combine_right_into(&rhs, &weight).unwrap();
-       
-      -        todo!()
-      +        // Expected structure:
-      +        // The original LHS NWA is preserved.
-      +        // The ignore NWA (1 state) is copied into LHS.
-      +        // An epsilon transition is added from the original LHS end state to the copied ignore NWA's start state.
-      +        // The new end_map contains the original LHS stack, but now associated with the copied ignore NWA's end state.
-      +
-      +        assert_eq!(lhs.nwa.states.len(), original_state_count + 1); // 2 + 1 = 3
-      +        let copied_rhs_start_id = original_state_count; // state 2
-      +
-      +        // Check original LHS structure is preserved
-      +        let lhs_start_state = &lhs.nwa.states[0];
-      +        let transitions = lhs_start_state.transitions.exceptions.get(&100).unwrap();
-      +        assert_eq!(transitions.len(), 1);
-      +        assert_eq!(
-      +            transitions[0],
-      +            (original_end_state_id, WaWeight::all())
-      +        );
-      +
-      +        // Check for epsilon transition from original end state to new state
-      +        let lhs_original_end_state = &lhs.nwa.states[original_end_state_id];
-      +        assert_eq!(lhs_original_end_state.epsilon_transitions.len(), 1);
-      +        assert_eq!(
-      +            lhs_original_end_state.epsilon_transitions[0],
-      +            (copied_rhs_start_id, WaWeight::all())
-      +        );
-      +
-      +        // Check the final end_map
-      +        let expected_end_map = BTreeMap::from([(
-      +            copied_rhs_start_id,
-      +            original_end_map.get(&original_end_state_id).unwrap().clone(),
-      +        )]);
-      +        assert_eq!(lhs.end_map, expected_end_map);
+      @@ -428,4 +428,126 @@
+               )]);
+               assert_eq!(lhs.end_map, expected_end_map);
            }
+      +
+      +    // Helper to build the NWA for Terminal 1 from the prompt
+      +    fn build_terminal1_nwa() -> AugmentedNwa {
+      +        let mut nwa = WaNWA::new(); // state 0
+      +        let end_state = nwa.add_state(); // state 1
+      +        let nt0_state = nwa.add_state(); // state 2
+      +        let nt1_state = nwa.add_state(); // state 3
+      +        assert_eq!(end_state, 1);
+      +        assert_eq!(nt0_state, 2);
+      +        assert_eq!(nt1_state, 3);
+      +
+      +        nwa.add_transition(0, 0, end_state, WaWeight::all());
+      +        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+      +        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+      +
+      +        let nt_nodes = BTreeMap::from([
+      +            (NonTerminalID(0), nt0_state),
+      +            (NonTerminalID(1), nt1_state),
+      +        ]);
+      +
+      +        let end_map = BTreeMap::from([(
+      +            end_state,
+      +            BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
+      +        )]);
+      +
+      +        AugmentedNwa {
+      +            nwa,
+      +            end_state,
+      +            nt_nodes,
+      +            end_map,
+      +        }
+      +    }
+      +
+      +    // Helper to build the NWA for Terminal 2 from the prompt
+      +    fn build_terminal2_nwa() -> AugmentedNwa {
+      +        let mut nwa = WaNWA::new(); // state 0
+      +        let end_state = nwa.add_state(); // state 1
+      +        let nt0_state = nwa.add_state(); // state 2
+      +        let nt1_state = nwa.add_state(); // state 3
+      +        assert_eq!(end_state, 1);
+      +        assert_eq!(nt0_state, 2);
+      +        assert_eq!(nt1_state, 3);
+      +
+      +        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+      +        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+      +
+      +        let nt_nodes = BTreeMap::from([
+      +            (NonTerminalID(0), nt0_state),
+      +            (NonTerminalID(1), nt1_state),
+      +        ]);
+      +
+      +        AugmentedNwa {
+      +            nwa,
+      +            end_state,
+      +            nt_nodes,
+      +            end_map: BTreeMap::new(),
+      +        }
+      +    }
+      +
+      +    // Helper to build the NWA for Terminal 0 from the prompt
+      +    fn build_terminal0_nwa() -> AugmentedNwa {
+      +        let mut nwa = WaNWA::new(); // state 0
+      +        let end_state = nwa.add_state(); // state 1
+      +        let nt0_state = nwa.add_state(); // state 2
+      +        let nt1_state = nwa.add_state(); // state 3
+      +        assert_eq!(end_state, 1);
+      +        assert_eq!(nt0_state, 2);
+      +        assert_eq!(nt1_state, 3);
+      +
+      +        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+      +        nwa.add_transition(0, 2, end_state, WaWeight::all());
+      +        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+      +
+      +        let nt_nodes = BTreeMap::from([
+      +            (NonTerminalID(0), nt0_state),
+      +            (NonTerminalID(1), nt1_state),
+      +        ]);
+      +
+      +        let end_map = BTreeMap::from([(
+      +            end_state,
+      +            BTreeSet::from([vec![ParserStateID(2), ParserStateID(0)]]),
+      +        )]);
+      +
+      +        AugmentedNwa {
+      +            nwa,
+      +            end_state,
+      +            nt_nodes,
+      +            end_map,
+      +        }
+      +    }
+      +
+      +    #[test]
+      +    fn test_right_to_left_combination() {
+      +        // This test simulates the right-to-left combination of augmented NWAs
+      +        // as it happens during the precomputation traversal of the reversed trie.
+      +        // The sequence of terminals is term0, term2, term1.
+      +
+      +        // 1. Define the initial NWA, which represents the state after all tokens
+      +        // have been processed. It's a single final state with an empty stack.
+      +        let mut initial_nwa = WaNWA::new();
+      +        let initial_state = initial_nwa.start_state;
+      +        initial_nwa.set_final_weight(initial_state, WaWeight::all());
+      +        let mut current_aug_nwa = AugmentedNwa {
+      +            nwa: initial_nwa,
+      +            end_state: initial_state,
+      +            nt_nodes: BTreeMap::new(),
+      +            end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+      +        };
+      +
+      +        let terminal_nwas = vec![
+      +            build_terminal0_nwa(),
+      +            build_terminal2_nwa(),
+      +            build_terminal1_nwa(),
+      +        ];
+      +        let weight = WaWeight::all();
+      +
+      +        for term_nwa in terminal_nwas.iter().rev() {
+      +            let mut new_current = term_nwa.clone();
+      +            new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
+      +            current_aug_nwa = new_current;
+      +        }
+      +
+      +        assert_eq!(current_aug_nwa.nwa.states.len(), 13);
+      +        assert!(current_aug_nwa.end_map.is_empty());
+      +    }
        }
 
       ```
@@ -7825,117 +8162,7 @@ messages:
       Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Complete test_combine_with_ignore_on_right
-      in AugmentedNwa"'
-    metadata:
-  - user: |-
-      Diff of src/weighted_automata.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/augmented_nwa.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/characterize.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/conversion.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/full_nwa.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/precompute4/mod.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |2+
-
-      thread 'precompute4::augmented_nwa::tests::test_combine_with_ignore_on_right' (39197195) panicked at src/precompute4/augmented_nwa.rs:474:9:
-      assertion `left == right` failed
-        left: 0
-       right: 1
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::augmented_nwa::tests::test_combine_with_ignore_on_right
-                   at ./src/precompute4/augmented_nwa.rs:474:9
-         5: sep1::precompute4::augmented_nwa::tests::test_combine_with_ignore_on_right::{{closure}}
-                   at ./src/precompute4/augmented_nwa.rs:443:43
-         6: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         7: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-    metadata:
-  - assistant: |-
-      It appears the test is failing because the `build_augmented_nwa_for_ignore_terminal` function creates an automaton that doesn't behave as expected within the `combine_right_into` logic. Specifically, its start state isn't marked as a final state.
-
-      The `process_stack_u16` function, which is used to see how one NWA processes a stack from another, only reports a "stop" if it reaches a final state or consumes the entire input. For the "ignore" NWA, the desired behavior is to consume nothing (`pos = 0`) and stop immediately. For this to happen, its start state must be a final state.
-
-      Here are the steps to fix the issue:
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `src/precompute4/augmented_nwa.rs`**.
-      2.  **Locate the `build_augmented_nwa_for_ignore_terminal` function.**
-      3.  **Add a line to set the start state's final weight.** This makes the start state an accepting state, allowing it to correctly signal a "stop" at the beginning of any input stack. Insert the following line right after `let start_state = nwa.start_state;`:
-
-          ```rust
-          nwa.set_final_weight(start_state, WaWeight::all());
-          ```
-
-      This change will make the test pass by correctly modeling the "identity" behavior of the ignore terminal's NWA.
-
-      ### Git Diff
-
-      Here is the git patch for the change:
-
-      ```diff
-      --- a/src/precompute4/augmented_nwa.rs
-      +++ b/src/precompute4/augmented_nwa.rs
-      @@ -63,6 +63,7 @@
-       pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
-           let mut nwa = WaNWA::new();
-           let start_state = nwa.start_state;
-      +    nwa.set_final_weight(start_state, WaWeight::all());
-       
-           // For an ignore terminal, the stack is passed through. The end_map should
-           // contain an empty stack at the end_state, which is also the start_state.
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/precompute4/augmented_nwa.rs
-      Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
-    metadata:
-  - user: 'Changes committed with message: "test: Complete test_combine_with_ignore_on_right
-      by fixing ignore NWA finality"'
+  - user: 'Changes committed with message: "Test: Add test for right-to-left combination
+      of Augmented NWAs"'
     metadata:
 ...
