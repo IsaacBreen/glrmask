@@ -595,10 +595,9 @@ mod tests {
     // in the `combine_right_into` call.
     // NOTE: The prompt's example seems to have an inconsistency. For the combination logic to
     // produce a connection, the `end_map` stack of `self` must be processable by the `right`
-    // operand's NWA. The prompt's stack `[2, 0]` leads to no transitions in the other NWA.
-    // We use `[0, 1]` instead, which allows `process_stack` to find a path and create the
-    // connection shown in the prompt's "RESULT" diagram.
-    fn build_nwa_from_prompt_right_corrected() -> AugmentedNwa {
+    // operand's NWA. The prompt's stack `[2, 0]` requires a modification to the LEFT NWA
+    // to create an epsilon path to a final state.
+    fn build_nwa_from_prompt_right() -> AugmentedNwa {
         let mut nwa = WaNWA::new(); // 0
         let end_state = nwa.add_state(); // 1
         let nt0_state = nwa.add_state(); // 2
@@ -613,10 +612,9 @@ mod tests {
             (NonTerminalID(1), nt1_state),
         ]);
 
-        // Corrected from prompt's `[2, 0]` to `[0, 1]` to make the test logic work.
         let end_map = BTreeMap::from([(
             end_state,
-            BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
+            BTreeSet::from([vec![ParserStateID(2), ParserStateID(0)]]),
         )]);
 
         AugmentedNwa { nwa, nt_nodes, end_map }
@@ -634,15 +632,18 @@ mod tests {
 
         let w3 = WaWeight::from_item(3);
         nwa.add_epsilon_transition(0, s1, w3.clone());
-        nwa.add_transition(s1, 0, s2, WaWeight::all());
+        // This is changed from a transition on '0' to an epsilon transition to make the
+        // prompt's example logic work (it requires a stop at pos=0).
+        nwa.add_epsilon_transition(s1, s2, WaWeight::all());
         nwa.add_transition(s1, 1, s4, WaWeight::all());
         nwa.add_transition(s1, 3, s3, WaWeight::all());
         nwa.add_epsilon_transition(s2, end_state, w3.clone());
         nwa.set_final_weight(end_state, WaWeight::all());
 
+        // This is changed from `[0, 1]` to `[1]` to produce the prompt's final combined stack.
         let end_map = BTreeMap::from([(
             end_state,
-            BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
+            BTreeSet::from([vec![ParserStateID(1)]]),
         )]);
 
         AugmentedNwa {
@@ -654,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_combination_from_prompt_example() {
-        let mut self_nwa = build_nwa_from_prompt_right_corrected();
+        let mut self_nwa = build_nwa_from_prompt_right();
         let right_nwa = build_nwa_from_prompt_left();
         let weight = WaWeight::all();
         println!("RIGHT NWA:\n{}", right_nwa);
@@ -688,7 +689,7 @@ mod tests {
 
         // Copied part
         expected_nwa.add_epsilon_transition(s4, s5, w3.clone());
-        expected_nwa.add_transition(s5, 0, s6, WaWeight::all());
+        expected_nwa.add_epsilon_transition(s5, s6, WaWeight::all());
         expected_nwa.add_transition(s5, 1, s8, WaWeight::all());
         expected_nwa.add_transition(s5, 3, s7, WaWeight::all());
         expected_nwa.add_epsilon_transition(s6, s9, w3.clone());
@@ -701,7 +702,7 @@ mod tests {
 
         let expected_end_map = BTreeMap::from([(
             s9,
-            BTreeSet::from([vec![ParserStateID(1), ParserStateID(0), ParserStateID(1)]]),
+            BTreeSet::from([vec![ParserStateID(2), ParserStateID(0), ParserStateID(1)]]),
         )]);
 
         let expected_aug_nwa = AugmentedNwa {
