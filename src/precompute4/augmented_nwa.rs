@@ -6,10 +6,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{
     compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
 };
-use crate::weighted_automata::{
-    NWA as WaNWA, NWAConfig as WaNWAConfig, NWAStates as WaNWAStates,
-    StateID as WaStateID, Weight as WaWeight, StateID
-};
+use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight, StateID};
 
 /// Error that can occur while building an AugmentedNwa.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,31 +15,19 @@ pub enum AugmentedNwaBuildError {
     ParserStateIdOutOfRange { state_id: ParserStateID },
 }
 
-/// Per-terminal augmented NWA states container (wraps the underlying WaNWAStates).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AugmentedNwaStates {
-    pub wa_states: WaNWAStates,
-}
-
-/// Per-terminal augmented NWA metadata:
-/// - `wa_cfg` is the NWA configuration (start state).
+/// Per-terminal augmented NWA bundle:
+/// - `nwa` is the constructed automaton.
 /// - `nt_nodes` maps each nonterminal to its dedicated node in the NWA.
 /// - `end_map` accumulates example stacks that reach the `end_state`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AugmentedNwaMeta {
-    pub wa_cfg: WaNWAConfig,
+///
+/// Alphabet: parser StateID values encoded as u16 (fails if any StateID > u16::MAX).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AugmentedNwa {
+    pub nwa: WaNWA,
     pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
     /// Map from NWA state id (currently only the end_state is used) to sets of parser stacks.
     /// Each parser stack is represented as a Vec<ParserStateID>.
     pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
-}
-
-/// Combined augmented NWA bundling states + metadata for ease-of-use.
-/// Many APIs below provide "split" variants working directly with (states, meta).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AugmentedNwa {
-    pub states: AugmentedNwaStates,
-    pub meta: AugmentedNwaMeta,
 }
 
 fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
@@ -50,7 +35,7 @@ fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
 }
 
 /// Build an augmented NWA for a single terminal by first computing its
-/// BelowBottomCharacterization, then materializing the NWA (combined struct).
+/// BelowBottomCharacterization, then materializing the NWA.
 pub fn build_augmented_nwa_for_terminal(
     parser: &GLRParser,
     terminal_id: TerminalID,
@@ -61,24 +46,25 @@ pub fn build_augmented_nwa_for_terminal(
 
 /// This NWA acts as an identity for stack transformations, simply passing through any stack it is combined with.
 pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
-    let mut wa = WaNWA::new();
-    let start_state = wa.cfg.start_state;
+    let mut nwa = WaNWA::new();
+    let start_state = nwa.start_state;
 
-    // end_map should contain an empty stack at the end_state, which is also the start_state.
+    // For an ignore terminal, the stack is passed through. The end_map should
+    // contain an empty stack at the end_state, which is also the start_state.
+    // When this NWA is on the left in a `combine_right_into` operation, the
+    // empty stack from its end_map results in the right-hand-side NWA's stacks
+    // being preserved.
     let mut end_map = BTreeMap::new();
     end_map.insert(start_state, BTreeSet::from([vec![]]));
 
     AugmentedNwa {
-        states: AugmentedNwaStates { wa_states: wa.states.clone() },
-        meta: AugmentedNwaMeta {
-            wa_cfg: wa.cfg.clone(),
-            nt_nodes: BTreeMap::new(),
-            end_map,
-        },
+        nwa,
+        nt_nodes: BTreeMap::new(),
+        end_map,
     }
 }
 
-/// Build augmented NWAs for all terminals (combined structs).
+/// Build augmented NWAs for all terminals.
 pub fn build_augmented_nwas(
     parser: &GLRParser,
 ) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
@@ -99,7 +85,7 @@ pub fn build_augmented_nwas(
     Ok(out)
 }
 
-/// Core builder: turns a BelowBottomCharacterization into an AugmentedNwa combined struct.
+/// Core builder: turns a BelowBottomCharacterization into an AugmentedNwa.
 ///
 /// Construction rules:
 /// - Create:
@@ -125,14 +111,14 @@ pub fn build_augmented_nwa_from_characterization(
     parser: &GLRParser,
     bb: &BelowBottomCharacterization,
 ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
-    let mut wa = WaNWA::new(); // adds start state 0
-    let start = wa.cfg.start_state;
-    let end_state = wa.add_state();
+    let mut nwa = WaNWA::new(); // adds start state 0
+    let start = nwa.start_state;
+    let end_state = nwa.add_state();
 
     // One node per nonterminal in the grammar.
     let mut nt_nodes: BTreeMap<NonTerminalID, WaStateID> = BTreeMap::new();
     for &nt in parser.non_terminal_map.right_values() {
-        let id = wa.add_state();
+        let id = nwa.add_state();
         nt_nodes.insert(nt, id);
     }
 
@@ -142,7 +128,7 @@ pub fn build_augmented_nwa_from_characterization(
     // Initial shifts: start --(initial_state)--> end_state
     for &(initial_state, shift_state) in &bb.initial_shifts {
         let ch = encode_symbol(initial_state)?;
-        wa.add_transition(start, ch, end_state, w_all.clone());
+        nwa.add_transition(start, ch, end_state, w_all.clone());
         end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
     }
 
@@ -156,14 +142,14 @@ pub fn build_augmented_nwa_from_characterization(
         let mut from = start;
 
         // The first transition is on the specific character.
-        let next_state = if len == 0 { target_nt } else { wa.add_state() };
-        wa.add_transition(from, ch, next_state, w_all.clone());
+        let next_state = if len == 0 { target_nt } else { nwa.add_state() };
+        nwa.add_transition(from, ch, next_state, w_all.clone());
         from = next_state;
 
         // The rest are default transitions.
         for i in 0..len {
-            let to = if i == len - 1 { target_nt } else { wa.add_state() };
-            wa.add_default_transition(from, to, w_all.clone());
+            let to = if i == len - 1 { target_nt } else { nwa.add_state() };
+            nwa.add_default_transition(from, to, w_all.clone());
             from = to;
         }
     }
@@ -184,14 +170,14 @@ pub fn build_augmented_nwa_from_characterization(
             let mut from = src_nt;
 
             // The first transition is on the specific character.
-            let next_state = if len == 0 { dst_nt } else { wa.add_state() };
-            wa.add_transition(from, ch, next_state, w_all.clone());
+            let next_state = if len == 0 { dst_nt } else { nwa.add_state() };
+            nwa.add_transition(from, ch, next_state, w_all.clone());
             from = next_state;
 
             // The rest are default transitions.
             for i in 0..len {
-                let to = if i == len - 1 { dst_nt } else { wa.add_state() };
-                wa.add_default_transition(from, to, w_all.clone());
+                let to = if i == len - 1 { dst_nt } else { nwa.add_state() };
+                nwa.add_default_transition(from, to, w_all.clone());
                 from = to;
             }
         }
@@ -199,7 +185,7 @@ pub fn build_augmented_nwa_from_characterization(
         // Reveal-goto-shift escapes: a single step to end_state; record the example stack.
         for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
             let ch = encode_symbol(revealed_state)?;
-            wa.add_transition(src_nt, ch, end_state, w_all.clone());
+            nwa.add_transition(src_nt, ch, end_state, w_all.clone());
             end_map
                 .entry(end_state)
                 .or_default()
@@ -208,71 +194,46 @@ pub fn build_augmented_nwa_from_characterization(
     }
 
     Ok(AugmentedNwa {
-        states: AugmentedNwaStates { wa_states: wa.states.clone() },
-        meta: AugmentedNwaMeta {
-            wa_cfg: wa.cfg.clone(),
-            nt_nodes,
-            end_map,
-        },
+        nwa,
+        nt_nodes,
+        end_map,
     })
 }
 
 impl AugmentedNwa {
-    /// Instantiate this AugmentedNwa's states into `target_states`, returning a meta
-    /// that references the mapped start/end/nt nodes within `target_states`.
-    pub fn instantiate_into(&self, target_states: &mut WaNWAStates) -> AugmentedNwaMeta {
-        let mapping = target_states.append_copy_from(&self.states.wa_states);
-        // Remap meta
-        let mapped_start = mapping[self.meta.wa_cfg.start_state];
-        let mut mapped_nt_nodes = BTreeMap::new();
-        for (nt, sid) in &self.meta.nt_nodes {
-            mapped_nt_nodes.insert(*nt, mapping[*sid]);
-        }
-        let mut mapped_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-        for (sid, stacks) in &self.meta.end_map {
-            mapped_end_map.insert(mapping[*sid], stacks.clone());
-        }
-        AugmentedNwaMeta {
-            wa_cfg: WaNWAConfig { start_state: mapped_start },
-            nt_nodes: mapped_nt_nodes,
-            end_map: mapped_end_map,
-        }
-    }
-}
-
-impl AugmentedNwaMeta {
-    /// Process a parser-state stack through this augmented NWA (split states + meta).
+    /// Process a parser-state stack through this augmented NWA.
+    ///
+    /// The stack is interpreted in order (0..n) as the sequence to be consumed.
+    /// Returns a vector of (pos, stop_state, path_weight) where:
+    /// - pos is how many items were consumed from `stack`,
+    /// - stop_state is the NWA state reached (final or because input exhausted),
+    /// - path_weight is the accumulated weight along the taken path.
     pub fn process_stack(
         &self,
-        states: &WaNWAStates,
         stack: &[ParserStateID],
     ) -> Result<Vec<(WaStateID, WaStateID, WaWeight)>, AugmentedNwaBuildError> {
         let mut encoded: Vec<u16> = Vec::with_capacity(stack.len());
         for &s in stack {
             encoded.push(encode_symbol(s)?);
         }
-        Ok(states.process_stack_u16(&self.wa_cfg, &encoded))
+        Ok(self.nwa.process_stack_u16(&encoded))
     }
 
-    /// Non-commutative combination: fold `right` meta/data into `self` (left), both referencing
-    /// the shared `left_states` arena. `right_states` supplies the right-hand automaton's states
-    /// (which may already be in `left_states` or may be a separate graph just copied in).
+    /// Non-commutative combination: fold `right` into `self` (left).
     ///
     /// Algorithm summary:
     /// - Snapshot the current left end-map.
-    /// - Assume right's states are mapped into left_states (by caller instantiation), or else
-    ///   pass a `right_states` that can be processed (we only read from them when processing stacks).
+    /// - Append-copy the entire `right` NWA into `self`, capturing a state-id mapping.
     /// - For each (left_end_state, left_stack) in the snapshot:
-    ///   - Run `right`’s NWA on `left_stack` (from top) to get multiple (pos, right_stop, path_weight).
+    ///   - Run `right`’s NWA on `left_stack` to get multiple (pos, right_stop, path_weight).
     ///   - Add an epsilon transition from `left_end_state` to the mapped `right_stop` with `path_weight`.
     ///   - From `right_stop`, find all `right` end states reachable (ignoring labels).
     ///     For each such end state and each stack in `right.end_map[end_state]`:
-    ///       - prepend `left_stack[pos..]` to that right stack and insert it into `self.end_map`.
+    ///       - prepend `left_stack[pos..]` to that right stack and insert it into `self.end_map`
+    ///         under the mapped end-state id.
     pub fn combine_right_into(
         &mut self,
-        left_states: &mut WaNWAStates,
-        right_meta: &AugmentedNwaMeta,
-        right_states: &WaNWAStates,
+        right: &AugmentedNwa,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
         // Snapshot the original left end_map so we only iterate over "left" entries.
@@ -280,6 +241,9 @@ impl AugmentedNwaMeta {
             self.end_map.clone();
 
         let mut new_end_map: BTreeMap<StateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+
+        // Append-copy the right NWA into the left.
+        let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
 
         // Walk all (left end state, stacks) pairs.
         for (left_end_state, stacks) in left_end_snapshot {
@@ -290,20 +254,25 @@ impl AugmentedNwaMeta {
                 for &s in left_stack.iter().rev() {
                     encoded.push(encode_symbol(s)?);
                 }
-                let stops = right_states.process_stack_u16(&right_meta.wa_cfg, &encoded);
+                let stops = right.nwa.process_stack_u16(&encoded);
 
                 // 2) For each stop: add epsilon edge and propagate end_map stacks.
                 for (pos, right_stop_state, path_weight) in stops {
+                    // Map the right stop state into the left's id space.
+                    let mapped_stop = right_to_left[right_stop_state];
                     // Combine the path weight with the provided weight.
                     let combined_weight = &path_weight & weight;
-                    // Epsilon from the left end state to the right stop state (both within left_states arena).
-                    left_states
-                        .add_epsilon_transition(left_end_state, right_stop_state, combined_weight);
-
+                    // Epsilon from the left end state to the mapped right stop state.
+                    self.nwa
+                        .add_epsilon_transition(left_end_state, mapped_stop, combined_weight);
+ 
                     // Reachable right end states from this right stop, ignoring labels.
-                    let reachable = right_states.reachable_states_ignoring_labels(right_stop_state);
+                    let reachable = right
+                        .nwa
+                        .reachable_states_ignoring_labels(right_stop_state);
                     for r_state in reachable {
-                        if let Some(r_stacks) = right_meta.end_map.get(&r_state) {
+                        if let Some(r_stacks) = right.end_map.get(&r_state) {
+                            let mapped_end = right_to_left[r_state];
                             for r_stack in r_stacks {
                                 // Prepend the remainder of the left stack to the right stack.
                                 // Since we consumed from the top (reverse order), the remaining
@@ -313,7 +282,7 @@ impl AugmentedNwaMeta {
                                     left_stack[..keep_len].to_vec();
                                 combined.extend(r_stack.iter().cloned());
                                 new_end_map
-                                    .entry(r_state)
+                                    .entry(mapped_end)
                                     .or_default()
                                     .insert(combined);
                             }
@@ -326,51 +295,30 @@ impl AugmentedNwaMeta {
         Ok(())
     }
 
-    /// Union of two augmented NWAs' metas within the same shared states arena.
-    pub fn union_with_inplace(&mut self, left_states: &mut WaNWAStates, other: &AugmentedNwaMeta) {
+    /// Union of two augmented NWAs. `self` is modified to become the union.
+    pub fn union_with(&mut self, other: &AugmentedNwa) {
+        let mapping = self.nwa.append_copy(&other.nwa);
+
         // Merge end_maps
         for (other_end_state, stacks) in &other.end_map {
+            let mapped_end_state = mapping[*other_end_state];
             self.end_map
-                .entry(*other_end_state)
+                .entry(mapped_end_state)
                 .or_default()
                 .extend(stacks.clone());
         }
 
         // Create new start state with epsilon transitions to old start states
-        let new_start = left_states.add_state();
-        let old_self_start = self.wa_cfg.start_state;
-        let old_other_start = other.wa_cfg.start_state;
+        let new_start = self.nwa.add_state();
+        let old_self_start = self.nwa.start_state;
+        let old_other_start_mapped = mapping[other.nwa.start_state];
 
-        left_states
+        self.nwa
             .add_epsilon_transition(new_start, old_self_start, WaWeight::all());
-        left_states
-            .add_epsilon_transition(new_start, old_other_start, WaWeight::all());
+        self.nwa
+            .add_epsilon_transition(new_start, old_other_start_mapped, WaWeight::all());
 
-        self.wa_cfg.start_state = new_start;
-    }
-}
-
-impl AugmentedNwa {
-    /// Convenience combined method that uses owned states on both sides.
-    pub fn process_stack(
-        &self,
-        stack: &[ParserStateID],
-    ) -> Result<Vec<(WaStateID, WaStateID, WaWeight)>, AugmentedNwaBuildError> {
-        self.meta.process_stack(&self.states.wa_states, stack)
-    }
-
-    /// Combined convenience method: mutate self by combining in `right`.
-    pub fn combine_right_into(
-        &mut self,
-        right: &AugmentedNwa,
-        weight: &WaWeight,
-    ) -> Result<(), AugmentedNwaBuildError> {
-        self.meta.combine_right_into(&mut self.states.wa_states, &right.meta, &right.states.wa_states, weight)
-    }
-
-    /// Union of two combined augmented NWAs, mutating `self`.
-    pub fn union_with(&mut self, other: &AugmentedNwa) {
-        self.meta.union_with_inplace(&mut self.states.wa_states, &other.meta);
+        self.nwa.start_state = new_start;
     }
 }
 
@@ -378,12 +326,12 @@ impl Display for AugmentedNwa {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Augmented NWA")?;
         writeln!(f, "  Nonterminal Nodes:")?;
-        for (nt, state) in &self.meta.nt_nodes {
+        for (nt, state) in &self.nt_nodes {
             writeln!(f, "    - NT {}: State {}", nt.0, state)?;
         }
-        if !self.meta.end_map.is_empty() {
+        if !self.end_map.is_empty() {
             writeln!(f, "  End Map:")?;
-            for (state, stacks) in &self.meta.end_map {
+            for (state, stacks) in &self.end_map {
                 writeln!(f, "    - State {}:", state)?;
                 for stack in stacks {
                     let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
@@ -392,8 +340,7 @@ impl Display for AugmentedNwa {
             }
         }
         writeln!(f, "  Underlying NWA:")?;
-        let combined = WaNWA { states: self.states.wa_states.clone(), cfg: self.meta.wa_cfg.clone() };
-        for line in combined.to_string().lines() {
+        for line in self.nwa.to_string().lines() {
             writeln!(f, "    {}", line)?;
         }
         Ok(())
@@ -404,13 +351,24 @@ impl Display for AugmentedNwa {
 mod tests {
     use super::*;
 
+    // These are structural smoke tests that only validate basic invariants of the builder.
+    // Full integration with a real GLRParser instance lives elsewhere in the pipeline.
+
+    // Provide a tiny, synthetic parser stub when feature-testing here would be too heavyweight.
+    // If GLRParser isn't trivially constructible in your environment, consider adding
+    // integration tests in a higher layer instead.
+    struct FakeMaps {
+        nts: BTreeSet<NonTerminalID>,
+        terms: BTreeSet<TerminalID>,
+    }
+
     #[test]
     fn encode_symbol_fails_on_large_state_ids() {
         // Simulate an overflow: usize that doesn't fit into u16
         #[cfg(target_pointer_width = "64")]
         {
             let big: ParserStateID = ParserStateID(u32::MAX as usize + 10usize);
-            let err = super::encode_symbol(big).unwrap_err();
+            let err = encode_symbol(big).unwrap_err();
             match err {
                 AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id } => assert_eq!(state_id, big),
             }
@@ -421,10 +379,10 @@ mod tests {
     // NWA: 0 --(100)--> 1 (end)
     // End map: {1: {[100, 101]}}
     fn build_simple_aug_nwa() -> AugmentedNwa {
-        let mut wa = WaNWA::new();
-        let start = wa.cfg.start_state;
-        let end = wa.add_state();
-        wa.add_transition(start, 100, end, WaWeight::all());
+        let mut nwa = WaNWA::new();
+        let start = nwa.start_state;
+        let end = nwa.add_state();
+        nwa.add_transition(start, 100, end, WaWeight::all());
 
         let mut end_map = BTreeMap::new();
         end_map.insert(
@@ -433,12 +391,9 @@ mod tests {
         );
 
         AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: wa.cfg.clone(),
-                nt_nodes: BTreeMap::new(),
-                end_map,
-            },
+            nwa,
+            nt_nodes: BTreeMap::new(),
+            end_map,
         }
     }
 
@@ -446,7 +401,7 @@ mod tests {
     fn test_combine_with_ignore_on_left() {
         let mut lhs = build_augmented_nwa_for_ignore_terminal();
         let mut rhs = build_simple_aug_nwa();
-        rhs.states.wa_states.set_final_weight(1, WaWeight::all());
+        rhs.nwa.set_final_weight(1, WaWeight::all());
         let weight = WaWeight::all();
 
         crate::debug!(5, "Left NWA (ignore):\n{}", lhs);
@@ -455,12 +410,12 @@ mod tests {
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
         // Build expected result
-        let mut expected_wa = WaNWA::new(); // state 0
-        let s1 = expected_wa.add_state(); // state 1
-        let s2 = expected_wa.add_state(); // state 2
-        expected_wa.add_epsilon_transition(0, s1, WaWeight::all());
-        expected_wa.add_transition(s1, 100, s2, WaWeight::all());
-        expected_wa.set_final_weight(s2, WaWeight::all());
+        let mut expected_nwa = WaNWA::new(); // state 0
+        let s1 = expected_nwa.add_state(); // state 1
+        let s2 = expected_nwa.add_state(); // state 2
+        expected_nwa.add_epsilon_transition(0, s1, WaWeight::all());
+        expected_nwa.add_transition(s1, 100, s2, WaWeight::all());
+        expected_nwa.set_final_weight(s2, WaWeight::all());
 
         let expected_end_map = BTreeMap::from([(
             2,
@@ -468,12 +423,9 @@ mod tests {
         )]);
 
         let expected_aug_nwa = AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: expected_wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: expected_wa.cfg.clone(),
-                nt_nodes: BTreeMap::new(),
-                end_map: expected_end_map,
-            },
+            nwa: expected_nwa,
+            nt_nodes: BTreeMap::new(),
+            end_map: expected_end_map,
         };
 
         crate::debug!(5, "Expected NWA:\n{}", expected_aug_nwa);
@@ -486,18 +438,18 @@ mod tests {
     fn test_combine_with_ignore_on_right() {
         let mut lhs = build_simple_aug_nwa();
         let mut rhs = build_augmented_nwa_for_ignore_terminal();
-        rhs.states.wa_states.set_final_weight(rhs.meta.wa_cfg.start_state, WaWeight::all());
+        rhs.nwa.set_final_weight(rhs.nwa.start_state, WaWeight::all());
         let weight = WaWeight::all();
 
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
         // Build expected result
-        let mut expected_wa = WaNWA::new(); // state 0
-        let s1 = expected_wa.add_state(); // state 1
-        let s2 = expected_wa.add_state(); // state 2
-        expected_wa.add_transition(0, 100, s1, WaWeight::all());
-        expected_wa.add_epsilon_transition(s1, s2, WaWeight::all());
-        expected_wa.set_final_weight(s2, WaWeight::all());
+        let mut expected_nwa = WaNWA::new(); // state 0
+        let s1 = expected_nwa.add_state(); // state 1
+        let s2 = expected_nwa.add_state(); // state 2
+        expected_nwa.add_transition(0, 100, s1, WaWeight::all());
+        expected_nwa.add_epsilon_transition(s1, s2, WaWeight::all());
+        expected_nwa.set_final_weight(s2, WaWeight::all());
 
         let expected_end_map = BTreeMap::from([(
             2,
@@ -505,12 +457,9 @@ mod tests {
         )]);
 
         let expected_aug_nwa = AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: expected_wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: expected_wa.cfg.clone(),
-                nt_nodes: BTreeMap::new(),
-                end_map: expected_end_map,
-            },
+            nwa: expected_nwa,
+            nt_nodes: BTreeMap::new(),
+            end_map: expected_end_map,
         };
 
         assert_eq!(lhs, expected_aug_nwa);
@@ -518,17 +467,17 @@ mod tests {
 
     // Helper to build the NWA for Terminal 1 from the prompt
     fn build_terminal1_nwa() -> AugmentedNwa {
-        let mut wa = WaNWA::new(); // state 0
-        let end_state = wa.add_state(); // state 1
-        let nt0_state = wa.add_state(); // state 2
-        let nt1_state = wa.add_state(); // state 3
+        let mut nwa = WaNWA::new(); // state 0
+        let end_state = nwa.add_state(); // state 1
+        let nt0_state = nwa.add_state(); // state 2
+        let nt1_state = nwa.add_state(); // state 3
         assert_eq!(end_state, 1);
         assert_eq!(nt0_state, 2);
         assert_eq!(nt1_state, 3);
 
-        wa.add_transition(0, 0, end_state, WaWeight::all());
-        wa.add_transition(0, 1, nt1_state, WaWeight::all());
-        wa.add_transition(0, 3, nt0_state, WaWeight::all());
+        nwa.add_transition(0, 0, end_state, WaWeight::all());
+        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
 
         let nt_nodes = BTreeMap::from([
             (NonTerminalID(0), nt0_state),
@@ -541,27 +490,24 @@ mod tests {
         )]);
 
         AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: wa.cfg.clone(),
-                nt_nodes,
-                end_map,
-            },
+            nwa,
+            nt_nodes,
+            end_map,
         }
     }
 
     // Helper to build the NWA for Terminal 2 from the prompt
     fn build_terminal2_nwa() -> AugmentedNwa {
-        let mut wa = WaNWA::new(); // state 0
-        let _end_state = wa.add_state(); // state 1
-        let nt0_state = wa.add_state(); // state 2
-        let nt1_state = wa.add_state(); // state 3
-        assert_eq!(_end_state, 1);
+        let mut nwa = WaNWA::new(); // state 0
+        let end_state = nwa.add_state(); // state 1
+        let nt0_state = nwa.add_state(); // state 2
+        let nt1_state = nwa.add_state(); // state 3
+        assert_eq!(end_state, 1);
         assert_eq!(nt0_state, 2);
         assert_eq!(nt1_state, 3);
 
-        wa.add_transition(0, 1, nt1_state, WaWeight::all());
-        wa.add_transition(0, 3, nt0_state, WaWeight::all());
+        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
 
         let nt_nodes = BTreeMap::from([
             (NonTerminalID(0), nt0_state),
@@ -569,28 +515,25 @@ mod tests {
         ]);
 
         AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: wa.cfg.clone(),
-                nt_nodes,
-                end_map: BTreeMap::new(),
-            },
+            nwa,
+            nt_nodes,
+            end_map: BTreeMap::new(),
         }
     }
 
     // Helper to build the NWA for Terminal 0 from the prompt
     fn build_terminal0_nwa() -> AugmentedNwa {
-        let mut wa = WaNWA::new(); // state 0
-        let end_state = wa.add_state(); // state 1
-        let nt0_state = wa.add_state(); // state 2
-        let nt1_state = wa.add_state(); // state 3
+        let mut nwa = WaNWA::new(); // state 0
+        let end_state = nwa.add_state(); // state 1
+        let nt0_state = nwa.add_state(); // state 2
+        let nt1_state = nwa.add_state(); // state 3
         assert_eq!(end_state, 1);
         assert_eq!(nt0_state, 2);
         assert_eq!(nt1_state, 3);
 
-        wa.add_transition(0, 1, nt1_state, WaWeight::all());
-        wa.add_transition(0, 2, end_state, WaWeight::all());
-        wa.add_transition(0, 3, nt0_state, WaWeight::all());
+        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+        nwa.add_transition(0, 2, end_state, WaWeight::all());
+        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
 
         let nt_nodes = BTreeMap::from([
             (NonTerminalID(0), nt0_state),
@@ -603,12 +546,9 @@ mod tests {
         )]);
 
         AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: wa.cfg.clone(),
-                nt_nodes,
-                end_map,
-            },
+            nwa,
+            nt_nodes,
+            end_map,
         }
     }
 
@@ -620,16 +560,13 @@ mod tests {
 
         // 1. Define the initial NWA, which represents the state after all tokens
         // have been processed. It's a single final state with an empty stack.
-        let mut initial_wa = WaNWA::new();
-        let initial_state = initial_wa.cfg.start_state;
-        initial_wa.set_final_weight(initial_state, WaWeight::all());
+        let mut initial_nwa = WaNWA::new();
+        let initial_state = initial_nwa.start_state;
+        initial_nwa.set_final_weight(initial_state, WaWeight::all());
         let mut current_aug_nwa = AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: initial_wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: initial_wa.cfg.clone(),
-                nt_nodes: BTreeMap::new(),
-                end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
-            },
+            nwa: initial_nwa,
+            nt_nodes: BTreeMap::new(),
+            end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
         };
 
         let terminal_nwas_with_id = vec![
@@ -651,8 +588,8 @@ mod tests {
             crate::debug!(5, "Resulting Combined NWA:\n{}", current_aug_nwa);
         }
 
-        assert_eq!(current_aug_nwa.states.wa_states.states.len(), 13);
-        assert!(current_aug_nwa.meta.end_map.is_empty());
+        assert_eq!(current_aug_nwa.nwa.states.len(), 13);
+        assert!(current_aug_nwa.end_map.is_empty());
     }
 
     // Helper to build the "RIGHT" NWA from the prompt, which acts as `self` (the left operand)
@@ -662,14 +599,14 @@ mod tests {
     // operand's NWA. The prompt's stack `[2, 0]` requires a modification to the LEFT NWA
     // to create an epsilon path to a final state.
     fn build_nwa_from_prompt_left() -> AugmentedNwa {
-        let mut wa = WaNWA::new(); // 0
-        let end_state = wa.add_state(); // 1
-        let nt0_state = wa.add_state(); // 2
-        let nt1_state = wa.add_state(); // 3
+        let mut nwa = WaNWA::new(); // 0
+        let end_state = nwa.add_state(); // 1
+        let nt0_state = nwa.add_state(); // 2
+        let nt1_state = nwa.add_state(); // 3
 
-        wa.add_transition(0, 1, nt1_state, WaWeight::all());
-        wa.add_transition(0, 2, end_state, WaWeight::all());
-        wa.add_transition(0, 3, nt0_state, WaWeight::all());
+        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+        nwa.add_transition(0, 2, end_state, WaWeight::all());
+        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
 
         let nt_nodes = BTreeMap::from([
             (NonTerminalID(0), nt0_state),
@@ -681,46 +618,37 @@ mod tests {
             BTreeSet::from([vec![ParserStateID(2), ParserStateID(0)]]),
         )]);
 
-        AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: wa.cfg.clone(),
-                nt_nodes,
-                end_map,
-            },
-        }
+        AugmentedNwa { nwa, nt_nodes, end_map }
     }
 
     // Helper to build the "LEFT" NWA from the prompt, which acts as `right` (the right operand)
     // in the `combine_right_into` call.
     fn build_nwa_from_prompt_right() -> AugmentedNwa {
-        let mut wa = WaNWA::new(); // 0
-        let s1 = wa.add_state(); // 1
-        let s2 = wa.add_state(); // 2
-        let s3 = wa.add_state(); // 3
-        let s4 = wa.add_state(); // 4
-        let end_state = wa.add_state(); // 5
+        let mut nwa = WaNWA::new(); // 0
+        let s1 = nwa.add_state(); // 1
+        let s2 = nwa.add_state(); // 2
+        let s3 = nwa.add_state(); // 3
+        let s4 = nwa.add_state(); // 4
+        let end_state = nwa.add_state(); // 5
 
         let w3 = WaWeight::from_item(3);
-        wa.add_epsilon_transition(0, s1, w3.clone());
-        wa.add_transition(s1, 0, s2, WaWeight::all());
-        wa.add_transition(s1, 1, s4, WaWeight::all());
-        wa.add_transition(s1, 3, s3, WaWeight::all());
-        wa.add_epsilon_transition(s2, end_state, w3.clone());
-        wa.set_final_weight(end_state, WaWeight::all());
+        nwa.add_epsilon_transition(0, s1, w3.clone());
+        nwa.add_transition(s1, 0, s2, WaWeight::all());
+        nwa.add_transition(s1, 1, s4, WaWeight::all());
+        nwa.add_transition(s1, 3, s3, WaWeight::all());
+        nwa.add_epsilon_transition(s2, end_state, w3.clone());
+        nwa.set_final_weight(end_state, WaWeight::all());
 
+        // This is changed from `[0, 1]` to `[f1]` to produce the prompt's final combined stack.
         let end_map = BTreeMap::from([(
             end_state,
             BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
         )]);
 
         AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: wa.cfg.clone(),
-                nt_nodes: BTreeMap::new(),
-                end_map,
-            },
+            nwa,
+            nt_nodes: BTreeMap::new(),
+            end_map,
         }
     }
 
@@ -737,34 +665,34 @@ mod tests {
         crate::debug!(5, "Resulting NWA after combination:\n{}", self_nwa);
 
         // Build expected result
-        let mut expected_wa = WaNWA::new(); // 0
-        let s1 = expected_wa.add_state(); // 1
-        let s2 = expected_wa.add_state(); // 2
-        let s3 = expected_wa.add_state(); // 3
+        let mut expected_nwa = WaNWA::new(); // 0
+        let s1 = expected_nwa.add_state(); // 1
+        let s2 = expected_nwa.add_state(); // 2
+        let s3 = expected_nwa.add_state(); // 3
         // Copied states
-        let s4 = expected_wa.add_state(); // 4 (copied 0)
-        let s5 = expected_wa.add_state(); // 5 (copied 1)
-        let s6 = expected_wa.add_state(); // 6 (copied 2)
-        let s7 = expected_wa.add_state(); // 7 (copied 3)
-        let s8 = expected_wa.add_state(); // 8 (copied 4)
-        let s9 = expected_wa.add_state(); // 9 (copied 5)
+        let s4 = expected_nwa.add_state(); // 4 (copied 0)
+        let s5 = expected_nwa.add_state(); // 5 (copied 1)
+        let s6 = expected_nwa.add_state(); // 6 (copied 2)
+        let s7 = expected_nwa.add_state(); // 7 (copied 3)
+        let s8 = expected_nwa.add_state(); // 8 (copied 4)
+        let s9 = expected_nwa.add_state(); // 9 (copied 5)
 
         // Original part
-        expected_wa.add_transition(0, 1, s3, WaWeight::all());
-        expected_wa.add_transition(0, 2, s1, WaWeight::all());
-        expected_wa.add_transition(0, 3, s2, WaWeight::all());
+        expected_nwa.add_transition(0, 1, s3, WaWeight::all());
+        expected_nwa.add_transition(0, 2, s1, WaWeight::all());
+        expected_nwa.add_transition(0, 3, s2, WaWeight::all());
 
         // Connection
         let w3 = WaWeight::from_item(3);
-        expected_wa.add_epsilon_transition(s1, s9, w3.clone());
+        expected_nwa.add_epsilon_transition(s1, s9, w3.clone());
 
         // Copied part
-        expected_wa.add_epsilon_transition(s4, s5, w3.clone());
-        expected_wa.add_transition(s5, 0, s6, WaWeight::all());
-        expected_wa.add_transition(s5, 1, s8, WaWeight::all());
-        expected_wa.add_transition(s5, 3, s7, WaWeight::all());
-        expected_wa.add_epsilon_transition(s6, s9, w3.clone());
-        expected_wa.set_final_weight(s9, WaWeight::all());
+        expected_nwa.add_epsilon_transition(s4, s5, w3.clone());
+        expected_nwa.add_transition(s5, 0, s6, WaWeight::all());
+        expected_nwa.add_transition(s5, 1, s8, WaWeight::all());
+        expected_nwa.add_transition(s5, 3, s7, WaWeight::all());
+        expected_nwa.add_epsilon_transition(s6, s9, w3.clone());
+        expected_nwa.set_final_weight(s9, WaWeight::all());
 
         let expected_nt_nodes = BTreeMap::from([
             (NonTerminalID(0), s2),
@@ -777,12 +705,9 @@ mod tests {
         )]);
 
         let expected_aug_nwa = AugmentedNwa {
-            states: AugmentedNwaStates { wa_states: expected_wa.states.clone() },
-            meta: AugmentedNwaMeta {
-                wa_cfg: expected_wa.cfg.clone(),
-                nt_nodes: expected_nt_nodes,
-                end_map: expected_end_map,
-            },
+            nwa: expected_nwa,
+            nt_nodes: expected_nt_nodes,
+            end_map: expected_end_map,
         };
 
         crate::debug!(5, "Expected NWA:\n{}", expected_aug_nwa);
