@@ -161,20 +161,15 @@ pub fn build_augmented_nwa_from_characterization(
             let dst_nt = *nt_nodes
                 .get(&reduce_nt)
                 .expect("reduce target nonterminal must exist");
-            if pop_n == 0 {
-                // Direct link if no extra pops below the revealed state.
-                nwa.add_transition(src_nt, ch, dst_nt, w_all.clone());
-            } else {
-                let mut from = src_nt;
-                for i in 0..pop_n {
-                    let to = if i + 1 == pop_n {
-                        dst_nt
-                    } else {
-                        nwa.add_state()
-                    };
-                    nwa.add_transition(from, ch, to, w_all.clone());
-                    from = to;
-                }
+            let mut from = src_nt;
+            for i in 0..pop_n {
+                let to = if i + 1 == pop_n {
+                    dst_nt
+                } else {
+                    nwa.add_state()
+                };
+                nwa.add_transition(from, ch, to, w_all.clone());
+                from = to;
             }
         }
 
