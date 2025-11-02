@@ -1409,8 +1409,8 @@ mod tests {
         nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 6]));
 
         let dwa = nwa.determinize();
-        crate::debug!(5, "NWA:\n{}", nwa);
-        crate::debug!(5, "DWA:\n{}", dwa);
+        println!("NWA:\n{}", nwa);
+        println!("DWA:\n{}", dwa);
         // Expected DWA:
         // S0 (start): weight=ALL
         //   'a' -> S1
@@ -1572,8 +1572,8 @@ mod tests {
         nwa.add_transition(s1, 5, s2, w01.clone());
 
         let dwa = nwa.determinize();
-        crate::debug!(5, "{}", nwa);
-        crate::debug!(5, "{}", dwa);
+        println!("{}", nwa);
+        println!("{}", dwa);
 
         // Expected DWA: 4 states (S0, S1, S2, S3)
         assert_eq!(dwa.states.len(), 4);
