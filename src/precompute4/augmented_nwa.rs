@@ -657,8 +657,12 @@ mod tests {
         let mut self_nwa = build_nwa_from_prompt_right_corrected();
         let right_nwa = build_nwa_from_prompt_left();
         let weight = WaWeight::all();
+        println!("SELF NWA (RIGHT from prompt):\n{}", self_nwa);
+        println!("RIGHT NWA (LEFT from prompt):\n{}", right_nwa);
 
         self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
+
+        println!("Resulting NWA after combination:\n{}", self_nwa);
 
         // Build expected result
         let mut expected_nwa = WaNWA::new(); // 0
@@ -705,6 +709,8 @@ mod tests {
             nt_nodes: expected_nt_nodes,
             end_map: expected_end_map,
         };
+
+        println!("Expected NWA:\n{}", expected_aug_nwa);
 
         assert_eq!(self_nwa, expected_aug_nwa);
     }
