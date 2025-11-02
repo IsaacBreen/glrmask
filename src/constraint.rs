@@ -673,6 +673,7 @@ pub struct GrammarConstraintConfig {
     pub intermediate_trie3_main: IntermediateTrie3Config,
     pub dummy_terminal_map: BTreeMap<String, BTreeSet<Terminal>>,
     pub dummy_terminal_penalties: BTreeMap<String, usize>,
+    pub use_dummy_terminals: bool,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -689,6 +690,7 @@ impl Default for GrammarConstraintConfig {
             intermediate_trie3_main: IntermediateTrie3Config::default(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
+            use_dummy_terminals: true,
         }
     }
 }
@@ -707,6 +709,7 @@ impl GrammarConstraintConfig {
             intermediate_trie3_main: IntermediateTrie3Config::off(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
+            use_dummy_terminals: false,
         }
     }
 }
@@ -1121,6 +1124,20 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
         precompute0_cache: Option<Precompute0Cache>,
     ) -> Self {
+        if !config.use_dummy_terminals {
+            // If dummy terminals are disabled, just compile the grammar and proceed.
+            let compiled_grammar = CompiledGrammar::from_definition(grammar_definition);
+            return Self::new_with_config_and_precompute0_cache(
+                compiled_grammar.tokenizer,
+                compiled_grammar.glr_parser,
+                llm_token_map,
+                compiled_grammar.definition.terminal_to_group_id().clone(),
+                max_original_llm_token_id,
+                config,
+                precompute0_cache,
+            );
+        }
+
         // This function assumes dummy terminals (e.g., `__DUMMY_TERMINAL_.*__`) are defined in the grammar.
         // It will group real terminals under these dummies based on the structural similarity of their
         // corresponding Trie3 templates.
