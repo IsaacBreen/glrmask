@@ -593,17 +593,23 @@ mod tests {
             end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
         };
 
-        let terminal_nwas = vec![
-            build_terminal0_nwa(),
-            build_terminal2_nwa(),
-            build_terminal1_nwa(),
+        let terminal_nwas_with_id = vec![
+            (0, build_terminal0_nwa()),
+            (2, build_terminal2_nwa()),
+            (1, build_terminal1_nwa()),
         ];
         let weight = WaWeight::all();
 
-        for term_nwa in terminal_nwas.iter().rev() {
+        for (i, (term_id, term_nwa)) in terminal_nwas_with_id.iter().rev().enumerate() {
+            println!("\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
+            println!("LEFT NWA (Term {}):\n{}", term_id, term_nwa);
+            println!("RIGHT NWA (Current):\n{}", current_aug_nwa);
+
             let mut new_current = term_nwa.clone();
             new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
             current_aug_nwa = new_current;
+
+            println!("Resulting Combined NWA:\n{}", current_aug_nwa);
         }
 
         assert_eq!(current_aug_nwa.nwa.states.len(), 13);
