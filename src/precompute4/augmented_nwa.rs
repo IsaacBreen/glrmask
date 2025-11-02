@@ -47,9 +47,7 @@ pub fn build_augmented_nwa_for_terminal(
 }
 
 /// This NWA acts as an identity for stack transformations, simply passing through any stack it is combined with.
-pub fn build_augmented_nwa_for_ignore_terminal(
-    terminal_id: TerminalID,
-) -> AugmentedNwa {
+pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
     let mut nwa = WaNWA::new();
     let start_state = nwa.start_state;
 
