@@ -1,11 +1,44 @@
 local_system:
   attached_files:
+    - src/lib.rs
     - src/weighted_automata.rs
-    - src/precompute4/characterize.rs
+    - src/precompute4/mod.rs
     - src/precompute4/augmented_nwa.rs
   conversation_file:
   compile_command:
   initial_file_contents:
+    src/lib.rs: |
+      #![allow(warnings)]
+      pub mod finite_automata;
+      pub mod equivalence_analysis_finite_automata;
+      pub mod glr;
+      pub mod constraint;
+      mod constraint_extra;
+      pub mod datastructures;
+      pub mod interface;
+      mod r#macro;
+      pub mod tokenizer;
+      mod types;
+      mod tests_apr25;
+      mod multi_dfa;
+      pub mod json_serialization;
+      mod test_constraint_basic;
+      // mod test_constraint_python;
+      mod profiler;
+      mod test_constraint_js;
+      mod test_precompute_optimizations;
+      mod constraint_precompute2_utils;
+      mod constraint_precompute1_utils;
+      mod constraint_precompute0_utils;
+      mod constraint_stored_cache_utils;
+      mod constraint_precompute3_challenge_elimination;
+      mod constraint_precompute3_intermediate_utils;
+      mod constraint_special_precompute;
+
+      // New lightweight pass framework for Trie3 optimization
+      pub mod trie3_opt;
+      mod weighted_automata;
+      mod precompute4;
     src/weighted_automata.rs: |
       // src/weighted_automata.rs
 
@@ -1432,146 +1465,9 @@ local_system:
               assert!(s7.transitions.default.is_none());
           }
       }
-    src/precompute4/characterize.rs: |
-      use crate::glr::parser::GLRParser;
-      use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      pub struct ReduceCharacterization {
-          pub terminal: TerminalID,
-          pub nonterminal: NonTerminalID,
-          // (revealed_state, pop_n, nonterminal)
-          pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          // (revealed_state, goto_state, shift_state)
-          pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct BelowBottomCharacterization {
-          pub terminal: TerminalID,
-          // (initial_state, shift_state)
-          pub initial_shifts: BTreeSet<(StateID, StateID)>,
-          // (initial_state, pop_n, nonterminal)
-          pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
-      }
-
-      pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
-          let mut all_chars = BTreeMap::new();
-          for &terminal_id in parser.terminal_map.right_values() {
-              all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
-          }
-          all_chars
-      }
-
-      pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
-          let mut char = BelowBottomCharacterization {
-              terminal: terminal_id,
-              initial_shifts: BTreeSet::new(),
-              initial_reduces: BTreeSet::new(),
-              reduce_characterizations: BTreeMap::new(),
-          };
-
-          // --- 1. Compute initial actions ---
-          for (&initial_state, row) in &parser.table {
-              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
-                  match action {
-                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                          char.initial_shifts.insert((initial_state, *shift_state));
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                          char.initial_reduces.insert((initial_state, *len, *nonterminal_id));
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                          if let Some(shift_state) = shift {
-                              char.initial_shifts.insert((initial_state, *shift_state));
-                          }
-                          for (len, nts) in reduces {
-                              for (nt_id, _) in nts {
-                                  char.initial_reduces.insert((initial_state, *len, *nt_id));
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
-          // --- 2. Compute reduce characterizations ---
-          for &nt_id in parser.non_terminal_map.right_values() {
-              let mut reduce_char = ReduceCharacterization {
-                  terminal: terminal_id,
-                  nonterminal: nt_id,
-                  reveal_and_rereduces: BTreeSet::new(),
-                  reveal_goto_shift_escapes: BTreeSet::new(),
-              };
-
-              // Iterate over all possible revealed states
-              for (&revealed_state, row) in &parser.table {
-                  // Check if this state has a GOTO for our non-terminal
-                  if let Some(goto) = row.gotos.get(&nt_id) {
-                      if let Some(goto_state) = goto.state_id {
-                          // This is a valid starting point for a chain.
-                          let mut worklist: VecDeque<StateID> = VecDeque::new();
-                          worklist.push_back(goto_state);
-                          let mut visited: BTreeSet<StateID> = BTreeSet::new();
-                          visited.insert(goto_state);
-
-                          while let Some(current_state) = worklist.pop_front() {
-                              if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
-                                  match action {
-                                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                                          reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                                          if *len == 1 {
-                                              // Unit reduction chain
-                                              if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                  if let Some(next_goto_state) = next_goto.state_id {
-                                                      if visited.insert(next_goto_state) {
-                                                          worklist.push_back(next_goto_state);
-                                                      }
-                                                  }
-                                              }
-                                          } else if *len > 1 {
-                                              // Pop below revealed state
-                                              reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                          }
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                          if let Some(shift_state) = shift {
-                                              reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                          }
-                                          for (len, nts) in reduces {
-                                              for (reduce_nt, _) in nts {
-                                                  if *len == 1 {
-                                                      if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                          if let Some(next_goto_state) = next_goto.state_id {
-                                                              if visited.insert(next_goto_state) {
-                                                                  worklist.push_back(next_goto_state);
-                                                              }
-                                                          }
-                                                      }
-                                                  } else if *len > 1 {
-                                                      reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                                  }
-                                              }
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-
-              if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
-                  char.reduce_characterizations.insert(nt_id, reduce_char);
-              }
-          }
-
-          char
-      }
+    src/precompute4/mod.rs: |-
+      pub mod characterize;
+      pub mod augmented_nwa;
     src/precompute4/augmented_nwa.rs: |
       use std::collections::{BTreeMap, BTreeSet};
 
@@ -1783,6 +1679,38 @@ local_system:
           }
       }
   prev_file_contents:
+    src/lib.rs: |
+      #![allow(warnings)]
+      pub mod finite_automata;
+      pub mod equivalence_analysis_finite_automata;
+      pub mod glr;
+      pub mod constraint;
+      mod constraint_extra;
+      pub mod datastructures;
+      pub mod interface;
+      mod r#macro;
+      pub mod tokenizer;
+      mod types;
+      mod tests_apr25;
+      mod multi_dfa;
+      pub mod json_serialization;
+      mod test_constraint_basic;
+      // mod test_constraint_python;
+      mod profiler;
+      mod test_constraint_js;
+      mod test_precompute_optimizations;
+      mod constraint_precompute2_utils;
+      mod constraint_precompute1_utils;
+      mod constraint_precompute0_utils;
+      mod constraint_stored_cache_utils;
+      mod constraint_precompute3_challenge_elimination;
+      mod constraint_precompute3_intermediate_utils;
+      mod constraint_special_precompute;
+
+      // New lightweight pass framework for Trie3 optimization
+      pub mod trie3_opt;
+      mod weighted_automata;
+      mod precompute4;
     src/weighted_automata.rs: |
       // src/weighted_automata.rs
 
@@ -2344,6 +2272,99 @@ local_system:
                   }
               }
               closure
+          }
+          // New: online NWA simulation over a stack of u16 symbols.
+          /// Simulate the NWA over a sequence of u16 symbols starting from `start_state`.
+          /// Returns a vector of (consumed_position, reached_state, accumulated_weight).
+          /// Weights are intersected (&) along a path and unioned (|) across nondeterminism.
+          /// Epsilon-closures are applied at the start and after each symbol is consumed.
+          pub fn process_symbol_stack_from(
+              &self,
+              start_state: StateID,
+              stack: &[u16],
+          ) -> Vec<(usize, StateID, Weight)> {
+              let has_epsilons = self
+                  .states
+                  .iter()
+                  .any(|s| !s.epsilon_transitions.is_empty());
+              // composition: NWA state -> accumulated path weight
+              let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
+              current.insert(start_state, Weight::all());
+              let mut current = self.epsilon_closure_with_flag(current, has_epsilons);
+
+              let mut pos = 0usize;
+              while pos < stack.len() {
+                  let ch = stack[pos];
+                  let mut next: BTreeMap<StateID, Weight> = BTreeMap::new();
+                  for (sid, path_w) in &current {
+                      if path_w.is_empty() {
+                          continue;
+                      }
+                      if let Some(transitions) = self.states[*sid].transitions.get(ch) {
+                          for (to, trans_w) in transitions {
+                              let new_w = path_w & trans_w;
+                              if !new_w.is_empty() {
+                                  next.entry(*to)
+                                      .or_insert_with(Weight::zeros)
+                                      .bitor_assign(&new_w);
+                              }
+                          }
+                      }
+                  }
+                  if next.is_empty() {
+                      // Cannot advance further; stop early.
+                      break;
+                  }
+                  current = self.epsilon_closure_with_flag(next, has_epsilons);
+                  pos += 1;
+              }
+              current
+                  .into_iter()
+                  .filter(|(_, w)| !w.is_empty())
+                  .map(|(sid, w)| (pos, sid, w))
+                  .collect()
+          }
+
+          /// Convenience wrapper for process_symbol_stack_from starting at self.start_state.
+          pub fn process_symbol_stack(&self, stack: &[u16]) -> Vec<(usize, StateID, Weight)> {
+              self.process_symbol_stack_from(self.start_state, stack)
+          }
+
+          /// Append a deep clone of `other` into `self`, remapping state IDs by an offset equal
+          /// to the current number of states. Returns the base offset where the clone begins.
+          pub fn append_clone_of(&mut self, other: &NWA) -> StateID {
+              let base = self.states.len();
+              self.states.reserve(other.states.len());
+              for _ in 0..other.states.len() {
+                  self.states.push(NWAState::new());
+              }
+              for (i, st) in other.states.iter().enumerate() {
+                  let new_idx = base + i;
+                  // Final weight
+                  self.states[new_idx].final_weight = st.final_weight.clone();
+                  // Epsilon transitions
+                  for (to, w) in &st.epsilon_transitions {
+                      self.states[new_idx]
+                          .epsilon_transitions
+                          .push((base + *to, w.clone()));
+                  }
+                  // Default transitions
+                  if let Some(list) = &st.transitions.default {
+                      let mapped: Vec<(StateID, Weight)> =
+                          list.iter().map(|(to, w)| (base + *to, w.clone())).collect();
+                      self.states[new_idx].transitions.default = Some(mapped);
+                  }
+                  // Exception transitions
+                  for (ch, list) in &st.transitions.exceptions {
+                      let mapped: Vec<(StateID, Weight)> =
+                          list.iter().map(|(to, w)| (base + *to, w.clone())).collect();
+                      self.states[new_idx]
+                          .transitions
+                          .exceptions
+                          .insert(*ch, mapped);
+                  }
+              }
+              base
           }
       }
 
@@ -3209,146 +3230,9 @@ local_system:
               assert!(s7.transitions.default.is_none());
           }
       }
-    src/precompute4/characterize.rs: |
-      use crate::glr::parser::GLRParser;
-      use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      pub struct ReduceCharacterization {
-          pub terminal: TerminalID,
-          pub nonterminal: NonTerminalID,
-          // (revealed_state, pop_n, nonterminal)
-          pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          // (revealed_state, goto_state, shift_state)
-          pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct BelowBottomCharacterization {
-          pub terminal: TerminalID,
-          // (initial_state, shift_state)
-          pub initial_shifts: BTreeSet<(StateID, StateID)>,
-          // (initial_state, pop_n, nonterminal)
-          pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
-      }
-
-      pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
-          let mut all_chars = BTreeMap::new();
-          for &terminal_id in parser.terminal_map.right_values() {
-              all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
-          }
-          all_chars
-      }
-
-      pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
-          let mut char = BelowBottomCharacterization {
-              terminal: terminal_id,
-              initial_shifts: BTreeSet::new(),
-              initial_reduces: BTreeSet::new(),
-              reduce_characterizations: BTreeMap::new(),
-          };
-
-          // --- 1. Compute initial actions ---
-          for (&initial_state, row) in &parser.table {
-              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
-                  match action {
-                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                          char.initial_shifts.insert((initial_state, *shift_state));
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                          char.initial_reduces.insert((initial_state, *len, *nonterminal_id));
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                          if let Some(shift_state) = shift {
-                              char.initial_shifts.insert((initial_state, *shift_state));
-                          }
-                          for (len, nts) in reduces {
-                              for (nt_id, _) in nts {
-                                  char.initial_reduces.insert((initial_state, *len, *nt_id));
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
-          // --- 2. Compute reduce characterizations ---
-          for &nt_id in parser.non_terminal_map.right_values() {
-              let mut reduce_char = ReduceCharacterization {
-                  terminal: terminal_id,
-                  nonterminal: nt_id,
-                  reveal_and_rereduces: BTreeSet::new(),
-                  reveal_goto_shift_escapes: BTreeSet::new(),
-              };
-
-              // Iterate over all possible revealed states
-              for (&revealed_state, row) in &parser.table {
-                  // Check if this state has a GOTO for our non-terminal
-                  if let Some(goto) = row.gotos.get(&nt_id) {
-                      if let Some(goto_state) = goto.state_id {
-                          // This is a valid starting point for a chain.
-                          let mut worklist: VecDeque<StateID> = VecDeque::new();
-                          worklist.push_back(goto_state);
-                          let mut visited: BTreeSet<StateID> = BTreeSet::new();
-                          visited.insert(goto_state);
-
-                          while let Some(current_state) = worklist.pop_front() {
-                              if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
-                                  match action {
-                                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                                          reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                                          if *len == 1 {
-                                              // Unit reduction chain
-                                              if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                  if let Some(next_goto_state) = next_goto.state_id {
-                                                      if visited.insert(next_goto_state) {
-                                                          worklist.push_back(next_goto_state);
-                                                      }
-                                                  }
-                                              }
-                                          } else if *len > 1 {
-                                              // Pop below revealed state
-                                              reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                          }
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                          if let Some(shift_state) = shift {
-                                              reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                          }
-                                          for (len, nts) in reduces {
-                                              for (reduce_nt, _) in nts {
-                                                  if *len == 1 {
-                                                      if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                          if let Some(next_goto_state) = next_goto.state_id {
-                                                              if visited.insert(next_goto_state) {
-                                                                  worklist.push_back(next_goto_state);
-                                                              }
-                                                          }
-                                                      }
-                                                  } else if *len > 1 {
-                                                      reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                                  }
-                                              }
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-
-              if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
-                  char.reduce_characterizations.insert(nt_id, reduce_char);
-              }
-          }
-
-          char
-      }
+    src/precompute4/mod.rs: |-
+      pub mod characterize;
+      pub mod augmented_nwa;
     src/precompute4/augmented_nwa.rs: |
       use std::collections::{BTreeMap, BTreeSet};
 
@@ -3386,6 +3270,15 @@ local_system:
 
       fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
           u16::try_from(id).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
+      }
+
+      // Helper: encode an entire stack to u16 symbols.
+      fn encode_stack_symbols(stack: &[ParserStateID]) -> Result<Vec<u16>, AugmentedNwaBuildError> {
+          let mut out = Vec::with_capacity(stack.len());
+          for &s in stack {
+              out.push(encode_symbol(s)?);
+          }
+          Ok(out)
       }
 
       /// Build an augmented NWA for a single terminal by first computing its
@@ -3531,6 +3424,48 @@ local_system:
           })
       }
 
+      /// Non-commutatively compose two AugmentedNwa automata: left then right.
+      ///
+      /// Steps:
+      /// - Clone the entire `right.nwa` into `left.nwa` once, capturing the base offset.
+      /// - For each (left_end_state, stack) in `left.end_map`, feed `stack` through the
+      ///   `right.nwa` from its start, yielding a set of (pos, state, weight).
+      /// - For each such result, add an epsilon transition from `left_end_state` to the
+      ///   cloned `right` state with the corresponding `weight`.
+      /// - Update `left.end_state` to the cloned `right.end_state` and replace `left.end_map`
+      ///   with a remapped clone of `right.end_map` (keys offset by the clone base), so further
+      ///   compositions continue from the new end.
+      pub fn combine_augmented_nwas_noncommutative(
+          left: &mut AugmentedNwa,
+          right: &AugmentedNwa,
+          ) -> Result<(), AugmentedNwaBuildError> {
+          // 1) Clone the entire right NWA into the left NWA and obtain the base offset.
+          let base = left.nwa.append_clone_of(&right.nwa);
+
+          // 2) For every escape stack recorded on the left, thread it through the right NWA.
+          //    We work over a snapshot of the map to avoid borrow conflicts as we mutate left.nwa.
+          let left_end_entries: Vec<(WaStateID, BTreeSet<Vec<ParserStateID>>)> =
+              left.end_map.iter().map(|(k, v)| (*k, v.clone())).collect();
+          for (left_end_state, stacks) in left_end_entries {
+              for stack in stacks {
+                  let encoded = encode_stack_symbols(&stack)?;
+                  let results = right.nwa.process_symbol_stack(&encoded);
+                  for (_pos, right_state, w) in results {
+                      left.nwa.add_epsilon_transition(left_end_state, base + right_state, w.clone());
+                  }
+              }
+          }
+
+          // 3) Update left's end_state and end_map to those of the appended right portion.
+          left.end_state = base + right.end_state;
+          let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+          for (st, stacks) in &right.end_map {
+              new_end_map.insert(base + *st, stacks.clone());
+          }
+          left.end_map = new_end_map;
+          Ok(())
+      }
+
       #[cfg(test)]
       mod tests {
           use super::*;
@@ -3601,6 +3536,43 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
+  - user: |-
+      ```rust "src/lib.rs"
+      #![allow(warnings)]
+      pub mod finite_automata;
+      pub mod equivalence_analysis_finite_automata;
+      pub mod glr;
+      pub mod constraint;
+      mod constraint_extra;
+      pub mod datastructures;
+      pub mod interface;
+      mod r#macro;
+      pub mod tokenizer;
+      mod types;
+      mod tests_apr25;
+      mod multi_dfa;
+      pub mod json_serialization;
+      mod test_constraint_basic;
+      // mod test_constraint_python;
+      mod profiler;
+      mod test_constraint_js;
+      mod test_precompute_optimizations;
+      mod constraint_precompute2_utils;
+      mod constraint_precompute1_utils;
+      mod constraint_precompute0_utils;
+      mod constraint_stored_cache_utils;
+      mod constraint_precompute3_challenge_elimination;
+      mod constraint_precompute3_intermediate_utils;
+      mod constraint_special_precompute;
+
+      // New lightweight pass framework for Trie3 optimization
+      pub mod trie3_opt;
+      mod weighted_automata;
+      mod precompute4;
+
+      ```
+    metadata:
+      filename: src/lib.rs
   - user: |-
       ```rust "src/weighted_automata.rs"
       // src/weighted_automata.rs
@@ -5033,246 +5005,239 @@ messages:
     metadata:
       filename: src/weighted_automata.rs
   - user: |-
-      ```rust "src/precompute4/characterize.rs"
+      ```rust "src/precompute4/mod.rs"
+      pub mod characterize;
+      pub mod augmented_nwa;
+      ```
+    metadata:
+      filename: src/precompute4/mod.rs
+  - user: |-
+      ```rust "src/precompute4/augmented_nwa.rs"
+      use std::collections::{BTreeMap, BTreeSet};
+
       use crate::glr::parser::GLRParser;
-      use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
+      use crate::precompute4::characterize::{
+          compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
+      };
+      use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight};
 
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      pub struct ReduceCharacterization {
-          pub terminal: TerminalID,
-          pub nonterminal: NonTerminalID,
-          // (revealed_state, pop_n, nonterminal)
-          pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          // (revealed_state, goto_state, shift_state)
-          pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
-      }
-
+      /// Error that can occur while building an AugmentedNwa.
       #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct BelowBottomCharacterization {
+      pub enum AugmentedNwaBuildError {
+          /// A parser StateID could not be represented as a u16 alphabet symbol.
+          ParserStateIdOutOfRange { state_id: ParserStateID },
+      }
+
+      /// Per-terminal augmented NWA bundle:
+      /// - `nwa` is the constructed automaton.
+      /// - `end_state` is the unique end node where we accumulate “escape” stacks.
+      /// - `nt_nodes` maps each nonterminal to its dedicated node in the NWA.
+      /// - `end_map` accumulates example stacks that reach the `end_state`.
+      ///
+      /// Alphabet: parser StateID values encoded as u16 (fails if any StateID > u16::MAX).
+      #[derive(Debug, Clone)]
+      pub struct AugmentedNwa {
           pub terminal: TerminalID,
-          // (initial_state, shift_state)
-          pub initial_shifts: BTreeSet<(StateID, StateID)>,
-          // (initial_state, pop_n, nonterminal)
-          pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-          pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+          pub nwa: WaNWA,
+          pub end_state: WaStateID,
+          pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
+          /// Map from NWA state id (currently only the end_state is used) to sets of parser stacks.
+          /// Each parser stack is represented as a Vec<ParserStateID>.
+          pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
       }
 
-      pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
-          let mut all_chars = BTreeMap::new();
-          for &terminal_id in parser.terminal_map.right_values() {
-              all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
+      fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
+          u16::try_from(id).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
+      }
+
+      /// Build an augmented NWA for a single terminal by first computing its
+      /// BelowBottomCharacterization, then materializing the NWA.
+      pub fn build_augmented_nwa_for_terminal(
+          parser: &GLRParser,
+          terminal_id: TerminalID,
+      ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
+          let bb = compute_below_bottom_characterization(parser, terminal_id);
+          build_augmented_nwa_from_characterization(parser, &bb)
+      }
+
+      /// Build augmented NWAs for all terminals.
+      pub fn build_augmented_nwas(
+          parser: &GLRParser,
+      ) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
+          let all = compute_all_characterizations(parser);
+          let mut out = BTreeMap::new();
+          for (term, bb) in all {
+              let aug = build_augmented_nwa_from_characterization(parser, &bb)?;
+              out.insert(term, aug);
           }
-          all_chars
+          Ok(out)
       }
 
-      pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
-          let mut char = BelowBottomCharacterization {
-              terminal: terminal_id,
-              initial_shifts: BTreeSet::new(),
-              initial_reduces: BTreeSet::new(),
-              reduce_characterizations: BTreeMap::new(),
-          };
+      /// Core builder: turns a BelowBottomCharacterization into an AugmentedNwa.
+      ///
+      /// Construction rules:
+      /// - Create:
+      ///   - one initial NWA start node (provided by WaNWA::new()),
+      ///   - one unique `end_state`,
+      ///   - one node per nonterminal.
+      /// - For initial shifts:
+      ///   - from start, on symbol (initial_state), go to end_state; add
+      ///     [initial_state, shift_state] into end_map[end_state].
+      /// - For initial reduces (initial_state, len, nt):
+      ///   - create a chain of (len - 1) edges labeled (initial_state) ending at the `nt` node.
+      ///     If len == 1, go directly to the `nt` node.
+      /// - For each nonterminal’s reduce characterization:
+      ///   - For reveal-and-rereduces (revealed_state, pop_n, reduce_nt):
+      ///     create a chain of pop_n edges labeled (revealed_state) from the `nt` node to `reduce_nt` node.
+      ///     If pop_n == 0, connect directly.
+      ///   - For reveal-goto-shift escapes (revealed_state, goto_state, shift_state):
+      ///     from the `nt` node, on symbol (revealed_state) go to end_state; add
+      ///     [revealed_state, goto_state, shift_state] into end_map[end_state].
+      pub fn build_augmented_nwa_from_characterization(
+          parser: &GLRParser,
+          bb: &BelowBottomCharacterization,
+      ) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
+          let mut nwa = WaNWA::new(); // adds start state 0
+          let start = nwa.start_state;
+          let end_state = nwa.add_state();
 
-          // --- 1. Compute initial actions ---
-          for (&initial_state, row) in &parser.table {
-              if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
-                  match action {
-                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                          char.initial_shifts.insert((initial_state, *shift_state));
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                          char.initial_reduces.insert((initial_state, *len, *nonterminal_id));
-                      }
-                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                          if let Some(shift_state) = shift {
-                              char.initial_shifts.insert((initial_state, *shift_state));
-                          }
-                          for (len, nts) in reduces {
-                              for (nt_id, _) in nts {
-                                  char.initial_reduces.insert((initial_state, *len, *nt_id));
-                              }
-                          }
-                      }
+          // One node per nonterminal in the grammar.
+          let mut nt_nodes: BTreeMap<NonTerminalID, WaStateID> = BTreeMap::new();
+          for &nt in parser.non_terminal_map.right_values() {
+              let id = nwa.add_state();
+              nt_nodes.insert(nt, id);
+          }
+
+          let mut end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+          let w_all = WaWeight::all();
+
+          // Initial shifts: start --(initial_state)--> end_state
+          for &(initial_state, shift_state) in &bb.initial_shifts {
+              let ch = encode_symbol(initial_state)?;
+              nwa.add_transition(start, ch, end_state, w_all.clone());
+              end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
+          }
+
+          // Initial reduces: chain of (len - 1) edges labeled by the initial_state, ending at the nt node.
+          for &(initial_state, len, nt) in &bb.initial_reduces {
+              let ch = encode_symbol(initial_state)?;
+              let target_nt = *nt_nodes
+                  .get(&nt)
+                  .expect("nonterminal node must exist (created from parser.non_terminal_map)");
+              // Defensive: if len == 0 (should not happen), treat as zero-length chain.
+              let pops = if len == 0 { 0 } else { len.saturating_sub(1) };
+              if pops == 0 {
+                  // Straight edge to the NT node.
+                  nwa.add_transition(start, ch, target_nt, w_all.clone());
+              } else {
+                  let mut from = start;
+                  for i in 0..pops {
+                      let to = if i + 1 == pops {
+                          target_nt
+                      } else {
+                          nwa.add_state()
+                      };
+                      nwa.add_transition(from, ch, to, w_all.clone());
+                      from = to;
                   }
               }
           }
 
-          // --- 2. Compute reduce characterizations ---
-          for &nt_id in parser.non_terminal_map.right_values() {
-              let mut reduce_char = ReduceCharacterization {
-                  terminal: terminal_id,
-                  nonterminal: nt_id,
-                  reveal_and_rereduces: BTreeSet::new(),
-                  reveal_goto_shift_escapes: BTreeSet::new(),
-              };
+          // Reduce characterizations per nonterminal.
+          for (nt, rc) in &bb.reduce_characterizations {
+              let src_nt = *nt_nodes
+                  .get(nt)
+                  .expect("reduce_characterizations only contains existing nonterminals");
 
-              // Iterate over all possible revealed states
-              for (&revealed_state, row) in &parser.table {
-                  // Check if this state has a GOTO for our non-terminal
-                  if let Some(goto) = row.gotos.get(&nt_id) {
-                      if let Some(goto_state) = goto.state_id {
-                          // This is a valid starting point for a chain.
-                          let mut worklist: VecDeque<StateID> = VecDeque::new();
-                          worklist.push_back(goto_state);
-                          let mut visited: BTreeSet<StateID> = BTreeSet::new();
-                          visited.insert(goto_state);
-
-                          while let Some(current_state) = worklist.pop_front() {
-                              if let Some(action) = parser.table.get(&current_state).and_then(|r| r.shifts_and_reduces_full.get(&terminal_id)) {
-                                  match action {
-                                      Stage7ShiftsAndReducesLookaheadValue::Shift(shift_state) => {
-                                          reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                                          if *len == 1 {
-                                              // Unit reduction chain
-                                              if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                  if let Some(next_goto_state) = next_goto.state_id {
-                                                      if visited.insert(next_goto_state) {
-                                                          worklist.push_back(next_goto_state);
-                                                      }
-                                                  }
-                                              }
-                                          } else if *len > 1 {
-                                              // Pop below revealed state
-                                              reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                          }
-                                      }
-                                      Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                          if let Some(shift_state) = shift {
-                                              reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
-                                          }
-                                          for (len, nts) in reduces {
-                                              for (reduce_nt, _) in nts {
-                                                  if *len == 1 {
-                                                      if let Some(next_goto) = parser.table.get(&revealed_state).and_then(|r| r.gotos.get(reduce_nt)) {
-                                                          if let Some(next_goto_state) = next_goto.state_id {
-                                                              if visited.insert(next_goto_state) {
-                                                                  worklist.push_back(next_goto_state);
-                                                              }
-                                                          }
-                                                      }
-                                                  } else if *len > 1 {
-                                                      reduce_char.reveal_and_rereduces.insert((revealed_state, *len - 2, *reduce_nt));
-                                                  }
-                                              }
-                                          }
-                                      }
-                                  }
-                              }
-                          }
+              // Reveal-and-rereduces: chain of `pop_n` edges from `src_nt` to the node for `reduce_nt`,
+              // all labeled with `revealed_state`.
+              for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
+                  let ch = encode_symbol(revealed_state)?;
+                  let dst_nt = *nt_nodes
+                      .get(&reduce_nt)
+                      .expect("reduce target nonterminal must exist");
+                  if pop_n == 0 {
+                      // Direct link if no extra pops below the revealed state.
+                      nwa.add_transition(src_nt, ch, dst_nt, w_all.clone());
+                  } else {
+                      let mut from = src_nt;
+                      for i in 0..pop_n {
+                          let to = if i + 1 == pop_n {
+                              dst_nt
+                          } else {
+                              nwa.add_state()
+                          };
+                          nwa.add_transition(from, ch, to, w_all.clone());
+                          from = to;
                       }
                   }
               }
 
-              if !reduce_char.reveal_and_rereduces.is_empty() || !reduce_char.reveal_goto_shift_escapes.is_empty() {
-                  char.reduce_characterizations.insert(nt_id, reduce_char);
+              // Reveal-goto-shift escapes: a single step to end_state; record the example stack.
+              for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+                  let ch = encode_symbol(revealed_state)?;
+                  nwa.add_transition(src_nt, ch, end_state, w_all.clone());
+                  end_map
+                      .entry(end_state)
+                      .or_default()
+                      .insert(vec![revealed_state, goto_state, shift_state]);
               }
           }
 
-          char
+          Ok(AugmentedNwa {
+              terminal: bb.terminal,
+              nwa,
+              end_state,
+              nt_nodes,
+              end_map,
+          })
+      }
+
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+
+          // These are structural smoke tests that only validate basic invariants of the builder.
+          // Full integration with a real GLRParser instance lives elsewhere in the pipeline.
+
+          // Provide a tiny, synthetic parser stub when feature-testing here would be too heavyweight.
+          // If GLRParser isn't trivially constructible in your environment, consider adding
+          // integration tests in a higher layer instead.
+          struct FakeMaps {
+              nts: BTreeSet<NonTerminalID>,
+              terms: BTreeSet<TerminalID>,
+          }
+
+          #[test]
+          fn encode_symbol_fails_on_large_state_ids() {
+              // Simulate an overflow: usize that doesn't fit into u16
+              #[cfg(target_pointer_width = "64")]
+              {
+                  let big: ParserStateID = u32::MAX as usize + 10usize;
+                  let err = encode_symbol(big).unwrap_err();
+                  match err {
+                      AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id } => assert_eq!(state_id, big),
+                  }
+              }
+          }
       }
 
       ```
     metadata:
-      filename: src/precompute4/characterize.rs
+      filename: src/precompute4/augmented_nwa.rs
   - user: |-
-      Things to do:
-      - parse table -> per-terminal below zero charactarization
-      - per-terminal below zero parsing charactarization -> per-terminal augmented NWA (no weights yet)
-      - per-terminal NWA + precompute1 terminal trie -> full NWA (straight to DWA)
-      - full NWA -> precompute3 trie
-      I'm going to implement this in steps.
+      We'll need to be able to process an input symbol stack with a NWA. This should produce a vector of (new position within the stack, new NWA state, weight). The weight is the accumulated weights encountered along the path. New position within stack will be at the end if either the input finished early or it finished the same time as a final NWA state was reached.
 
-      ---
+      Then, we need to define a way to combine two augmented NWAs.
+      The method will be non-commutative. It'll take a left and a right item.
+      Loop through the end map on the left, through each left end NWA state and stack.
+      - Process the stack with the NWA on the right, producing vec of (pos (ignored), right end NWA state, weight). Loop over this vec.
+          - Create an epsilon transition transition from the left end state to the right end NWA state with the given weight.
+          - Since these are two different NWAs, we need to copy the subtree from the right end NWA state into the left NWA.
+          - Actually, might be better to copy the entire right NWA into the left NWA once before this loop. Cleaner. Yes, do that.
 
-      **parse table -> per-terminal below zero charactarization**
-
-      **Structs:**
-      Reduce charactarization: charactarizes the behaviour of the parser after reducing by a given nonterminal
-      - terminal
-      - nonterminal
-      - vec (state ID, pop n, nonterminal) of reveal-and-rereduces
-          - 'reveal' refers to the state 'revealed' by the reduce
-          - represents revealing a given state, and reducing with pop n by the given nonterminal
-          - The reduce doesn't occur from the revealed state. The revealed state doesn't do shift/reduce, it does goto. So, we can reduce from the subsequent goto state. But we don't care what the goto state actually *is*. Only that *some* goto eventually leads to a reduce. And we don't care about the reduce's actual pop n, but rather the distance below the revealed state that it popped.
-          - In theory, since there are no 0-reductions in the grammar, this should always be n-2 for a reduce of pop n. Also, we must eventually must either reduce below the revealed state or must shift from the state above it. Which explains the next field...
-      - vec (state ID, state ID, state ID) of reveal-goto-shift escapes
-          - represents revealing the given state, going to the given state, and shifting to the given state
-          - 'escape' refers to the fact that this terminates the parser *step*. To parse further, we'd want to know the next terminal.
-          - As explained above, we can't shift straight from the revealed state; the revealed state represents the state revealed after a reduce, and we can't shift straight after reduce -- we must first perform a goto.
-
-      Below-bottom charactarization:
-      - terminal
-      - vec (state ID, state ID) of initial shifts
-          - if the given state ID is this, perform an immediate shift
-      - vec (state ID, pop n, nonterminal) of initial reduces
-          - if the given state ID is this, perform an immediate reduce
-      - vec of reduce charactarizations
-
-
-      **Computing it:**
-      Choose a terminal. Create a below-bottom charactarization for each.
-      Choose an initial state.
-      Loop over the actions in that initial state - optional shift and zero or more reduces. Computing the initial actions is simple (and fairly obvious):
-      - If there's a shift, add an initial shift from the initial state to the shift state to the below-bottom charactarization.
-      - For each reduce, add a reduce from the initial state by the reduce's pop n-1 with the reduce's nonterminal.
-          - Minus one to account for popping the revealed state -- see below. (Although this kind of contradicts the usual 'reduce by n' meaning in LR theory...)
-
-      Now for the vec of reduce charactarizations.
-      Choose a nonterminal. Create a reduce charactarization for it.
-      Choose an initial 'revealed' state. It can be any state that has a goto for this nonterminal.
-      Create a queue of goto states to process.
-      To initialize the queue, use the goto state for chosen nonterminal under the revealed state.
-      (Implementation node: no need to build an actual stack; just hold the revealed state in one variable and the goto state in another.)
-      Look at the goto state for shift/reduce actions.
-      - If there's a shift, add an escape for the revealed state, the goto state, and the shift state.
-      - For each reduce
-          - if the reduce's pop n = 1, look for a goto under the revealed state for the reduce's nonterminal and add it to the queue.
-          - if the reduce's pop n > 1, add a reveal-and-rereduce with the revealed state ID, the reduce's pop n-2 , and 
-              - Why n-2 and not just n? To account for the revealed and goto states that sit on top of the stack at the time the reduce from the goto state happens. The reduce immediately pops through the goto and revealed states, thus the remaining number to pop is two less than the reduce action's stated pop n.
-              - So, the pop n in a reduce-and-rereduce entry refers to the *additional* amount to pop starting from *underneath* the revealed state, i.e. kind of we take it as a given that we pop the revealed state, and then potentialy pop further.
-              - This reflects the philosophy of the below-bottom charactarization design; it describes what actions occur when, with as little extra fluff as possible. We don't care what the goto states are, what happens on top of the revealed state. There may be lots of reduce-goto stuff. We only care about when we eventually *exit* from a reduce-goto loop into a shift, or when we *exit* into another reduce below the bottom of the stack.
-
-      That's it!
-      Write this in full. Add it to a separate script in `src/precompute4/`.
-      ```bash
-      chatllm send --init --code-completion-model cp --attach src/glr/*.rs --apply git-llm --model cp --paste
-      ```
-      ...Done!
-
-      ---
-
-      **per-terminal below zero charactarization -> per-terminal augmented NWA**
-
-      Convert each below zero charactarization into a NWA.
-      This could just be a NDA, since we don't acutally use weights at this point. But we'll need to use weights eventually anyway.
-
-      **Structs:**
-      Augmented NWA:
-      - terminal
-      - nwa
-      - map NWA state -> set of vecs of parser state IDs: an end map
-
-
-      Create an initial NWA state.
-      Create an end NWA state.
-      Create one NWA state per nonterminal.
-
-      For transitions from the initial NWA state, look at the inital shifts/reduces.
-      - For each initial shift, create a transition (from the initial NWA state) on the initial shift's initial (parser) state to the end NWA state. Add to the end map a stack with the initial shift's initial state and the shift state (like a parser stack would be if we started in the initial state and shifted).
-      - For each initial reduce, create a sequence of transitions on the initial reduce's revealed state to newly-created intermediate NWA states, one for each pop n. The final transition goes to the NWA state for the initial reduce's nonterminal. (If pop n=0, it just goes straight there, no intermediate transitions.)
-          - We could minimize the number of intermediate states required by sharing somehow... But don't bother yet. Want to keep the initial implementation as simple as possible.
-
-      For transitions from the nonterminal NWA states, look at the reduce charactarizations.
-      - For each reveal-and-rereduce, create a sequence of transitions just like we did for each initial reduce.
-      - For each reveal-goto-shift, create a transition to the end NWA state just like we did for the initial shifts. The only difference is that for the stack we add to the end map, there'll be *three* items, not two: the revealed state, the goto state, and the shift state. Again, stacked like they would be in a parser stack after performing a goto from the revealed state and then shifting.
-
-
-      That's it!
-      Implement this step in full.
-      Add it to a separate script in `src/precompute4`.
+      Add this to `src/weighted_automata.rs` and `src/precompute4/augmented_nwa.rs`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5292,277 +5257,240 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are the concrete steps to implement “per-terminal below-bottom characterization -> per-terminal augmented NWA.”
+      Here’s how to implement stack processing for NWA and a non-commutative composition of two Augmented NWAs.
 
       Step-by-step instructions
 
-      1. Create a new file src/precompute4/augmented_nwa.rs
-         - This file will define:
-           - AugmentedNwa: a per-terminal augmented NWA bundle that includes an NWA, an end state, a map of nonterminal nodes, and an end_map collecting parser stacks for end transitions.
-           - AugmentedNwaBuildError: an error type to report alphabet conversion issues (if parser StateID doesn’t fit into u16).
-           - Functions to build:
-             - build_augmented_nwa_from_characterization(parser, &BelowBottomCharacterization) -> Result<AugmentedNwa, AugmentedNwaBuildError>
-             - build_augmented_nwa_for_terminal(parser, terminal_id) -> Result<AugmentedNwa, AugmentedNwaBuildError> (convenience)
-             - build_augmented_nwas(parser) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> (for all terminals)
+      1) Add online NWA stack processing and cloning support
+      - File: src/weighted_automata.rs
+      - Inside the impl NWA block that already contains determinize and epsilon_closure helpers, add three new public methods:
+        - process_symbol_stack_from(&self, start_state: StateID, stack: &[u16]) -> Vec<(usize, StateID, Weight)>
+          - Simulates the NWA over a sequence of u16 symbols, starting from a specified state.
+          - Aggregates weights with bitwise-and along a path and bitwise-or across nondeterminism.
+          - Takes epsilon-closures both at the start and after each symbol.
+          - Stops early if no transitions are possible; otherwise consumes all input.
+          - Returns a vector of tuples (pos_consumed, reached_state_id, accumulated_weight).
+        - process_symbol_stack(&self, stack: &[u16]) -> Vec<(usize, StateID, Weight)>
+          - Convenience wrapper that starts from self.start_state.
+        - append_clone_of(&mut self, other: &NWA) -> StateID
+          - Deeply clones the NWA “other” into self, remapping all state IDs by an offset equal to the current self.states.len().
+          - Returns the starting offset (base) of the newly appended block.
 
-         - Implementation details encoded exactly as described:
-           - One initial NWA start state (from NWA::new), one “end” state, and one NWA state per nonterminal.
-           - For each initial shift (initial_state -> shift_state), add a transition from the NWA start on symbol initial_state to the end state; add [initial_state, shift_state] to end_map[end_state].
-           - For each initial reduce (initial_state, len, nt), add a chain of len-1 transitions (if len == 1, zero-length chain) labeled by initial_state, ending at the NWA state for nt.
-             - This “len-1” matches the earlier conceptual note where initial reduces effectively pop below the revealed state; the compute_below_bottom_characterization code saved the raw len, so the subtraction is applied here during NWA construction.
-           - For each reduce characterization:
-             - For each reveal-and-rereduce (revealed_state, pop_n, reduce_nt), add a chain of pop_n transitions (possibly zero) labeled by revealed_state, starting from the nt’s NWA node, ending at the NWA node for reduce_nt.
-             - For each reveal-goto-shift escape (revealed_state, goto_state, shift_state), add a one-step transition from the nt’s NWA node on revealed_state to end_state; add [revealed_state, goto_state, shift_state] to end_map[end_state].
-           - All transitions use unit weight Weight::all() (no real weighting yet).
+      - Place these three methods just before the closing brace of the impl NWA where epsilon_closure_with_flag is defined. They must be added inside the same impl NWA, before the DWA utilities section.
 
-         - Parser state IDs are encoded on the alphabet as u16. If a parser StateID is too large for u16, the builder returns a descriptive error.
+      2) Add a helper to encode stacks and the non-commutative compositor for AugmentedNwa
+      - File: src/precompute4/augmented_nwa.rs
+      - Add a small helper:
+        - encode_stack_symbols(stack: &[ParserStateID]) -> Result<Vec<u16>, AugmentedNwaBuildError>
+          - Converts a vector of ParserStateID to u16 symbols using the module’s existing encode_symbol, returning an error if any state ID is out of range.
+      - Add the public composition function:
+        - combine_augmented_nwas_noncommutative(left: &mut AugmentedNwa, right: &AugmentedNwa) -> Result<(), AugmentedNwaBuildError>
+          - Clones the entire right.nwa into left.nwa once using append_clone_of (from step 1).
+          - Iterates over all stacks in left.end_map:
+            - Encodes the stack to a u16 sequence.
+            - Processes the stack with the right NWA (from its start state) using process_symbol_stack.
+            - For each result (pos ignored), adds an epsilon transition from the left end state to the cloned right state with the accumulated weight.
+          - Finally, updates:
+            - left.end_state to the cloned right.end_state.
+            - left.end_map to a remapped copy of right.end_map (keys shifted by the clone offset).
+          - Note: left.nt_nodes and left.terminal remain unchanged. We prefer not to merge nt_nodes to avoid key collisions; transitions to the cloned right nt nodes are present in the automaton graph even if not exposed via nt_nodes map.
 
-      2. Make the module visible
-         - Ensure src/precompute4/mod.rs declares pub mod augmented_nwa;. If mod.rs already exists with other submodules, just add one line:
-           pub mod augmented_nwa;
-         - If your crate wires precompute4 via lib.rs, no further changes are required. Otherwise, make sure mod precompute4; (or equivalent) is present in lib.rs (or main.rs) and export it as needed.
+      Patches
 
-      3. Example usage (no code changes required)
-         - Build for one terminal:
-           - let bb = compute_below_bottom_characterization(parser, terminal_id);
-           - let aug = build_augmented_nwa_from_characterization(parser, &bb)?;
-         - Or build for all terminals:
-           - let all = build_augmented_nwas(parser)?;
-
-      Git diffs
-
-      ```diff
+      diff --git a/src/weighted_automata.rs b/src/weighted_automata.rs
+      --- a/src/weighted_automata.rs
+      +++ b/src/weighted_automata.rs
+      @@ -475,9 +475,86 @@ impl NWA {
+               }
+               closure
+           }
+      -}
+      +    // New: online NWA simulation over a stack of u16 symbols.
+      +    /// Simulate the NWA over a sequence of u16 symbols starting from `start_state`.
+      +    /// Returns a vector of (consumed_position, reached_state, accumulated_weight).
+      +    /// Weights are intersected (&) along a path and unioned (|) across nondeterminism.
+      +    /// Epsilon-closures are applied at the start and after each symbol is consumed.
+      +    pub fn process_symbol_stack_from(
+      +        &self,
+      +        start_state: StateID,
+      +        stack: &[u16],
+      +    ) -> Vec<(usize, StateID, Weight)> {
+      +        let has_epsilons = self
+      +            .states
+      +            .iter()
+      +            .any(|s| !s.epsilon_transitions.is_empty());
+      +        // composition: NWA state -> accumulated path weight
+      +        let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
+      +        current.insert(start_state, Weight::all());
+      +        let mut current = self.epsilon_closure_with_flag(current, has_epsilons);
+      +
+      +        let mut pos = 0usize;
+      +        while pos < stack.len() {
+      +            let ch = stack[pos];
+      +            let mut next: BTreeMap<StateID, Weight> = BTreeMap::new();
+      +            for (sid, path_w) in &current {
+      +                if path_w.is_empty() {
+      +                    continue;
+      +                }
+      +                if let Some(transitions) = self.states[*sid].transitions.get(ch) {
+      +                    for (to, trans_w) in transitions {
+      +                        let new_w = path_w & trans_w;
+      +                        if !new_w.is_empty() {
+      +                            next.entry(*to)
+      +                                .or_insert_with(Weight::zeros)
+      +                                .bitor_assign(&new_w);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +            if next.is_empty() {
+      +                // Cannot advance further; stop early.
+      +                break;
+      +            }
+      +            current = self.epsilon_closure_with_flag(next, has_epsilons);
+      +            pos += 1;
+      +        }
+      +        current
+      +            .into_iter()
+      +            .filter(|(_, w)| !w.is_empty())
+      +            .map(|(sid, w)| (pos, sid, w))
+      +            .collect()
+      +    }
+      +
+      +    /// Convenience wrapper for process_symbol_stack_from starting at self.start_state.
+      +    pub fn process_symbol_stack(&self, stack: &[u16]) -> Vec<(usize, StateID, Weight)> {
+      +        self.process_symbol_stack_from(self.start_state, stack)
+      +    }
+      +
+      +    /// Append a deep clone of `other` into `self`, remapping state IDs by an offset equal
+      +    /// to the current number of states. Returns the base offset where the clone begins.
+      +    pub fn append_clone_of(&mut self, other: &NWA) -> StateID {
+      +        let base = self.states.len();
+      +        self.states.reserve(other.states.len());
+      +        for _ in 0..other.states.len() {
+      +            self.states.push(NWAState::new());
+      +        }
+      +        for (i, st) in other.states.iter().enumerate() {
+      +            let new_idx = base + i;
+      +            // Final weight
+      +            self.states[new_idx].final_weight = st.final_weight.clone();
+      +            // Epsilon transitions
+      +            for (to, w) in &st.epsilon_transitions {
+      +                self.states[new_idx]
+      +                    .epsilon_transitions
+      +                    .push((base + *to, w.clone()));
+      +            }
+      +            // Default transitions
+      +            if let Some(list) = &st.transitions.default {
+      +                let mapped: Vec<(StateID, Weight)> =
+      +                    list.iter().map(|(to, w)| (base + *to, w.clone())).collect();
+      +                self.states[new_idx].transitions.default = Some(mapped);
+      +            }
+      +            // Exception transitions
+      +            for (ch, list) in &st.transitions.exceptions {
+      +                let mapped: Vec<(StateID, Weight)> =
+      +                    list.iter().map(|(to, w)| (base + *to, w.clone())).collect();
+      +                self.states[new_idx]
+      +                    .transitions
+      +                    .exceptions
+      +                    .insert(*ch, mapped);
+      +            }
+      +        }
+      +        base
+      +    }
+      +}
+       
+       // New: DWA simplification utilities (collapse simple edges, prune unreachable, merge equivalents)
+       impl DWA {
       diff --git a/src/precompute4/augmented_nwa.rs b/src/precompute4/augmented_nwa.rs
-      new file mode 100644
-      index 0000000..a58181f
-      --- /dev/null
+      --- a/src/precompute4/augmented_nwa.rs
       +++ b/src/precompute4/augmented_nwa.rs
-      @@ -0,0 +1,235 @@
-      +use std::collections::{BTreeMap, BTreeSet};
+      @@ -23,6 +23,14 @@ pub struct AugmentedNwa {
+           pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
+       }
+       
+       fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
+           u16::try_from(id).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
+       }
       +
-      +use crate::glr::parser::GLRParser;
-      +use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
-      +use crate::precompute4::characterize::{
-      +    compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
-      +};
-      +use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight};
-      +
-      +/// Error that can occur while building an AugmentedNwa.
-      +#[derive(Debug, Clone, PartialEq, Eq)]
-      +pub enum AugmentedNwaBuildError {
-      +    /// A parser StateID could not be represented as a u16 alphabet symbol.
-      +    ParserStateIdOutOfRange { state_id: ParserStateID },
-      +}
-      +
-      +/// Per-terminal augmented NWA bundle:
-      +/// - `nwa` is the constructed automaton.
-      +/// - `end_state` is the unique end node where we accumulate “escape” stacks.
-      +/// - `nt_nodes` maps each nonterminal to its dedicated node in the NWA.
-      +/// - `end_map` accumulates example stacks that reach the `end_state`.
-      +///
-      +/// Alphabet: parser StateID values encoded as u16 (fails if any StateID > u16::MAX).
-      +#[derive(Debug, Clone)]
-      +pub struct AugmentedNwa {
-      +    pub terminal: TerminalID,
-      +    pub nwa: WaNWA,
-      +    pub end_state: WaStateID,
-      +    pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
-      +    /// Map from NWA state id (currently only the end_state is used) to sets of parser stacks.
-      +    /// Each parser stack is represented as a Vec<ParserStateID>.
-      +    pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
-      +}
-      +
-      +fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
-      +    u16::try_from(id).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
-      +}
-      +
-      +/// Build an augmented NWA for a single terminal by first computing its
-      +/// BelowBottomCharacterization, then materializing the NWA.
-      +pub fn build_augmented_nwa_for_terminal(
-      +    parser: &GLRParser,
-      +    terminal_id: TerminalID,
-      +) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
-      +    let bb = compute_below_bottom_characterization(parser, terminal_id);
-      +    build_augmented_nwa_from_characterization(parser, &bb)
-      +}
-      +
-      +/// Build augmented NWAs for all terminals.
-      +pub fn build_augmented_nwas(
-      +    parser: &GLRParser,
-      +) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
-      +    let all = compute_all_characterizations(parser);
-      +    let mut out = BTreeMap::new();
-      +    for (term, bb) in all {
-      +        let aug = build_augmented_nwa_from_characterization(parser, &bb)?;
-      +        out.insert(term, aug);
+      +// Helper: encode an entire stack to u16 symbols.
+      +fn encode_stack_symbols(stack: &[ParserStateID]) -> Result<Vec<u16>, AugmentedNwaBuildError> {
+      +    let mut out = Vec::with_capacity(stack.len());
+      +    for &s in stack {
+      +        out.push(encode_symbol(s)?);
       +    }
       +    Ok(out)
       +}
+       
+       /// Build an augmented NWA for a single terminal by first computing its
+       /// BelowBottomCharacterization, then materializing the NWA.
+      @@ -160,6 +168,44 @@ pub fn build_augmented_nwa_from_characterization(
+               end_map,
+           })
+       }
       +
-      +/// Core builder: turns a BelowBottomCharacterization into an AugmentedNwa.
+      +/// Non-commutatively compose two AugmentedNwa automata: left then right.
       +///
-      +/// Construction rules:
-      +/// - Create:
-      +///   - one initial NWA start node (provided by WaNWA::new()),
-      +///   - one unique `end_state`,
-      +///   - one node per nonterminal.
-      +/// - For initial shifts:
-      +///   - from start, on symbol (initial_state), go to end_state; add
-      +///     [initial_state, shift_state] into end_map[end_state].
-      +/// - For initial reduces (initial_state, len, nt):
-      +///   - create a chain of (len - 1) edges labeled (initial_state) ending at the `nt` node.
-      +///     If len == 1, go directly to the `nt` node.
-      +/// - For each nonterminal’s reduce characterization:
-      +///   - For reveal-and-rereduces (revealed_state, pop_n, reduce_nt):
-      +///     create a chain of pop_n edges labeled (revealed_state) from the `nt` node to `reduce_nt` node.
-      +///     If pop_n == 0, connect directly.
-      +///   - For reveal-goto-shift escapes (revealed_state, goto_state, shift_state):
-      +///     from the `nt` node, on symbol (revealed_state) go to end_state; add
-      +///     [revealed_state, goto_state, shift_state] into end_map[end_state].
-      +pub fn build_augmented_nwa_from_characterization(
-      +    parser: &GLRParser,
-      +    bb: &BelowBottomCharacterization,
-      +) -> Result<AugmentedNwa, AugmentedNwaBuildError> {
-      +    let mut nwa = WaNWA::new(); // adds start state 0
-      +    let start = nwa.start_state;
-      +    let end_state = nwa.add_state();
+      +/// Steps:
+      +/// - Clone the entire `right.nwa` into `left.nwa` once, capturing the base offset.
+      +/// - For each (left_end_state, stack) in `left.end_map`, feed `stack` through the
+      +///   `right.nwa` from its start, yielding a set of (pos, state, weight).
+      +/// - For each such result, add an epsilon transition from `left_end_state` to the
+      +///   cloned `right` state with the corresponding `weight`.
+      +/// - Update `left.end_state` to the cloned `right.end_state` and replace `left.end_map`
+      +///   with a remapped clone of `right.end_map` (keys offset by the clone base), so further
+      +///   compositions continue from the new end.
+      +pub fn combine_augmented_nwas_noncommutative(
+      +    left: &mut AugmentedNwa,
+      +    right: &AugmentedNwa,
+      +    ) -> Result<(), AugmentedNwaBuildError> {
+      +    // 1) Clone the entire right NWA into the left NWA and obtain the base offset.
+      +    let base = left.nwa.append_clone_of(&right.nwa);
       +
-      +    // One node per nonterminal in the grammar.
-      +    let mut nt_nodes: BTreeMap<NonTerminalID, WaStateID> = BTreeMap::new();
-      +    for &nt in parser.non_terminal_map.right_values() {
-      +        let id = nwa.add_state();
-      +        nt_nodes.insert(nt, id);
-      +    }
-      +
-      +    let mut end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-      +    let w_all = WaWeight::all();
-      +
-      +    // Initial shifts: start --(initial_state)--> end_state
-      +    for &(initial_state, shift_state) in &bb.initial_shifts {
-      +        let ch = encode_symbol(initial_state)?;
-      +        nwa.add_transition(start, ch, end_state, w_all.clone());
-      +        end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
-      +    }
-      +
-      +    // Initial reduces: chain of (len - 1) edges labeled by the initial_state, ending at the nt node.
-      +    for &(initial_state, len, nt) in &bb.initial_reduces {
-      +        let ch = encode_symbol(initial_state)?;
-      +        let target_nt = *nt_nodes
-      +            .get(&nt)
-      +            .expect("nonterminal node must exist (created from parser.non_terminal_map)");
-      +        // Defensive: if len == 0 (should not happen), treat as zero-length chain.
-      +        let pops = if len == 0 { 0 } else { len.saturating_sub(1) };
-      +        if pops == 0 {
-      +            // Straight edge to the NT node.
-      +            nwa.add_transition(start, ch, target_nt, w_all.clone());
-      +        } else {
-      +            let mut from = start;
-      +            for i in 0..pops {
-      +                let to = if i + 1 == pops {
-      +                    target_nt
-      +                } else {
-      +                    nwa.add_state()
-      +                };
-      +                nwa.add_transition(from, ch, to, w_all.clone());
-      +                from = to;
+      +    // 2) For every escape stack recorded on the left, thread it through the right NWA.
+      +    //    We work over a snapshot of the map to avoid borrow conflicts as we mutate left.nwa.
+      +    let left_end_entries: Vec<(WaStateID, BTreeSet<Vec<ParserStateID>>)> =
+      +        left.end_map.iter().map(|(k, v)| (*k, v.clone())).collect();
+      +    for (left_end_state, stacks) in left_end_entries {
+      +        for stack in stacks {
+      +            let encoded = encode_stack_symbols(&stack)?;
+      +            let results = right.nwa.process_symbol_stack(&encoded);
+      +            for (_pos, right_state, w) in results {
+      +                left.nwa.add_epsilon_transition(left_end_state, base + right_state, w.clone());
       +            }
       +        }
       +    }
       +
-      +    // Reduce characterizations per nonterminal.
-      +    for (nt, rc) in &bb.reduce_characterizations {
-      +        let src_nt = *nt_nodes
-      +            .get(nt)
-      +            .expect("reduce_characterizations only contains existing nonterminals");
-      +
-      +        // Reveal-and-rereduces: chain of `pop_n` edges from `src_nt` to the node for `reduce_nt`,
-      +        // all labeled with `revealed_state`.
-      +        for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
-      +            let ch = encode_symbol(revealed_state)?;
-      +            let dst_nt = *nt_nodes
-      +                .get(&reduce_nt)
-      +                .expect("reduce target nonterminal must exist");
-      +            if pop_n == 0 {
-      +                // Direct link if no extra pops below the revealed state.
-      +                nwa.add_transition(src_nt, ch, dst_nt, w_all.clone());
-      +            } else {
-      +                let mut from = src_nt;
-      +                for i in 0..pop_n {
-      +                    let to = if i + 1 == pop_n {
-      +                        dst_nt
-      +                    } else {
-      +                        nwa.add_state()
-      +                    };
-      +                    nwa.add_transition(from, ch, to, w_all.clone());
-      +                    from = to;
-      +                }
-      +            }
-      +        }
-      +
-      +        // Reveal-goto-shift escapes: a single step to end_state; record the example stack.
-      +        for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
-      +            let ch = encode_symbol(revealed_state)?;
-      +            nwa.add_transition(src_nt, ch, end_state, w_all.clone());
-      +            end_map
-      +                .entry(end_state)
-      +                .or_default()
-      +                .insert(vec![revealed_state, goto_state, shift_state]);
-      +        }
+      +    // 3) Update left's end_state and end_map to those of the appended right portion.
+      +    left.end_state = base + right.end_state;
+      +    let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+      +    for (st, stacks) in &right.end_map {
+      +        new_end_map.insert(base + *st, stacks.clone());
       +    }
-      +
-      +    Ok(AugmentedNwa {
-      +        terminal: bb.terminal,
-      +        nwa,
-      +        end_state,
-      +        nt_nodes,
-      +        end_map,
-      +    })
+      +    left.end_map = new_end_map;
+      +    Ok(())
       +}
-      +
-      +#[cfg(test)]
-      +mod tests {
-      +    use super::*;
-      +
-      +    // These are structural smoke tests that only validate basic invariants of the builder.
-      +    // Full integration with a real GLRParser instance lives elsewhere in the pipeline.
-      +
-      +    // Provide a tiny, synthetic parser stub when feature-testing here would be too heavyweight.
-      +    // If GLRParser isn't trivially constructible in your environment, consider adding
-      +    // integration tests in a higher layer instead.
-      +    struct FakeMaps {
-      +        nts: BTreeSet<NonTerminalID>,
-      +        terms: BTreeSet<TerminalID>,
-      +    }
-      +
-      +    #[test]
-      +    fn encode_symbol_fails_on_large_state_ids() {
-      +        // Simulate an overflow: usize that doesn't fit into u16
-      +        #[cfg(target_pointer_width = "64")]
-      +        {
-      +            let big: ParserStateID = u32::MAX as usize + 10usize;
-      +            let err = encode_symbol(big).unwrap_err();
-      +            match err {
-      +                AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id } => assert_eq!(state_id, big),
-      +            }
-      +        }
-      +    }
-      +}
-      ```
+       
+       #[cfg(test)]
+       mod tests {
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      No ```diff blocks found. Scanning for raw, unfenced diffs...
+      Found 2 potential raw diff block(s).
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/weighted_automata.rs
+      Applying patch to 'src/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/weighted_automata.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/precompute4/augmented_nwa.rs
-      Detected new file (--- /dev/null or missing --- line).
-      Detected 'new file mode'.
       Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
-      Confirmed creation of src/precompute4/augmented_nwa.rs.
-      Added newly created file src/precompute4/augmented_nwa.rs to attached files state.
     metadata:
-  - user: 'Changes committed with message: "feat(precompute4): implement conversion
-      from BelowBottomCharacterization to AugmentedNWA"'
+  - user: 'Changes committed with message: "Implement NWA stack processing and non-commutative
+      composition for AugmentedNWA"'
     metadata:
 ...

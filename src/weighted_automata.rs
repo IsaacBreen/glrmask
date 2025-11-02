@@ -559,6 +559,99 @@ impl NWA {
         }
         closure
     }
+    // New: online NWA simulation over a stack of u16 symbols.
+    /// Simulate the NWA over a sequence of u16 symbols starting from `start_state`.
+    /// Returns a vector of (consumed_position, reached_state, accumulated_weight).
+    /// Weights are intersected (&) along a path and unioned (|) across nondeterminism.
+    /// Epsilon-closures are applied at the start and after each symbol is consumed.
+    pub fn process_symbol_stack_from(
+        &self,
+        start_state: StateID,
+        stack: &[u16],
+    ) -> Vec<(usize, StateID, Weight)> {
+        let has_epsilons = self
+            .states
+            .iter()
+            .any(|s| !s.epsilon_transitions.is_empty());
+        // composition: NWA state -> accumulated path weight
+        let mut current: BTreeMap<StateID, Weight> = BTreeMap::new();
+        current.insert(start_state, Weight::all());
+        let mut current = self.epsilon_closure_with_flag(current, has_epsilons);
+
+        let mut pos = 0usize;
+        while pos < stack.len() {
+            let ch = stack[pos];
+            let mut next: BTreeMap<StateID, Weight> = BTreeMap::new();
+            for (sid, path_w) in &current {
+                if path_w.is_empty() {
+                    continue;
+                }
+                if let Some(transitions) = self.states[*sid].transitions.get(ch) {
+                    for (to, trans_w) in transitions {
+                        let new_w = path_w & trans_w;
+                        if !new_w.is_empty() {
+                            next.entry(*to)
+                                .or_insert_with(Weight::zeros)
+                                .bitor_assign(&new_w);
+                        }
+                    }
+                }
+            }
+            if next.is_empty() {
+                // Cannot advance further; stop early.
+                break;
+            }
+            current = self.epsilon_closure_with_flag(next, has_epsilons);
+            pos += 1;
+        }
+        current
+            .into_iter()
+            .filter(|(_, w)| !w.is_empty())
+            .map(|(sid, w)| (pos, sid, w))
+            .collect()
+    }
+
+    /// Convenience wrapper for process_symbol_stack_from starting at self.start_state.
+    pub fn process_symbol_stack(&self, stack: &[u16]) -> Vec<(usize, StateID, Weight)> {
+        self.process_symbol_stack_from(self.start_state, stack)
+    }
+
+    /// Append a deep clone of `other` into `self`, remapping state IDs by an offset equal
+    /// to the current number of states. Returns the base offset where the clone begins.
+    pub fn append_clone_of(&mut self, other: &NWA) -> StateID {
+        let base = self.states.len();
+        self.states.reserve(other.states.len());
+        for _ in 0..other.states.len() {
+            self.states.push(NWAState::new());
+        }
+        for (i, st) in other.states.iter().enumerate() {
+            let new_idx = base + i;
+            // Final weight
+            self.states[new_idx].final_weight = st.final_weight.clone();
+            // Epsilon transitions
+            for (to, w) in &st.epsilon_transitions {
+                self.states[new_idx]
+                    .epsilon_transitions
+                    .push((base + *to, w.clone()));
+            }
+            // Default transitions
+            if let Some(list) = &st.transitions.default {
+                let mapped: Vec<(StateID, Weight)> =
+                    list.iter().map(|(to, w)| (base + *to, w.clone())).collect();
+                self.states[new_idx].transitions.default = Some(mapped);
+            }
+            // Exception transitions
+            for (ch, list) in &st.transitions.exceptions {
+                let mapped: Vec<(StateID, Weight)> =
+                    list.iter().map(|(to, w)| (base + *to, w.clone())).collect();
+                self.states[new_idx]
+                    .transitions
+                    .exceptions
+                    .insert(*ch, mapped);
+            }
+        }
+        base
+    }
 }
 
 // New: DWA simplification utilities (collapse simple edges, prune unreachable, merge equivalents)
