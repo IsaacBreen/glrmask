@@ -657,8 +657,8 @@ mod tests {
         let mut self_nwa = build_nwa_from_prompt_right_corrected();
         let right_nwa = build_nwa_from_prompt_left();
         let weight = WaWeight::all();
-        println!("LEFT NWA:\n{}", self_nwa);
         println!("RIGHT NWA:\n{}", right_nwa);
+        println!("LEFT NWA:\n{}", self_nwa);
 
         self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
 
