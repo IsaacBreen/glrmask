@@ -2356,9 +2356,11 @@ fn test_constraint_repetition_a() {
         &GrammarConstraintConfig::default(),
         None,
     );
-    // constraint.dump_precomputed1();
+    println!("Parser: {}", constraint.parser);
+    constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
+    constraint.dump_precomputed4();
 
     // Initial state and step
     let mut state = constraint.init();
