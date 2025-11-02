@@ -36,15 +36,6 @@ fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
     u16::try_from(id).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
 }
 
-// Helper: encode an entire stack to u16 symbols.
-fn encode_stack_symbols(stack: &[ParserStateID]) -> Result<Vec<u16>, AugmentedNwaBuildError> {
-    let mut out = Vec::with_capacity(stack.len());
-    for &s in stack {
-        out.push(encode_symbol(s)?);
-    }
-    Ok(out)
-}
-
 /// Build an augmented NWA for a single terminal by first computing its
 /// BelowBottomCharacterization, then materializing the NWA.
 pub fn build_augmented_nwa_for_terminal(
@@ -186,48 +177,6 @@ pub fn build_augmented_nwa_from_characterization(
         nt_nodes,
         end_map,
     })
-}
-
-/// Non-commutatively compose two AugmentedNwa automata: left then right.
-///
-/// Steps:
-/// - Clone the entire `right.nwa` into `left.nwa` once, capturing the base offset.
-/// - For each (left_end_state, stack) in `left.end_map`, feed `stack` through the
-///   `right.nwa` from its start, yielding a set of (pos, state, weight).
-/// - For each such result, add an epsilon transition from `left_end_state` to the
-///   cloned `right` state with the corresponding `weight`.
-/// - Update `left.end_state` to the cloned `right.end_state` and replace `left.end_map`
-///   with a remapped clone of `right.end_map` (keys offset by the clone base), so further
-///   compositions continue from the new end.
-pub fn combine_augmented_nwas_noncommutative(
-    left: &mut AugmentedNwa,
-    right: &AugmentedNwa,
-    ) -> Result<(), AugmentedNwaBuildError> {
-    // 1) Clone the entire right NWA into the left NWA and obtain the base offset.
-    let base = left.nwa.append_clone_of(&right.nwa);
-
-    // 2) For every escape stack recorded on the left, thread it through the right NWA.
-    //    We work over a snapshot of the map to avoid borrow conflicts as we mutate left.nwa.
-    let left_end_entries: Vec<(WaStateID, BTreeSet<Vec<ParserStateID>>)> =
-        left.end_map.iter().map(|(k, v)| (*k, v.clone())).collect();
-    for (left_end_state, stacks) in left_end_entries {
-        for stack in stacks {
-            let encoded = encode_stack_symbols(&stack)?;
-            let results = right.nwa.process_symbol_stack(&encoded);
-            for (_pos, right_state, w) in results {
-                left.nwa.add_epsilon_transition(left_end_state, base + right_state, w.clone());
-            }
-        }
-    }
-
-    // 3) Update left's end_state and end_map to those of the appended right portion.
-    left.end_state = base + right.end_state;
-    let mut new_end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
-    for (st, stacks) in &right.end_map {
-        new_end_map.insert(base + *st, stacks.clone());
-    }
-    left.end_map = new_end_map;
-    Ok(())
 }
 
 #[cfg(test)]
