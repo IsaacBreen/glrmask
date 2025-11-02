@@ -451,13 +451,6 @@ mod tests {
 
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
-        // The combination should not change the end_map because processing a stack on the
-        // ignore NWA yields no stops. The only change is appending unreachable states.
-        assert_eq!(lhs.nwa.states.len(), original_state_count + rhs.nwa.states.len());
-        assert_eq!(lhs.end_map, original_end_map);
-
-        // Verify no new epsilon transitions were added to the original end state.
-        let original_end_state = &lhs.nwa.states[original_end_state_id];
-        assert!(original_end_state.epsilon_transitions.is_empty());
+        todo!()
     }
 }
