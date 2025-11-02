@@ -641,7 +641,7 @@ mod tests {
         // This is changed from `[0, 1]` to `[f1]` to produce the prompt's final combined stack.
         let end_map = BTreeMap::from([(
             end_state,
-            BTreeSet::from([vec![ParserStateID(1)]]),
+            BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
         )]);
 
         AugmentedNwa {
