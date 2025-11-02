@@ -92,6 +92,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
     );
 
+    println!("\n--- Final NWAs Before Determinization ---");
+    for (sid, aug_nwa) in &final_nwas {
+        println!("Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
+    }
+    println!("--- End Final NWAs Before Determinization ---\n");
+
     // 4. Convert final NWAs to DWAs and simplify.
     let mut precomputed4: Precomputed4 = BTreeMap::new();
     for (sid, aug_nwa) in final_nwas {
