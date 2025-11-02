@@ -147,7 +147,7 @@ pub fn build_augmented_nwa_from_characterization(
         from = next_state;
 
         // The rest are default transitions.
-        for i in 1..len {
+        for i in 0..len {
             let to = if i == len - 1 { target_nt } else { nwa.add_state() };
             nwa.add_default_transition(from, to, w_all.clone());
             from = to;
@@ -175,7 +175,7 @@ pub fn build_augmented_nwa_from_characterization(
             from = next_state;
 
             // The rest are default transitions.
-            for i in 1..pop_n {
+            for i in 0..pop_n {
                 let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };
                 nwa.add_default_transition(from, to, w_all.clone());
                 from = to;
