@@ -1464,6 +1464,6 @@ mod tests {
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
         nwa.add_transition(0, b'a' as u16, s1, SimpleBitset::from_iter(vec![1, 4]));
-        nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_iter(vec':[1, 5]')); // fix: compile
+        nwa.add_transition(s1, b'b' as u16, s2, SimpleBitset::from_iter(vec![2, 5]));
     }
 }
