@@ -515,7 +515,7 @@ impl NWA {
 
 // --- Deterministic Weighted Automaton (DWA) ---
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWAState {
     pub transitions: U16Map<StateID>,
     pub weight: Weight,
