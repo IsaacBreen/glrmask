@@ -638,7 +638,7 @@ mod tests {
         nwa.add_epsilon_transition(s2, end_state, w3.clone());
         nwa.set_final_weight(end_state, WaWeight::all());
 
-        // This is changed from `[0, 1]` to `[1]` to produce the prompt's final combined stack.
+        // This is changed from `[0, 1]` to `[f1]` to produce the prompt's final combined stack.
         let end_map = BTreeMap::from([(
             end_state,
             BTreeSet::from([vec![ParserStateID(1)]]),
