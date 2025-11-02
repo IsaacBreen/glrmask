@@ -213,6 +213,7 @@ impl AugmentedNwa {
     pub fn combine_right_into(
         &mut self,
         right: &AugmentedNwa,
+        weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
         // Snapshot the original left end_map so we only iterate over "left" entries.
         let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
@@ -235,10 +236,12 @@ impl AugmentedNwa {
                 for (pos, right_stop_state, path_weight) in stops {
                     // Map the right stop state into the left's id space.
                     let mapped_stop = right_to_left[right_stop_state];
+                    // Combine the path weight with the provided weight.
+                    let combined_weight = &path_weight & weight;
                     // Epsilon from the left end state to the mapped right stop state.
                     self.nwa
-                        .add_epsilon_transition(left_end_state, mapped_stop, path_weight.clone());
-
+                        .add_epsilon_transition(left_end_state, mapped_stop, combined_weight);
+ 
                     // Reachable right end states from this right stop, ignoring labels.
                     let reachable = right
                         .nwa
