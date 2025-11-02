@@ -34,6 +34,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
 
     let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
     let reversed_trie_root = leaf_node;
+    println!("\n--- Reversed Trie1 ---\n{}", Trie::pretty_print(&reversed_trie1_god, &[reversed_trie_root]));
 
     // 3. Traverse the reversed trie.
     let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
