@@ -48,7 +48,6 @@ pub fn build_augmented_nwa_for_terminal(
 pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
     let mut nwa = WaNWA::new();
     let start_state = nwa.start_state;
-    nwa.set_final_weight(start_state, WaWeight::all());
 
     // For an ignore terminal, the stack is passed through. The end_map should
     // contain an empty stack at the end_state, which is also the start_state.
