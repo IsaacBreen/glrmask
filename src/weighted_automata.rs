@@ -1205,28 +1205,11 @@ impl Display for DWA {
 
 impl JSONConvertible for SimpleBitset {
     fn to_json(&self) -> JSONNode {
-        let ranges: Vec<JSONNode> = self.0.ranges().map(|r| {
-            JSONNode::Array(vec![
-                JSONNode::Int(r.start() as i64),
-                JSONNode::Int(r.end() as i64),
-            ])
-        }).collect();
-        JSONNode::Array(ranges)
+        todo!()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        let arr = node.into_array()?;
-        let mut rsb = RangeSetBlaze::new();
-        for range_node in arr {
-            let mut range_arr = range_node.into_array()?;
-            if range_arr.len() != 2 {
-                return Err("Range must be a 2-element array".to_string());
-            }
-            let end = range_arr.pop().unwrap().into_int()? as usize;
-            let start = range_arr.pop().unwrap().into_int()? as usize;
-            rsb.insert_range(start..=end);
-        }
-        Ok(SimpleBitset(rsb))
+        todo!()
     }
 }
 
