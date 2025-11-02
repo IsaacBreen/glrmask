@@ -1,4 +1,4 @@
-use crate::glr::analyze::{self, filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
+use crate::glr::analyze::{self, filter_productions_by_reachability, inline_null_productions, remove_productions_with_undefined_nonterminals};
 use crate::glr::grammar::{nt, prod, regex_name, t, Production, Symbol};
 use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ProcessTokenAdvancedConfig};
 use crate::glr::table::{generate_glr_parser, TerminalID};
@@ -21,6 +21,49 @@ fn create_simple_parser() -> GLRParser {
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+#[test]
+fn test_inline_null_productions_complex() {
+    // Productions:
+    // start' -> s_prime
+    // s_prime -> s
+    // s -> s A
+    // s -> ε
+    //
+    // Nullable non-terminals: s, s_prime, start'
+    //
+    // Expected output after inlining:
+    // start' -> s_prime (untouched, as it's the start production)
+    // s_prime -> s (from original)
+    // s_prime -> ε (from s_prime -> s, where s is nullable)
+    // s -> s A (from original)
+    // s -> A (from s -> s A, where s is nullable)
+    //
+    // The original `s -> ε` is removed.
+    // The generated `s_prime -> ε` is kept because `s_prime` is in the RHS of the start production.
+    let productions = vec![
+        prod("start'", vec![nt("s_prime")]),
+        prod("s_prime", vec![nt("s")]),
+        prod("s", vec![nt("s"), t("A")]),
+        prod("s", vec![]),
+    ];
+
+    let expected = vec![
+        prod("start'", vec![nt("s_prime")]),
+        prod("s_prime", vec![nt("s")]),
+        prod("s_prime", vec![]),
+        prod("s", vec![nt("s"), t("A")]),
+        prod("s", vec![t("A")]),
+    ];
+
+    let result = analyze::inline_null_productions(&productions);
+
+    // Compare as sets to ignore ordering differences.
+    let result_set: BTreeSet<_> = result.into_iter().collect();
+    let expected_set: BTreeSet<_> = expected.into_iter().collect();
+
+    assert_eq!(result_set, expected_set);
+}
 
 #[test]
 fn test_repetition_no_eof_1() {
