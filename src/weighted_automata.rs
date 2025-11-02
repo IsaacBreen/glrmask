@@ -1036,7 +1036,7 @@ impl DWA {
         }
         let n = self.states.states.len();
         let mut visited = vec![false; n];
-        let mut q: std::collections::VecDeque::new = std::collections::VecDeque::new();
+        let mut q = std::collections::VecDeque::new();
         visited[self.cfg.start_state] = true;
         q.push_back(self.cfg.start_state);
         while let Some(u) = q.pop_front() {

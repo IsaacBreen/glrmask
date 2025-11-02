@@ -99,7 +99,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             aug_nwa1.union_with_inplace(&mut shared_states, &aug_nwa2);
         },
         // process function
-        |node_data, node_idx, aug_meta: &AugmentedNwaMeta| {
+        |node_data, node_idx, aug_meta: &mut AugmentedNwaMeta| {
             if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
                 final_metas.insert(*tokenizer_state_id, aug_meta.clone());
             }
