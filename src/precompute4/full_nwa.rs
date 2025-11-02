@@ -77,6 +77,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                     .expect("Combine failed");
                 results.push((*dest_idx, new_aug_nwa));
             }
+            println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+            println!("--- Incoming aug_nwa ---\n{}", current_aug_nwa);
+            println!("--- Edge aug_nwa ---\n{}", aug_nwa);
+            for (_, res_aug_nwa) in &results {
+                println!("--- Resulting aug_nwa ---\n{}", res_aug_nwa);
+            }
             results
         },
         // merge function
