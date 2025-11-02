@@ -70,6 +70,9 @@ impl Display for BelowBottomCharacterization {
 pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
     let mut all_chars = BTreeMap::new();
     for &terminal_id in parser.terminal_map.right_values() {
+        if parser.ignore_terminal_id == Some(terminal_id) {
+            continue;
+        }
         all_chars.insert(terminal_id, compute_below_bottom_characterization(parser, terminal_id));
     }
     all_chars
