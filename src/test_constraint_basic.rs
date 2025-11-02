@@ -2491,9 +2491,11 @@ fn test_constraint_expression_trivial_direct() {
         &GrammarConstraintConfig::default(),
         None,
     );
-    // constraint.dump_precomputed1();
+    println!("Parser: {}", constraint.parser);
+    constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
+    constraint.dump_precomputed4    ();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -2511,6 +2513,7 @@ fn test_constraint_expression_trivial_direct() {
     // Commit "i"
     state.commit(LLMTokenID(0));
     let mask = state.get_mask();
+    state.print_gss();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, HybridBitset::from_iter(vec![3]));
 }
