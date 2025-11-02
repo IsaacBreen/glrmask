@@ -135,9 +135,7 @@ pub fn build_augmented_nwa_from_characterization(
     // Initial reduces: create a chain of `len` transitions. The first is on `initial_state`,
     // and the rest are default transitions. The chain ends at the `nt` node.
     for &(initial_state, len, nt) in &bb.initial_reduces {
-        if len == 0 {
-            continue; // A reduce of length 0 consumes no stack.
-        }
+        assert!(len >= 1);
         let ch = encode_symbol(initial_state)?;
         let target_nt = *nt_nodes
             .get(&nt)
@@ -166,9 +164,7 @@ pub fn build_augmented_nwa_from_characterization(
         // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
         // and the rest are default.
         for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
-            if pop_n == 0 {
-                continue;
-            }
+            assert!(pop_n >= 1);
             let ch = encode_symbol(revealed_state)?;
             let dst_nt = *nt_nodes
                 .get(&reduce_nt)
