@@ -338,13 +338,13 @@ impl NWA {
     }
 
     pub fn set_final_weight(&mut self, state: StateID, weight: Weight) {
-        self.states[state].final_weight = Some(weight);
+        self.states.states[state].final_weight = Some(weight);
     }
 }
 
 // --- Deterministic Weighted Automaton (DWA) ---
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWAState {
     /// Deterministic transitions: one character leads to at most one state.
     pub transitions: U16Map<StateID>,
@@ -1013,7 +1013,7 @@ impl DWAStates {
                 if !st.transitions.exceptions.contains_key(&k) { st.trans_weights_exceptions.remove(&k); }
             }
         }
-        self.start_state = *repr_to_new.get(&repr[self.start_state]).unwrap();
+        self.meta.start_state = *repr_to_new.get(&repr[self.meta.start_state]).unwrap();
         self.states = new_states;
         true
     }

@@ -300,7 +300,7 @@ impl AugmentedNwa {
  
                     // Reachable right end states from this right stop, ignoring labels.
                     let reachable = right
-                        .nwa
+                        .meta
                         .reachable_states_ignoring_labels(right_stop_state);
                     for r_state in reachable {
                         if let Some(r_stacks) = right.meta.end_map.get(&r_state) {
