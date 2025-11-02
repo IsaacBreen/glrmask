@@ -33,7 +33,7 @@ pub struct AugmentedNwa {
 }
 
 fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
-    u16::try_from(id).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
+    u16::try_from(id.0).map_err(|_| AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id: id })
 }
 
 /// Build an augmented NWA for a single terminal by first computing its
@@ -288,7 +288,7 @@ mod tests {
         // Simulate an overflow: usize that doesn't fit into u16
         #[cfg(target_pointer_width = "64")]
         {
-            let big: ParserStateID = u32::MAX as usize + 10usize;
+            let big: ParserStateID = ParserStateID(u32::MAX as usize + 10usize);
             let err = encode_symbol(big).unwrap_err();
             match err {
                 AugmentedNwaBuildError::ParserStateIdOutOfRange { state_id } => assert_eq!(state_id, big),
