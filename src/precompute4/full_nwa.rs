@@ -16,6 +16,8 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         Err(e) => panic!("Failed to build augmented NWAs: {:?}", e),
     };
 
+    let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
+
     println!("\n--- Augmented NWA Generation ---");
     for aug_nwa in augmented_nwas.values() {
         println!("{}", aug_nwa);
@@ -60,20 +62,20 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         |current_aug_nwa, edge_terminal_opt, dest_map| {
             let mut results: Vec<(PrecomputeNode1Index, AugmentedNwa)> = Vec::new();
 
-            if let Some(terminal_id) = &edge_terminal_opt {
-                let terminal_aug_nwa = augmented_nwas.get(terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
-                for (dest_idx, llm_token_bv) in dest_map.iter() {
-                    let mut new_aug_nwa = terminal_aug_nwa.clone();
-                    let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                    new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
-                        .expect("Combine failed");
-                    results.push((*dest_idx, new_aug_nwa));
-                }
+            let aug_nwa;
+            if edge_terminal_opt.is_some() && *edge_terminal_opt != parser.ignore_terminal_id {
+                let terminal_id = edge_terminal_opt.unwrap();
+                aug_nwa = augmented_nwas.get(&terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
             } else {
                 // Epsilon-like edge in grammar trie. Just propagate the current NWA.
-                for (dest_idx, _llm_token_bv) in dest_map.iter() {
-                    results.push((*dest_idx, current_aug_nwa.clone()));
-                }
+                aug_nwa = &ignore_nwa;
+            }
+            for (dest_idx, llm_token_bv) in dest_map.iter() {
+                let mut new_aug_nwa = aug_nwa.clone();
+                let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
+                    .expect("Combine failed");
+                results.push((*dest_idx, new_aug_nwa));
             }
             results
         },
