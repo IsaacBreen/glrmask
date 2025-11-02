@@ -79,7 +79,7 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         },
         // process function
         |node_data, node_idx, aug_nwa| {
-            if let Some(tokenizer_state_id) = original_trie1_roots_map.get(node_idx) {
+            if let Some(tokenizer_state_id) = original_trie1_roots_map.get(&node_idx) {
                 final_nwas.insert(*tokenizer_state_id, aug_nwa.clone());
             }
             true // continue traversal

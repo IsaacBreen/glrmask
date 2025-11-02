@@ -560,7 +560,7 @@ fn build_super_edges_via_trie(
             acc.append(&mut other);
         },
         // process (unused)
-        |_node, _v| false,
+        |_node, _idx, _v| false,
     );
 
     (super_edges_out.into_inner(), end_nodes)

@@ -1953,7 +1953,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         initial_nodes_and_values: Vec<(Trie2Index, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&Trie<EK, EV, T>, Trie2Index, &mut V) -> bool,
     )
     where
         V: Clone,
@@ -2023,7 +2023,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
                 let proceed = {
                     let guard = node_idx.read(arena).expect("poison");
-                    process(&guard, &mut agg_v)
+                    process(&guard, node_idx, &mut agg_v)
                 };
                 if !proceed {
                     stopped_nodes.insert(u);

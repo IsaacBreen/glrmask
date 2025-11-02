@@ -2749,7 +2749,7 @@ impl GrammarConstraint {
                 s1.1.extend(s2.1.into_iter());
             },
             // process: when we reach Trie1 end, attach nodes to a shared trie3_end node and continue
-            |precomputed_node_data, (tokens, nodes_set)| {
+            |precomputed_node_data, _, (tokens, nodes_set)| {
                 if tokens.is_empty() {
                     return false;
                 }
@@ -4028,7 +4028,7 @@ impl<'a> GrammarConstraintState<'a> {
             // merge_fn
             |glr_s1, glr_s2| glr_s1.merge_with(glr_s2),
             // process_fn: (precomputed_node_data, final_state_for_this_path)
-            |precomputed_node_data, glr_s| {
+            |precomputed_node_data, _, glr_s| {
                 let mut glr_s_copy = glr_s.clone();
                 let glr_active_tokens = glr_s_copy.active_state.stack.allowed_llm_tokens();
                 let keep_going = glr_s_copy.is_ok();
