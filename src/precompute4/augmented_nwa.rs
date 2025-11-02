@@ -17,7 +17,6 @@ pub enum AugmentedNwaBuildError {
 
 /// Per-terminal augmented NWA bundle:
 /// - `nwa` is the constructed automaton.
-/// - `end_state` is the unique end node where we accumulate “escape” stacks.
 /// - `nt_nodes` maps each nonterminal to its dedicated node in the NWA.
 /// - `end_map` accumulates example stacks that reach the `end_state`.
 ///
@@ -25,7 +24,6 @@ pub enum AugmentedNwaBuildError {
 #[derive(Debug, Clone)]
 pub struct AugmentedNwa {
     pub nwa: WaNWA,
-    pub end_state: WaStateID,
     pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
     /// Map from NWA state id (currently only the end_state is used) to sets of parser stacks.
     /// Each parser stack is represented as a Vec<ParserStateID>.
@@ -61,7 +59,6 @@ pub fn build_augmented_nwa_for_ignore_terminal() -> AugmentedNwa {
 
     AugmentedNwa {
         nwa,
-        end_state: start_state,
         nt_nodes: BTreeMap::new(),
         end_map,
     }
@@ -201,7 +198,6 @@ pub fn build_augmented_nwa_from_characterization(
 
     Ok(AugmentedNwa {
         nwa,
-        end_state,
         nt_nodes,
         end_map,
     })
@@ -322,14 +318,12 @@ impl AugmentedNwa {
             .add_epsilon_transition(new_start, old_other_start_mapped, WaWeight::all());
 
         self.nwa.start_state = new_start;
-        self.end_state = usize::MAX; // Invalidate single end_state
     }
 }
 
 impl Display for AugmentedNwa {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Augmented NWA")?;
-        writeln!(f, "  End State: {}", self.end_state)?;
         writeln!(f, "  Nonterminal Nodes:")?;
         for (nt, state) in &self.nt_nodes {
             writeln!(f, "    - NT {}: State {}", nt.0, state)?;
@@ -397,7 +391,6 @@ mod tests {
 
         AugmentedNwa {
             nwa,
-            end_state: end,
             nt_nodes: BTreeMap::new(),
             end_map,
         }
@@ -447,7 +440,7 @@ mod tests {
 
         let original_end_map = lhs.end_map.clone();
         let original_state_count = lhs.nwa.states.len();
-        let original_end_state_id = lhs.end_state;
+        let original_end_state_id = *lhs.end_map.keys().next().unwrap();
 
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
@@ -511,7 +504,6 @@ mod tests {
 
         AugmentedNwa {
             nwa,
-            end_state,
             nt_nodes,
             end_map,
         }
@@ -537,7 +529,6 @@ mod tests {
 
         AugmentedNwa {
             nwa,
-            end_state,
             nt_nodes,
             end_map: BTreeMap::new(),
         }
@@ -569,7 +560,6 @@ mod tests {
 
         AugmentedNwa {
             nwa,
-            end_state,
             nt_nodes,
             end_map,
         }
@@ -588,7 +578,6 @@ mod tests {
         initial_nwa.set_final_weight(initial_state, WaWeight::all());
         let mut current_aug_nwa = AugmentedNwa {
             nwa: initial_nwa,
-            end_state: initial_state,
             nt_nodes: BTreeMap::new(),
             end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
         };

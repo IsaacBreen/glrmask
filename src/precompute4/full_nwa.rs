@@ -48,7 +48,6 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     initial_nwa.set_final_weight(initial_state, WaWeight::all());
     let initial_aug_nwa = AugmentedNwa {
         nwa: initial_nwa,
-        end_state: initial_state,
         nt_nodes: BTreeMap::new(),
         end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
     };
