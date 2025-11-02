@@ -575,9 +575,7 @@ impl DWA {
     /// - prune unreachable.
     pub fn simplify_components(states: &mut DWAStates, rest: &mut DWARest) {
         if states.0.is_empty() { return; }
-        // Pre-pass: normalize and collapse simple default-only chains before pruning.
         Self::normalize_edges_inplace(states);
-        let _ = Self::collapse_simple_default_chains(states, rest);
         Self::prune_unreachable(states, rest);
 
         let mut changed_any = true;
@@ -587,8 +585,6 @@ impl DWA {
             changed_any = false;
 
             if Self::normalize_edges_inplace(states) { changed_any = true; }
-            // Collapsing default-only pass-through states preserves "pop 0" semantics at the root.
-            if Self::collapse_simple_default_chains(states, rest) { changed_any = true; }
             if Self::minimize_partition_refinement(states, rest) { changed_any = true; }
             if Self::normalize_edges_inplace(states) { changed_any = true; }
             if Self::prune_unreachable(states, rest) { changed_any = true; }
@@ -733,55 +729,6 @@ impl DWA {
         rest.start_state = *pid_to_new.get(&start_pid).unwrap();
         true
     }
-
-    /// Collapse chains of "simple" default-only states by rewiring all incoming
-    /// transitions to their ultimate non-simple representative.
-    ///
-    /// A state is "simple default-only" if:
-    /// - it has no exceptions,
-    /// - it has no final_weight,
-    /// - it has a default transition,
-    /// - and trans_weight_default equals its own weight.
-    ///
-    /// Returns true if any rewiring occurred. Unreachable states are not removed
-    /// here; call prune_unreachable afterwards.
-    pub fn collapse_simple_default_chains(states: &mut DWAStates, rest: &mut DWARest) -> bool {
-        let n = states.0.len();
-        if n == 0 { return false; }
-
-        // Compute representative for each state by following simple-default chains.
-        let mut rep: Vec<usize> = (0..n).collect();
-        let mut changed = false;
-        for i in 0..n {
-            let mut x = i;
-            let mut guard = 0usize;
-            while let Some(t) = states.0[x].simple_default_target() {
-                if t == x { break; }
-                x = t;
-                guard += 1;
-                if guard > n { break; } // safety against unexpected cycles
-            }
-            rep[i] = x;
-            if x != i { changed = true; }
-        }
-        if !changed { return false; }
-
-        // Rewire all transitions to point to representatives.
-        for st in states.0.iter_mut() {
-            if let Some(d) = st.transitions.default { st.transitions.default = Some(rep[d]); }
-            let ex_old = st.transitions.exceptions.clone();
-            st.transitions.exceptions.clear();
-            for (ch, tgt) in ex_old { st.transitions.exceptions.insert(ch, rep[tgt]); }
-        }
-        rest.start_state = rep[rest.start_state];
-        true
-    }
-
-    /// Partition-refinement minimization. Two states are equivalent iff they share:
-    /// - weight and final_weight,
-    /// - default target's partition,
-    /// - and exception targets per character (up to default-equivalence).
-    ///
 
     /// Remove states unreachable from `start_state` and renumber them densely.
     pub fn prune_unreachable(states: &mut DWAStates, rest: &mut DWARest) -> bool {
