@@ -1,5 +1,5 @@
 use crate::constraint::{PrecomputeNode1Index, Trie1GodWrapper};
-use crate::glr::parser::GLRParser;
+use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::tokenizer::TokenizerStateID;
 use crate::weighted_automata::{DWA, NWA as WaNWA, Weight as WaWeight};
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,14 +62,13 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
             let mut results: Vec<(PrecomputeNode1Index, AugmentedNwa)> = Vec::new();
 
             if let Some(terminal_id) = edge_terminal_opt {
-                if let Some(terminal_aug_nwa) = augmented_nwas.get(terminal_id) {
-                    for (dest_idx, llm_token_bv) in dest_map.iter() {
-                        let mut new_aug_nwa = terminal_aug_nwa.clone();
-                        let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                        new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
-                            .expect("Combine failed");
-                        results.push((*dest_idx, new_aug_nwa));
-                    }
+                let terminal_aug_nwa = augmented_nwas.get(terminal_id).expect_else(|| format!("No augmented NWA for terminal {:?}", terminal_id));
+                for (dest_idx, llm_token_bv) in dest_map.iter() {
+                    let mut new_aug_nwa = terminal_aug_nwa.clone();
+                    let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                    new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
+                        .expect("Combine failed");
+                    results.push((*dest_idx, new_aug_nwa));
                 }
             } else {
                 // Epsilon-like edge in grammar trie. Just propagate the current NWA.
