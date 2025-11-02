@@ -13,6 +13,7 @@ use bitvec::prelude::BitVec;
 use std::collections::BTreeMap as StdMap;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::ops::BitOrAssign;
 use std::sync::{Arc, RwLock};
 
 /// Creates a neat string representation of a HybridBitset, showing values as ranges.
@@ -49,27 +50,30 @@ fn format_bv_with_tokens(
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     limit: usize,
 ) -> String {
-    let bv_neat_str = format_hybrid_bitset_neatly(bv);
-
     let (i2o_map, token_map) = match (internal_to_original_map, llm_token_map) {
         (Some(i), Some(t)) => (i, t),
-        _ => return bv_neat_str, // If we don't have maps, just return the neat string.
+        _ => return format_hybrid_bitset_neatly(bv), // If we don't have maps, just return the neat string of internal IDs.
     };
 
-    let mut token_samples = Vec::new();
-    let mut total_original_tokens = 0;
-
-    'outer: for internal_id in bv.iter() {
+    // Convert internal IDs to original LLM token IDs
+    let mut original_tokens_bv = LLMTokenBV::zeros();
+    for internal_id in bv.iter() {
         if let Some(original_ids_bv) = i2o_map.get(&internal_id) {
-            total_original_tokens += original_ids_bv.len();
-            for original_id in original_ids_bv.iter() {
-                if token_samples.len() >= limit {
-                    break 'outer;
-                }
-                if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(original_id)) {
-                    token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
-                }
-            }
+            original_tokens_bv.bitor_assign(original_ids_bv);
+        }
+    }
+    let bv_neat_str = format_hybrid_bitset_neatly(&original_tokens_bv);
+
+    if original_tokens_bv.is_empty() {
+        return bv_neat_str;
+    }
+
+    let mut token_samples = Vec::new();
+    let total_original_tokens = original_tokens_bv.len();
+
+    for original_id in original_tokens_bv.iter().take(limit) {
+        if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(original_id)) {
+            token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
         }
     }
 
