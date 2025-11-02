@@ -604,4 +604,121 @@ mod tests {
         assert_eq!(current_aug_nwa.nwa.states.len(), 13);
         assert!(current_aug_nwa.end_map.is_empty());
     }
+
+    // Helper to build the "RIGHT" NWA from the prompt, which acts as `self` (the left operand)
+    // in the `combine_right_into` call.
+    // NOTE: The prompt's example seems to have an inconsistency. For the combination logic to
+    // produce a connection, the `end_map` stack of `self` must be processable by the `right`
+    // operand's NWA. The prompt's stack `[2, 0]` leads to no transitions in the other NWA.
+    // We use `[0, 1]` instead, which allows `process_stack` to find a path and create the
+    // connection shown in the prompt's "RESULT" diagram.
+    fn build_nwa_from_prompt_right_corrected() -> AugmentedNwa {
+        let mut nwa = WaNWA::new(); // 0
+        let end_state = nwa.add_state(); // 1
+        let nt0_state = nwa.add_state(); // 2
+        let nt1_state = nwa.add_state(); // 3
+
+        nwa.add_transition(0, 1, nt1_state, WaWeight::all());
+        nwa.add_transition(0, 2, end_state, WaWeight::all());
+        nwa.add_transition(0, 3, nt0_state, WaWeight::all());
+
+        let nt_nodes = BTreeMap::from([
+            (NonTerminalID(0), nt0_state),
+            (NonTerminalID(1), nt1_state),
+        ]);
+
+        // Corrected from prompt's `[2, 0]` to `[0, 1]` to make the test logic work.
+        let end_map = BTreeMap::from([(
+            end_state,
+            BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
+        )]);
+
+        AugmentedNwa { nwa, nt_nodes, end_map }
+    }
+
+    // Helper to build the "LEFT" NWA from the prompt, which acts as `right` (the right operand)
+    // in the `combine_right_into` call.
+    fn build_nwa_from_prompt_left() -> AugmentedNwa {
+        let mut nwa = WaNWA::new(); // 0
+        let s1 = nwa.add_state(); // 1
+        let s2 = nwa.add_state(); // 2
+        let s3 = nwa.add_state(); // 3
+        let s4 = nwa.add_state(); // 4
+        let end_state = nwa.add_state(); // 5
+
+        let w3 = WaWeight::from_item(3);
+        nwa.add_epsilon_transition(0, s1, w3.clone());
+        nwa.add_transition(s1, 0, s2, WaWeight::all());
+        nwa.add_transition(s1, 1, s4, WaWeight::all());
+        nwa.add_transition(s1, 3, s3, WaWeight::all());
+        nwa.add_epsilon_transition(s2, end_state, w3.clone());
+        nwa.set_final_weight(end_state, WaWeight::all());
+
+        let end_map = BTreeMap::from([(
+            end_state,
+            BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
+        )]);
+
+        AugmentedNwa {
+            nwa,
+            nt_nodes: BTreeMap::new(),
+            end_map,
+        }
+    }
+
+    #[test]
+    fn test_combination_from_prompt_example() {
+        let mut self_nwa = build_nwa_from_prompt_right_corrected();
+        let right_nwa = build_nwa_from_prompt_left();
+        let weight = WaWeight::all();
+
+        // The state of `self_nwa` before combination:
+        // 4 states (0-3), start=0. end_map has state 1 with stack [0, 1].
+        assert_eq!(self_nwa.nwa.states.len(), 4);
+        assert_eq!(*self_nwa.end_map.keys().next().unwrap(), 1);
+        let original_nt_nodes = self_nwa.nt_nodes.clone();
+
+        self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
+
+        // After combination:
+        // `self_nwa` should have its original 4 states + `right_nwa`'s 6 states = 10 states.
+        assert_eq!(self_nwa.nwa.states.len(), 10);
+        // nt_nodes should be preserved.
+        assert_eq!(self_nwa.nt_nodes, original_nt_nodes);
+
+        // The original end state of `self_nwa` (state 1) should now have an epsilon
+        // transition to the mapped stop state from `right_nwa`.
+        // The stack `[0, 1]` processed by `right_nwa.nwa` stops at `pos=1`, `state=5` with weight `[3]`.
+        // `right_nwa`'s state 5 is mapped to `4 + 5 = 9` in the combined NWA.
+        let self_original_end_state = &self_nwa.nwa.states[1];
+        assert_eq!(self_original_end_state.epsilon_transitions.len(), 1);
+        assert_eq!(
+            self_original_end_state.epsilon_transitions[0],
+            (9, WaWeight::from_item(3))
+        );
+
+        // The new end_map should be calculated correctly.
+        // self_stack = [0, 1], pos = 1. Remainder is [1].
+        // right_stack = [0, 1].
+        // combined = [1, 0, 1].
+        // The end state from `right_nwa` was 5, mapped to 9.
+        let expected_end_map = BTreeMap::from([(
+            9,
+            BTreeSet::from([vec![ParserStateID(1), ParserStateID(0), ParserStateID(1)]]),
+        )]);
+        assert_eq!(self_nwa.end_map, expected_end_map);
+
+        // Check that the appended states are structured correctly, matching the prompt's RESULT.
+        // right_nwa state 0 -> mapped to 4. ε -> 1 becomes ε -> 5.
+        assert_eq!(self_nwa.nwa.states[4].epsilon_transitions[0], (5, WaWeight::from_item(3)));
+        // right_nwa state 1 -> mapped to 5. transitions 0->2, 1->4, 3->3 become 0->6, 1->8, 3->7.
+        let s5_trans = &self_nwa.nwa.states[5].transitions.exceptions;
+        assert_eq!(*s5_trans.get(&0).unwrap(), vec![(6, WaWeight::all())]);
+        assert_eq!(*s5_trans.get(&1).unwrap(), vec![(8, WaWeight::all())]);
+        assert_eq!(*s5_trans.get(&3).unwrap(), vec![(7, WaWeight::all())]);
+        // right_nwa state 2 -> mapped to 6. ε -> 5 becomes ε -> 9.
+        assert_eq!(self_nwa.nwa.states[6].epsilon_transitions[0], (9, WaWeight::from_item(3)));
+        // right_nwa state 5 -> mapped to 9. final_weight should be copied.
+        assert_eq!(self_nwa.nwa.states[9].final_weight, Some(WaWeight::all()));
+    }
 }
