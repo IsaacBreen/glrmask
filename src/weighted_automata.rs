@@ -1199,6 +1199,17 @@ impl Display for DWA {
     }
 }
 
+impl JSONConvertible for DWA {
+    fn to_json(&self) -> JSONNode {
+        todo!()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        todo!()
+    }
+}
+
+
 // --- Tests ---
 #[cfg(test)]
 mod tests {
