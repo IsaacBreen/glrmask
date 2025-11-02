@@ -27,9 +27,6 @@ pub struct AugmentedNwa {
     pub nwa: WaNWA,
     pub end_state: WaStateID,
     pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
-    /// Map from NWA state id (currently only the end_state is used) to sets of parser stacks.
-    /// Each parser stack is represented as a Vec<ParserStateID>.
-    pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
 }
 
 fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
@@ -94,14 +91,12 @@ pub fn build_augmented_nwa_from_characterization(
         nt_nodes.insert(nt, id);
     }
 
-    let mut end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
     let w_all = WaWeight::all();
 
     // Initial shifts: start --(initial_state)--> end_state
     for &(initial_state, shift_state) in &bb.initial_shifts {
         let ch = encode_symbol(initial_state)?;
         nwa.add_transition(start, ch, end_state, w_all.clone());
-        end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
     }
 
     // Initial reduces: chain of (len - 1) edges labeled by the initial_state, ending at the nt node.
@@ -163,10 +158,6 @@ pub fn build_augmented_nwa_from_characterization(
         for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
             let ch = encode_symbol(revealed_state)?;
             nwa.add_transition(src_nt, ch, end_state, w_all.clone());
-            end_map
-                .entry(end_state)
-                .or_default()
-                .insert(vec![revealed_state, goto_state, shift_state]);
         }
     }
 
@@ -175,7 +166,6 @@ pub fn build_augmented_nwa_from_characterization(
         nwa,
         end_state,
         nt_nodes,
-        end_map,
     })
 }
 
@@ -207,78 +197,23 @@ impl AugmentedNwa {
     ///   - Run `right`’s NWA on `left_stack` to get multiple (pos, right_stop, path_weight).
     ///   - Add an epsilon transition from `left_end_state` to the mapped `right_stop` with `path_weight`.
     ///   - From `right_stop`, find all `right` end states reachable (ignoring labels).
-    ///     For each such end state and each stack in `right.end_map[end_state]`:
-    ///       - prepend `left_stack[pos..]` to that right stack and insert it into `self.end_map`
-    ///         under the mapped end-state id.
     pub fn combine_right_into(
         &mut self,
         right: &AugmentedNwa,
         weight: &WaWeight,
     ) -> Result<(), AugmentedNwaBuildError> {
-        // Snapshot the original left end_map so we only iterate over "left" entries.
-        let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
-            self.end_map.clone();
-
         // Append-copy the right NWA into the left.
         let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
-
-        // Walk all (left end state, stacks) pairs.
-        for (left_end_state, stacks) in left_end_snapshot {
-            for left_stack in stacks {
-                // 1) Process the left stack through the right NWA.
-                let mut encoded: Vec<u16> = Vec::with_capacity(left_stack.len());
-                for &s in &left_stack {
-                    encoded.push(encode_symbol(s)?);
-                }
-                let stops = right.nwa.process_stack_u16(&encoded);
-
-                // 2) For each stop: add epsilon edge and propagate end_map stacks.
-                for (pos, right_stop_state, path_weight) in stops {
-                    // Map the right stop state into the left's id space.
-                    let mapped_stop = right_to_left[right_stop_state];
-                    // Combine the path weight with the provided weight.
-                    let combined_weight = &path_weight & weight;
-                    // Epsilon from the left end state to the mapped right stop state.
-                    self.nwa
-                        .add_epsilon_transition(left_end_state, mapped_stop, combined_weight);
- 
-                    // Reachable right end states from this right stop, ignoring labels.
-                    let reachable = right
-                        .nwa
-                        .reachable_states_ignoring_labels(right_stop_state);
-                    for r_state in reachable {
-                        if let Some(r_stacks) = right.end_map.get(&r_state) {
-                            let mapped_end = right_to_left[r_state];
-                            for r_stack in r_stacks {
-                                // Prepend the remainder of the left stack to the right stack.
-                                let mut combined: Vec<ParserStateID> =
-                                    left_stack[pos..].to_vec();
-                                combined.extend(r_stack.iter().cloned());
-                                self.end_map
-                                    .entry(mapped_end)
-                                    .or_default()
-                                    .insert(combined);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let mapped_right_start = right_to_left[right.nwa.start_state];
+        self.nwa.add_epsilon_transition(self.end_state, mapped_right_start, weight.clone());
+        // The new end state is the (mapped) end state of the right NWA.
+        self.end_state = right_to_left[right.end_state];
         Ok(())
     }
 
     /// Union of two augmented NWAs. `self` is modified to become the union.
     pub fn union_with(&mut self, other: &AugmentedNwa) {
         let mapping = self.nwa.append_copy(&other.nwa);
-
-        // Merge end_maps
-        for (other_end_state, stacks) in &other.end_map {
-            let mapped_end_state = mapping[*other_end_state];
-            self.end_map
-                .entry(mapped_end_state)
-                .or_default()
-                .extend(stacks.clone());
-        }
 
         // Create new start state with epsilon transitions to old start states
         let new_start = self.nwa.add_state();
@@ -291,7 +226,13 @@ impl AugmentedNwa {
             .add_epsilon_transition(new_start, old_other_start_mapped, WaWeight::all());
 
         self.nwa.start_state = new_start;
-        self.end_state = usize::MAX; // Invalidate single end_state
+        // Create a new single end state and connect old end states to it.
+        let new_end = self.nwa.add_state();
+        let old_self_end = self.end_state;
+        let old_other_end_mapped = mapping[other.end_state];
+        self.nwa.add_epsilon_transition(old_self_end, new_end, WaWeight::all());
+        self.nwa.add_epsilon_transition(old_other_end_mapped, new_end, WaWeight::all());
+        self.end_state = new_end;
     }
 }
 

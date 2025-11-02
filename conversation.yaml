@@ -12734,351 +12734,86 @@ local_system:
           pub fn precompute3(
               precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
               trie1_god: &Trie1GodWrapper,
-              tokenizer: &Regex,
+              _tokenizer: &Regex,
               parser: Option<&GLRParser>,
-              llm_vocab: Option<Arc<LLMVocab>>,
-              internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-              token_name_map: &BiBTreeMap<Terminal, usize>,
+              _llm_vocab: Option<Arc<LLMVocab>>,
+              _internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+              _token_name_map: &BiBTreeMap<Terminal, usize>,
               internal_max_llm_token: usize,
-              terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-              ignore_terminal_id: Option<TerminalID>,
+              _terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+              _ignore_terminal_id: Option<TerminalID>,
               _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
               config: &GrammarConstraintConfig,
               stage_vocab: &mut StageVocab,
           ) -> (Precomputed3, Trie3GodWrapper) {
-              crate::debug!(2, "Precomputing Trie 3 (template-driven)...");
-              let roots: Vec<PrecomputeNode1Index> = precomputed1.values().cloned().collect();
-              // assert!(!Trie::has_cycle(trie1_god, roots));
-              let mut intermediate_precomputed3 = BTreeMap::new();
-              let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
-
-              // Build per-terminal template subgraphs once in this arena.
-              let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
-              // for (tid, (start, end)) in &terminal_templates {
-              //     let terminal = token_name_map.get_by_right(&tid.0).unwrap();
-              //     println!("\n--- Intermediate Trie3 Template for terminal {}: ---", terminal);
-              //     println!("End node: {:?}", end);
-              //     let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-              //         .display_edge_keys_only()
-              //         .display_nodes()
-              //         .omit_depth()
-              //         ;
-              //     println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &options));
-              // }
-
-              if is_debug_level_enabled(2) {
-                  println!("\n--- Intermediate Trie3 Template Statistics ---");
-                  println!("{:<25} {:<5} {:>10} {:>10} {:>12}", "Terminal Name", "ID", "Nodes", "Edges", "Cyclic Nodes");
-                  println!("{:-<25} {:-<5} {:-<10} {:-<10} {:-<12}", "", "", "", "", "");
-
-                  let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
-                  sorted_templates.sort_by_key(|(tid, _)| *tid);
-
-                  for (tid, (start_node, _end_node)) in sorted_templates {
-                      let mut stats = crate::constraint_extra::PrecomputeStats::default();
-                      crate::constraint_extra::calculate_intermediate_stats3(
-                          &[*start_node],
-                          &mut stats,
-                          &intermediate_trie3_god,
-                      );
-                      let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
-
-                      let cyclic_nodes = IntermediatePrecomputeNode3::nodes_in_cycles(&intermediate_trie3_god, &[*start_node]);
-                      let cyclic_info = if cyclic_nodes.is_empty() {
-                          "No".to_string()
-                      } else {
-                          format!("Yes ({})", cyclic_nodes.len())
-                      };
-
-                      println!(
-                          "{:<25} {:<5} {:>10} {:>10} {:>12}",
-                          format!("'{}'", terminal_name),
-                          tid.0,
-                          stats.final_unique_nodes_count,
-                          stats.final_edges_count,
-                          cyclic_info
-                      );
-                  }
-                  println!("-----------------------------------------------------------------\n");
-
-                  // Aggregate stats across all templates: union nodes/edges and shared nodes count
-                  {
-                      use std::collections::{HashMap, HashSet};
-
-                      let mut union_nodes: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-                      let mut coverage: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
-
-                      for (_tid, (start_node, _end_node)) in &terminal_templates {
-                          let nodes = Trie::all_nodes(&intermediate_trie3_god, &[*start_node]);
-                          for n in nodes {
-                              union_nodes.insert(n);
-                              *coverage.entry(n).or_insert(0) += 1;
-                          }
-                      }
-
-                      let mut union_edges = 0usize;
-                      for n in &union_nodes {
-                          if let Some(g) = n.read(&intermediate_trie3_god) {
-                              for (_ek, dm) in g.children() {
-                                  union_edges += dm.len();
-                              }
-                          }
-                      }
-                      let shared_nodes = coverage.values().filter(|&&c| c > 1).count();
-                      let shared_pct = if union_nodes.is_empty() { 0.0 } else { (shared_nodes as f64) * 100.0 / (union_nodes.len() as f64) };
-
-                      println!("Union Across All Templates:");
-                      println!("  Unique nodes: {}", union_nodes.len());
-                      println!("  Total edges: {}", union_edges);
-                      println!("  Nodes shared by >= 2 templates: {} ({:.1}%)", shared_nodes, shared_pct);
-                      println!("--------------------------------------------\n");
-                  }
-              }
-
-              if is_debug_level_enabled(3) {
-                  println!("\n--- Terminal Template Paths ---");
-                  let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
-                  sorted_templates.sort_by_key(|(tid, _)| *tid);
-
-                  for (tid, (start_node, end_node)) in sorted_templates {
-                      let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
-                      println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
-
-                      let template_paths = IntermediatePrecomputeNode3::get_all_paths(
-                          &intermediate_trie3_god,
-                          &[start_node.clone()],
-                          |idx, _node| idx == *end_node
-                      );
-
-                      if template_paths.is_empty() {
-                          println!("  (No paths found to end node)");
-                      }
-
-                      for (_root_value, path_edges) in &template_paths {
-                          let edge_keys_str: Vec<_> = path_edges.iter()
-                              .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
-                              .map(|(ek, _, _)| format!("{}", ek))
-                              .collect();
-                          if !edge_keys_str.is_empty() {
-                              println!("  [{}]", edge_keys_str.join(", "));
-                          }
-                      }
-                  }
-                  println!("--- End Terminal Template Paths ---\n");
-              }
-
-              // Group tokenizer states by shared Trie1 root
-              let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
-              for (tokenizer_state_id, trie1_root) in precomputed1.iter() {
-                  trie1_roots_to_tokenizer_states.entry(trie1_root.clone()).or_default().push(*tokenizer_state_id);
-              }
-
-              // Create Trie3 roots and seed initial sets
-              let mut initial_values_for_map: Vec<(PrecomputeNode1Index, (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>))> = Vec::new();
-              let all_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
-              for (trie1_root, tokenizer_state_ids) in &trie1_roots_to_tokenizer_states {
-                  let trie3_root = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                  for tokenizer_state_id in tokenizer_state_ids {
-                      intermediate_precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
-                  }
-                  let mut seed = BTreeSet::new();
-                  seed.insert(trie3_root.clone());
-                  initial_values_for_map.push((trie1_root.clone(), (all_tokens.clone(), seed)));
-              }
-
-              // Shared end node for Trie1-end positions
-              let trie3_end = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
-
-              let trie1_roots_for_traversal: Vec<_> = initial_values_for_map.iter().map(|(idx, _)| *idx).collect();
-              let traversal_data = Trie::compute_traversal_data(&trie1_god, &trie1_roots_for_traversal)
-                  .expect("Failed to compute traversal data for trie1 in precompute3");
-
-              crate::debug!(2, "Entering precompute3 special_map_grouped");
-              Trie::special_map_grouped(
-                  &trie1_god,
-                  &traversal_data,
-                  initial_values_for_map,
-                  // step: merge current set into a single node, then attach the terminal template or direct LLM edges
-                  |(current_tokens, current_nodes_set), edge_grammar_token_opt, destinations_map| {
-                      // Merge current set into a single node with unconditional edges
-                      let merged = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                      for src in current_nodes_set.iter() {
-                          let inserter = EdgeInserter::new(
-                              &intermediate_trie3_god,
-                              src.as_arc().clone(),
-                              IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                          );
-                          inserter.try_destination(merged.clone()).expect("Failed to insert merge edge in Trie3 step");
-                      }
-
-                      let mut out = Vec::new();
-                      match edge_grammar_token_opt {
-                          Some(tid) => {
-                              // Copy the terminal's template and hook it after merged
-                              let (templ_start, templ_end) = terminal_templates.get(&tid).expect("template for terminal missing");
-                              let (copied_roots, id_map) = IntermediatePrecomputeNode3::deep_copy_subtrees_into(
-                                  &intermediate_trie3_god,
-                                  &intermediate_trie3_god,
-                                  &[*templ_start],
-                              );
-                              let copied_start = copied_roots.into_iter().next().unwrap();
-                              let copied_end = id_map.get(templ_end).unwrap_or(&copied_start).clone();
-
-                              // Connect merged -> copied_start unconditionally
-                              {
-                                  let inserter = EdgeInserter::new(
-                                      &intermediate_trie3_god,
-                                      merged.as_arc().clone(),
-                                      IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                                  );
-                                  inserter.try_destination(copied_start.clone()).expect("Failed to hook merged node to copied template start");
-                              }
-
-                              // For each destination in Trie1, fork a node from copied_end with LLM tokens on the edge.
-                              for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
-                                  let next_tokens = &*current_tokens & edge_bv;
-                                  if next_tokens.is_empty() { continue; }
-
-                                  let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                                  let inserter = EdgeInserter::new(
-                                      &intermediate_trie3_god,
-                                      copied_end.as_arc().clone(),
-                                      IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), (), |_, _| {}, |_, _| {}, |_, _| {},
-                                  );
-                                  let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge after template end");
-                                  let mut s = BTreeSet::new();
-                                  s.insert(actual);
-                                  out.push((dst_node_wrapper.clone(), (next_tokens, s)));
-                              }
-                          }
-                          None => {
-                              // No grammar token on this edge: fan out directly from merged with LLM-token edges.
-                              for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
-                                  let next_tokens = &*current_tokens & edge_bv;
-                                  if next_tokens.is_empty() { continue; }
-
-                                  let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                                  let inserter = EdgeInserter::new(
-                                      &intermediate_trie3_god,
-                                      merged.as_arc().clone(),
-                                      IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), (), |_, _| {}, |_, _| {}, |_, _| {},
-                                  );
-                                  let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge on None-terminal branch");
-                                  let mut s = BTreeSet::new();
-                                  s.insert(actual);
-                                  out.push((dst_node_wrapper.clone(), (next_tokens, s)));
-                              }
-                          }
-                      }
-                      out
-                  },
-                  // merge sets
-                  |s1: &mut (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>), s2: (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>)| {
-                      s1.0 |= &s2.0;
-                      s1.1.extend(s2.1.into_iter());
-                  },
-                  // process: when we reach Trie1 end, attach nodes to a shared trie3_end node and continue
-                  |precomputed_node_data, _, (tokens, nodes_set)| {
-                      if tokens.is_empty() {
-                          return false;
-                      }
-                      if precomputed_node_data.value.end {
-                          for src in nodes_set.iter() {
-                              let inserter = EdgeInserter::new(
-                                  &intermediate_trie3_god,
-                                  src.as_arc().clone(),
-                                  IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                              );
-                              inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge from nodes_set");
-                          }
-                      }
-                      true
-                  },
+              let parser = parser.unwrap();
+              let precomputed4_map = crate::precompute4::full_nwa::precompute4(
+                  parser,
+                  precomputed1,
+                  trie1_god,
               );
 
-              // Ensure that the only node with end == true is trie3_end
-              for node in Trie::all_nodes(&intermediate_trie3_god, &intermediate_precomputed3.values().cloned().collect::<Vec<_>>()) {
-                  let contents = &node.read(&intermediate_trie3_god).unwrap().value;
-                  if contents.end {
-                      assert_eq!(node, trie3_end);
+              let trie3_god = Trie3GodWrapper::new();
+              let mut precomputed3 = Precomputed3::new();
+              let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
+
+              for (sid, dwa) in precomputed4_map {
+                  if dwa.states.is_empty() {
+                      continue;
+                  }
+
+                  let mut dwa_to_trie_map: BTreeMap<usize, PrecomputeNode3Index> = BTreeMap::new();
+                  let leaf_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
+
+                  for (dwa_id, _) in dwa.states.iter().enumerate() {
+                      let trie_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
+                      dwa_to_trie_map.insert(dwa_id, trie_node);
+                  }
+
+                  let root_trie_node = *dwa_to_trie_map.get(&dwa.start_state).unwrap();
+                  precomputed3.insert(sid, root_trie_node);
+
+                  for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+                      let src_trie_node = *dwa_to_trie_map.get(&dwa_id).unwrap();
+
+                      if let Some(final_weight) = &dwa_state.final_weight {
+                          if !final_weight.is_empty() {
+                              let tokens = LLMTokenBV { inner: crate::datastructures::cache::intern_l1(final_weight.0.clone()) };
+                              let key = (0, tokens);
+                              let value = StateIDBV::max_ones();
+                              trie3_god.insert_edge_simple(src_trie_node, leaf_node, key, value);
+                          }
+                      }
+
+                      if let (Some(target_dwa_id), Some(trans_weight)) = (dwa_state.transitions.default, &dwa_state.trans_weight_default) {
+                          let dst_trie_node = *dwa_to_trie_map.get(&target_dwa_id).unwrap();
+                          let tokens = LLMTokenBV { inner: crate::datastructures::cache::intern_l1(trans_weight.0.clone()) };
+                          let mut all_parser_states = StateIDBV::zeros();
+                          all_parser_states.insert_range(0..=max_state_id);
+                          let mut consumed_states = StateIDBV::zeros();
+                          for (ch, _) in &dwa_state.transitions.exceptions {
+                              consumed_states.insert(*ch as usize);
+                          }
+                          let remaining_states = all_parser_states - &consumed_states;
+                          let key = (1, tokens);
+                          let value = remaining_states;
+                          if !value.is_empty() {
+                              trie3_god.insert_edge_simple(src_trie_node, dst_trie_node, key, value);
+                          }
+                      }
+
+                      for (ch, target_dwa_id) in &dwa_state.transitions.exceptions {
+                          if let Some(trans_weight) = dwa_state.trans_weights_exceptions.get(ch) {
+                              let dst_trie_node = *dwa_to_trie_map.get(target_dwa_id).unwrap();
+                              let tokens = LLMTokenBV { inner: crate::datastructures::cache::intern_l1(trans_weight.0.clone()) };
+                              let key = (1, tokens);
+                              let value = StateIDBV::from_iter(std::iter::once(*ch as usize));
+                              trie3_god.insert_edge_simple(src_trie_node, dst_trie_node, key, value);
+                          }
+                      }
                   }
               }
 
-              // --- New: Optimize intermediate trie before path processing ---
-              crate::debug!(2, "Optimizing intermediate trie3...");
-              let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-              let node_map = optimize_intermediate_trie3(
-                  &intermediate_roots,
-                  &intermediate_trie3_god,
-                  |_, node| node.value.end,
-                  &config.intermediate_trie3_main,
-              );
-              // Update the roots in the map after optimization
-              intermediate_roots = intermediate_roots.into_iter().map(|x| node_map.get(&x).cloned().unwrap_or(x)).collect();
-              for root in intermediate_precomputed3.values_mut() {
-                  if let Some(new_root) = node_map.get(root) {
-                      *root = new_root.clone();
-                  }
-              }
-
-              // println!("Intermediate trie3 before eliminating negative pops:");
-              // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-              //     .display_edge_keys_only()
-              //     .display_nodes()
-              //     .omit_depth()
-              //     ;
-              // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
-
-              // --- New: Path extraction, elimination, and trie rebuilding ---
-              crate::debug!(2, "Processing and rebuilding trie3 paths...");
-              Self::_process_and_rebuild_trie3_paths(
-                  &mut intermediate_precomputed3,
-                  &intermediate_trie3_god,
-              );
-              intermediate_roots = intermediate_precomputed3.values().cloned().collect();
-
-              // println!("Final intermediate trie3:");
-              // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-              //     .display_edge_keys_only()
-              //     .display_nodes()
-              //     .omit_depth()
-              //     ;
-              // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
-
-              crate::debug!(2, "Optimizing intermediate trie3 again...");
-              let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-              let node_map = optimize_intermediate_trie3(
-                  &intermediate_roots,
-                  &intermediate_trie3_god,
-                  |_, node| node.value.end,
-                  &config.intermediate_trie3_main,
-              );
-              // Update the roots in the map after optimization
-              intermediate_roots = intermediate_roots.into_iter().map(|x| node_map.get(&x).cloned().unwrap_or(x)).collect();
-              for root in intermediate_precomputed3.values_mut() {
-                  if let Some(new_root) = node_map.get(root) {
-                      *root = new_root.clone();
-                  }
-              }
-
-              // --- Convert intermediate trie to final Trie3 format ---
-              crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");
-              let (mut precomputed3, trie3_god) = Self::convert_intermediate_trie3_to_final(
-                  &intermediate_precomputed3,
-                  &intermediate_trie3_god,
-                  internal_max_llm_token,
-              );
-
-              // println!("Precompute3 trie before optimization:");
-              // Self::_dump_precomputed3(
-              //     &precomputed3,
-              //     &stage_vocab.internal_to_original,
-              //     &llm_vocab.as_ref().unwrap().llm_token_map,
-              //     &trie3_god,
-              // );
-
-              crate::debug!(2, "Finished precomputing Trie 3.");
-              let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
               optimize_trie3_size(&mut precomputed3, &trie3_god, &config.trie3, max_state_id, internal_max_llm_token, stage_vocab, parser.unwrap());
               (precomputed3, trie3_god)
           }
@@ -19408,90 +19143,13 @@ local_system:
           }
       }
 
-      impl JSONConvertible for SimpleBitset {
-          fn to_json(&self) -> JSONNode {
-              let ranges: Vec<JSONNode> = self.0.ranges().map(|r| {
-                  JSONNode::Array(vec![
-                      JSONNode::Int(r.start() as i64),
-                      JSONNode::Int(r.end() as i64),
-                  ])
-              }).collect();
-              JSONNode::Array(ranges)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              let arr = node.into_array()?;
-              let mut rsb = RangeSetBlaze::new();
-              for range_node in arr {
-                  let mut range_arr = range_node.into_array()?;
-                  if range_arr.len() != 2 {
-                      return Err("Range must be a 2-element array".to_string());
-                  }
-                  let end = range_arr.pop().unwrap().into_int()? as usize;
-                  let start = range_arr.pop().unwrap().into_int()? as usize;
-                  rsb.insert_range(start..=end);
-              }
-              Ok(SimpleBitset(rsb))
-          }
-      }
-
-      impl<T: JSONConvertible> JSONConvertible for U16Map<T> {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = BTreeMap::new();
-              obj.insert("exceptions".to_string(), self.exceptions.to_json());
-              obj.insert("default".to_string(), self.default.to_json());
-              JSONNode::Object(obj)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              let mut obj = node.into_object()?;
-              let exceptions = BTreeMap::<u16, T>::from_json(obj.remove("exceptions").ok_or("Missing 'exceptions' field")?)?;
-              let default = Option::<T>::from_json(obj.remove("default").ok_or("Missing 'default' field")?)?;
-              Ok(U16Map { exceptions, default })
-          }
-      }
-
-      impl JSONConvertible for DWAState {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = BTreeMap::new();
-              obj.insert("transitions".to_string(), self.transitions.to_json());
-              obj.insert("weight".to_string(), self.weight.to_json());
-              obj.insert("final_weight".to_string(), self.final_weight.to_json());
-              obj.insert("trans_weight_default".to_string(), self.trans_weight_default.to_json());
-              obj.insert("trans_weights_exceptions".to_string(), self.trans_weights_exceptions.to_json());
-              JSONNode::Object(obj)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              let mut obj = node.into_object()?;
-              let transitions = U16Map::<StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
-              let weight = Weight::from_json(obj.remove("weight").ok_or("Missing 'weight' field")?)?;
-              let final_weight = Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
-              let trans_weight_default = Option::<Weight>::from_json(obj.remove("trans_weight_default").ok_or("Missing 'trans_weight_default' field")?)?;
-              let trans_weights_exceptions = BTreeMap::<u16, Weight>::from_json(obj.remove("trans_weights_exceptions").ok_or("Missing 'trans_weights_exceptions' field")?)?;
-              Ok(DWAState {
-                  transitions,
-                  weight,
-                  final_weight,
-                  trans_weight_default,
-                  trans_weights_exceptions,
-              })
-          }
-      }
-
       impl JSONConvertible for DWA {
           fn to_json(&self) -> JSONNode {
-              let mut obj = BTreeMap::new();
-              obj.insert("states".to_string(), self.states.to_json());
-              obj.insert("start_state".to_string(), self.start_state.to_json());
-              JSONNode::Object(obj)
+              todo!()
           }
 
           fn from_json(node: JSONNode) -> Result<Self, String> {
-              let mut obj = node.into_object()?;
-              let states = Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
-              let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
-              Ok(DWA { states, start_state })
+              todo!()
           }
       }
 
@@ -19914,9 +19572,6 @@ local_system:
           pub nwa: WaNWA,
           pub end_state: WaStateID,
           pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
-          /// Map from NWA state id (currently only the end_state is used) to sets of parser stacks.
-          /// Each parser stack is represented as a Vec<ParserStateID>.
-          pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
       }
 
       fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
@@ -19981,14 +19636,12 @@ local_system:
               nt_nodes.insert(nt, id);
           }
 
-          let mut end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
           let w_all = WaWeight::all();
 
           // Initial shifts: start --(initial_state)--> end_state
           for &(initial_state, shift_state) in &bb.initial_shifts {
               let ch = encode_symbol(initial_state)?;
               nwa.add_transition(start, ch, end_state, w_all.clone());
-              end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
           }
 
           // Initial reduces: chain of (len - 1) edges labeled by the initial_state, ending at the nt node.
@@ -20050,10 +19703,6 @@ local_system:
               for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
                   let ch = encode_symbol(revealed_state)?;
                   nwa.add_transition(src_nt, ch, end_state, w_all.clone());
-                  end_map
-                      .entry(end_state)
-                      .or_default()
-                      .insert(vec![revealed_state, goto_state, shift_state]);
               }
           }
 
@@ -20062,7 +19711,6 @@ local_system:
               nwa,
               end_state,
               nt_nodes,
-              end_map,
           })
       }
 
@@ -20094,78 +19742,23 @@ local_system:
           ///   - Run `right`’s NWA on `left_stack` to get multiple (pos, right_stop, path_weight).
           ///   - Add an epsilon transition from `left_end_state` to the mapped `right_stop` with `path_weight`.
           ///   - From `right_stop`, find all `right` end states reachable (ignoring labels).
-          ///     For each such end state and each stack in `right.end_map[end_state]`:
-          ///       - prepend `left_stack[pos..]` to that right stack and insert it into `self.end_map`
-          ///         under the mapped end-state id.
           pub fn combine_right_into(
               &mut self,
               right: &AugmentedNwa,
               weight: &WaWeight,
           ) -> Result<(), AugmentedNwaBuildError> {
-              // Snapshot the original left end_map so we only iterate over "left" entries.
-              let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
-                  self.end_map.clone();
-
               // Append-copy the right NWA into the left.
               let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
-
-              // Walk all (left end state, stacks) pairs.
-              for (left_end_state, stacks) in left_end_snapshot {
-                  for left_stack in stacks {
-                      // 1) Process the left stack through the right NWA.
-                      let mut encoded: Vec<u16> = Vec::with_capacity(left_stack.len());
-                      for &s in &left_stack {
-                          encoded.push(encode_symbol(s)?);
-                      }
-                      let stops = right.nwa.process_stack_u16(&encoded);
-
-                      // 2) For each stop: add epsilon edge and propagate end_map stacks.
-                      for (pos, right_stop_state, path_weight) in stops {
-                          // Map the right stop state into the left's id space.
-                          let mapped_stop = right_to_left[right_stop_state];
-                          // Combine the path weight with the provided weight.
-                          let combined_weight = &path_weight & weight;
-                          // Epsilon from the left end state to the mapped right stop state.
-                          self.nwa
-                              .add_epsilon_transition(left_end_state, mapped_stop, combined_weight);
-       
-                          // Reachable right end states from this right stop, ignoring labels.
-                          let reachable = right
-                              .nwa
-                              .reachable_states_ignoring_labels(right_stop_state);
-                          for r_state in reachable {
-                              if let Some(r_stacks) = right.end_map.get(&r_state) {
-                                  let mapped_end = right_to_left[r_state];
-                                  for r_stack in r_stacks {
-                                      // Prepend the remainder of the left stack to the right stack.
-                                      let mut combined: Vec<ParserStateID> =
-                                          left_stack[pos..].to_vec();
-                                      combined.extend(r_stack.iter().cloned());
-                                      self.end_map
-                                          .entry(mapped_end)
-                                          .or_default()
-                                          .insert(combined);
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
+              let mapped_right_start = right_to_left[right.nwa.start_state];
+              self.nwa.add_epsilon_transition(self.end_state, mapped_right_start, weight.clone());
+              // The new end state is the (mapped) end state of the right NWA.
+              self.end_state = right_to_left[right.end_state];
               Ok(())
           }
 
           /// Union of two augmented NWAs. `self` is modified to become the union.
           pub fn union_with(&mut self, other: &AugmentedNwa) {
               let mapping = self.nwa.append_copy(&other.nwa);
-
-              // Merge end_maps
-              for (other_end_state, stacks) in &other.end_map {
-                  let mapped_end_state = mapping[*other_end_state];
-                  self.end_map
-                      .entry(mapped_end_state)
-                      .or_default()
-                      .extend(stacks.clone());
-              }
 
               // Create new start state with epsilon transitions to old start states
               let new_start = self.nwa.add_state();
@@ -20178,7 +19771,13 @@ local_system:
                   .add_epsilon_transition(new_start, old_other_start_mapped, WaWeight::all());
 
               self.nwa.start_state = new_start;
-              self.end_state = usize::MAX; // Invalidate single end_state
+              // Create a new single end state and connect old end states to it.
+              let new_end = self.nwa.add_state();
+              let old_self_end = self.end_state;
+              let old_other_end_mapped = mapping[other.end_state];
+              self.nwa.add_epsilon_transition(old_self_end, new_end, WaWeight::all());
+              self.nwa.add_epsilon_transition(old_other_end_mapped, new_end, WaWeight::all());
+              self.end_state = new_end;
           }
       }
 
@@ -20387,12 +19986,11 @@ local_system:
           let mut initial_nwa = WaNWA::new();
           let initial_state = initial_nwa.start_state;
           initial_nwa.set_final_weight(initial_state, WaWeight::all());
-          let initial_aug_nwa = AugmentedNwa {
+          let mut initial_aug_nwa = AugmentedNwa {
               terminal: TerminalID(usize::MAX),
               nwa: initial_nwa,
               end_state: initial_state,
               nt_nodes: BTreeMap::new(),
-              end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
           };
 
           let initial_values = vec![(reversed_trie_root, initial_aug_nwa)];
@@ -30716,18 +30314,9 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: |
-      impl JSONConvertible for DWA {
-          fn to_json(&self) -> JSONNode {
-              todo!()
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              todo!()
-          }
-      }
-    metadata:
-  - user: Implement this
+  - user: This one's relatively easy. Replace the entire implementation of precompute3
+      with one that just converts from the full NWA. You can actually discard the
+      end map in the augmented NWA; it's now irrelevant.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -30747,218 +30336,673 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to implement the JSON serialization for the `DWA` struct, followed by the git diff.
+      Of course. Here are the step-by-step instructions to refactor your precomputation logic, followed by the corresponding git diffs.
 
-      ### Step-by-step Instructions
+      ### Step-by-Step Instructions
 
-      1.  **Open `src/weighted_automata.rs`**.
+      #### 1. Simplify the Augmented NWA
 
-      2.  Locate the `impl Display for DWA` block. After this block, and before the existing `impl JSONConvertible for DWA` block, insert the following `JSONConvertible` implementations for `SimpleBitset`, `U16Map<T>`, and `DWAState`:
+      First, we'll remove the now-irrelevant `end_map` which tracks parser stacks. This simplifies the automaton composition logic significantly.
 
-          ```rust
-          impl JSONConvertible for SimpleBitset {
-              fn to_json(&self) -> JSONNode {
-                  let ranges: Vec<JSONNode> = self.0.ranges().map(|r| {
-                      JSONNode::Array(vec![
-                          JSONNode::Int(r.start() as i64),
-                          JSONNode::Int(r.end() as i64),
-                      ])
-                  }).collect();
-                  JSONNode::Array(ranges)
-              }
-          
-              fn from_json(node: JSONNode) -> Result<Self, String> {
-                  let arr = node.into_array()?;
-                  let mut rsb = RangeSetBlaze::new();
-                  for range_node in arr {
-                      let mut range_arr = range_node.into_array()?;
-                      if range_arr.len() != 2 {
-                          return Err("Range must be a 2-element array".to_string());
-                      }
-                      let end = range_arr.pop().unwrap().into_int()? as usize;
-                      let start = range_arr.pop().unwrap().into_int()? as usize;
-                      rsb.insert_range(start..=end);
-                  }
-                  Ok(SimpleBitset(rsb))
-              }
-          }
-          
-          impl<T: JSONConvertible> JSONConvertible for U16Map<T> {
-              fn to_json(&self) -> JSONNode {
-                  let mut obj = BTreeMap::new();
-                  obj.insert("exceptions".to_string(), self.exceptions.to_json());
-                  obj.insert("default".to_string(), self.default.to_json());
-                  JSONNode::Object(obj)
-              }
-          
-              fn from_json(node: JSONNode) -> Result<Self, String> {
-                  let mut obj = node.into_object()?;
-                  let exceptions = BTreeMap::<u16, T>::from_json(obj.remove("exceptions").ok_or("Missing 'exceptions' field")?)?;
-                  let default = Option::<T>::from_json(obj.remove("default").ok_or("Missing 'default' field")?)?;
-                  Ok(U16Map { exceptions, default })
-              }
-          }
-          
-          impl JSONConvertible for DWAState {
-              fn to_json(&self) -> JSONNode {
-                  let mut obj = BTreeMap::new();
-                  obj.insert("transitions".to_string(), self.transitions.to_json());
-                  obj.insert("weight".to_string(), self.weight.to_json());
-                  obj.insert("final_weight".to_string(), self.final_weight.to_json());
-                  obj.insert("trans_weight_default".to_string(), self.trans_weight_default.to_json());
-                  obj.insert("trans_weights_exceptions".to_string(), self.trans_weights_exceptions.to_json());
-                  JSONNode::Object(obj)
-              }
-          
-              fn from_json(node: JSONNode) -> Result<Self, String> {
-                  let mut obj = node.into_object()?;
-                  let transitions = U16Map::<StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
-                  let weight = Weight::from_json(obj.remove("weight").ok_or("Missing 'weight' field")?)?;
-                  let final_weight = Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
-                  let trans_weight_default = Option::<Weight>::from_json(obj.remove("trans_weight_default").ok_or("Missing 'trans_weight_default' field")?)?;
-                  let trans_weights_exceptions = BTreeMap::<u16, Weight>::from_json(obj.remove("trans_weights_exceptions").ok_or("Missing 'trans_weights_exceptions' field")?)?;
-                  Ok(DWAState {
-                      transitions,
-                      weight,
-                      final_weight,
-                      trans_weight_default,
-                      trans_weights_exceptions,
-                  })
-              }
-          }
-          ```
+      **File: `src/precompute4/augmented_nwa.rs`**
 
-      3.  Finally, replace the existing `impl JSONConvertible for DWA` block (which contains `todo!()`) with the following complete implementation:
+      1.  **Remove `end_map` field:** In the `AugmentedNwa` struct, delete the `end_map` field and its documentation comment.
 
-          ```rust
-          impl JSONConvertible for DWA {
-              fn to_json(&self) -> JSONNode {
-                  let mut obj = BTreeMap::new();
-                  obj.insert("states".to_string(), self.states.to_json());
-                  obj.insert("start_state".to_string(), self.start_state.to_json());
-                  JSONNode::Object(obj)
-              }
-          
-              fn from_json(node: JSONNode) -> Result<Self, String> {
-                  let mut obj = node.into_object()?;
-                  let states = Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
-                  let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
-                  Ok(DWA { states, start_state })
-              }
-          }
-          ```
+      2.  **Update NWA construction:** In the `build_augmented_nwa_from_characterization` function:
+          *   Delete the line `let mut end_map: BTreeMap<...> = BTreeMap::new();`.
+          *   Delete the two lines that call `end_map.entry(...).or_default().insert(...)`.
+          *   Remove the `end_map` field from the struct literal at the end of the function.
+
+      3.  **Rewrite automaton composition:** Replace the body of the `combine_right_into` function. The new logic will append the `right` NWA and add a single epsilon transition from the `end_state` of the current NWA to the start state of the `right` NWA. The combined NWA's new `end_state` will be the one from `right`.
+
+      4.  **Rewrite automaton union:** Replace the body of the `union_with` function. The new logic will create a new start state and a new end state, connecting the original start/end states of both automata to these new states via epsilon transitions.
+
+      #### 2. Update NWA Initialization
+
+      Next, adjust the initialization of the first NWA in the main precomputation logic to reflect the removal of `end_map`.
+
+      **File: `src/precompute4/full_nwa.rs`**
+
+      1.  **Update `initial_aug_nwa`:** In the `precompute4` function, find the creation of `initial_aug_nwa`. Remove the `end_map` field from the struct literal.
+
+      #### 3. Replace `precompute3` Implementation
+
+      Finally, replace the entire implementation of `precompute3` with a new one that calls the weighted automata logic (`precompute4`) and converts the resulting Deterministic Weighted Automata (DWA) into the final `Trie3` format.
+
+      **File: `src/constraint.rs`**
+
+      1.  **Replace function body:** Delete the entire body of the `precompute3` function.
+
+      2.  **Insert new implementation:** The new implementation will:
+          *   Call `precompute4` to get a map of `DWA`s.
+          *   For each `DWA`, create a corresponding `Trie3` structure.
+              *   Each DWA state maps to a `Trie3` node.
+              *   DWA transitions on a parser state `s` become `Trie3` edges with a pop count of 1 and a stack constraint for state `s`.
+              *   The `final_weight` of a DWA state (which contains allowed LLM token IDs) becomes a `Trie3` edge with a pop count of 0 leading to a shared leaf node.
+          *   The function will still call `optimize_trie3_size` at the end.
+          *   Parameters that are no longer used by this new logic will be prefixed with an underscore (`_`) to avoid compiler warnings.
 
       ### Git Diffs
 
+      Here are the git diffs to apply these changes.
+
       ```diff
-      --- a/src/weighted_automata.rs
-      +++ b/src/weighted_automata.rs
-      @@ -361,16 +361,85 @@
-           }
-       }
-       
-      +impl JSONConvertible for SimpleBitset {
-      +    fn to_json(&self) -> JSONNode {
-      +        let ranges: Vec<JSONNode> = self.0.ranges().map(|r| {
-      +            JSONNode::Array(vec![
-      +                JSONNode::Int(r.start() as i64),
-      +                JSONNode::Int(r.end() as i64),
-      +            ])
-      +        }).collect();
-      +        JSONNode::Array(ranges)
-      +    }
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1688,251 +1688,91 @@
+           pub fn precompute3(
+               precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+               trie1_god: &Trie1GodWrapper,
+      -        tokenizer: &Regex,
+      +        _tokenizer: &Regex,
+               parser: Option<&GLRParser>,
+      -        llm_vocab: Option<Arc<LLMVocab>>,
+      -        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+      -        token_name_map: &BiBTreeMap<Terminal, usize>,
+      +        _llm_vocab: Option<Arc<LLMVocab>>,
+      +        _internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+      +        _token_name_map: &BiBTreeMap<Terminal, usize>,
+               internal_max_llm_token: usize,
+      -        terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+      -        ignore_terminal_id: Option<TerminalID>,
+      +        _terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+      +        _ignore_terminal_id: Option<TerminalID>,
+               _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+               config: &GrammarConstraintConfig,
+               stage_vocab: &mut StageVocab,
+           ) -> (Precomputed3, Trie3GodWrapper) {
+      -        crate::debug!(2, "Precomputing Trie 3 (template-driven)...");
+      -        let roots: Vec<PrecomputeNode1Index> = precomputed1.values().cloned().collect();
+      -        // assert!(!Trie::has_cycle(trie1_god, roots));
+      -        let mut intermediate_precomputed3 = BTreeMap::new();
+      -        let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
+      -
+      -        // Build per-terminal template subgraphs once in this arena.
+      -        let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
+      -        // for (tid, (start, end)) in &terminal_templates {
+      -        //     let terminal = token_name_map.get_by_right(&tid.0).unwrap();
+      -        //     println!("\n--- Intermediate Trie3 Template for terminal {}: ---", terminal);
+      -        //     println!("End node: {:?}", end);
+      -        //     let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+      -        //         .display_edge_keys_only()
+      -        //         .display_nodes()
+      -        //         .omit_depth()
+      -        //         ;
+      -        //     println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &options));
+      -        // }
+      -
+      -        if is_debug_level_enabled(2) {
+      -            println!("\n--- Intermediate Trie3 Template Statistics ---");
+      -            println!("{:<25} {:<5} {:>10} {:>10} {:>12}", "Terminal Name", "ID", "Nodes", "Edges", "Cyclic Nodes");
+      -            println!("{:-<25} {:-<5} {:-<10} {:-<10} {:-<12}", "", "", "", "", "");
+      -
+      -            let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
+      -            sorted_templates.sort_by_key(|(tid, _)| *tid);
+      -
+      -            for (tid, (start_node, _end_node)) in sorted_templates {
+      -                let mut stats = crate::constraint_extra::PrecomputeStats::default();
+      -                crate::constraint_extra::calculate_intermediate_stats3(
+      -                    &[*start_node],
+      -                    &mut stats,
+      -                    &intermediate_trie3_god,
+      -                );
+      -                let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
+      -
+      -                let cyclic_nodes = IntermediatePrecomputeNode3::nodes_in_cycles(&intermediate_trie3_god, &[*start_node]);
+      -                let cyclic_info = if cyclic_nodes.is_empty() {
+      -                    "No".to_string()
+      -                } else {
+      -                    format!("Yes ({})", cyclic_nodes.len())
+      -                };
+      -
+      -                println!(
+      -                    "{:<25} {:<5} {:>10} {:>10} {:>12}",
+      -                    format!("'{}'", terminal_name),
+      -                    tid.0,
+      -                    stats.final_unique_nodes_count,
+      -                    stats.final_edges_count,
+      -                    cyclic_info
+      -                );
+      -            }
+      -            println!("-----------------------------------------------------------------\n");
+      -
+      -            // Aggregate stats across all templates: union nodes/edges and shared nodes count
+      -            {
+      -                use std::collections::{HashMap, HashSet};
+      -
+      -                let mut union_nodes: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
+      -                let mut coverage: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
+      -
+      -                for (_tid, (start_node, _end_node)) in &terminal_templates {
+      -                    let nodes = Trie::all_nodes(&intermediate_trie3_god, &[*start_node]);
+      -                    for n in nodes {
+      -                        union_nodes.insert(n);
+      -                        *coverage.entry(n).or_insert(0) += 1;
+      -                    }
+      -                }
+      -
+      -                let mut union_edges = 0usize;
+      -                for n in &union_nodes {
+      -                    if let Some(g) = n.read(&intermediate_trie3_god) {
+      -                        for (_ek, dm) in g.children() {
+      -                            union_edges += dm.len();
+      -                        }
+      -                    }
+      -                }
+      -                let shared_nodes = coverage.values().filter(|&&c| c > 1).count();
+      -                let shared_pct = if union_nodes.is_empty() { 0.0 } else { (shared_nodes as f64) * 100.0 / (union_nodes.len() as f64) };
+      -
+      -                println!("Union Across All Templates:");
+      -                println!("  Unique nodes: {}", union_nodes.len());
+      -                println!("  Total edges: {}", union_edges);
+      -                println!("  Nodes shared by >= 2 templates: {} ({:.1}%)", shared_nodes, shared_pct);
+      -                println!("--------------------------------------------\n");
+      -            }
+      -        }
+      -
+      -        if is_debug_level_enabled(3) {
+      -            println!("\n--- Terminal Template Paths ---");
+      -            let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
+      -            sorted_templates.sort_by_key(|(tid, _)| *tid);
+      -
+      -            for (tid, (start_node, end_node)) in sorted_templates {
+      -                let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
+      -                println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
+      -
+      -                let template_paths = IntermediatePrecomputeNode3::get_all_paths(
+      -                    &intermediate_trie3_god,
+      -                    &[start_node.clone()],
+      -                    |idx, _node| idx == *end_node
+      -                );
+      -
+      -                if template_paths.is_empty() {
+      -                    println!("  (No paths found to end node)");
+      -                }
+      -
+      -                for (_root_value, path_edges) in &template_paths {
+      -                    let edge_keys_str: Vec<_> = path_edges.iter()
+      -                        .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
+      -                        .map(|(ek, _, _)| format!("{}", ek))
+      -                        .collect();
+      -                    if !edge_keys_str.is_empty() {
+      -                        println!("  [{}]", edge_keys_str.join(", "));
+      -                    }
+      -                }
+      -            }
+      -            println!("--- End Terminal Template Paths ---\n");
+      -        }
+      -
+      -        // Group tokenizer states by shared Trie1 root
+      -        let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+      -        for (tokenizer_state_id, trie1_root) in precomputed1.iter() {
+      -            trie1_roots_to_tokenizer_states.entry(trie1_root.clone()).or_default().push(*tokenizer_state_id);
+      -        }
+      -
+      -        // Create Trie3 roots and seed initial sets
+      -        let mut initial_values_for_map: Vec<(PrecomputeNode1Index, (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>))> = Vec::new();
+      -        let all_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
+      -        for (trie1_root, tokenizer_state_ids) in &trie1_roots_to_tokenizer_states {
+      -            let trie3_root = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
+      -            for tokenizer_state_id in tokenizer_state_ids {
+      -                intermediate_precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
+      -            }
+      -            let mut seed = BTreeSet::new();
+      -            seed.insert(trie3_root.clone());
+      -            initial_values_for_map.push((trie1_root.clone(), (all_tokens.clone(), seed)));
+      -        }
+      -
+      -        // Shared end node for Trie1-end positions
+      -        let trie3_end = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
+      -
+      -        let trie1_roots_for_traversal: Vec<_> = initial_values_for_map.iter().map(|(idx, _)| *idx).collect();
+      -        let traversal_data = Trie::compute_traversal_data(&trie1_god, &trie1_roots_for_traversal)
+      -            .expect("Failed to compute traversal data for trie1 in precompute3");
+      -
+      -        crate::debug!(2, "Entering precompute3 special_map_grouped");
+      -        Trie::special_map_grouped(
+      -            &trie1_god,
+      -            &traversal_data,
+      -            initial_values_for_map,
+      -            // step: merge current set into a single node, then attach the terminal template or direct LLM edges
+      -            |(current_tokens, current_nodes_set), edge_grammar_token_opt, destinations_map| {
+      -                // Merge current set into a single node with unconditional edges
+      -                let merged = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
+      -                for src in current_nodes_set.iter() {
+      -                    let inserter = EdgeInserter::new(
+      -                        &intermediate_trie3_god,
+      -                        src.as_arc().clone(),
+      -                        IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+      -                    );
+      -                    inserter.try_destination(merged.clone()).expect("Failed to insert merge edge in Trie3 step");
+      -                }
+      -
+      -                let mut out = Vec::new();
+      -                match edge_grammar_token_opt {
+      -                    Some(tid) => {
+      -                        // Copy the terminal's template and hook it after merged
+      -                        let (templ_start, templ_end) = terminal_templates.get(&tid).expect("template for terminal missing");
+      -                        let (copied_roots, id_map) = IntermediatePrecomputeNode3::deep_copy_subtrees_into(
+      -                            &intermediate_trie3_god,
+      -                            &intermediate_trie3_god,
+      -                            &[*templ_start],
+      -                        );
+      -                        let copied_start = copied_roots.into_iter().next().unwrap();
+      -                        let copied_end = id_map.get(templ_end).unwrap_or(&copied_start).clone();
+      -
+      -                        // Connect merged -> copied_start unconditionally
+      -                        {
+      -                            let inserter = EdgeInserter::new(
+      -                                &intermediate_trie3_god,
+      -                                merged.as_arc().clone(),
+      -                                IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+      -                            );
+      -                            inserter.try_destination(copied_start.clone()).expect("Failed to hook merged node to copied template start");
+      -                        }
+      -
+      -                        // For each destination in Trie1, fork a node from copied_end with LLM tokens on the edge.
+      -                        for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+      -                            let next_tokens = &*current_tokens & edge_bv;
+      -                            if next_tokens.is_empty() { continue; }
+      -
+      -                            let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
+      -                            let inserter = EdgeInserter::new(
+      -                                &intermediate_trie3_god,
+      -                                copied_end.as_arc().clone(),
+      -                                IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), (), |_, _| {}, |_, _| {}, |_, _| {},
+      -                            );
+      -                            let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge after template end");
+      -                            let mut s = BTreeSet::new();
+      -                            s.insert(actual);
+      -                            out.push((dst_node_wrapper.clone(), (next_tokens, s)));
+      -                        }
+      -                    }
+      -                    None => {
+      -                        // No grammar token on this edge: fan out directly from merged with LLM-token edges.
+      -                        for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
+      -                            let next_tokens = &*current_tokens & edge_bv;
+      -                            if next_tokens.is_empty() { continue; }
+      -
+      -                            let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
+      -                            let inserter = EdgeInserter::new(
+      -                                &intermediate_trie3_god,
+      -                                merged.as_arc().clone(),
+      -                                IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), (), |_, _| {}, |_, _| {}, |_, _| {},
+      -                            );
+      -                            let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge on None-terminal branch");
+      -                            let mut s = BTreeSet::new();
+      -                            s.insert(actual);
+      -                            out.push((dst_node_wrapper.clone(), (next_tokens, s)));
+      -                        }
+      -                    }
+      -                }
+      -                out
+      -            },
+      -            // merge sets
+      -            |s1: &mut (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>), s2: (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>)| {
+      -                s1.0 |= &s2.0;
+      -                s1.1.extend(s2.1.into_iter());
+      -            },
+      -            // process: when we reach Trie1 end, attach nodes to a shared trie3_end node and continue
+      -            |precomputed_node_data, _, (tokens, nodes_set)| {
+      -                if tokens.is_empty() {
+      -                    return false;
+      -                }
+      -                if precomputed_node_data.value.end {
+      -                    for src in nodes_set.iter() {
+      -                        let inserter = EdgeInserter::new(
+      -                            &intermediate_trie3_god,
+      -                            src.as_arc().clone(),
+      -                            IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
+      -                        );
+      -                        inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge from nodes_set");
+      -                    }
+      -                }
+      -                true
+      -            },
+      -        );
+      -
+      -        // Ensure that the only node with end == true is trie3_end
+      -        for node in Trie::all_nodes(&intermediate_trie3_god, &intermediate_precomputed3.values().cloned().collect::<Vec<_>>()) {
+      -            let contents = &node.read(&intermediate_trie3_god).unwrap().value;
+      -            if contents.end {
+      -                assert_eq!(node, trie3_end);
+      -            }
+      -        }
+      -
+      -        // --- New: Optimize intermediate trie before path processing ---
+      -        crate::debug!(2, "Optimizing intermediate trie3...");
+      -        let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
+      -        let node_map = optimize_intermediate_trie3(
+      -            &intermediate_roots,
+      -            &intermediate_trie3_god,
+      -            |_, node| node.value.end,
+      -            &config.intermediate_trie3_main,
+      -        );
+      -        // Update the roots in the map after optimization
+      -        intermediate_roots = intermediate_roots.into_iter().map(|x| node_map.get(&x).cloned().unwrap_or(x)).collect();
+      -        for root in intermediate_precomputed3.values_mut() {
+      -            if let Some(new_root) = node_map.get(root) {
+      -                *root = new_root.clone();
+      -            }
+      -        }
+      -
+      -        // println!("Intermediate trie3 before eliminating negative pops:");
+      -        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+      -        //     .display_edge_keys_only()
+      -        //     .display_nodes()
+      -        //     .omit_depth()
+      -        //     ;
+      -        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+      -
+      -        // --- New: Path extraction, elimination, and trie rebuilding ---
+      -        crate::debug!(2, "Processing and rebuilding trie3 paths...");
+      -        Self::_process_and_rebuild_trie3_paths(
+      -            &mut intermediate_precomputed3,
+      -            &intermediate_trie3_god,
+      -        );
+      -        intermediate_roots = intermediate_precomputed3.values().cloned().collect();
+      -
+      -        // println!("Final intermediate trie3:");
+      -        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
+      -        //     .display_edge_keys_only()
+      -        //     .display_nodes()
+      -        //     .omit_depth()
+      -        //     ;
+      -        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
+      -
+      -        crate::debug!(2, "Optimizing intermediate trie3 again...");
+      -        let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
+      -        let node_map = optimize_intermediate_trie3(
+      -            &intermediate_roots,
+      -            &intermediate_trie3_god,
+      -            |_, node| node.value.end,
+      -            &config.intermediate_trie3_main,
+      -        );
+      -        // Update the roots in the map after optimization
+      -        intermediate_roots = intermediate_roots.into_iter().map(|x| node_map.get(&x).cloned().unwrap_or(x)).collect();
+      -        for root in intermediate_precomputed3.values_mut() {
+      -            if let Some(new_root) = node_map.get(root) {
+      -                *root = new_root.clone();
+      -            }
+      -        }
+      -
+      -        // --- Convert intermediate trie to final Trie3 format ---
+      -        crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");
+      -        let (mut precomputed3, trie3_god) = Self::convert_intermediate_trie3_to_final(
+      -            &intermediate_precomputed3,
+      -            &intermediate_trie3_god,
+      -            internal_max_llm_token,
+      -        );
+      -
+      -        // println!("Precompute3 trie before optimization:");
+      -        // Self::_dump_precomputed3(
+      -        //     &precomputed3,
+      -        //     &stage_vocab.internal_to_original,
+      -        //     &llm_vocab.as_ref().unwrap().llm_token_map,
+      -        //     &trie3_god,
+      -        // );
+      -
+      -        crate::debug!(2, "Finished precomputing Trie 3.");
+      -        let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
+      +        let parser = parser.unwrap();
+      +        let precomputed4_map = crate::precompute4::full_nwa::precompute4(
+      +            parser,
+      +            precomputed1,
+      +            trie1_god,
+      +        );
       +
-      +    fn from_json(node: JSONNode) -> Result<Self, String> {
-      +        let arr = node.into_array()?;
-      +        let mut rsb = RangeSetBlaze::new();
-      +        for range_node in arr {
-      +            let mut range_arr = range_node.into_array()?;
-      +            if range_arr.len() != 2 {
-      +                return Err("Range must be a 2-element array".to_string());
+      +        let trie3_god = Trie3GodWrapper::new();
+      +        let mut precomputed3 = Precomputed3::new();
+      +        let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
+      +
+      +        for (sid, dwa) in precomputed4_map {
+      +            if dwa.states.is_empty() {
+      +                continue;
       +            }
-      +            let end = range_arr.pop().unwrap().into_int()? as usize;
-      +            let start = range_arr.pop().unwrap().into_int()? as usize;
-      +            rsb.insert_range(start..=end);
+      +
+      +            let mut dwa_to_trie_map: BTreeMap<usize, PrecomputeNode3Index> = BTreeMap::new();
+      +            let leaf_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
+      +
+      +            for (dwa_id, _) in dwa.states.iter().enumerate() {
+      +                let trie_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
+      +                dwa_to_trie_map.insert(dwa_id, trie_node);
+      +            }
+      +
+      +            let root_trie_node = *dwa_to_trie_map.get(&dwa.start_state).unwrap();
+      +            precomputed3.insert(sid, root_trie_node);
+      +
+      +            for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+      +                let src_trie_node = *dwa_to_trie_map.get(&dwa_id).unwrap();
+      +
+      +                if let Some(final_weight) = &dwa_state.final_weight {
+      +                    if !final_weight.is_empty() {
+      +                        let tokens = LLMTokenBV { inner: crate::datastructures::cache::intern_l1(final_weight.0.clone()) };
+      +                        let key = (0, tokens);
+      +                        let value = StateIDBV::max_ones();
+      +                        trie3_god.insert_edge_simple(src_trie_node, leaf_node, key, value);
+      +                    }
+      +                }
+      +
+      +                if let (Some(target_dwa_id), Some(trans_weight)) = (dwa_state.transitions.default, &dwa_state.trans_weight_default) {
+      +                    let dst_trie_node = *dwa_to_trie_map.get(&target_dwa_id).unwrap();
+      +                    let tokens = LLMTokenBV { inner: crate::datastructures::cache::intern_l1(trans_weight.0.clone()) };
+      +                    let mut all_parser_states = StateIDBV::zeros();
+      +                    all_parser_states.insert_range(0..=max_state_id);
+      +                    let mut consumed_states = StateIDBV::zeros();
+      +                    for (ch, _) in &dwa_state.transitions.exceptions {
+      +                        consumed_states.insert(*ch as usize);
+      +                    }
+      +                    let remaining_states = all_parser_states - &consumed_states;
+      +                    let key = (1, tokens);
+      +                    let value = remaining_states;
+      +                    if !value.is_empty() {
+      +                        trie3_god.insert_edge_simple(src_trie_node, dst_trie_node, key, value);
+      +                    }
+      +                }
+      +
+      +                for (ch, target_dwa_id) in &dwa_state.transitions.exceptions {
+      +                    if let Some(trans_weight) = dwa_state.trans_weights_exceptions.get(ch) {
+      +                        let dst_trie_node = *dwa_to_trie_map.get(target_dwa_id).unwrap();
+      +                        let tokens = LLMTokenBV { inner: crate::datastructures::cache::intern_l1(trans_weight.0.clone()) };
+      +                        let key = (1, tokens);
+      +                        let value = StateIDBV::from_iter(std::iter::once(*ch as usize));
+      +                        trie3_god.insert_edge_simple(src_trie_node, dst_trie_node, key, value);
+      +                    }
+      +                }
+      +            }
       +        }
-      +        Ok(SimpleBitset(rsb))
-      +    }
-      +}
       +
-      +impl<T: JSONConvertible> JSONConvertible for U16Map<T> {
-      +    fn to_json(&self) -> JSONNode {
-      +        let mut obj = BTreeMap::new();
-      +        obj.insert("exceptions".to_string(), self.exceptions.to_json());
-      +        obj.insert("default".to_string(), self.default.to_json());
-      +        JSONNode::Object(obj)
-      +    }
-      +
-      +    fn from_json(node: JSONNode) -> Result<Self, String> {
-      +        let mut obj = node.into_object()?;
-      +        let exceptions = BTreeMap::<u16, T>::from_json(obj.remove("exceptions").ok_or("Missing 'exceptions' field")?)?;
-      +        let default = Option::<T>::from_json(obj.remove("default").ok_or("Missing 'default' field")?)?;
-      +        Ok(U16Map { exceptions, default })
-      +    }
-      +}
-      +
-      +impl JSONConvertible for DWAState {
-      +    fn to_json(&self) -> JSONNode {
-      +        let mut obj = BTreeMap::new();
-      +        obj.insert("transitions".to_string(), self.transitions.to_json());
-      +        obj.insert("weight".to_string(), self.weight.to_json());
-      +        obj.insert("final_weight".to_string(), self.final_weight.to_json());
-      +        obj.insert("trans_weight_default".to_string(), self.trans_weight_default.to_json());
-      +        obj.insert("trans_weights_exceptions".to_string(), self.trans_weights_exceptions.to_json());
-      +        JSONNode::Object(obj)
-      +    }
-      +
-      +    fn from_json(node: JSONNode) -> Result<Self, String> {
-      +        let mut obj = node.into_object()?;
-      +        let transitions = U16Map::<StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
-      +        let weight = Weight::from_json(obj.remove("weight").ok_or("Missing 'weight' field")?)?;
-      +        let final_weight = Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
-      +        let trans_weight_default = Option::<Weight>::from_json(obj.remove("trans_weight_default").ok_or("Missing 'trans_weight_default' field")?)?;
-      +        let trans_weights_exceptions = BTreeMap::<u16, Weight>::from_json(obj.remove("trans_weights_exceptions").ok_or("Missing 'trans_weights_exceptions' field")?)?;
-      +        Ok(DWAState {
-      +            transitions,
-      +            weight,
-      +            final_weight,
-      +            trans_weight_default,
-      +            trans_weights_exceptions,
-      +        })
-      +    }
-      +}
-      +
-       impl JSONConvertible for DWA {
-           fn to_json(&self) -> JSONNode {
-      -        todo!()
-      +        let mut obj = BTreeMap::new();
-      +        obj.insert("states".to_string(), self.states.to_json());
-      +        obj.insert("start_state".to_string(), self.start_state.to_json());
-      +        JSONNode::Object(obj)
+               optimize_trie3_size(&mut precomputed3, &trie3_god, &config.trie3, max_state_id, internal_max_llm_token, stage_vocab, parser.unwrap());
+               (precomputed3, trie3_god)
+           }
+
+      ``````diff
+      --- a/src/precompute4/augmented_nwa.rs
+      +++ b/src/precompute4/augmented_nwa.rs
+      @@ -16,10 +16,6 @@
+           pub nwa: WaNWA,
+           pub end_state: WaStateID,
+           pub nt_nodes: BTreeMap<NonTerminalID, WaStateID>,
+      -    /// Map from NWA state id (currently only the end_state is used) to sets of parser stacks.
+      -    /// Each parser stack is represented as a Vec<ParserStateID>.
+      -    pub end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>>,
+       }
+       
+       fn encode_symbol(id: ParserStateID) -> Result<u16, AugmentedNwaBuildError> {
+      @@ -60,14 +56,12 @@
+               nt_nodes.insert(nt, id);
            }
        
-           fn from_json(node: JSONNode) -> Result<Self, String> {
-      -        todo!()
-      +        let mut obj = node.into_object()?;
-      +        let states = Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
-      +        let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
-      +        Ok(DWA { states, start_state })
+      -    let mut end_map: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+           let w_all = WaWeight::all();
+       
+           // Initial shifts: start --(initial_state)--> end_state
+           for &(initial_state, shift_state) in &bb.initial_shifts {
+               let ch = encode_symbol(initial_state)?;
+               nwa.add_transition(start, ch, end_state, w_all.clone());
+      -        end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
+           }
+       
+           // Initial reduces: chain of (len - 1) edges labeled by the initial_state, ending at the nt node.
+      @@ -123,10 +117,6 @@
+               for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+                   let ch = encode_symbol(revealed_state)?;
+                   nwa.add_transition(src_nt, ch, end_state, w_all.clone());
+      -            end_map
+      -                .entry(end_state)
+      -                .or_default()
+      -                .insert(vec![revealed_state, goto_state, shift_state]);
+               }
+           }
+       
+      @@ -135,7 +125,6 @@
+               nwa,
+               end_state,
+               nt_nodes,
+      -        end_map,
+           })
+       }
+       
+      @@ -160,56 +149,17 @@
+           ///   - Run `right`’s NWA on `left_stack` to get multiple (pos, right_stop, path_weight).
+           ///   - Add an epsilon transition from `left_end_state` to the mapped `right_stop` with `path_weight`.
+           ///   - From `right_stop`, find all `right` end states reachable (ignoring labels).
+      -    ///     For each such end state and each stack in `right.end_map[end_state]`:
+      -    ///       - prepend `left_stack[pos..]` to that right stack and insert it into `self.end_map`
+      -    ///         under the mapped end-state id.
+           pub fn combine_right_into(
+               &mut self,
+               right: &AugmentedNwa,
+               weight: &WaWeight,
+           ) -> Result<(), AugmentedNwaBuildError> {
+      -        // Snapshot the original left end_map so we only iterate over "left" entries.
+      -        let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
+      -            self.end_map.clone();
+      -
+               // Append-copy the right NWA into the left.
+               let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
+      -
+      -        // Walk all (left end state, stacks) pairs.
+      -        for (left_end_state, stacks) in left_end_snapshot {
+      -            for left_stack in stacks {
+      -                // 1) Process the left stack through the right NWA.
+      -                let mut encoded: Vec<u16> = Vec::with_capacity(left_stack.len());
+      -                for &s in &left_stack {
+      -                    encoded.push(encode_symbol(s)?);
+      -                }
+      -                let stops = right.nwa.process_stack_u16(&encoded);
+      -
+      -                // 2) For each stop: add epsilon edge and propagate end_map stacks.
+      -                for (pos, right_stop_state, path_weight) in stops {
+      -                    // Map the right stop state into the left's id space.
+      -                    let mapped_stop = right_to_left[right_stop_state];
+      -                    // Combine the path weight with the provided weight.
+      -                    let combined_weight = &path_weight & weight;
+      -                    // Epsilon from the left end state to the mapped right stop state.
+      -                    self.nwa
+      -                        .add_epsilon_transition(left_end_state, mapped_stop, combined_weight);
+      - 
+      -                    // Reachable right end states from this right stop, ignoring labels.
+      -                    let reachable = right
+      -                        .nwa
+      -                        .reachable_states_ignoring_labels(right_stop_state);
+      -                    for r_state in reachable {
+      -                        if let Some(r_stacks) = right.end_map.get(&r_state) {
+      -                            let mapped_end = right_to_left[r_state];
+      -                            for r_stack in r_stacks {
+      -                                // Prepend the remainder of the left stack to the right stack.
+      -                                let mut combined: Vec<ParserStateID> =
+      -                                    left_stack[pos..].to_vec();
+      -                                combined.extend(r_stack.iter().cloned());
+      -                                self.end_map
+      -                                    .entry(mapped_end)
+      -                                    .or_default()
+      -                                    .insert(combined);
+      -                            }
+      -                        }
+      -                    }
+      -                }
+      -            }
+      -        }
+      +        let mapped_right_start = right_to_left[right.nwa.start_state];
+      +        self.nwa.add_epsilon_transition(self.end_state, mapped_right_start, weight.clone());
+      +        // The new end state is the (mapped) end state of the right NWA.
+      +        self.end_state = right_to_left[right.end_state];
+               Ok(())
+           }
+       
+      @@ -217,15 +167,6 @@
+           pub fn union_with(&mut self, other: &AugmentedNwa) {
+               let mapping = self.nwa.append_copy(&other.nwa);
+       
+      -        // Merge end_maps
+      -        for (other_end_state, stacks) in &other.end_map {
+      -            let mapped_end_state = mapping[*other_end_state];
+      -            self.end_map
+      -                .entry(mapped_end_state)
+      -                .or_default()
+      -                .extend(stacks.clone());
+      -        }
+      -
+               // Create new start state with epsilon transitions to old start states
+               let new_start = self.nwa.add_state();
+               let old_self_start = self.nwa.start_state;
+      @@ -236,7 +177,12 @@
+                   .add_epsilon_transition(new_start, old_other_start_mapped, WaWeight::all());
+       
+               self.nwa.start_state = new_start;
+      -        self.end_state = usize::MAX; // Invalidate single end_state
+      +        // Create a new single end state and connect old end states to it.
+      +        let new_end = self.nwa.add_state();
+      +        let old_self_end = self.end_state;
+      +        let old_other_end_mapped = mapping[other.end_state];
+      +        self.nwa.add_epsilon_transition(old_self_end, new_end, WaWeight::all());
+      +        self.nwa.add_epsilon_transition(old_other_end_mapped, new_end, WaWeight::all());
+      +        self.end_state = new_end;
            }
        }
        
+
+      ``````diff
+      --- a/src/precompute4/full_nwa.rs
+      +++ b/src/precompute4/full_nwa.rs
+      @@ -26,12 +26,11 @@
+           let mut initial_nwa = WaNWA::new();
+           let initial_state = initial_nwa.start_state;
+           initial_nwa.set_final_weight(initial_state, WaWeight::all());
+      -    let initial_aug_nwa = AugmentedNwa {
+      +    let mut initial_aug_nwa = AugmentedNwa {
+               terminal: TerminalID(usize::MAX),
+               nwa: initial_nwa,
+               end_state: initial_state,
+               nt_nodes: BTreeMap::new(),
+      -        end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
+           };
+       
+           let initial_values = vec![(reversed_trie_root, initial_aug_nwa)];
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/weighted_automata.rs
-      Applying patch to 'src/weighted_automata.rs' using custom patcher...
-      Successfully applied patch and wrote to src/weighted_automata.rs.
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/precompute4/augmented_nwa.rs
+      Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/precompute4/full_nwa.rs
+      Applying patch to 'src/precompute4/full_nwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/full_nwa.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement JSONConvertible for SimpleBitset,
-      U16Map, DWAState, and DWA in weighted_automata"'
+  - user: 'Changes committed with message: "Refactor: Replace precompute3 with direct
+      conversion from precompute4 and simplify AugmentedNwa structure"'
     metadata:
 ...

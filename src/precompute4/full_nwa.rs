@@ -34,12 +34,11 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
     let mut initial_nwa = WaNWA::new();
     let initial_state = initial_nwa.start_state;
     initial_nwa.set_final_weight(initial_state, WaWeight::all());
-    let initial_aug_nwa = AugmentedNwa {
+    let mut initial_aug_nwa = AugmentedNwa {
         terminal: TerminalID(usize::MAX),
         nwa: initial_nwa,
         end_state: initial_state,
         nt_nodes: BTreeMap::new(),
-        end_map: BTreeMap::from([(initial_state, BTreeSet::from([vec![]]))]),
     };
 
     let initial_values = vec![(reversed_trie_root, initial_aug_nwa)];

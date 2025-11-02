@@ -2505,351 +2505,86 @@ impl GrammarConstraint {
     pub fn precompute3(
         precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
         trie1_god: &Trie1GodWrapper,
-        tokenizer: &Regex,
+        _tokenizer: &Regex,
         parser: Option<&GLRParser>,
-        llm_vocab: Option<Arc<LLMVocab>>,
-        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        token_name_map: &BiBTreeMap<Terminal, usize>,
+        _llm_vocab: Option<Arc<LLMVocab>>,
+        _internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        _token_name_map: &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,
-        terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-        ignore_terminal_id: Option<TerminalID>,
+        _terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+        _ignore_terminal_id: Option<TerminalID>,
         _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         config: &GrammarConstraintConfig,
         stage_vocab: &mut StageVocab,
     ) -> (Precomputed3, Trie3GodWrapper) {
-        crate::debug!(2, "Precomputing Trie 3 (template-driven)...");
-        let roots: Vec<PrecomputeNode1Index> = precomputed1.values().cloned().collect();
-        // assert!(!Trie::has_cycle(trie1_god, roots));
-        let mut intermediate_precomputed3 = BTreeMap::new();
-        let intermediate_trie3_god = IntermediateTrie3GodWrapper::new();
-
-        // Build per-terminal template subgraphs once in this arena.
-        let terminal_templates = Self::build_terminal_trie3_templates(parser.unwrap(), &intermediate_trie3_god, internal_max_llm_token, &config.intermediate_trie3_templates);
-        // for (tid, (start, end)) in &terminal_templates {
-        //     let terminal = token_name_map.get_by_right(&tid.0).unwrap();
-        //     println!("\n--- Intermediate Trie3 Template for terminal {}: ---", terminal);
-        //     println!("End node: {:?}", end);
-        //     let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-        //         .display_edge_keys_only()
-        //         .display_nodes()
-        //         .omit_depth()
-        //         ;
-        //     println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &[*start], &options));
-        // }
-
-        if is_debug_level_enabled(2) {
-            println!("\n--- Intermediate Trie3 Template Statistics ---");
-            println!("{:<25} {:<5} {:>10} {:>10} {:>12}", "Terminal Name", "ID", "Nodes", "Edges", "Cyclic Nodes");
-            println!("{:-<25} {:-<5} {:-<10} {:-<10} {:-<12}", "", "", "", "", "");
-
-            let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
-            sorted_templates.sort_by_key(|(tid, _)| *tid);
-
-            for (tid, (start_node, _end_node)) in sorted_templates {
-                let mut stats = crate::constraint_extra::PrecomputeStats::default();
-                crate::constraint_extra::calculate_intermediate_stats3(
-                    &[*start_node],
-                    &mut stats,
-                    &intermediate_trie3_god,
-                );
-                let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
-
-                let cyclic_nodes = IntermediatePrecomputeNode3::nodes_in_cycles(&intermediate_trie3_god, &[*start_node]);
-                let cyclic_info = if cyclic_nodes.is_empty() {
-                    "No".to_string()
-                } else {
-                    format!("Yes ({})", cyclic_nodes.len())
-                };
-
-                println!(
-                    "{:<25} {:<5} {:>10} {:>10} {:>12}",
-                    format!("'{}'", terminal_name),
-                    tid.0,
-                    stats.final_unique_nodes_count,
-                    stats.final_edges_count,
-                    cyclic_info
-                );
-            }
-            println!("-----------------------------------------------------------------\n");
-
-            // Aggregate stats across all templates: union nodes/edges and shared nodes count
-            {
-                use std::collections::{HashMap, HashSet};
-
-                let mut union_nodes: HashSet<IntermediatePrecomputeNode3Index> = HashSet::new();
-                let mut coverage: HashMap<IntermediatePrecomputeNode3Index, usize> = HashMap::new();
-
-                for (_tid, (start_node, _end_node)) in &terminal_templates {
-                    let nodes = Trie::all_nodes(&intermediate_trie3_god, &[*start_node]);
-                    for n in nodes {
-                        union_nodes.insert(n);
-                        *coverage.entry(n).or_insert(0) += 1;
-                    }
-                }
-
-                let mut union_edges = 0usize;
-                for n in &union_nodes {
-                    if let Some(g) = n.read(&intermediate_trie3_god) {
-                        for (_ek, dm) in g.children() {
-                            union_edges += dm.len();
-                        }
-                    }
-                }
-                let shared_nodes = coverage.values().filter(|&&c| c > 1).count();
-                let shared_pct = if union_nodes.is_empty() { 0.0 } else { (shared_nodes as f64) * 100.0 / (union_nodes.len() as f64) };
-
-                println!("Union Across All Templates:");
-                println!("  Unique nodes: {}", union_nodes.len());
-                println!("  Total edges: {}", union_edges);
-                println!("  Nodes shared by >= 2 templates: {} ({:.1}%)", shared_nodes, shared_pct);
-                println!("--------------------------------------------\n");
-            }
-        }
-
-        if is_debug_level_enabled(3) {
-            println!("\n--- Terminal Template Paths ---");
-            let mut sorted_templates: Vec<_> = terminal_templates.iter().collect();
-            sorted_templates.sort_by_key(|(tid, _)| *tid);
-
-            for (tid, (start_node, end_node)) in sorted_templates {
-                let terminal_name = parser.unwrap().terminal_map.get_by_right(tid).unwrap();
-                println!("Template for terminal '{}' ({}):", terminal_name, tid.0);
-
-                let template_paths = IntermediatePrecomputeNode3::get_all_paths(
-                    &intermediate_trie3_god,
-                    &[start_node.clone()],
-                    |idx, _node| idx == *end_node
-                );
-
-                if template_paths.is_empty() {
-                    println!("  (No paths found to end node)");
-                }
-
-                for (_root_value, path_edges) in &template_paths {
-                    let edge_keys_str: Vec<_> = path_edges.iter()
-                        .filter(|(ek, _, _)| !matches!(ek, IntermediateTrie3EdgeKey::NoOp))
-                        .map(|(ek, _, _)| format!("{}", ek))
-                        .collect();
-                    if !edge_keys_str.is_empty() {
-                        println!("  [{}]", edge_keys_str.join(", "));
-                    }
-                }
-            }
-            println!("--- End Terminal Template Paths ---\n");
-        }
-
-        // Group tokenizer states by shared Trie1 root
-        let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
-        for (tokenizer_state_id, trie1_root) in precomputed1.iter() {
-            trie1_roots_to_tokenizer_states.entry(trie1_root.clone()).or_default().push(*tokenizer_state_id);
-        }
-
-        // Create Trie3 roots and seed initial sets
-        let mut initial_values_for_map: Vec<(PrecomputeNode1Index, (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>))> = Vec::new();
-        let all_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
-        for (trie1_root, tokenizer_state_ids) in &trie1_roots_to_tokenizer_states {
-            let trie3_root = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-            for tokenizer_state_id in tokenizer_state_ids {
-                intermediate_precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
-            }
-            let mut seed = BTreeSet::new();
-            seed.insert(trie3_root.clone());
-            initial_values_for_map.push((trie1_root.clone(), (all_tokens.clone(), seed)));
-        }
-
-        // Shared end node for Trie1-end positions
-        let trie3_end = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::leaf())));
-
-        let trie1_roots_for_traversal: Vec<_> = initial_values_for_map.iter().map(|(idx, _)| *idx).collect();
-        let traversal_data = Trie::compute_traversal_data(&trie1_god, &trie1_roots_for_traversal)
-            .expect("Failed to compute traversal data for trie1 in precompute3");
-
-        crate::debug!(2, "Entering precompute3 special_map_grouped");
-        Trie::special_map_grouped(
-            &trie1_god,
-            &traversal_data,
-            initial_values_for_map,
-            // step: merge current set into a single node, then attach the terminal template or direct LLM edges
-            |(current_tokens, current_nodes_set), edge_grammar_token_opt, destinations_map| {
-                // Merge current set into a single node with unconditional edges
-                let merged = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                for src in current_nodes_set.iter() {
-                    let inserter = EdgeInserter::new(
-                        &intermediate_trie3_god,
-                        src.as_arc().clone(),
-                        IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                    );
-                    inserter.try_destination(merged.clone()).expect("Failed to insert merge edge in Trie3 step");
-                }
-
-                let mut out = Vec::new();
-                match edge_grammar_token_opt {
-                    Some(tid) => {
-                        // Copy the terminal's template and hook it after merged
-                        let (templ_start, templ_end) = terminal_templates.get(&tid).expect("template for terminal missing");
-                        let (copied_roots, id_map) = IntermediatePrecomputeNode3::deep_copy_subtrees_into(
-                            &intermediate_trie3_god,
-                            &intermediate_trie3_god,
-                            &[*templ_start],
-                        );
-                        let copied_start = copied_roots.into_iter().next().unwrap();
-                        let copied_end = id_map.get(templ_end).unwrap_or(&copied_start).clone();
-
-                        // Connect merged -> copied_start unconditionally
-                        {
-                            let inserter = EdgeInserter::new(
-                                &intermediate_trie3_god,
-                                merged.as_arc().clone(),
-                                IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                            );
-                            inserter.try_destination(copied_start.clone()).expect("Failed to hook merged node to copied template start");
-                        }
-
-                        // For each destination in Trie1, fork a node from copied_end with LLM tokens on the edge.
-                        for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
-                            let next_tokens = &*current_tokens & edge_bv;
-                            if next_tokens.is_empty() { continue; }
-
-                            let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                            let inserter = EdgeInserter::new(
-                                &intermediate_trie3_god,
-                                copied_end.as_arc().clone(),
-                                IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), (), |_, _| {}, |_, _| {}, |_, _| {},
-                            );
-                            let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge after template end");
-                            let mut s = BTreeSet::new();
-                            s.insert(actual);
-                            out.push((dst_node_wrapper.clone(), (next_tokens, s)));
-                        }
-                    }
-                    None => {
-                        // No grammar token on this edge: fan out directly from merged with LLM-token edges.
-                        for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
-                            let next_tokens = &*current_tokens & edge_bv;
-                            if next_tokens.is_empty() { continue; }
-
-                            let next = IntermediatePrecomputeNode3Index::new(intermediate_trie3_god.insert(IntermediatePrecomputeNode3::new(IntermediatePrecomputedNodeContents3::internal())));
-                            let inserter = EdgeInserter::new(
-                                &intermediate_trie3_god,
-                                merged.as_arc().clone(),
-                                IntermediateTrie3EdgeKey::CheckLLM(edge_bv.clone()), (), |_, _| {}, |_, _| {}, |_, _| {},
-                            );
-                            let actual = inserter.try_destination(next.clone()).expect("Failed to add LLM edge on None-terminal branch");
-                            let mut s = BTreeSet::new();
-                            s.insert(actual);
-                            out.push((dst_node_wrapper.clone(), (next_tokens, s)));
-                        }
-                    }
-                }
-                out
-            },
-            // merge sets
-            |s1: &mut (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>), s2: (LLMTokenBV, BTreeSet<IntermediatePrecomputeNode3Index>)| {
-                s1.0 |= &s2.0;
-                s1.1.extend(s2.1.into_iter());
-            },
-            // process: when we reach Trie1 end, attach nodes to a shared trie3_end node and continue
-            |precomputed_node_data, _, (tokens, nodes_set)| {
-                if tokens.is_empty() {
-                    return false;
-                }
-                if precomputed_node_data.value.end {
-                    for src in nodes_set.iter() {
-                        let inserter = EdgeInserter::new(
-                            &intermediate_trie3_god,
-                            src.as_arc().clone(),
-                            IntermediateTrie3EdgeKey::NoOp, (), |_, _| {}, |_, _| {}, |_, _| {},
-                        );
-                        inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge from nodes_set");
-                    }
-                }
-                true
-            },
+        let parser = parser.unwrap();
+        let precomputed4_map = crate::precompute4::full_nwa::precompute4(
+            parser,
+            precomputed1,
+            trie1_god,
         );
 
-        // Ensure that the only node with end == true is trie3_end
-        for node in Trie::all_nodes(&intermediate_trie3_god, &intermediate_precomputed3.values().cloned().collect::<Vec<_>>()) {
-            let contents = &node.read(&intermediate_trie3_god).unwrap().value;
-            if contents.end {
-                assert_eq!(node, trie3_end);
+        let trie3_god = Trie3GodWrapper::new();
+        let mut precomputed3 = Precomputed3::new();
+        let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
+
+        for (sid, dwa) in precomputed4_map {
+            if dwa.states.is_empty() {
+                continue;
+            }
+
+            let mut dwa_to_trie_map: BTreeMap<usize, PrecomputeNode3Index> = BTreeMap::new();
+            let leaf_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
+
+            for (dwa_id, _) in dwa.states.iter().enumerate() {
+                let trie_node = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
+                dwa_to_trie_map.insert(dwa_id, trie_node);
+            }
+
+            let root_trie_node = *dwa_to_trie_map.get(&dwa.start_state).unwrap();
+            precomputed3.insert(sid, root_trie_node);
+
+            for (dwa_id, dwa_state) in dwa.states.iter().enumerate() {
+                let src_trie_node = *dwa_to_trie_map.get(&dwa_id).unwrap();
+
+                if let Some(final_weight) = &dwa_state.final_weight {
+                    if !final_weight.is_empty() {
+                        let tokens = LLMTokenBV { inner: crate::datastructures::cache::intern_l1(final_weight.0.clone()) };
+                        let key = (0, tokens);
+                        let value = StateIDBV::max_ones();
+                        trie3_god.insert_edge_simple(src_trie_node, leaf_node, key, value);
+                    }
+                }
+
+                if let (Some(target_dwa_id), Some(trans_weight)) = (dwa_state.transitions.default, &dwa_state.trans_weight_default) {
+                    let dst_trie_node = *dwa_to_trie_map.get(&target_dwa_id).unwrap();
+                    let tokens = LLMTokenBV { inner: crate::datastructures::cache::intern_l1(trans_weight.0.clone()) };
+                    let mut all_parser_states = StateIDBV::zeros();
+                    all_parser_states.insert_range(0..=max_state_id);
+                    let mut consumed_states = StateIDBV::zeros();
+                    for (ch, _) in &dwa_state.transitions.exceptions {
+                        consumed_states.insert(*ch as usize);
+                    }
+                    let remaining_states = all_parser_states - &consumed_states;
+                    let key = (1, tokens);
+                    let value = remaining_states;
+                    if !value.is_empty() {
+                        trie3_god.insert_edge_simple(src_trie_node, dst_trie_node, key, value);
+                    }
+                }
+
+                for (ch, target_dwa_id) in &dwa_state.transitions.exceptions {
+                    if let Some(trans_weight) = dwa_state.trans_weights_exceptions.get(ch) {
+                        let dst_trie_node = *dwa_to_trie_map.get(target_dwa_id).unwrap();
+                        let tokens = LLMTokenBV { inner: crate::datastructures::cache::intern_l1(trans_weight.0.clone()) };
+                        let key = (1, tokens);
+                        let value = StateIDBV::from_iter(std::iter::once(*ch as usize));
+                        trie3_god.insert_edge_simple(src_trie_node, dst_trie_node, key, value);
+                    }
+                }
             }
         }
 
-        // --- New: Optimize intermediate trie before path processing ---
-        crate::debug!(2, "Optimizing intermediate trie3...");
-        let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        let node_map = optimize_intermediate_trie3(
-            &intermediate_roots,
-            &intermediate_trie3_god,
-            |_, node| node.value.end,
-            &config.intermediate_trie3_main,
-        );
-        // Update the roots in the map after optimization
-        intermediate_roots = intermediate_roots.into_iter().map(|x| node_map.get(&x).cloned().unwrap_or(x)).collect();
-        for root in intermediate_precomputed3.values_mut() {
-            if let Some(new_root) = node_map.get(root) {
-                *root = new_root.clone();
-            }
-        }
-
-        // println!("Intermediate trie3 before eliminating negative pops:");
-        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-        //     .display_edge_keys_only()
-        //     .display_nodes()
-        //     .omit_depth()
-        //     ;
-        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
-
-        // --- New: Path extraction, elimination, and trie rebuilding ---
-        crate::debug!(2, "Processing and rebuilding trie3 paths...");
-        Self::_process_and_rebuild_trie3_paths(
-            &mut intermediate_precomputed3,
-            &intermediate_trie3_god,
-        );
-        intermediate_roots = intermediate_precomputed3.values().cloned().collect();
-
-        // println!("Final intermediate trie3:");
-        // let mut options = crate::datastructures::trie::PrettyPrintOptions::default()
-        //     .display_edge_keys_only()
-        //     .display_nodes()
-        //     .omit_depth()
-        //     ;
-        // println!("{}", Trie::pretty_print_with_options(&intermediate_trie3_god, &intermediate_roots.iter().cloned().collect::<Vec<_>>(), &options));
-
-        crate::debug!(2, "Optimizing intermediate trie3 again...");
-        let mut intermediate_roots: Vec<_> = intermediate_precomputed3.values().cloned().collect();
-        let node_map = optimize_intermediate_trie3(
-            &intermediate_roots,
-            &intermediate_trie3_god,
-            |_, node| node.value.end,
-            &config.intermediate_trie3_main,
-        );
-        // Update the roots in the map after optimization
-        intermediate_roots = intermediate_roots.into_iter().map(|x| node_map.get(&x).cloned().unwrap_or(x)).collect();
-        for root in intermediate_precomputed3.values_mut() {
-            if let Some(new_root) = node_map.get(root) {
-                *root = new_root.clone();
-            }
-        }
-
-        // --- Convert intermediate trie to final Trie3 format ---
-        crate::debug!(2, "Converting intermediate trie3 to final Trie3 format...");
-        let (mut precomputed3, trie3_god) = Self::convert_intermediate_trie3_to_final(
-            &intermediate_precomputed3,
-            &intermediate_trie3_god,
-            internal_max_llm_token,
-        );
-
-        // println!("Precompute3 trie before optimization:");
-        // Self::_dump_precomputed3(
-        //     &precomputed3,
-        //     &stage_vocab.internal_to_original,
-        //     &llm_vocab.as_ref().unwrap().llm_token_map,
-        //     &trie3_god,
-        // );
-
-        crate::debug!(2, "Finished precomputing Trie 3.");
-        let max_state_id = parser.unwrap().table.keys().map(|s| s.0).max().unwrap_or(0);
         optimize_trie3_size(&mut precomputed3, &trie3_god, &config.trie3, max_state_id, internal_max_llm_token, stage_vocab, parser.unwrap());
         (precomputed3, trie3_god)
     }
