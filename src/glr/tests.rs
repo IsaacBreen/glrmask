@@ -50,8 +50,8 @@ fn test_inline_null_productions_complex() {
 
     let expected = vec![
         prod("start'", vec![nt("s_prime")]),
+        prod("start'", vec![]),
         prod("s_prime", vec![nt("s")]),
-        prod("s_prime", vec![]),
         prod("s", vec![nt("s"), t("A")]),
         prod("s", vec![t("A")]),
     ];

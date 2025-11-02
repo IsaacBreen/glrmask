@@ -6670,7 +6670,6 @@ local_system:
           if true {
               // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
               // println!("Before inlining nullable productions: Number of productions: {}", productions.len());
-              println!("Productions: {:?}", productions);
               productions = inline_null_productions(&productions);
               // println!("After inlining nullable productions:\n{}", display_productions(&productions));
               // println!("After inlining nullable productions: Number of productions: {}", productions.len());
@@ -6803,7 +6802,7 @@ local_system:
       use crate::profiler::{print_summary, print_summary_flat};
 
     src/glr/tests.rs: |
-      use crate::glr::analyze::{self, filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
+      use crate::glr::analyze::{self, filter_productions_by_reachability, inline_null_productions, remove_productions_with_undefined_nonterminals};
       use crate::glr::grammar::{nt, prod, regex_name, t, Production, Symbol};
       use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ProcessTokenAdvancedConfig};
       use crate::glr::table::{generate_glr_parser, TerminalID};
@@ -6826,6 +6825,49 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+      #[test]
+      fn test_inline_null_productions_complex() {
+          // Productions:
+          // start' -> s_prime
+          // s_prime -> s
+          // s -> s A
+          // s -> ε
+          //
+          // Nullable non-terminals: s, s_prime, start'
+          //
+          // Expected output after inlining:
+          // start' -> s_prime (untouched, as it's the start production)
+          // s_prime -> s (from original)
+          // s_prime -> ε (from s_prime -> s, where s is nullable)
+          // s -> s A (from original)
+          // s -> A (from s -> s A, where s is nullable)
+          //
+          // The original `s -> ε` is removed.
+          // The generated `s_prime -> ε` is kept because `s_prime` is in the RHS of the start production.
+          let productions = vec![
+              prod("start'", vec![nt("s_prime")]),
+              prod("s_prime", vec![nt("s")]),
+              prod("s", vec![nt("s"), t("A")]),
+              prod("s", vec![]),
+          ];
+
+          let expected = vec![
+              prod("start'", vec![nt("s_prime")]),
+              prod("s_prime", vec![nt("s")]),
+              prod("s_prime", vec![]),
+              prod("s", vec![nt("s"), t("A")]),
+              prod("s", vec![t("A")]),
+          ];
+
+          let result = analyze::inline_null_productions(&productions);
+
+          // Compare as sets to ignore ordering differences.
+          let result_set: BTreeSet<_> = result.into_iter().collect();
+          let expected_set: BTreeSet<_> = expected.into_iter().collect();
+
+          assert_eq!(result_set, expected_set);
+      }
 
       #[test]
       fn test_repetition_no_eof_1() {
@@ -8820,49 +8862,10 @@ local_system:
           }
 
           let nullability = compute_nonterminal_nullability(productions);
-          let mut seen = BTreeSet::<Production>::new();
-          let mut out = Vec::<Production>::new();
-
-          let start_prod = productions[0].clone();
-          seen.insert(start_prod.clone());
-          out.push(start_prod);
-
-          for prod in &productions[1..] {
-              // Generate all RHS variants by taking the Cartesian product of options for each symbol.
-              let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
-                  let sym_options = match sym {
-                      Symbol::Terminal(_) => vec![Some(sym.clone())],
-                      Symbol::NonTerminal(nt) => match nullability.get(nt) {
-                          Some(Nullability::Null) => vec![None], // Must be removed
-                          Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
-                          _ => vec![Some(sym.clone())], // Must be kept
-                      },
-                  };
-
-                  acc.into_iter().flat_map(|variant| {
-                      sym_options.iter().map(move |opt| {
-                          let mut new_variant = variant.clone();
-                          if let Some(s) = opt {
-                              new_variant.push(s.clone());
-                          }
-                          new_variant
-                      })
-                  }).collect()
-              });
-
-              for rhs in rhs_variants {
-                  let new_prod = Production { lhs: prod.lhs.clone(), rhs };
-                  if seen.insert(new_prod.clone()) {
-                      out.push(new_prod);
-                  }
-              }
-          }
-
-          let start_rhs_nts: BTreeSet<_> = productions[0]
-              .rhs
+          let nullable_nonterminals: BTreeSet<_> = nullability
               .iter()
-              .filter_map(|s| {
-                  if let Symbol::NonTerminal(nt) = s {
+              .filter_map(|(nt, status)| {
+                  if matches!(status, Nullability::Nullable | Nullability::Null) {
                       Some(nt.clone())
                   } else {
                       None
@@ -8870,9 +8873,62 @@ local_system:
               })
               .collect();
 
-          out.into_iter()
-              .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
-              .collect()
+          let mut out = Vec::<Production>::new();
+          let mut seen = BTreeSet::<Production>::new();
+
+          for prod in productions {
+              // Generate all RHS variants by taking the Cartesian product of options for each symbol.
+              let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+                  let sym_options = match sym {
+                      Symbol::Terminal(_) => vec![Some(sym.clone())],
+                      Symbol::NonTerminal(nt) => {
+                          if nullable_nonterminals.contains(nt) {
+                              vec![Some(sym.clone()), None] // Optional
+                          } else {
+                              vec![Some(sym.clone())] // Must be kept
+                          }
+                      }
+                  };
+
+                  acc.into_iter()
+                      .flat_map(|variant| {
+                          sym_options.iter().map(move |opt| {
+                              let mut new_variant = variant.clone();
+                              if let Some(s) = opt {
+                                  new_variant.push(s.clone());
+                              }
+                              new_variant
+                          })
+                      })
+                      .collect()
+              });
+
+              for rhs in rhs_variants {
+                  // Don't add original epsilon productions back, and don't add newly generated ones.
+                  if rhs.is_empty() {
+                      continue;
+                  }
+                  let new_prod = Production { lhs: prod.lhs.clone(), rhs };
+                  if seen.insert(new_prod.clone()) {
+                      out.push(new_prod);
+                  }
+              }
+          }
+
+          // If the original start symbol was nullable, the new grammar must accept the empty string.
+          // The standard way is to add an epsilon production for the start symbol.
+          let start_symbol = &productions[0].lhs;
+          if nullable_nonterminals.contains(start_symbol) {
+              let epsilon_prod = Production {
+                  lhs: start_symbol.clone(),
+                  rhs: vec![],
+              };
+              if seen.insert(epsilon_prod.clone()) {
+                  out.push(epsilon_prod);
+              }
+          }
+
+          out
       }
 
       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
@@ -14710,15 +14766,11 @@ local_system:
           // println!("After direct right recursion:\n{}", display_productions(&productions));
 
           if true {
-              // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
-              // println!("Before inlining nullable productions: Number of productions: {}", productions.len());
-              println!("Productions: {:?}", productions);
+              let original_start_symbol = productions[0].lhs.clone();
               productions = inline_null_productions(&productions);
-              // println!("After inlining nullable productions:\n{}", display_productions(&productions));
-              // println!("After inlining nullable productions: Number of productions: {}", productions.len());
-              // Assert that there are no nullable productions left.
+              // Assert that there are no nullable productions left, except for the start symbol.
               for p in &productions {
-                  assert!(!p.rhs.is_empty(), "Nullable production still present after inlining: {:?}", p);
+                  assert!(!p.rhs.is_empty() || p.lhs == original_start_symbol, "Nullable production still present after inlining for non-start symbol: {:?}", p);
               }
           }
           if false {
@@ -14897,8 +14949,8 @@ local_system:
 
           let expected = vec![
               prod("start'", vec![nt("s_prime")]),
+              prod("start'", vec![]),
               prod("s_prime", vec![nt("s")]),
-              prod("s_prime", vec![]),
               prod("s", vec![nt("s"), t("A")]),
               prod("s", vec![t("A")]),
           ];
@@ -16150,7 +16202,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -22878,7 +22930,6 @@ messages:
           if true {
               // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
               // println!("Before inlining nullable productions: Number of productions: {}", productions.len());
-              println!("Productions: {:?}", productions);
               productions = inline_null_productions(&productions);
               // println!("After inlining nullable productions:\n{}", display_productions(&productions));
               // println!("After inlining nullable productions: Number of productions: {}", productions.len());
@@ -23016,7 +23067,7 @@ messages:
       filename: src/glr/table.rs
   - user: |-
       ```rust "src/glr/tests.rs"
-      use crate::glr::analyze::{self, filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
+      use crate::glr::analyze::{self, filter_productions_by_reachability, inline_null_productions, remove_productions_with_undefined_nonterminals};
       use crate::glr::grammar::{nt, prod, regex_name, t, Production, Symbol};
       use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ProcessTokenAdvancedConfig};
       use crate::glr::table::{generate_glr_parser, TerminalID};
@@ -23039,6 +23090,49 @@ messages:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+      #[test]
+      fn test_inline_null_productions_complex() {
+          // Productions:
+          // start' -> s_prime
+          // s_prime -> s
+          // s -> s A
+          // s -> ε
+          //
+          // Nullable non-terminals: s, s_prime, start'
+          //
+          // Expected output after inlining:
+          // start' -> s_prime (untouched, as it's the start production)
+          // s_prime -> s (from original)
+          // s_prime -> ε (from s_prime -> s, where s is nullable)
+          // s -> s A (from original)
+          // s -> A (from s -> s A, where s is nullable)
+          //
+          // The original `s -> ε` is removed.
+          // The generated `s_prime -> ε` is kept because `s_prime` is in the RHS of the start production.
+          let productions = vec![
+              prod("start'", vec![nt("s_prime")]),
+              prod("s_prime", vec![nt("s")]),
+              prod("s", vec![nt("s"), t("A")]),
+              prod("s", vec![]),
+          ];
+
+          let expected = vec![
+              prod("start'", vec![nt("s_prime")]),
+              prod("s_prime", vec![nt("s")]),
+              prod("s_prime", vec![]),
+              prod("s", vec![nt("s"), t("A")]),
+              prod("s", vec![t("A")]),
+          ];
+
+          let result = analyze::inline_null_productions(&productions);
+
+          // Compare as sets to ignore ordering differences.
+          let result_set: BTreeSet<_> = result.into_iter().collect();
+          let expected_set: BTreeSet<_> = expected.into_iter().collect();
+
+          assert_eq!(result_set, expected_set);
+      }
 
       #[test]
       fn test_repetition_no_eof_1() {
@@ -24271,11 +24365,35 @@ messages:
       ```
     metadata:
       filename: src/glr/tests.rs
-  - user: |-
-      Add a test of inline_null_productions with these productions:
-      ```rust
-      Productions: [Production { lhs: NonTerminal("start'"), rhs: [NonTerminal(NonTerminal("s_prime"))] }, Production { lhs: NonTerminal("s_prime"), rhs: [NonTerminal(NonTerminal("s"))] }, Production { lhs: NonTerminal("s"), rhs: [NonTerminal(NonTerminal("s")), Terminal(RegexName("A"))] }, Production { lhs: NonTerminal("s"), rhs: [] }]
-      ```
+  - user: |+
+      [DEBUG] 2] src/glr/table.rs:1455: Validating initial grammar
+      [DEBUG] 2] src/glr/table.rs:1461: Removing productions with undefined non-terminals
+      Productions: [Production { lhs: NonTerminal("S'"), rhs: [NonTerminal(NonTerminal("S")), Terminal(RegexName("$"))] }, Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("A")), NonTerminal(NonTerminal("B"))] }, Production { lhs: NonTerminal("A"), rhs: [Terminal(RegexName("x"))] }, Production { lhs: NonTerminal("A"), rhs: [] }, Production { lhs: NonTerminal("B"), rhs: [Terminal(RegexName("x"))] }, Production { lhs: NonTerminal("B"), rhs: [] }]
+
+
+      thread 'glr::tests::test_epsilon_rules_ambiguity' (39669383) panicked at src/glr/table.rs:1483:13:
+      Nullable production still present after inlining: Production { lhs: NonTerminal("S"), rhs: [] }
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::glr::table::generate_glr_parser_with_maps
+                   at ./src/glr/table.rs:1483:13
+         3: sep1::glr::table::generate_glr_parser_with_terminal_map
+                   at ./src/glr/table.rs:1573:5
+         4: sep1::glr::table::generate_glr_parser
+                   at ./src/glr/table.rs:1568:5
+         5: sep1::glr::tests::test_epsilon_rules_ambiguity
+                   at ./src/glr/tests.rs:619:18
+         6: sep1::glr::tests::test_epsilon_rules_ambiguity::{{closure}}
+                   at ./src/glr/tests.rs:605:34
+         7: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         8: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -24295,144 +24413,340 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I will add a new test case to `src/glr/tests.rs` to verify the behavior of the `inline_null_productions` function with a specific grammar that involves chained nullable non-terminals.
+      This is a classic issue when dealing with grammars that can derive the empty string (epsilon). The process of "inlining" or eliminating epsilon productions is meant to create an equivalent grammar without rules of the form `A -> ε`. However, if the language itself contains the empty string (i.e., the start symbol is nullable), this fact must be preserved.
+
+      The panic you're seeing is because the `inline_null_productions` function was preserving epsilon-productions for certain non-terminals, but a later assertion in the parser generation pipeline expected all such productions to be gone.
+
+      The fix involves three parts:
+      1.  Correcting `inline_null_productions` to a more standard algorithm. The new version will remove all epsilon productions, and then, only if the original grammar's start symbol was nullable, it will add a single `start -> ε` rule back. This correctly preserves the language while cleaning up the grammar.
+      2.  Updating the assertion in the parser generator to be aware of this exception for the start symbol.
+      3.  Fixing a unit test that was written against the old, incorrect behavior of `inline_null_productions`.
+
+      Here are the step-by-step instructions to apply the fix.
 
       ### Step-by-step Instructions
 
-      1.  **Modify `src/glr/tests.rs`:**
-          *   First, update the `use` statement at the top of the file to import `inline_null_productions` from the `analyze` module. This makes the function available within the test file.
-          *   Next, add a new test function named `test_inline_null_productions_complex` to the end of the file. This test will define a grammar with nullable rules, specify the expected output after inlining, and assert that the function produces the correct set of productions.
+      1.  **File: `src/glr/analyze.rs`**
+          -   Replace the entire `inline_null_productions` function with the corrected implementation below. This new version correctly handles all productions and only re-introduces an epsilon rule for the start symbol if necessary.
 
-          Specifically:
-          a.  In `src/glr/tests.rs`, change this line:
-              ```rust
-              use crate::glr::analyze::{self, filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
-              ```
-              to this (adding `inline_null_productions`):
-              ```rust
-              use crate::glr::analyze::{self, filter_productions_by_reachability, inline_null_productions, remove_productions_with_undefined_nonterminals};
-              ```
-
-          b.  Append the following test function to the end of `src/glr/tests.rs`:
-              ```rust
-              #[test]
-              fn test_inline_null_productions_complex() {
-                  // Productions:
-                  // start' -> s_prime
-                  // s_prime -> s
-                  // s -> s A
-                  // s -> ε
-                  //
-                  // Nullable non-terminals: s, s_prime, start'
-                  //
-                  // Expected output after inlining:
-                  // start' -> s_prime (untouched, as it's the start production)
-                  // s_prime -> s (from original)
-                  // s_prime -> ε (from s_prime -> s, where s is nullable)
-                  // s -> s A (from original)
-                  // s -> A (from s -> s A, where s is nullable)
-                  //
-                  // The original `s -> ε` is removed.
-                  // The generated `s_prime -> ε` is kept because `s_prime` is in the RHS of the start production.
-                  let productions = vec![
-                      prod("start'", vec![nt("s_prime")]),
-                      prod("s_prime", vec![nt("s")]),
-                      prod("s", vec![nt("s"), t("A")]),
-                      prod("s", vec![]),
-                  ];
-
-                  let expected = vec![
-                      prod("start'", vec![nt("s_prime")]),
-                      prod("s_prime", vec![nt("s")]),
-                      prod("s_prime", vec![]),
-                      prod("s", vec![nt("s"), t("A")]),
-                      prod("s", vec![t("A")]),
-                  ];
-
-                  let result = analyze::inline_null_productions(&productions);
-
-                  // Compare as sets to ignore ordering differences.
-                  let result_set: BTreeSet<_> = result.into_iter().collect();
-                  let expected_set: BTreeSet<_> = expected.into_iter().collect();
-
-                  assert_eq!(result_set, expected_set);
+          ```rust
+          pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
+              if productions.is_empty() {
+                  return Vec::new();
               }
-              ```
+          
+              let nullability = compute_nonterminal_nullability(productions);
+              let nullable_nonterminals: BTreeSet<_> = nullability
+                  .iter()
+                  .filter_map(|(nt, status)| {
+                      if matches!(status, Nullability::Nullable | Nullability::Null) {
+                          Some(nt.clone())
+                      } else {
+                          None
+                      }
+                  })
+                  .collect();
+          
+              let mut out = Vec::<Production>::new();
+              let mut seen = BTreeSet::<Production>::new();
+          
+              for prod in productions {
+                  // Generate all RHS variants by taking the Cartesian product of options for each symbol.
+                  let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+                      let sym_options = match sym {
+                          Symbol::Terminal(_) => vec![Some(sym.clone())],
+                          Symbol::NonTerminal(nt) => {
+                              if nullable_nonterminals.contains(nt) {
+                                  vec![Some(sym.clone()), None] // Optional
+                              } else {
+                                  vec![Some(sym.clone())] // Must be kept
+                              }
+                          }
+                      };
+          
+                      acc.into_iter()
+                          .flat_map(|variant| {
+                              sym_options.iter().map(move |opt| {
+                                  let mut new_variant = variant.clone();
+                                  if let Some(s) = opt {
+                                      new_variant.push(s.clone());
+                                  }
+                                  new_variant
+                              })
+                          })
+                          .collect()
+                  });
+          
+                  for rhs in rhs_variants {
+                      // Don't add original epsilon productions back, and don't add newly generated ones.
+                      if rhs.is_empty() {
+                          continue;
+                      }
+                      let new_prod = Production {
+                          lhs: prod.lhs.clone(),
+                          rhs,
+                      };
+                      if seen.insert(new_prod.clone()) {
+                          out.push(new_prod);
+                      }
+                  }
+              }
+          
+              // If the original start symbol was nullable, the new grammar must accept the empty string.
+              // The standard way is to add an epsilon production for the start symbol.
+              let start_symbol = &productions[0].lhs;
+              if nullable_nonterminals.contains(start_symbol) {
+                  let epsilon_prod = Production {
+                      lhs: start_symbol.clone(),
+                      rhs: vec![],
+                  };
+                  if seen.insert(epsilon_prod.clone()) {
+                      out.push(epsilon_prod);
+                  }
+              }
+          
+              out
+          }
+          ```
+
+      2.  **File: `src/glr/table.rs`**
+          -   In the `generate_glr_parser_with_maps` function, locate the block that calls `inline_null_productions`.
+          -   Modify the assertion to allow an epsilon production *only* for the original start symbol. This makes the check consistent with the corrected inlining logic.
+
+          ```rust
+          // Around line 1479
+          if true {
+              // ...
+              let original_start_symbol = productions[0].lhs.clone();
+              productions = inline_null_productions(&productions);
+              // ...
+              // Assert that there are no nullable productions left, except for the start symbol.
+              for p in &productions {
+                  assert!(!p.rhs.is_empty() || p.lhs == original_start_symbol, "Nullable production still present after inlining for non-start symbol: {:?}", p);
+              }
+          }
+          ```
+
+      3.  **File: `src/glr/tests.rs`**
+          -   In the test `test_inline_null_productions_complex`, the `expected` productions list needs to be updated to reflect the correct behavior of the new `inline_null_productions` function. The new expectation is that an epsilon production for the *start symbol* (`start'`) is created, not for an intermediate one (`s_prime`).
+
+          ```rust
+          // Around line 58
+          #[test]
+          fn test_inline_null_productions_complex() {
+              // ... (productions definition is unchanged) ...
+              let productions = vec![
+                  prod("start'", vec![nt("s_prime")]),
+                  prod("s_prime", vec![nt("s")]),
+                  prod("s", vec![nt("s"), t("A")]),
+                  prod("s", vec![]),
+              ];
+          
+              let expected = vec![
+                  prod("start'", vec![nt("s_prime")]),
+                  prod("start'", vec![]),
+                  prod("s_prime", vec![nt("s")]),
+                  prod("s", vec![nt("s"), t("A")]),
+                  prod("s", vec![t("A")]),
+              ];
+          
+              let result = analyze::inline_null_productions(&productions);
+              // ... (rest of the test is unchanged) ...
+          }
+          ```
+
+      These changes will resolve the panic and align the epsilon-production elimination logic with standard compiler theory, making the parser generation process more robust.
 
       ### Git Diffs
 
-      Here is the git diff for the changes.
+      Here are the changes in `git diff` format.
 
       ```diff
-      diff --git a/src/glr/tests.rs b/src/glr/tests.rs
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -688,69 +688,69 @@
+           productions.extend(new_productions);
+       }
+       
+      -pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
+      +pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
+           if productions.is_empty() {
+               return Vec::new();
+           }
+       
+           let nullability = compute_nonterminal_nullability(productions);
+      -    let mut seen = BTreeSet::<Production>::new();
+      -    let mut out = Vec::<Production>::new();
+      -
+      -    let start_prod = productions[0].clone();
+      -    seen.insert(start_prod.clone());
+      -    out.push(start_prod);
+      -
+      -    for prod in &productions[1..] {
+      +    let nullable_nonterminals: BTreeSet<_> = nullability
+      +        .iter()
+      +        .filter_map(|(nt, status)| {
+      +            if matches!(status, Nullability::Nullable | Nullability::Null) {
+      +                Some(nt.clone())
+      +            } else {
+      +                None
+      +            }
+      +        })
+      +        .collect();
+      +
+      +    let mut out = Vec::<Production>::new();
+      +    let mut seen = BTreeSet::<Production>::new();
+      +
+      +    for prod in productions {
+               // Generate all RHS variants by taking the Cartesian product of options for each symbol.
+               let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+                   let sym_options = match sym {
+                       Symbol::Terminal(_) => vec![Some(sym.clone())],
+      -                Symbol::NonTerminal(nt) => match nullability.get(nt) {
+      -                    Some(Nullability::Null) => vec![None], // Must be removed
+      -                    Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
+      -                    _ => vec![Some(sym.clone())], // Must be kept
+      -                },
+      +                Symbol::NonTerminal(nt) => {
+      +                    if nullable_nonterminals.contains(nt) {
+      +                        vec![Some(sym.clone()), None] // Optional
+      +                    } else {
+      +                        vec![Some(sym.clone())] // Must be kept
+      +                    }
+      +                }
+                   };
+       
+      -            acc.into_iter().flat_map(|variant| {
+      -                sym_options.iter().map(move |opt| {
+      -                    let mut new_variant = variant.clone();
+      -                    if let Some(s) = opt {
+      -                        new_variant.push(s.clone());
+      -                    }
+      -                    new_variant
+      +            acc.into_iter()
+      +                .flat_map(|variant| {
+      +                    sym_options.iter().map(move |opt| {
+      +                        let mut new_variant = variant.clone();
+      +                        if let Some(s) = opt {
+      +                            new_variant.push(s.clone());
+      +                        }
+      +                        new_variant
+      +                    })
+                       })
+      -            }).collect()
+      +                .collect()
+               });
+       
+               for rhs in rhs_variants {
+      +            // Don't add original epsilon productions back, and don't add newly generated ones.
+      +            if rhs.is_empty() {
+      +                continue;
+      +            }
+                   let new_prod = Production { lhs: prod.lhs.clone(), rhs };
+                   if seen.insert(new_prod.clone()) {
+                       out.push(new_prod);
+                   }
+               }
+           }
+       
+      -    let start_rhs_nts: BTreeSet<_> = productions[0]
+      -        .rhs
+      -        .iter()
+      -        .filter_map(|s| {
+      -            if let Symbol::NonTerminal(nt) = s {
+      -                Some(nt.clone())
+      -            } else {
+      -                None
+      -            }
+      -        })
+      -        .collect();
+      -
+      -    out.into_iter()
+      -        .filter(|p| !p.rhs.is_empty() || start_rhs_nts.contains(&p.lhs))
+      -        .collect()
+      +    // If the original start symbol was nullable, the new grammar must accept the empty string.
+      +    // The standard way is to add an epsilon production for the start symbol.
+      +    let start_symbol = &productions[0].lhs;
+      +    if nullable_nonterminals.contains(start_symbol) {
+      +        let epsilon_prod = Production {
+      +            lhs: start_symbol.clone(),
+      +            rhs: vec![],
+      +        };
+      +        if seen.insert(epsilon_prod.clone()) {
+      +            out.push(epsilon_prod);
+      +        }
+      +    }
+      +
+      +    out
+       }
+       
+       pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
+
+      ```
+      ```diff
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -1477,15 +1477,13 @@
+           // println!("Before recursion resolution:\n{}", display_productions(&productions));
+           // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+           crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+           // println!("After direct right recursion:\n{}", display_productions(&productions));
+       
+           if true {
+      -        // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+      -        // println!("Before inlining nullable productions: Number of productions: {}", productions.len());
+      +        let original_start_symbol = productions[0].lhs.clone();
+               productions = inline_null_productions(&productions);
+      -        // println!("After inlining nullable productions:\n{}", display_productions(&productions));
+      -        // println!("After inlining nullable productions: Number of productions: {}", productions.len());
+      -        // Assert that there are no nullable productions left.
+      +        // Assert that there are no nullable productions left, except for the start symbol.
+               for p in &productions {
+      -            assert!(!p.rhs.is_empty(), "Nullable production still present after inlining: {:?}", p);
+      +            assert!(!p.rhs.is_empty() || p.lhs == original_start_symbol, "Nullable production still present after inlining for non-start symbol: {:?}", p);
+               }
+           }
+           if false {
+
+      ```
+      ```diff
       --- a/src/glr/tests.rs
       +++ b/src/glr/tests.rs
-      @@ -1,4 +1,4 @@
-      -use crate::glr::analyze::{self, filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
-      +use crate::glr::analyze::{self, filter_productions_by_reachability, inline_null_productions, remove_productions_with_undefined_nonterminals};
-       use crate::glr::grammar::{nt, prod, regex_name, t, Production, Symbol};
-       use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ProcessTokenAdvancedConfig};
-       use crate::glr::table::{generate_glr_parser, TerminalID};
-      @@ -561,3 +561,40 @@
-       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
-       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
-       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-      +
-      +#[test]
-      +fn test_inline_null_productions_complex() {
-      +    // Productions:
-      +    // start' -> s_prime
-      +    // s_prime -> s
-      +    // s -> s A
-      +    // s -> ε
-      +    //
-      +    // Nullable non-terminals: s, s_prime, start'
-      +    //
-      +    // Expected output after inlining:
-      +    // start' -> s_prime (untouched, as it's the start production)
-      +    // s_prime -> s (from original)
-      +    // s_prime -> ε (from s_prime -> s, where s is nullable)
-      +    // s -> s A (from original)
-      +    // s -> A (from s -> s A, where s is nullable)
-      +    //
-      +    // The original `s -> ε` is removed.
-      +    // The generated `s_prime -> ε` is kept because `s_prime` is in the RHS of the start production.
-      +    let productions = vec![
-      +        prod("start'", vec![nt("s_prime")]),
-      +        prod("s_prime", vec![nt("s")]),
-      +        prod("s", vec![nt("s"), t("A")]),
-      +        prod("s", vec![]),
-      +    ];
-      +
-      +    let expected = vec![
-      +        prod("start'", vec![nt("s_prime")]),
-      +        prod("s_prime", vec![nt("s")]),
-      +        prod("s_prime", vec![]),
-      +        prod("s", vec![nt("s"), t("A")]),
-      +        prod("s", vec![t("A")]),
-      +    ];
-      +
-      +    let result = analyze::inline_null_productions(&productions);
-      +
-      +    // Compare as sets to ignore ordering differences.
-      +    let result_set: BTreeSet<_> = result.into_iter().collect();
-      +    let expected_set: BTreeSet<_> = expected.into_iter().collect();
-      +
-      +    assert_eq!(result_set, expected_set);
-      +}
+      @@ -74,10 +74,10 @@
+       
+           let expected = vec![
+               prod("start'", vec![nt("s_prime")]),
+      +        prod("start'", vec![]),
+               prod("s_prime", vec![nt("s")]),
+      -        prod("s_prime", vec![]),
+               prod("s", vec![nt("s"), t("A")]),
+               prod("s", vec![t("A")]),
+           ];
+       
+           let result = analyze::inline_null_productions(&productions);
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+
+      --- Processing Diff Block 3 ---
       Identified target file: src/glr/tests.rs
       Applying patch to 'src/glr/tests.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/tests.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Add complex test case for inline_null_productions
-      in GLR analysis"'
+  - user: 'Changes committed with message: "Fix: Allow epsilon production for nullable
+      start symbol after inline_null_productions"'
     metadata:
 ...
