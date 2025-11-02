@@ -1802,6 +1802,7 @@ impl GrammarConstraint {
                 precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
+                precomputed4: BTreeMap::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -1860,6 +1861,12 @@ impl GrammarConstraint {
             &mut precompute3_vocab,
         );
 
+        let precomputed4 = if config.run_precompute4 {
+            precompute4(&parser, &precomputed1, &trie1_god)
+        } else {
+            BTreeMap::new()
+        };
+
         // After precompute3, vocab may have changed due to optimizations. Remap other structures that use internal LLM token IDs.
         let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
         for (original_id, old_internal_id) in &precompute3_vocab_before.original_to_internal {
@@ -1917,6 +1924,7 @@ impl GrammarConstraint {
             precomputed1,
             precomputed2,
             precomputed3,
+            precomputed4,
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches,
