@@ -1702,7 +1702,7 @@ local_system:
       use crate::precompute4::characterize::{
           compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
       };
-      use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight};
+      use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight, StateID};
 
       /// Error that can occur while building an AugmentedNwa.
       #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1943,6 +1943,8 @@ local_system:
               let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
                   self.end_map.clone();
 
+              let mut new_end_map: BTreeMap<StateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+
               // Append-copy the right NWA into the left.
               let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
 
@@ -1978,7 +1980,7 @@ local_system:
                                       let mut combined: Vec<ParserStateID> =
                                           left_stack[pos..].to_vec();
                                       combined.extend(r_stack.iter().cloned());
-                                      self.end_map
+                                      new_end_map
                                           .entry(mapped_end)
                                           .or_default()
                                           .insert(combined);
@@ -1988,6 +1990,7 @@ local_system:
                       }
                   }
               }
+              self.end_map = new_end_map;
               Ok(())
           }
 
@@ -2144,14 +2147,7 @@ local_system:
 
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
-              // The combination should not change the end_map because processing a stack on the
-              // ignore NWA yields no stops. The only change is appending unreachable states.
-              assert_eq!(lhs.nwa.states.len(), original_state_count + rhs.nwa.states.len());
-              assert_eq!(lhs.end_map, original_end_map);
-
-              // Verify no new epsilon transitions were added to the original end state.
-              let original_end_state = &lhs.nwa.states[original_end_state_id];
-              assert!(original_end_state.epsilon_transitions.is_empty());
+              todo!()
           }
       }
     src/precompute4/characterize.rs: |
@@ -4233,7 +4229,7 @@ local_system:
       use crate::precompute4::characterize::{
           compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
       };
-      use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight};
+      use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight, StateID};
 
       /// Error that can occur while building an AugmentedNwa.
       #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4474,7 +4470,7 @@ local_system:
               let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
                   self.end_map.clone();
 
-              let mut new_end_map = BTreeMap::new();
+              let mut new_end_map: BTreeMap<StateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
 
               // Append-copy the right NWA into the left.
               let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
@@ -4488,15 +4484,6 @@ local_system:
                           encoded.push(encode_symbol(s)?);
                       }
                       let stops = right.nwa.process_stack_u16(&encoded);
-
-                      if stops.is_empty() {
-                          // Path could not be extended. Keep the original stack.
-                          new_end_map
-                              .entry(left_end_state)
-                              .or_default()
-                              .insert(left_stack);
-                          continue;
-                      }
 
                       // 2) For each stop: add epsilon edge and propagate end_map stacks.
                       for (pos, right_stop_state, path_weight) in stops {
@@ -4687,14 +4674,38 @@ local_system:
 
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
-              // The combination should not change the end_map because processing a stack on the
-              // ignore NWA yields no stops. The only change is appending unreachable states.
-              assert_eq!(lhs.nwa.states.len(), original_state_count + rhs.nwa.states.len());
-              assert_eq!(lhs.end_map, original_end_map);
+              // Expected structure:
+              // The original LHS NWA is preserved.
+              // The ignore NWA (1 state) is copied into LHS.
+              // An epsilon transition is added from the original LHS end state to the copied ignore NWA's start state.
+              // The new end_map contains the original LHS stack, but now associated with the copied ignore NWA's end state.
 
-              // Verify no new epsilon transitions were added to the original end state.
-              let original_end_state = &lhs.nwa.states[original_end_state_id];
-              assert!(original_end_state.epsilon_transitions.is_empty());
+              assert_eq!(lhs.nwa.states.len(), original_state_count + 1); // 2 + 1 = 3
+              let copied_rhs_start_id = original_state_count; // state 2
+
+              // Check original LHS structure is preserved
+              let lhs_start_state = &lhs.nwa.states[0];
+              let transitions = lhs_start_state.transitions.exceptions.get(&100).unwrap();
+              assert_eq!(transitions.len(), 1);
+              assert_eq!(
+                  transitions[0],
+                  (original_end_state_id, WaWeight::all())
+              );
+
+              // Check for epsilon transition from original end state to new state
+              let lhs_original_end_state = &lhs.nwa.states[original_end_state_id];
+              assert_eq!(lhs_original_end_state.epsilon_transitions.len(), 1);
+              assert_eq!(
+                  lhs_original_end_state.epsilon_transitions[0],
+                  (copied_rhs_start_id, WaWeight::all())
+              );
+
+              // Check the final end_map
+              let expected_end_map = BTreeMap::from([(
+                  copied_rhs_start_id,
+                  original_end_map.get(&original_end_state_id).unwrap().clone(),
+              )]);
+              assert_eq!(lhs.end_map, expected_end_map);
           }
       }
     src/precompute4/characterize.rs: |
@@ -6823,7 +6834,7 @@ messages:
       use crate::precompute4::characterize::{
           compute_all_characterizations, compute_below_bottom_characterization, BelowBottomCharacterization,
       };
-      use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight};
+      use crate::weighted_automata::{NWA as WaNWA, StateID as WaStateID, Weight as WaWeight, StateID};
 
       /// Error that can occur while building an AugmentedNwa.
       #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7064,6 +7075,8 @@ messages:
               let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
                   self.end_map.clone();
 
+              let mut new_end_map: BTreeMap<StateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
+
               // Append-copy the right NWA into the left.
               let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
 
@@ -7099,7 +7112,7 @@ messages:
                                       let mut combined: Vec<ParserStateID> =
                                           left_stack[pos..].to_vec();
                                       combined.extend(r_stack.iter().cloned());
-                                      self.end_map
+                                      new_end_map
                                           .entry(mapped_end)
                                           .or_default()
                                           .insert(combined);
@@ -7109,6 +7122,7 @@ messages:
                       }
                   }
               }
+              self.end_map = new_end_map;
               Ok(())
           }
 
@@ -7265,14 +7279,7 @@ messages:
 
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
-              // The combination should not change the end_map because processing a stack on the
-              // ignore NWA yields no stops. The only change is appending unreachable states.
-              assert_eq!(lhs.nwa.states.len(), original_state_count + rhs.nwa.states.len());
-              assert_eq!(lhs.end_map, original_end_map);
-
-              // Verify no new epsilon transitions were added to the original end state.
-              let original_end_state = &lhs.nwa.states[original_end_state_id];
-              assert!(original_end_state.epsilon_transitions.is_empty());
+              todo!()
           }
       }
 
@@ -7684,30 +7691,9 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: |2+
-
-      thread 'precompute4::augmented_nwa::tests::test_combine_with_ignore_on_left' (39161519) panicked at src/precompute4/augmented_nwa.rs:436:9:
-      assertion `left == right` failed
-        left: {0: {[]}, 2: {[StateID(100), StateID(101)]}}
-       right: {2: {[StateID(100), StateID(101)]}}
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
-         4: sep1::precompute4::augmented_nwa::tests::test_combine_with_ignore_on_left
-                   at ./src/precompute4/augmented_nwa.rs:436:9
-         5: sep1::precompute4::augmented_nwa::tests::test_combine_with_ignore_on_left::{{closure}}
-                   at ./src/precompute4/augmented_nwa.rs:404:42
-         6: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         7: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
+  - user: test_combine_with_ignore_on_right
+    metadata:
+  - user: Complete test_combine_with_ignore_on_right
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7727,174 +7713,105 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! I see you're encountering a test failure. The panic indicates an issue in how `AugmentedNwa` instances are combined, specifically regarding the `end_map` which tracks parser stacks at the end of automaton paths.
-
-      The failing test, `test_combine_with_ignore_on_left`, reveals that when one `AugmentedNwa` is combined into another, the `end_map` of the resulting automaton incorrectly retains entries from the original "left-hand side" automaton. After combination, these original end states are no longer true end states but intermediate points, so their entries should be removed.
-
-      A second test, `test_combine_with_ignore_on_right`, passes with the current code but would fail with a naive fix, highlighting a subtle requirement: if a path from the left automaton cannot be extended through the right one, it should be preserved as a valid final path.
-
-      I'll provide a patch that corrects the logic in `combine_right_into` to handle both cases correctly by building a new `end_map` during the combination process.
-
-      Here are the step-by-step instructions to apply the fix:
+      Of course. Here are the step-by-step instructions to complete the test case, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
       1.  **Open the file `src/precompute4/augmented_nwa.rs`**.
-
-      2.  **Locate the `combine_right_into` function**. It starts around line 288.
-
-      3.  **Replace the entire body of the `combine_right_into` function** with the following corrected implementation. This new version correctly constructs a `new_end_map` that reflects the state of the combined automaton, ensuring old end states are removed and un-extendable paths are preserved.
+      2.  **Navigate to the test function `test_combine_with_ignore_on_right`** at the end of the file. You will see it has a `todo!()` placeholder.
+      3.  **Replace the body of the function** (from the line after the opening brace `{` to the line before the closing brace `}`) with the following code. This new code defines the expected behavior when combining an augmented NWA with an "ignore" NWA on the right and adds assertions to verify it.
 
           ```rust
-          // src/precompute4/augmented_nwa.rs
+              let mut lhs = build_simple_aug_nwa();
+              let rhs = build_augmented_nwa_for_ignore_terminal();
+              let weight = WaWeight::all();
 
-              pub fn combine_right_into(
-                  &mut self,
-                  right: &AugmentedNwa,
-                  weight: &WaWeight,
-              ) -> Result<(), AugmentedNwaBuildError> {
-                  // Snapshot the original left end_map so we only iterate over "left" entries.
-                  let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
-                      self.end_map.clone();
-          
-                  let mut new_end_map = BTreeMap::new();
-          
-                  // Append-copy the right NWA into the left.
-                  let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
-          
-                  // Walk all (left end state, stacks) pairs.
-                  for (left_end_state, stacks) in left_end_snapshot {
-                      for left_stack in stacks {
-                          // 1) Process the left stack through the right NWA.
-                          let mut encoded: Vec<u16> = Vec::with_capacity(left_stack.len());
-                          for &s in &left_stack {
-                              encoded.push(encode_symbol(s)?);
-                          }
-                          let stops = right.nwa.process_stack_u16(&encoded);
-          
-                          if stops.is_empty() {
-                              // Path could not be extended. Keep the original stack.
-                              new_end_map
-                                  .entry(left_end_state)
-                                  .or_default()
-                                  .insert(left_stack);
-                              continue;
-                          }
-          
-                          // 2) For each stop: add epsilon edge and propagate end_map stacks.
-                          for (pos, right_stop_state, path_weight) in stops {
-                              // Map the right stop state into the left's id space.
-                              let mapped_stop = right_to_left[right_stop_state];
-                              // Combine the path weight with the provided weight.
-                              let combined_weight = &path_weight & weight;
-                              // Epsilon from the left end state to the mapped right stop state.
-                              self.nwa
-                                  .add_epsilon_transition(left_end_state, mapped_stop, combined_weight);
-          
-                              // Reachable right end states from this right stop, ignoring labels.
-                              let reachable = right
-                                  .nwa
-                                  .reachable_states_ignoring_labels(right_stop_state);
-                              for r_state in reachable {
-                                  if let Some(r_stacks) = right.end_map.get(&r_state) {
-                                      let mapped_end = right_to_left[r_state];
-                                      for r_stack in r_stacks {
-                                          // Prepend the remainder of the left stack to the right stack.
-                                          let mut combined: Vec<ParserStateID> =
-                                              left_stack[pos..].to_vec();
-                                          combined.extend(r_stack.iter().cloned());
-                                          new_end_map
-                                              .entry(mapped_end)
-                                              .or_default()
-                                              .insert(combined);
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-                  self.end_map = new_end_map;
-                  Ok(())
-              }
+              let original_end_map = lhs.end_map.clone();
+              let original_state_count = lhs.nwa.states.len();
+              let original_end_state_id = lhs.end_state;
+
+              lhs.combine_right_into(&rhs, &weight).unwrap();
+
+              // Expected structure:
+              // The original LHS NWA is preserved.
+              // The ignore NWA (1 state) is copied into LHS.
+              // An epsilon transition is added from the original LHS end state to the copied ignore NWA's start state.
+              // The new end_map contains the original LHS stack, but now associated with the copied ignore NWA's end state.
+
+              assert_eq!(lhs.nwa.states.len(), original_state_count + 1); // 2 + 1 = 3
+              let copied_rhs_start_id = original_state_count; // state 2
+
+              // Check original LHS structure is preserved
+              let lhs_start_state = &lhs.nwa.states[0];
+              let transitions = lhs_start_state.transitions.exceptions.get(&100).unwrap();
+              assert_eq!(transitions.len(), 1);
+              assert_eq!(
+                  transitions[0],
+                  (original_end_state_id, WaWeight::all())
+              );
+
+              // Check for epsilon transition from original end state to new state
+              let lhs_original_end_state = &lhs.nwa.states[original_end_state_id];
+              assert_eq!(lhs_original_end_state.epsilon_transitions.len(), 1);
+              assert_eq!(
+                  lhs_original_end_state.epsilon_transitions[0],
+                  (copied_rhs_start_id, WaWeight::all())
+              );
+
+              // Check the final end_map
+              let expected_end_map = BTreeMap::from([(
+                  copied_rhs_start_id,
+                  original_end_map.get(&original_end_state_id).unwrap().clone(),
+              )]);
+              assert_eq!(lhs.end_map, expected_end_map);
           ```
-
-      After applying this change, the tests should pass, and the NWA combination logic will be correct.
 
       ### Git Diff
 
-      Here is the corresponding git diff for the change.
+      Here is the git patch to apply the changes:
 
       ```diff
-      diff --git a/src/precompute4/augmented_nwa.rs b/src/precompute4/augmented_nwa.rs
       --- a/src/precompute4/augmented_nwa.rs
       +++ b/src/precompute4/augmented_nwa.rs
-      @@ -293,52 +293,62 @@
-           ) -> Result<(), AugmentedNwaBuildError> {
-               // Snapshot the original left end_map so we only iterate over "left" entries.
-               let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
-                   self.end_map.clone();
+      @@ -404,7 +404,33 @@
        
-      +        let mut new_end_map = BTreeMap::new();
+               lhs.combine_right_into(&rhs, &weight).unwrap();
+       
+      -        todo!()
+      +        // Expected structure:
+      +        // The original LHS NWA is preserved.
+      +        // The ignore NWA (1 state) is copied into LHS.
+      +        // An epsilon transition is added from the original LHS end state to the copied ignore NWA's start state.
+      +        // The new end_map contains the original LHS stack, but now associated with the copied ignore NWA's end state.
       +
-               // Append-copy the right NWA into the left.
-               let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
-       
-               // Walk all (left end state, stacks) pairs.
-               for (left_end_state, stacks) in left_end_snapshot {
-                   for left_stack in stacks {
-                       // 1) Process the left stack through the right NWA.
-                       let mut encoded: Vec<u16> = Vec::with_capacity(left_stack.len());
-                       for &s in &left_stack {
-                           encoded.push(encode_symbol(s)?);
-                       }
-                       let stops = right.nwa.process_stack_u16(&encoded);
-       
-      +                if stops.is_empty() {
-      +                    // Path could not be extended. Keep the original stack.
-      +                    new_end_map
-      +                        .entry(left_end_state)
-      +                        .or_default()
-      +                        .insert(left_stack);
-      +                    continue;
-      +                }
+      +        assert_eq!(lhs.nwa.states.len(), original_state_count + 1); // 2 + 1 = 3
+      +        let copied_rhs_start_id = original_state_count; // state 2
       +
-                       // 2) For each stop: add epsilon edge and propagate end_map stacks.
-                       for (pos, right_stop_state, path_weight) in stops {
-                           // Map the right stop state into the left's id space.
-                           let mapped_stop = right_to_left[right_stop_state];
-                           // Combine the path weight with the provided weight.
-                           let combined_weight = &path_weight & weight;
-                           // Epsilon from the left end state to the mapped right stop state.
-                           self.nwa
-                               .add_epsilon_transition(left_end_state, mapped_stop, combined_weight);
-        
-                           // Reachable right end states from this right stop, ignoring labels.
-                           let reachable = right
-                               .nwa
-                               .reachable_states_ignoring_labels(right_stop_state);
-                           for r_state in reachable {
-                               if let Some(r_stacks) = right.end_map.get(&r_state) {
-                                   let mapped_end = right_to_left[r_state];
-                                   for r_stack in r_stacks {
-                                       // Prepend the remainder of the left stack to the right stack.
-                                       let mut combined: Vec<ParserStateID> =
-                                           left_stack[pos..].to_vec();
-                                       combined.extend(r_stack.iter().cloned());
-      -                                self.end_map
-      +                                new_end_map
-                                           .entry(mapped_end)
-                                           .or_default()
-                                           .insert(combined);
-                                   }
-                               }
-                           }
-                       }
-                   }
-               }
-      +        self.end_map = new_end_map;
-               Ok(())
+      +        // Check original LHS structure is preserved
+      +        let lhs_start_state = &lhs.nwa.states[0];
+      +        let transitions = lhs_start_state.transitions.exceptions.get(&100).unwrap();
+      +        assert_eq!(transitions.len(), 1);
+      +        assert_eq!(
+      +            transitions[0],
+      +            (original_end_state_id, WaWeight::all())
+      +        );
+      +
+      +        // Check for epsilon transition from original end state to new state
+      +        let lhs_original_end_state = &lhs.nwa.states[original_end_state_id];
+      +        assert_eq!(lhs_original_end_state.epsilon_transitions.len(), 1);
+      +        assert_eq!(
+      +            lhs_original_end_state.epsilon_transitions[0],
+      +            (copied_rhs_start_id, WaWeight::all())
+      +        );
+      +
+      +        // Check the final end_map
+      +        let expected_end_map = BTreeMap::from([(
+      +            copied_rhs_start_id,
+      +            original_end_map.get(&original_end_state_id).unwrap().clone(),
+      +        )]);
+      +        assert_eq!(lhs.end_map, expected_end_map);
            }
-       
+       }
 
       ```
     metadata:
@@ -7907,6 +7824,7 @@ messages:
       Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly update end_map in AugmentedNwa::combine_right_into"'
+  - user: 'Changes committed with message: "test: Complete test_combine_with_ignore_on_right
+      in AugmentedNwa"'
     metadata:
 ...

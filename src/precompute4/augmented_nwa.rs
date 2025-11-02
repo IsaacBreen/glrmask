@@ -451,6 +451,37 @@ mod tests {
 
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
-        todo!()
+        // Expected structure:
+        // The original LHS NWA is preserved.
+        // The ignore NWA (1 state) is copied into LHS.
+        // An epsilon transition is added from the original LHS end state to the copied ignore NWA's start state.
+        // The new end_map contains the original LHS stack, but now associated with the copied ignore NWA's end state.
+
+        assert_eq!(lhs.nwa.states.len(), original_state_count + 1); // 2 + 1 = 3
+        let copied_rhs_start_id = original_state_count; // state 2
+
+        // Check original LHS structure is preserved
+        let lhs_start_state = &lhs.nwa.states[0];
+        let transitions = lhs_start_state.transitions.exceptions.get(&100).unwrap();
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(
+            transitions[0],
+            (original_end_state_id, WaWeight::all())
+        );
+
+        // Check for epsilon transition from original end state to new state
+        let lhs_original_end_state = &lhs.nwa.states[original_end_state_id];
+        assert_eq!(lhs_original_end_state.epsilon_transitions.len(), 1);
+        assert_eq!(
+            lhs_original_end_state.epsilon_transitions[0],
+            (copied_rhs_start_id, WaWeight::all())
+        );
+
+        // Check the final end_map
+        let expected_end_map = BTreeMap::from([(
+            copied_rhs_start_id,
+            original_end_map.get(&original_end_state_id).unwrap().clone(),
+        )]);
+        assert_eq!(lhs.end_map, expected_end_map);
     }
 }
