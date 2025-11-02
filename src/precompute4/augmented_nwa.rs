@@ -96,8 +96,10 @@ pub fn build_augmented_nwas(
 ///   - from start, on symbol (initial_state), go to end_state; add
 ///     [initial_state, shift_state] into end_map[end_state].
 /// - For initial reduces (initial_state, len, nt):
-///   - create a chain of (len - 1) edges labeled (initial_state) ending at the `nt` node.
-///     If len == 1, go directly to the `nt` node.
+///   - create a chain of `len` transitions from `start` to the `nt` node.
+///   - The first `len - 1` transitions are unconditional (default) transitions
+///     to intermediate states.
+///   - The final transition is on `initial_state` to the `nt` node.
 /// - For each nonterminal’s reduce characterization:
 ///   - For reveal-and-rereduces (revealed_state, pop_n, reduce_nt):
 ///     create a chain of pop_n edges labeled (revealed_state) from the `nt` node to `reduce_nt` node.
@@ -130,22 +132,24 @@ pub fn build_augmented_nwa_from_characterization(
         end_map.entry(end_state).or_default().insert(vec![initial_state, shift_state]);
     }
 
-    // Initial reduces: chain of (len - 1) edges labeled by the initial_state, ending at the nt node.
+    // Initial reduces: create a chain of `len` transitions. The first `len-1` are default
+    // transitions, and the last is on `initial_state`. The chain ends at the `nt` node.
     for &(initial_state, len, nt) in &bb.initial_reduces {
         let ch = encode_symbol(initial_state)?;
         let target_nt = *nt_nodes
             .get(&nt)
             .expect("nonterminal node must exist (created from parser.non_terminal_map)");
         let mut from = start;
-        for i in 0..=len {
-            let to = if i == len {
-                target_nt
-            } else {
-                nwa.add_state()
-            };
-            nwa.add_transition(from, ch, to, w_all.clone());
+
+        // Create `len - 1` intermediate default transitions.
+        for _ in 0..(len.saturating_sub(1)) {
+            let to = nwa.add_state();
+            nwa.add_default_transition(from, to, w_all.clone());
             from = to;
         }
+
+        // The final transition is on the specific character.
+        nwa.add_transition(from, ch, target_nt, w_all.clone());
     }
 
     // Reduce characterizations per nonterminal.
@@ -154,23 +158,24 @@ pub fn build_augmented_nwa_from_characterization(
             .get(nt)
             .expect("reduce_characterizations only contains existing nonterminals");
 
-        // Reveal-and-rereduces: chain of `pop_n` edges from `src_nt` to the node for `reduce_nt`,
-        // all labeled with `revealed_state`.
+        // Reveal-and-rereduces: chain of `pop_n` transitions. The first `pop_n-1` are default,
+        // and the last is on `revealed_state`.
         for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
             let ch = encode_symbol(revealed_state)?;
             let dst_nt = *nt_nodes
                 .get(&reduce_nt)
                 .expect("reduce target nonterminal must exist");
             let mut from = src_nt;
-            for i in 0..=pop_n {
-                let to = if i == pop_n {
-                    dst_nt
-                } else {
-                    nwa.add_state()
-                };
-                nwa.add_transition(from, ch, to, w_all.clone());
+
+            // Create `pop_n - 1` intermediate default transitions.
+            for _ in 0..(pop_n.saturating_sub(1)) {
+                let to = nwa.add_state();
+                nwa.add_default_transition(from, to, w_all.clone());
                 from = to;
             }
+
+            // The final transition is on the specific character.
+            nwa.add_transition(from, ch, dst_nt, w_all.clone());
         }
 
         // Reveal-goto-shift escapes: a single step to end_state; record the example stack.
