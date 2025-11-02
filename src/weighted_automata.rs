@@ -466,56 +466,42 @@ impl NWA {
 
             // Default transition
             let mut default_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+            let mut default_weight_agg = Weight::zeros();
             for (nwa_id, path_weight) in &current_composition {
                 if let Some(transitions) = states.0[*nwa_id].transitions.get_default() {
                     for (next_nwa_id, trans_weight) in transitions {
                         let w = path_weight & trans_weight;
                         default_next_raw.entry(*next_nwa_id).or_default().bitor_assign(&w);
+                        default_weight_agg |= &w;
                     }
                 }
             }
-            let default_next_comp_map = states.epsilon_closure_with_flag(default_next_raw, has_epsilons);
-            let def_comp = to_key(default_next_comp_map.clone());
+            let def_comp = to_key(states.epsilon_closure_with_flag(default_next_raw, has_epsilons));
             let def_target = get_or_create(def_comp, &mut dwa_states, &mut known_states, &mut worklist);
             dwa_states.0[current_dwa_id].transitions.default = def_target;
-            if def_target.is_some() {
-                // Aggregate tokens accepted AFTER taking the default edge and epsilon-closing.
-                let mut default_final_agg = Weight::zeros();
-                for (sid, pw) in default_next_comp_map {
-                    if let Some(final_w) = &states.0[sid].final_weight {
-                        default_final_agg |= &(pw & final_w);
-                    }
-                }
-                dwa_states.0[current_dwa_id].trans_weight_default = Some(default_final_agg);
-            }
+            if def_target.is_some() { dwa_states.0[current_dwa_id].trans_weight_default = Some(default_weight_agg); }
 
             // Exception transitions
             for char_code in critical_points {
                 let mut exception_next_raw: BTreeMap<StateID, Weight> = BTreeMap::new();
+                let mut exception_weight_agg = Weight::zeros();
                 for (nwa_id, path_weight) in &current_composition {
                     if let Some(transitions) = states.0[*nwa_id].transitions.get(char_code) {
                         for (next_nwa_id, trans_weight) in transitions {
                             let w = path_weight & trans_weight;
                             exception_next_raw.entry(*next_nwa_id).or_default().bitor_assign(&w);
+                            exception_weight_agg |= &w;
                         }
                     }
                 }
                 if exception_next_raw.is_empty() { continue; }
-                let exception_next_comp_map = states.epsilon_closure_with_flag(exception_next_raw, has_epsilons);
-                let exc_comp = to_key(exception_next_comp_map.clone());
+                let exc_comp = to_key(states.epsilon_closure_with_flag(exception_next_raw, has_epsilons));
                 let exc_target = get_or_create(exc_comp, &mut dwa_states, &mut known_states, &mut worklist);
 
                 if exc_target != def_target {
                     if let Some(tid) = exc_target {
                         dwa_states.0[current_dwa_id].transitions.exceptions.insert(char_code, tid);
-                        // Aggregate tokens accepted AFTER taking the char edge and epsilon-closing.
-                        let mut exception_final_agg = Weight::zeros();
-                        for (sid, pw) in exception_next_comp_map {
-                            if let Some(final_w) = &states.0[sid].final_weight {
-                                exception_final_agg |= &(pw & final_w);
-                            }
-                        }
-                        dwa_states.0[current_dwa_id].trans_weights_exceptions.insert(char_code, exception_final_agg);
+                        dwa_states.0[current_dwa_id].trans_weights_exceptions.insert(char_code, exception_weight_agg);
                     }
                 }
             }
