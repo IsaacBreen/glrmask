@@ -597,7 +597,7 @@ mod tests {
     // produce a connection, the `end_map` stack of `self` must be processable by the `right`
     // operand's NWA. The prompt's stack `[2, 0]` requires a modification to the LEFT NWA
     // to create an epsilon path to a final state.
-    fn build_nwa_from_prompt_right() -> AugmentedNwa {
+    fn build_nwa_from_prompt_left() -> AugmentedNwa {
         let mut nwa = WaNWA::new(); // 0
         let end_state = nwa.add_state(); // 1
         let nt0_state = nwa.add_state(); // 2
@@ -622,7 +622,7 @@ mod tests {
 
     // Helper to build the "LEFT" NWA from the prompt, which acts as `right` (the right operand)
     // in the `combine_right_into` call.
-    fn build_nwa_from_prompt_left() -> AugmentedNwa {
+    fn build_nwa_from_prompt_right() -> AugmentedNwa {
         let mut nwa = WaNWA::new(); // 0
         let s1 = nwa.add_state(); // 1
         let s2 = nwa.add_state(); // 2
@@ -632,9 +632,7 @@ mod tests {
 
         let w3 = WaWeight::from_item(3);
         nwa.add_epsilon_transition(0, s1, w3.clone());
-        // This is changed from a transition on '0' to an epsilon transition to make the
-        // prompt's example logic work (it requires a stop at pos=0).
-        nwa.add_epsilon_transition(s1, s2, WaWeight::all());
+        nwa.add_transition(s1, 0, s2, WaWeight::all());
         nwa.add_transition(s1, 1, s4, WaWeight::all());
         nwa.add_transition(s1, 3, s3, WaWeight::all());
         nwa.add_epsilon_transition(s2, end_state, w3.clone());
@@ -655,8 +653,8 @@ mod tests {
 
     #[test]
     fn test_combination_from_prompt_example() {
-        let mut self_nwa = build_nwa_from_prompt_right();
-        let right_nwa = build_nwa_from_prompt_left();
+        let mut self_nwa = build_nwa_from_prompt_left();
+        let right_nwa = build_nwa_from_prompt_right();
         let weight = WaWeight::all();
         println!("RIGHT NWA:\n{}", right_nwa);
         println!("LEFT NWA:\n{}", self_nwa);
