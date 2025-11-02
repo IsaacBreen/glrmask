@@ -684,8 +684,8 @@ impl Default for GrammarConstraintConfig {
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::default(),
-            intermediate_trie3_templates: IntermediateTrie3Config::default(),
             run_precompute4: false,
+            intermediate_trie3_templates: IntermediateTrie3Config::default(),
             intermediate_trie3_main: IntermediateTrie3Config::default(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
@@ -702,8 +702,8 @@ impl GrammarConstraintConfig {
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::off(),
-            intermediate_trie3_templates: IntermediateTrie3Config::off(),
             run_precompute4: false,
+            intermediate_trie3_templates: IntermediateTrie3Config::off(),
             intermediate_trie3_main: IntermediateTrie3Config::off(),
             dummy_terminal_map: BTreeMap::new(),
             dummy_terminal_penalties: BTreeMap::new(),
@@ -795,6 +795,7 @@ pub struct GrammarConstraint {
     pub(crate) precomputed1:      Precomputed,
     pub precomputed2:     Precomputed2,
     pub precomputed3:     Precomputed3,
+    pub precomputed3:     Precomputed3,
     pub precomputed4:     Precomputed4,
     pub llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
@@ -846,7 +847,6 @@ impl GrammarConstraint {
         assert_eq!(self.post_commit_allow_check_mode, other.post_commit_allow_check_mode);
         assert_eq!(self.state_map_by_llm, other.state_map_by_llm);
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
-        assert_eq!(self.special_precomputation, other.special_precomputation);
         // assert_eq!(self.precomputed4, other.precomputed4); // DWA doesn't have PartialEq yet
         assert_eq!(self.original_to_dummy_map, other.original_to_dummy_map);
     }
@@ -962,6 +962,7 @@ impl JSONConvertible for GrammarConstraint {
                     precomputed1,
                     precomputed2,
                     precomputed3,
+                    precomputed4,
                     precomputed4,
                     llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id }),
                     token_name_map,
@@ -1590,6 +1591,7 @@ impl GrammarConstraint {
             precomputed2,
             precomputed3,
             precomputed4,
+            precomputed4,
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches,
@@ -1924,6 +1926,7 @@ impl GrammarConstraint {
             precomputed1,
             precomputed2,
             precomputed3,
+            precomputed4,
             precomputed4,
             llm_vocab,
             token_name_map,
@@ -2749,7 +2752,7 @@ impl GrammarConstraint {
                 s1.1.extend(s2.1.into_iter());
             },
             // process: when we reach Trie1 end, attach nodes to a shared trie3_end node and continue
-            |precomputed_node_data, (tokens, nodes_set)| {
+            |_node_idx, precomputed_node_data, (tokens, nodes_set)| {
                 if tokens.is_empty() {
                     return false;
                 }

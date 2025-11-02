@@ -1770,7 +1770,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 // ---------- user ‘process’ callback ----------
                 let proceed = {
                     let guard = node_idx.read(arena).expect("poison");
-                    process(&guard, &mut agg_v)
+                    process(node_idx, &guard, &mut agg_v)
                 };
 
                 if !proceed {
@@ -1953,7 +1953,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         initial_nodes_and_values: Vec<(Trie2Index, V)>,
         mut step: S,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(Trie2Index, &Trie<EK, EV, T>, &mut V) -> bool,
     )
     where
         V: Clone,

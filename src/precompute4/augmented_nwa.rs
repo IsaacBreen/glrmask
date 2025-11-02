@@ -266,6 +266,33 @@ impl AugmentedNwa {
         }
         Ok(())
     }
+
+    /// Union of two augmented NWAs. `self` is modified to become the union.
+    pub fn union_with(&mut self, other: &AugmentedNwa) {
+        let mapping = self.nwa.append_copy(&other.nwa);
+
+        // Merge end_maps
+        for (other_end_state, stacks) in &other.end_map {
+            let mapped_end_state = mapping[*other_end_state];
+            self.end_map
+                .entry(mapped_end_state)
+                .or_default()
+                .extend(stacks.clone());
+        }
+
+        // Create new start state with epsilon transitions to old start states
+        let new_start = self.nwa.add_state();
+        let old_self_start = self.nwa.start_state;
+        let old_other_start_mapped = mapping[other.nwa.start_state];
+
+        self.nwa
+            .add_epsilon_transition(new_start, old_self_start, WaWeight::all());
+        self.nwa
+            .add_epsilon_transition(new_start, old_other_start_mapped, WaWeight::all());
+
+        self.nwa.start_state = new_start;
+        self.end_state = usize::MAX; // Invalidate single end_state
+    }
 }
 
 #[cfg(test)]
