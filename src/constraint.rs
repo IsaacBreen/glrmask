@@ -1028,7 +1028,9 @@ impl GrammarConstraint {
         tokenizer: &Regex,
     ) -> BTreeMap<usize, usize>
     {
-        // return original_llm_token_map.iter().map(|(bytes, id)| (id.0, id.0)).collect(); // TEMP
+        if original_llm_token_map.len() < 10 {
+            return original_llm_token_map.iter().map(|(bytes, id)| (id.0, id.0)).collect(); // TEMP
+        }
         // 1. Prepare inputs for equivalence analysis.
         // We sort the tokens by their byte representation to ensure determinism.
         let mut sorted_tokens: Vec<_> = original_llm_token_map.iter().collect();
