@@ -242,30 +242,11 @@ impl AugmentedNwa {
         // Snapshot the original left end_map so we only iterate over "left" entries.
         let left_end_snapshot: BTreeMap<WaStateID, BTreeSet<Vec<ParserStateID>>> =
             self.end_map.clone();
-        let left_state_count_before = self.nwa.states.len();
 
         let mut new_end_map: BTreeMap<StateID, BTreeSet<Vec<ParserStateID>>> = BTreeMap::new();
 
         // Append-copy the right NWA into the left.
         let right_to_left: Vec<WaStateID> = self.nwa.append_copy(&right.nwa);
-
-        // Promote '0'-labeled transitions to epsilon in the appended right subgraph.
-        // This treats the bottom-of-stack sentinel (0) as an epsilon step post-combination,
-        // matching the expected structure in tests.
-        if !right_to_left.is_empty() {
-            for &mapped_id in &right_to_left {
-                // Remove any '0' exceptions and convert them into epsilon transitions.
-                if let Some(zero_edges) = self.nwa.states[mapped_id]
-                    .transitions
-                    .exceptions
-                    .remove(&0u16)
-                {
-                    for (to, w) in zero_edges {
-                        self.nwa.states[mapped_id].epsilon_transitions.push((to, w));
-                    }
-                }
-            }
-        }
 
         // Walk all (left end state, stacks) pairs.
         for (left_end_state, stacks) in left_end_snapshot {
