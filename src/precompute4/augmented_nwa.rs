@@ -145,13 +145,13 @@ pub fn build_augmented_nwa_from_characterization(
         let mut from = start;
 
         // The first transition is on the specific character.
-        let next_state = if len == 1 { *target_nt } else { nwa.add_state() };
+        let next_state = if len == 1 { target_nt } else { nwa.add_state() };
         nwa.add_transition(from, ch, next_state, w_all.clone());
         from = next_state;
 
         // The rest are default transitions.
         for i in 1..len {
-            let to = if i == len - 1 { *target_nt } else { nwa.add_state() };
+            let to = if i == len - 1 { target_nt } else { nwa.add_state() };
             nwa.add_default_transition(from, to, w_all.clone());
             from = to;
         }
@@ -176,13 +176,13 @@ pub fn build_augmented_nwa_from_characterization(
             let mut from = src_nt;
 
             // The first transition is on the specific character.
-            let next_state = if pop_n == 1 { *dst_nt } else { nwa.add_state() };
+            let next_state = if pop_n == 1 { dst_nt } else { nwa.add_state() };
             nwa.add_transition(from, ch, next_state, w_all.clone());
             from = next_state;
 
             // The rest are default transitions.
             for i in 1..pop_n {
-                let to = if i == pop_n - 1 { *dst_nt } else { nwa.add_state() };
+                let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };
                 nwa.add_default_transition(from, to, w_all.clone());
                 from = to;
             }
