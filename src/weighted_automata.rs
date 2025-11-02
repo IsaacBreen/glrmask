@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 use std::fmt::{Debug, Display, Formatter};
 use std::iter::FromIterator;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
-
+use crate::json_serialization::{JSONConvertible, JSONNode};
 // --- Part 1: SimpleBitset ---
 
 /// A simple wrapper around `RangeSetBlaze<usize>` for representing sets of numbers as weights.
@@ -1196,6 +1196,16 @@ impl Display for DWA {
             }
         }
         Ok(())
+    }
+}
+
+impl JSONConvertible for DWA {
+    fn to_json(&self) -> JSONNode {
+        todo!()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        todo!()
     }
 }
 
