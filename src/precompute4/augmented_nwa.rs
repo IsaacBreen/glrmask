@@ -137,8 +137,8 @@ pub fn build_augmented_nwa_from_characterization(
             .get(&nt)
             .expect("nonterminal node must exist (created from parser.non_terminal_map)");
         let mut from = start;
-        for i in 0..len {
-            let to = if i + 1 == len {
+        for i in 0..=len {
+            let to = if i == len {
                 target_nt
             } else {
                 nwa.add_state()
@@ -162,8 +162,8 @@ pub fn build_augmented_nwa_from_characterization(
                 .get(&reduce_nt)
                 .expect("reduce target nonterminal must exist");
             let mut from = src_nt;
-            for i in 0..pop_n {
-                let to = if i + 1 == pop_n {
+            for i in 0..=pop_n {
+                let to = if i == pop_n {
                     dst_nt
                 } else {
                     nwa.add_state()
