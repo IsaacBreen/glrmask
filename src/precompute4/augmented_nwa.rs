@@ -70,12 +70,12 @@ pub fn build_augmented_nwas(
 ) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
     let all = compute_all_characterizations(parser);
 
-    println!("\n--- Terminal Characterizations ---");
+    crate::debug!(5, "\n--- Terminal Characterizations ---");
     for (terminal_id, bb) in &all {
         let terminal = parser.terminal_map.get_by_right(terminal_id).cloned().unwrap_or(regex_name("UNKNOWN"));
-        println!("Terminal {} ({}) Characterization:\n{}", terminal_id.0, terminal, bb);
+        crate::debug!(5, "Terminal {} ({}) Characterization:\n{}", terminal_id.0, terminal, bb);
     }
-    println!("--- End Terminal Characterizations ---\n");
+    crate::debug!(5, "--- End Terminal Characterizations ---\n");
 
     let mut out = BTreeMap::new();
     for (term, bb) in all {
@@ -404,8 +404,8 @@ mod tests {
         rhs.nwa.set_final_weight(1, WaWeight::all());
         let weight = WaWeight::all();
 
-        println!("Left NWA (ignore):\n{}", lhs);
-        println!("Right NWA (simple):\n{}", rhs);
+        crate::debug!(5, "Left NWA (ignore):\n{}", lhs);
+        crate::debug!(5, "Right NWA (simple):\n{}", rhs);
 
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
@@ -428,8 +428,8 @@ mod tests {
             end_map: expected_end_map,
         };
 
-        println!("Expected NWA:\n{}", expected_aug_nwa);
-        println!("Resulting NWA:\n{}", lhs);
+        crate::debug!(5, "Expected NWA:\n{}", expected_aug_nwa);
+        crate::debug!(5, "Resulting NWA:\n{}", lhs);
 
         assert_eq!(lhs, expected_aug_nwa);
     }
@@ -577,15 +577,15 @@ mod tests {
         let weight = WaWeight::all();
 
         for (i, (term_id, term_nwa)) in terminal_nwas_with_id.iter().rev().enumerate() {
-            println!("\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
-            println!("LEFT NWA (Term {}):\n{}", term_id, term_nwa);
-            println!("RIGHT NWA (Current):\n{}", current_aug_nwa);
+            crate::debug!(5, "\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
+            crate::debug!(5, "LEFT NWA (Term {}):\n{}", term_id, term_nwa);
+            crate::debug!(5, "RIGHT NWA (Current):\n{}", current_aug_nwa);
 
             let mut new_current = term_nwa.clone();
             new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
             current_aug_nwa = new_current;
 
-            println!("Resulting Combined NWA:\n{}", current_aug_nwa);
+            crate::debug!(5, "Resulting Combined NWA:\n{}", current_aug_nwa);
         }
 
         assert_eq!(current_aug_nwa.nwa.states.len(), 13);
@@ -657,12 +657,12 @@ mod tests {
         let mut self_nwa = build_nwa_from_prompt_left();
         let right_nwa = build_nwa_from_prompt_right();
         let weight = WaWeight::all();
-        println!("RIGHT NWA:\n{}", right_nwa);
-        println!("LEFT NWA:\n{}", self_nwa);
+        crate::debug!(5, "RIGHT NWA:\n{}", right_nwa);
+        crate::debug!(5, "LEFT NWA:\n{}", self_nwa);
 
         self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
 
-        println!("Resulting NWA after combination:\n{}", self_nwa);
+        crate::debug!(5, "Resulting NWA after combination:\n{}", self_nwa);
 
         // Build expected result
         let mut expected_nwa = WaNWA::new(); // 0
@@ -710,7 +710,7 @@ mod tests {
             end_map: expected_end_map,
         };
 
-        println!("Expected NWA:\n{}", expected_aug_nwa);
+        crate::debug!(5, "Expected NWA:\n{}", expected_aug_nwa);
 
         assert_eq!(self_nwa, expected_aug_nwa);
     }

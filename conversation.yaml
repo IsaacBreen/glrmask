@@ -1856,9 +1856,9 @@ local_system:
                   .get(nt)
                   .expect("reduce_characterizations only contains existing nonterminals");
 
-              // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
+              // Reveal-and-rereduces: chain of `len` transitions. The first is on `revealed_state`,
               // and the rest are default.
-              for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
+              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
                   let ch = encode_symbol(revealed_state)?;
                   let dst_nt = *nt_nodes
                       .get(&reduce_nt)
@@ -1866,13 +1866,13 @@ local_system:
                   let mut from = src_nt;
 
                   // The first transition is on the specific character.
-                  let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };
+                  let next_state = if len == 0 { dst_nt } else { nwa.add_state() };
                   nwa.add_transition(from, ch, next_state, w_all.clone());
                   from = next_state;
 
                   // The rest are default transitions.
-                  for i in 0..pop_n {
-                      let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };
+                  for i in 0..len {
+                      let to = if i == len - 1 { dst_nt } else { nwa.add_state() };
                       nwa.add_default_transition(from, to, w_all.clone());
                       from = to;
                   }
@@ -2421,7 +2421,7 @@ local_system:
       pub struct ReduceCharacterization {
           pub terminal: TerminalID,
           pub nonterminal: NonTerminalID,
-          // (revealed_state, pop_n, nonterminal)
+          // (revealed_state, len, nonterminal)
           pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
           // (revealed_state, goto_state, shift_state)
           pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
@@ -2432,8 +2432,8 @@ local_system:
               writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
               if !self.reveal_and_rereduces.is_empty() {
                   writeln!(f, "      Reveal-and-rereduces:")?;
-                  for (revealed, pop, nt) in &self.reveal_and_rereduces {
-                      writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?;
+                  for (revealed, len, nt) in &self.reveal_and_rereduces {
+                      writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
                   }
               }
               if !self.reveal_goto_shift_escapes.is_empty() {
@@ -2451,7 +2451,7 @@ local_system:
           pub terminal: TerminalID,
           // (initial_state, shift_state)
           pub initial_shifts: BTreeSet<(StateID, StateID)>,
-          // (initial_state, pop_n, nonterminal)
+          // (initial_state, len, nonterminal)
           pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
           pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
       }
@@ -4221,8 +4221,8 @@ local_system:
               nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 6]));
 
               let dwa = nwa.determinize();
-              println!("NWA:\n{}", nwa);
-              println!("DWA:\n{}", dwa);
+              crate::debug!(5, "NWA:\n{}", nwa);
+              crate::debug!(5, "DWA:\n{}", dwa);
               // Expected DWA:
               // S0 (start): weight=ALL
               //   'a' -> S1
@@ -4384,8 +4384,8 @@ local_system:
               nwa.add_transition(s1, 5, s2, w01.clone());
 
               let dwa = nwa.determinize();
-              println!("{}", nwa);
-              println!("{}", dwa);
+              crate::debug!(5, "{}", nwa);
+              crate::debug!(5, "{}", dwa);
 
               // Expected DWA: 4 states (S0, S1, S2, S3)
               assert_eq!(dwa.states.len(), 4);
@@ -4566,12 +4566,12 @@ local_system:
       ) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
           let all = compute_all_characterizations(parser);
 
-          println!("\n--- Terminal Characterizations ---");
+          crate::debug!(5, "\n--- Terminal Characterizations ---");
           for (terminal_id, bb) in &all {
               let terminal = parser.terminal_map.get_by_right(terminal_id).cloned().unwrap_or(regex_name("UNKNOWN"));
-              println!("Terminal {} ({}) Characterization:\n{}", terminal_id.0, terminal, bb);
+              crate::debug!(5, "Terminal {} ({}) Characterization:\n{}", terminal_id.0, terminal, bb);
           }
-          println!("--- End Terminal Characterizations ---\n");
+          crate::debug!(5, "--- End Terminal Characterizations ---\n");
 
           let mut out = BTreeMap::new();
           for (term, bb) in all {
@@ -4900,8 +4900,8 @@ local_system:
               rhs.nwa.set_final_weight(1, WaWeight::all());
               let weight = WaWeight::all();
 
-              println!("Left NWA (ignore):\n{}", lhs);
-              println!("Right NWA (simple):\n{}", rhs);
+              crate::debug!(5, "Left NWA (ignore):\n{}", lhs);
+              crate::debug!(5, "Right NWA (simple):\n{}", rhs);
 
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
@@ -4924,8 +4924,8 @@ local_system:
                   end_map: expected_end_map,
               };
 
-              println!("Expected NWA:\n{}", expected_aug_nwa);
-              println!("Resulting NWA:\n{}", lhs);
+              crate::debug!(5, "Expected NWA:\n{}", expected_aug_nwa);
+              crate::debug!(5, "Resulting NWA:\n{}", lhs);
 
               assert_eq!(lhs, expected_aug_nwa);
           }
@@ -5073,15 +5073,15 @@ local_system:
               let weight = WaWeight::all();
 
               for (i, (term_id, term_nwa)) in terminal_nwas_with_id.iter().rev().enumerate() {
-                  println!("\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
-                  println!("LEFT NWA (Term {}):\n{}", term_id, term_nwa);
-                  println!("RIGHT NWA (Current):\n{}", current_aug_nwa);
+                  crate::debug!(5, "\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
+                  crate::debug!(5, "LEFT NWA (Term {}):\n{}", term_id, term_nwa);
+                  crate::debug!(5, "RIGHT NWA (Current):\n{}", current_aug_nwa);
 
                   let mut new_current = term_nwa.clone();
                   new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
                   current_aug_nwa = new_current;
 
-                  println!("Resulting Combined NWA:\n{}", current_aug_nwa);
+                  crate::debug!(5, "Resulting Combined NWA:\n{}", current_aug_nwa);
               }
 
               assert_eq!(current_aug_nwa.nwa.states.len(), 13);
@@ -5153,12 +5153,12 @@ local_system:
               let mut self_nwa = build_nwa_from_prompt_left();
               let right_nwa = build_nwa_from_prompt_right();
               let weight = WaWeight::all();
-              println!("RIGHT NWA:\n{}", right_nwa);
-              println!("LEFT NWA:\n{}", self_nwa);
+              crate::debug!(5, "RIGHT NWA:\n{}", right_nwa);
+              crate::debug!(5, "LEFT NWA:\n{}", self_nwa);
 
               self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
 
-              println!("Resulting NWA after combination:\n{}", self_nwa);
+              crate::debug!(5, "Resulting NWA after combination:\n{}", self_nwa);
 
               // Build expected result
               let mut expected_nwa = WaNWA::new(); // 0
@@ -5206,7 +5206,7 @@ local_system:
                   end_map: expected_end_map,
               };
 
-              println!("Expected NWA:\n{}", expected_aug_nwa);
+              crate::debug!(5, "Expected NWA:\n{}", expected_aug_nwa);
 
               assert_eq!(self_nwa, expected_aug_nwa);
           }
@@ -5499,11 +5499,11 @@ local_system:
 
           let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
 
-          println!("\n--- Augmented NWA Generation ---");
+          crate::debug!(5, "\n--- Augmented NWA Generation ---");
           for (tid, aug_nwa) in &augmented_nwas {
-              println!("Terminal ID {:?}:\n{}", tid, aug_nwa);
+              crate::debug!(5, "Terminal ID {:?}:\n{}", tid, aug_nwa);
           }
-          println!("--- End Augmented NWA Generation ---\n");
+          crate::debug!(5, "--- End Augmented NWA Generation ---\n");
 
           // 2. Reverse the precompute1 trie.
           let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
@@ -5518,7 +5518,7 @@ local_system:
               let options = crate::datastructures::trie::PrettyPrintOptions::default()
                   .omit_depth()
                   ;
-          println!("\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+          crate::debug!(5, "\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
 
           // 3. Traverse the reversed trie.
           let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
@@ -5554,16 +5554,16 @@ local_system:
                       // Epsilon-like edge in grammar trie. Just propagate the current NWA.
                       aug_nwa = &ignore_nwa;
                   }
-                  println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
-                  println!("--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
-                  println!("--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
+                  crate::debug!(5, "Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+                  crate::debug!(5, "--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
+                  crate::debug!(5, "--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
                   for (dest_idx, llm_token_bv) in dest_map.iter() {
                       let mut new_aug_nwa = aug_nwa.clone();
                       let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
                       new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
                           .expect("Combine failed");
-                      println!("For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
-                      println!("--- COMBINED: Resulting aug_nwa ---\n{}", new_aug_nwa);
+                      crate::debug!(5, "For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
+                      crate::debug!(5, "--- COMBINED: Resulting aug_nwa ---\n{}", new_aug_nwa);
                       results.push((*dest_idx, new_aug_nwa));
                   }
                   results
@@ -5581,11 +5581,11 @@ local_system:
               },
           );
 
-          println!("\n--- Final NWAs Before Determinization ---");
+          crate::debug!(5, "\n--- Final NWAs Before Determinization ---");
           for (sid, aug_nwa) in &final_nwas {
-              println!("Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
+              crate::debug!(5, "Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
           }
-          println!("--- End Final NWAs Before Determinization ---\n");
+          crate::debug!(5, "--- End Final NWAs Before Determinization ---\n");
 
           // 4. Convert final NWAs to DWAs and simplify.
           let mut precomputed4: Precomputed4 = BTreeMap::new();
@@ -5595,11 +5595,11 @@ local_system:
               precomputed4.insert(sid, dwa);
           }
 
-          println!("\n--- Final DWAs After Determinization and Simplification ---");
+          crate::debug!(5, "\n--- Final DWAs After Determinization and Simplification ---");
           for (sid, dwa) in &precomputed4 {
-              println!("Tokenizer State ID {:?}:\n{}", sid, dwa);
+              crate::debug!(5, "Tokenizer State ID {:?}:\n{}", sid, dwa);
           }
-          println!("--- End Final DWAs After Determinization and Simplification ---\n");
+          crate::debug!(5, "--- End Final DWAs After Determinization and Simplification ---\n");
 
           precomputed4
       }
@@ -5619,7 +5619,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -7503,9 +7503,9 @@ messages:
                   .get(nt)
                   .expect("reduce_characterizations only contains existing nonterminals");
 
-              // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
+              // Reveal-and-rereduces: chain of `len` transitions. The first is on `revealed_state`,
               // and the rest are default.
-              for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
+              for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
                   let ch = encode_symbol(revealed_state)?;
                   let dst_nt = *nt_nodes
                       .get(&reduce_nt)
@@ -7513,13 +7513,13 @@ messages:
                   let mut from = src_nt;
 
                   // The first transition is on the specific character.
-                  let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };
+                  let next_state = if len == 0 { dst_nt } else { nwa.add_state() };
                   nwa.add_transition(from, ch, next_state, w_all.clone());
                   from = next_state;
 
                   // The rest are default transitions.
-                  for i in 0..pop_n {
-                      let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };
+                  for i in 0..len {
+                      let to = if i == len - 1 { dst_nt } else { nwa.add_state() };
                       nwa.add_default_transition(from, to, w_all.clone());
                       from = to;
                   }
@@ -8073,7 +8073,7 @@ messages:
       pub struct ReduceCharacterization {
           pub terminal: TerminalID,
           pub nonterminal: NonTerminalID,
-          // (revealed_state, pop_n, nonterminal)
+          // (revealed_state, len, nonterminal)
           pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
           // (revealed_state, goto_state, shift_state)
           pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
@@ -8084,8 +8084,8 @@ messages:
               writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
               if !self.reveal_and_rereduces.is_empty() {
                   writeln!(f, "      Reveal-and-rereduces:")?;
-                  for (revealed, pop, nt) in &self.reveal_and_rereduces {
-                      writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?;
+                  for (revealed, len, nt) in &self.reveal_and_rereduces {
+                      writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
                   }
               }
               if !self.reveal_goto_shift_escapes.is_empty() {
@@ -8103,7 +8103,7 @@ messages:
           pub terminal: TerminalID,
           // (initial_state, shift_state)
           pub initial_shifts: BTreeSet<(StateID, StateID)>,
-          // (initial_state, pop_n, nonterminal)
+          // (initial_state, len, nonterminal)
           pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
           pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
       }
@@ -8479,9 +8479,12 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
-  - user: Inconsistent terminology throughout src/precompute4/ where we refer to 'len'
-      in bb.initial_reduces and 'pop n' in rc.reveal_and_rereduces. Just refer to
-      'len'.
+  - user: |-
+      There's a bunch of print statements throughout this code used for debugging. Use the debug macro with level 5 instead.
+      Here's an example of how to use the debug macro:
+      ```rust
+      crate::debug!(5, "Processing input bytes: {:?} with {} active tokenizer states", bytes, self.state.len());
+      ```
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8501,114 +8504,237 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to standardize the terminology, followed by the corresponding git diffs.
+      Of course. I will replace the `println!` statements used for debugging with the `crate::debug!(5, ...)` macro as you requested. Here are the step-by-step instructions and the corresponding git diffs.
 
-      ### Step-by-step Instructions
+      ### Step-by-Step Instructions
 
-      #### File: `src/precompute4/characterize.rs`
+      1.  **File: `src/precompute4/augmented_nwa.rs`**
+          *   In the `build_augmented_nwas` function, replace the three `println!` calls with `crate::debug!(5, ...)` to log terminal characterizations.
+          *   In the test functions `test_combine_with_ignore_on_left`, `test_right_to_left_combination`, and `test_combination_from_prompt_example`, convert all `println!` statements to `crate::debug!(5, ...)` to log the state of the NWAs during tests.
 
-      1.  In the `ReduceCharacterization` struct definition, update the comment for the `reveal_and_rereduces` field to use `len` instead of `pop_n`.
-          -   Change line 7 from `// (revealed_state, pop_n, nonterminal)` to `// (revealed_state, len, nonterminal)`.
+      2.  **File: `src/precompute4/full_nwa.rs`**
+          *   In the `precompute4` function, I will replace all `println!` statements with `crate::debug!(5, ...)`:
+              *   The logs for "Augmented NWA Generation".
+              *   The log for the "Reversed Trie1".
+              *   The logs inside the `Trie::special_map_grouped` closure that detail the NWA combination process.
+              *   The logs for "Final NWAs Before Determinization".
+              *   The logs for "Final DWAs After Determinization and Simplification".
 
-      2.  In the `Display` implementation for `ReduceCharacterization`, update the loop variable and the format string to use `len` instead of `pop`.
-          -   On line 19, change `for (revealed, pop, nt) in &self.reveal_and_rereduces` to `for (revealed, len, nt) in &self.reveal_and_rereduces`.
-          -   On line 20, change `writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?` to `writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?`.
-
-      3.  In the `BelowBottomCharacterization` struct definition, update the comment for the `initial_reduces` field.
-          -   Change line 38 from `// (initial_state, pop_n, nonterminal)` to `// (initial_state, len, nonterminal)`.
-
-      #### File: `src/precompute4/augmented_nwa.rs`
-
-      1.  In the `build_augmented_nwa_from_characterization` function, find the section that handles `Reveal-and-rereduces` (around line 151).
-
-      2.  Update the comment to refer to a "chain of `len` transitions" instead of `pop_n`.
-          -   Change line 151 from `// Reveal-and-rereduces: chain of `pop_n` transitions...` to `// Reveal-and-rereduces: chain of `len` transitions...`.
-
-      3.  In the loop that processes `rc.reveal_and_rereduces`, rename the `pop_n` variable to `len` throughout the loop body.
-          -   On line 153, change `for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces` to `for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces`.
-          -   On line 160, change `let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };` to `let next_state = if len == 0 { dst_nt } else { nwa.add_state() };`.
-          -   On line 164, change `for i in 0..pop_n` to `for i in 0..len`.
-          -   On line 165, change `let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };` to `let to = if i == len - 1 { dst_nt } else { nwa.add_state() };`.
+      3.  **File: `src/weighted_automata.rs`**
+          *   In the test function `test_determinize_simple_nwa`, replace the two `println!` calls with `crate::debug!(5, ...)` to log the NWA and resulting DWA.
+          *   In the test function `test_determinize_complex_nondeterminism`, do the same for the two `println!` calls there.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes:
+      Here are the git diffs to apply these changes.
 
       ```diff
-      diff --git a/src/precompute4/augmented_nwa.rs b/src/precompute4/augmented_nwa.rs
       --- a/src/precompute4/augmented_nwa.rs
       +++ b/src/precompute4/augmented_nwa.rs
-      @@ -148,23 +148,23 @@
-                   .get(nt)
-                   .expect("reduce_characterizations only contains existing nonterminals");
+      @@ -62,12 +62,12 @@
+       ) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
+           let all = compute_all_characterizations(parser);
        
-      -        // Reveal-and-rereduces: chain of `pop_n` transitions. The first is on `revealed_state`,
-      +        // Reveal-and-rereduces: chain of `len` transitions. The first is on `revealed_state`,
-               // and the rest are default.
-      -        for &(revealed_state, pop_n, reduce_nt) in &rc.reveal_and_rereduces {
-      +        for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
-                   let ch = encode_symbol(revealed_state)?;
-                   let dst_nt = *nt_nodes
-                       .get(&reduce_nt)
-                       .expect("reduce target nonterminal must exist");
-                   let mut from = src_nt;
+      -    println!("\n--- Terminal Characterizations ---");
+      +    crate::debug!(5, "\n--- Terminal Characterizations ---");
+           for (terminal_id, bb) in &all {
+               let terminal = parser.terminal_map.get_by_right(terminal_id).cloned().unwrap_or(regex_name("UNKNOWN"));
+      -        println!("Terminal {} ({}) Characterization:\n{}", terminal_id.0, terminal, bb);
+      -    }
+      -    println!("--- End Terminal Characterizations ---\n");
+      +        crate::debug!(5, "Terminal {} ({}) Characterization:\n{}", terminal_id.0, terminal, bb);
+      +    }
+      +    crate::debug!(5, "--- End Terminal Characterizations ---\n");
        
-                   // The first transition is on the specific character.
-      -            let next_state = if pop_n == 0 { dst_nt } else { nwa.add_state() };
-      +            let next_state = if len == 0 { dst_nt } else { nwa.add_state() };
-                   nwa.add_transition(from, ch, next_state, w_all.clone());
-                   from = next_state;
+           let mut out = BTreeMap::new();
+           for (term, bb) in all {
+      @@ -351,10 +351,10 @@
+               rhs.nwa.set_final_weight(1, WaWeight::all());
+               let weight = WaWeight::all();
        
-                   // The rest are default transitions.
-      -            for i in 0..pop_n {
-      -                let to = if i == pop_n - 1 { dst_nt } else { nwa.add_state() };
-      +            for i in 0..len {
-      +                let to = if i == len - 1 { dst_nt } else { nwa.add_state() };
-                       nwa.add_default_transition(from, to, w_all.clone());
-                       from = to;
-                   }
+      -        println!("Left NWA (ignore):\n{}", lhs);
+      -        println!("Right NWA (simple):\n{}", rhs);
+      +        crate::debug!(5, "Left NWA (ignore):\n{}", lhs);
+      +        crate::debug!(5, "Right NWA (simple):\n{}", rhs);
+       
+               lhs.combine_right_into(&rhs, &weight).unwrap();
+       
+               // Build expected result
+      @@ -375,8 +375,8 @@
+                   end_map: expected_end_map,
+               };
+       
+      -        println!("Expected NWA:\n{}", expected_aug_nwa);
+      -        println!("Resulting NWA:\n{}", lhs);
+      +        crate::debug!(5, "Expected NWA:\n{}", expected_aug_nwa);
+      +        crate::debug!(5, "Resulting NWA:\n{}", lhs);
+       
+               assert_eq!(lhs, expected_aug_nwa);
+           }
+      @@ -489,15 +489,15 @@
+               let weight = WaWeight::all();
+       
+               for (i, (term_id, term_nwa)) in terminal_nwas_with_id.iter().rev().enumerate() {
+      -            println!("\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
+      -            println!("LEFT NWA (Term {}):\n{}", term_id, term_nwa);
+      -            println!("RIGHT NWA (Current):\n{}", current_aug_nwa);
+      +            crate::debug!(5, "\n--- Combination Step {} (Term {} on LEFT) ---", i, term_id);
+      +            crate::debug!(5, "LEFT NWA (Term {}):\n{}", term_id, term_nwa);
+      +            crate::debug!(5, "RIGHT NWA (Current):\n{}", current_aug_nwa);
+       
+                   let mut new_current = term_nwa.clone();
+                   new_current.combine_right_into(&current_aug_nwa, &weight).unwrap();
+                   current_aug_nwa = new_current;
+       
+      -            println!("Resulting Combined NWA:\n{}", current_aug_nwa);
+      +            crate::debug!(5, "Resulting Combined NWA:\n{}", current_aug_nwa);
+               }
+       
+               assert_eq!(current_aug_nwa.nwa.states.len(), 13);
+      @@ -561,11 +561,11 @@
+               let mut self_nwa = build_nwa_from_prompt_left();
+               let right_nwa = build_nwa_from_prompt_right();
+               let weight = WaWeight::all();
+      -        println!("RIGHT NWA:\n{}", right_nwa);
+      -        println!("LEFT NWA:\n{}", self_nwa);
+      +        crate::debug!(5, "RIGHT NWA:\n{}", right_nwa);
+      +        crate::debug!(5, "LEFT NWA:\n{}", self_nwa);
+       
+               self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
+       
+      -        println!("Resulting NWA after combination:\n{}", self_nwa);
+      +        crate::debug!(5, "Resulting NWA after combination:\n{}", self_nwa);
+       
+               // Build expected result
+               let mut expected_nwa = WaNWA::new(); // 0
+      @@ -611,7 +611,7 @@
+                   end_map: expected_end_map,
+               };
+       
+      -        println!("Expected NWA:\n{}", expected_aug_nwa);
+      +        crate::debug!(5, "Expected NWA:\n{}", expected_aug_nwa);
+       
+               assert_eq!(self_nwa, expected_aug_nwa);
+           }
 
       ```
 
       ```diff
-      diff --git a/src/precompute4/characterize.rs b/src/precompute4/characterize.rs
-      --- a/src/precompute4/characterize.rs
-      +++ b/src/precompute4/characterize.rs
-      @@ -6,7 +6,7 @@
-       pub struct ReduceCharacterization {
-           pub terminal: TerminalID,
-           pub nonterminal: NonTerminalID,
-      -    // (revealed_state, pop_n, nonterminal)
-      +    // (revealed_state, len, nonterminal)
-           pub reveal_and_rereduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-           // (revealed_state, goto_state, shift_state)
-           pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
-      @@ -18,8 +18,8 @@
-               writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
-               if !self.reveal_and_rereduces.is_empty() {
-                   writeln!(f, "      Reveal-and-rereduces:")?;
-      -            for (revealed, pop, nt) in &self.reveal_and_rereduces {
-      -                writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?;
-      +            for (revealed, len, nt) in &self.reveal_and_rereduces {
-      +                writeln!(f, "        - revealed: {}, len: {}, reduce_nt: {}", revealed.0, len, nt.0)?;
-                   }
-               }
-               if !self.reveal_goto_shift_escapes.is_empty() {
+      --- a/src/precompute4/full_nwa.rs
+      +++ b/src/precompute4/full_nwa.rs
+      @@ -17,12 +17,12 @@
+       
+           let ignore_nwa = crate::precompute4::augmented_nwa::build_augmented_nwa_for_ignore_terminal();
+       
+      -    println!("\n--- Augmented NWA Generation ---");
+      +    crate::debug!(5, "\n--- Augmented NWA Generation ---");
+           for (tid, aug_nwa) in &augmented_nwas {
+      -        println!("Terminal ID {:?}:\n{}", tid, aug_nwa);
+      -    }
+      -    println!("--- End Augmented NWA Generation ---\n");
+      +        crate::debug!(5, "Terminal ID {:?}:\n{}", tid, aug_nwa);
+      +    }
+      +    crate::debug!(5, "--- End Augmented NWA Generation ---\n");
+       
+           // 2. Reverse the precompute1 trie.
+           let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
       @@ -36,7 +36,7 @@
-           pub terminal: TerminalID,
-           // (initial_state, shift_state)
-           pub initial_shifts: BTreeSet<(StateID, StateID)>,
-      -    // (initial_state, pop_n, nonterminal)
-      +    // (initial_state, len, nonterminal)
-           pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
-           pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+               let options = crate::datastructures::trie::PrettyPrintOptions::default()
+                   .omit_depth()
+                   ;
+      -    println!("\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+      +    crate::debug!(5, "\n--- Reversed Trie1 ---\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
+       
+           // 3. Traverse the reversed trie.
+           let traversal_data = Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root])
+      @@ -71,16 +71,16 @@
+                       // Epsilon-like edge in grammar trie. Just propagate the current NWA.
+                       aug_nwa = &ignore_nwa;
+                   }
+      -            println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+      -            println!("--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
+      -            println!("--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
+      +            crate::debug!(5, "Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+      +            crate::debug!(5, "--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
+      +            crate::debug!(5, "--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
+                   for (dest_idx, llm_token_bv) in dest_map.iter() {
+                       let mut new_aug_nwa = aug_nwa.clone();
+                       let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                       new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
+                           .expect("Combine failed");
+      -                println!("For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
+      -                println!("--- COMBINED: Resulting aug_nwa ---\n{}", new_aug_nwa);
+      +                crate::debug!(5, "For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
+      +                crate::debug!(5, "--- COMBINED: Resulting aug_nwa ---\n{}", new_aug_nwa);
+                       results.push((*dest_idx, new_aug_nwa));
+                   }
+                   results
+      @@ -98,12 +98,12 @@
+               },
+           );
+       
+      -    println!("\n--- Final NWAs Before Determinization ---");
+      +    crate::debug!(5, "\n--- Final NWAs Before Determinization ---");
+           for (sid, aug_nwa) in &final_nwas {
+      -        println!("Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
+      -    }
+      -    println!("--- End Final NWAs Before Determinization ---\n");
+      +        crate::debug!(5, "Tokenizer State ID {:?}:\n{}", sid, aug_nwa);
+      +    }
+      +    crate::debug!(5, "--- End Final NWAs Before Determinization ---\n");
+       
+           // 4. Convert final NWAs to DWAs and simplify.
+           let mut precomputed4: Precomputed4 = BTreeMap::new();
+      @@ -113,12 +113,12 @@
+               precomputed4.insert(sid, dwa);
+           }
+       
+      -    println!("\n--- Final DWAs After Determinization and Simplification ---");
+      +    crate::debug!(5, "\n--- Final DWAs After Determinization and Simplification ---");
+           for (sid, dwa) in &precomputed4 {
+      -        println!("Tokenizer State ID {:?}:\n{}", sid, dwa);
+      -    }
+      -    println!("--- End Final DWAs After Determinization and Simplification ---\n");
+      +        crate::debug!(5, "Tokenizer State ID {:?}:\n{}", sid, dwa);
+      +    }
+      +    crate::debug!(5, "--- End Final DWAs After Determinization and Simplification ---\n");
+       
+           precomputed4
        }
+
+      ```
+
+      ```diff
+      --- a/src/weighted_automata.rs
+      +++ b/src/weighted_automata.rs
+      @@ -1004,8 +1004,8 @@
+               nwa.set_final_weight(s2, SimpleBitset::from_iter(vec![1, 6]));
+       
+               let dwa = nwa.determinize();
+      -        println!("NWA:\n{}", nwa);
+      -        println!("DWA:\n{}", dwa);
+      +        crate::debug!(5, "NWA:\n{}", nwa);
+      +        crate::debug!(5, "DWA:\n{}", dwa);
+               // Expected DWA:
+               // S0 (start): weight=ALL
+               //   'a' -> S1
+      @@ -1182,8 +1182,8 @@
+               nwa.add_transition(s1, 5, s2, w01.clone());
+       
+               let dwa = nwa.determinize();
+      -        println!("{}", nwa);
+      -        println!("{}", dwa);
+      +        crate::debug!(5, "{}", nwa);
+      +        crate::debug!(5, "{}", dwa);
+       
+               // Expected DWA: 4 states (S0, S1, S2, S3)
+               assert_eq!(dwa.states.len(), 4);
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/precompute4/augmented_nwa.rs
@@ -8616,11 +8742,16 @@ messages:
       Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
 
       --- Processing Diff Block 2 ---
-      Identified target file: src/precompute4/characterize.rs
-      Applying patch to 'src/precompute4/characterize.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/characterize.rs.
+      Identified target file: src/precompute4/full_nwa.rs
+      Applying patch to 'src/precompute4/full_nwa.rs' using custom patcher...
+      Successfully applied patch and wrote to src/precompute4/full_nwa.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/weighted_automata.rs
+      Applying patch to 'src/weighted_automata.rs' using custom patcher...
+      Successfully applied patch and wrote to src/weighted_automata.rs.
     metadata:
-  - user: "Changes committed with message: \"Refactor: Standardize 'len' terminology
-      over 'pop_n' in precompute4 characterization and augmented NWA construction\""
+  - user: 'Changes committed with message: "Replace debug println! with crate::debug!(5,
+      ...) across relevant files"'
     metadata:
 ...
