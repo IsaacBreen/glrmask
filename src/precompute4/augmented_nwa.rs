@@ -47,6 +47,31 @@ pub fn build_augmented_nwa_for_terminal(
     build_augmented_nwa_from_characterization(parser, &bb)
 }
 
+/// Build an augmented NWA for the ignore terminal. This NWA acts as an identity
+/// for stack transformations, simply passing through any stack it is combined with.
+pub fn build_augmented_nwa_for_ignore_terminal(
+    terminal_id: TerminalID,
+) -> AugmentedNwa {
+    let mut nwa = WaNWA::new();
+    let start_state = nwa.start_state;
+
+    // For an ignore terminal, the stack is passed through. The end_map should
+    // contain an empty stack at the end_state, which is also the start_state.
+    // When this NWA is on the left in a `combine_right_into` operation, the
+    // empty stack from its end_map results in the right-hand-side NWA's stacks
+    // being preserved.
+    let mut end_map = BTreeMap::new();
+    end_map.insert(start_state, BTreeSet::from([vec![]]));
+
+    AugmentedNwa {
+        terminal: terminal_id,
+        nwa,
+        end_state: start_state,
+        nt_nodes: BTreeMap::new(),
+        end_map,
+    }
+}
+
 /// Build augmented NWAs for all terminals.
 pub fn build_augmented_nwas(
     parser: &GLRParser,
@@ -63,6 +88,13 @@ pub fn build_augmented_nwas(
     for (term, bb) in all {
         let aug = build_augmented_nwa_from_characterization(parser, &bb)?;
         out.insert(term, aug);
+    }
+
+    if let Some(ignore_terminal_id) = parser.ignore_terminal_id {
+        out.insert(
+            ignore_terminal_id,
+            build_augmented_nwa_for_ignore_terminal(ignore_terminal_id),
+        );
     }
     Ok(out)
 }
