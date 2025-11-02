@@ -73,18 +73,17 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
                 // Epsilon-like edge in grammar trie. Just propagate the current NWA.
                 aug_nwa = &ignore_nwa;
             }
+            println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
+            println!("--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
+            println!("--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
             for (dest_idx, llm_token_bv) in dest_map.iter() {
                 let mut new_aug_nwa = aug_nwa.clone();
                 let weight: WaWeight = WaWeight::from_rsb(llm_token_bv.inner.as_ref().clone());
                 new_aug_nwa.combine_right_into(current_aug_nwa, &weight)
                     .expect("Combine failed");
+                println!("For dest_idx {:?} with token bv (WEIGHT) {:?}:", dest_idx, llm_token_bv);
+                println!("--- COMBINED: Resulting aug_nwa ---\n{}", new_aug_nwa);
                 results.push((*dest_idx, new_aug_nwa));
-            }
-            println!("Processed edge {:?}, produced {} results.", edge_terminal_opt, results.len());
-            println!("--- RIGHT: Incoming aug_nwa ---\n{}", current_aug_nwa);
-            println!("--- LEFT: Edge aug_nwa ---\n{}", aug_nwa);
-            for (_, res_aug_nwa) in &results {
-                println!("--- COMBINED: Resulting aug_nwa ---\n{}", res_aug_nwa);
             }
             results
         },
