@@ -400,7 +400,7 @@ mod tests {
     fn test_combine_with_ignore_on_left() {
         let mut lhs = build_augmented_nwa_for_ignore_terminal();
         let mut rhs = build_simple_aug_nwa();
-        rhs.nwa.set_final_weight(rhs.nwa.start_state, WaWeight::all());
+        rhs.nwa.set_final_weight(1, WaWeight::all());
         let weight = WaWeight::all();
 
         println!("Left NWA (ignore):\n{}", lhs);
