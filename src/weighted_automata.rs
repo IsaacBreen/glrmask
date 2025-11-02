@@ -1203,13 +1203,90 @@ impl Display for DWA {
     }
 }
 
-impl JSONConvertible for DWA {
+impl JSONConvertible for SimpleBitset {
     fn to_json(&self) -> JSONNode {
-        todo!()
+        let ranges: Vec<JSONNode> = self.0.ranges().map(|r| {
+            JSONNode::Array(vec![
+                JSONNode::Int(r.start() as i64),
+                JSONNode::Int(r.end() as i64),
+            ])
+        }).collect();
+        JSONNode::Array(ranges)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        todo!()
+        let arr = node.into_array()?;
+        let mut rsb = RangeSetBlaze::new();
+        for range_node in arr {
+            let mut range_arr = range_node.into_array()?;
+            if range_arr.len() != 2 {
+                return Err("Range must be a 2-element array".to_string());
+            }
+            let end = range_arr.pop().unwrap().into_int()? as usize;
+            let start = range_arr.pop().unwrap().into_int()? as usize;
+            rsb.insert_range(start..=end);
+        }
+        Ok(SimpleBitset(rsb))
+    }
+}
+
+impl<T: JSONConvertible> JSONConvertible for U16Map<T> {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = BTreeMap::new();
+        obj.insert("exceptions".to_string(), self.exceptions.to_json());
+        obj.insert("default".to_string(), self.default.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        let mut obj = node.into_object()?;
+        let exceptions = BTreeMap::<u16, T>::from_json(obj.remove("exceptions").ok_or("Missing 'exceptions' field")?)?;
+        let default = Option::<T>::from_json(obj.remove("default").ok_or("Missing 'default' field")?)?;
+        Ok(U16Map { exceptions, default })
+    }
+}
+
+impl JSONConvertible for DWAState {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = BTreeMap::new();
+        obj.insert("transitions".to_string(), self.transitions.to_json());
+        obj.insert("weight".to_string(), self.weight.to_json());
+        obj.insert("final_weight".to_string(), self.final_weight.to_json());
+        obj.insert("trans_weight_default".to_string(), self.trans_weight_default.to_json());
+        obj.insert("trans_weights_exceptions".to_string(), self.trans_weights_exceptions.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        let mut obj = node.into_object()?;
+        let transitions = U16Map::<StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
+        let weight = Weight::from_json(obj.remove("weight").ok_or("Missing 'weight' field")?)?;
+        let final_weight = Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
+        let trans_weight_default = Option::<Weight>::from_json(obj.remove("trans_weight_default").ok_or("Missing 'trans_weight_default' field")?)?;
+        let trans_weights_exceptions = BTreeMap::<u16, Weight>::from_json(obj.remove("trans_weights_exceptions").ok_or("Missing 'trans_weights_exceptions' field")?)?;
+        Ok(DWAState {
+            transitions,
+            weight,
+            final_weight,
+            trans_weight_default,
+            trans_weights_exceptions,
+        })
+    }
+}
+
+impl JSONConvertible for DWA {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = BTreeMap::new();
+        obj.insert("states".to_string(), self.states.to_json());
+        obj.insert("start_state".to_string(), self.start_state.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        let mut obj = node.into_object()?;
+        let states = Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
+        let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
+        Ok(DWA { states, start_state })
     }
 }
 
