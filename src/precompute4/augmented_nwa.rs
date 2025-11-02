@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
-
+use crate::glr::grammar::regex_name;
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{
@@ -77,7 +77,7 @@ pub fn build_augmented_nwas(
 
     println!("\n--- Terminal Characterizations ---");
     for (terminal_id, bb) in &all {
-        let terminal = parser.terminal_map.get_by_right(terminal_id).unwrap_or("<unknown>".as_ref());
+        let terminal = parser.terminal_map.get_by_right(terminal_id).cloned().unwrap_or(regex_name("UNKNOWN"));
         println!("Terminal {} ({}) Characterization:\n{}", terminal_id.0, terminal, bb);
     }
     println!("--- End Terminal Characterizations ---\n");
