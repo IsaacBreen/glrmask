@@ -403,6 +403,9 @@ mod tests {
         rhs.nwa.set_final_weight(rhs.nwa.start_state, WaWeight::all());
         let weight = WaWeight::all();
 
+        println!("Left NWA (ignore):\n{}", lhs);
+        println!("Right NWA (simple):\n{}", rhs);
+
         lhs.combine_right_into(&rhs, &weight).unwrap();
 
         // Build expected result
