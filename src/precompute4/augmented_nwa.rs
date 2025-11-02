@@ -290,7 +290,9 @@ impl AugmentedNwa {
                 }
             }
         }
-        self.end_map = new_end_map;
+        for (state, stacks) in new_end_map {
+            self.end_map.entry(state).or_default().extend(stacks);
+        }
         Ok(())
     }
 
