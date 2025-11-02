@@ -4688,21 +4688,22 @@ local_system:
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let s1 = states.add_state();
               let s2 = states.add_state();
-              states.add_epsilon_transition(0, s1, WaWeight::all());
+              states.add_epsilon_transition(start, s1, WaWeight::all());
               states.add_transition(s1, 100, s2, WaWeight::all());
               states.set_final_weight(s2, WaWeight::all());
 
               let expected_end_map = BTreeMap::from([(
-                  2,
+                  s2,
                   BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
               )]);
 
               let expected_aug_nwa = AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes: BTreeMap::new(),
                       end_map: expected_end_map,
                   },
@@ -4724,21 +4725,22 @@ local_system:
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let s1 = states.add_state();
               let s2 = states.add_state();
-              states.add_transition(0, 100, s1, WaWeight::all());
+              states.add_transition(start, 100, s1, WaWeight::all());
               states.add_epsilon_transition(s1, s2, WaWeight::all());
               states.set_final_weight(s2, WaWeight::all());
 
               let expected_end_map = BTreeMap::from([(
-                  2,
+                  s2,
                   BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
               )]);
 
               let expected_aug_nwa = AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes: BTreeMap::new(),
                       end_map: expected_end_map,
                   },
@@ -4749,6 +4751,7 @@ local_system:
 
           fn build_terminal1_nwa() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let end_state = states.add_state();
               let nt0_state = states.add_state();
               let nt1_state = states.add_state();
@@ -4756,9 +4759,9 @@ local_system:
               assert_eq!(nt0_state, 2);
               assert_eq!(nt1_state, 3);
 
-              states.add_transition(0, 0, end_state, WaWeight::all());
-              states.add_transition(0, 1, nt1_state, WaWeight::all());
-              states.add_transition(0, 3, nt0_state, WaWeight::all());
+              states.add_transition(start, 0, end_state, WaWeight::all());
+              states.add_transition(start, 1, nt1_state, WaWeight::all());
+              states.add_transition(start, 3, nt0_state, WaWeight::all());
 
               let nt_nodes = BTreeMap::from([
                   (NonTerminalID(0), nt0_state),
@@ -4773,7 +4776,7 @@ local_system:
               AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes,
                       end_map,
                   },
@@ -4782,6 +4785,7 @@ local_system:
 
           fn build_terminal2_nwa() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let end_state = states.add_state();
               let nt0_state = states.add_state();
               let nt1_state = states.add_state();
@@ -4789,8 +4793,8 @@ local_system:
               assert_eq!(nt0_state, 2);
               assert_eq!(nt1_state, 3);
 
-              states.add_transition(0, 1, nt1_state, WaWeight::all());
-              states.add_transition(0, 3, nt0_state, WaWeight::all());
+              states.add_transition(start, 1, nt1_state, WaWeight::all());
+              states.add_transition(start, 3, nt0_state, WaWeight::all());
 
               let nt_nodes = BTreeMap::from([
                   (NonTerminalID(0), nt0_state),
@@ -4800,7 +4804,7 @@ local_system:
               AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes,
                       end_map: BTreeMap::new(),
                   },
@@ -4809,6 +4813,7 @@ local_system:
 
           fn build_terminal0_nwa() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let end_state = states.add_state();
               let nt0_state = states.add_state();
               let nt1_state = states.add_state();
@@ -4816,9 +4821,9 @@ local_system:
               assert_eq!(nt0_state, 2);
               assert_eq!(nt1_state, 3);
 
-              states.add_transition(0, 1, nt1_state, WaWeight::all());
-              states.add_transition(0, 2, end_state, WaWeight::all());
-              states.add_transition(0, 3, nt0_state, WaWeight::all());
+              states.add_transition(start, 1, nt1_state, WaWeight::all());
+              states.add_transition(start, 2, end_state, WaWeight::all());
+              states.add_transition(start, 3, nt0_state, WaWeight::all());
 
               let nt_nodes = BTreeMap::from([
                   (NonTerminalID(0), nt0_state),
@@ -4833,7 +4838,7 @@ local_system:
               AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes,
                       end_map,
                   },
@@ -4878,13 +4883,14 @@ local_system:
 
           fn build_nwa_from_prompt_left() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let end_state = states.add_state();
               let nt0_state = states.add_state();
               let nt1_state = states.add_state();
 
-              states.add_transition(0, 1, nt1_state, WaWeight::all());
-              states.add_transition(0, 2, end_state, WaWeight::all());
-              states.add_transition(0, 3, nt0_state, WaWeight::all());
+              states.add_transition(start, 1, nt1_state, WaWeight::all());
+              states.add_transition(start, 2, end_state, WaWeight::all());
+              states.add_transition(start, 3, nt0_state, WaWeight::all());
 
               let nt_nodes = BTreeMap::from([
                   (NonTerminalID(0), nt0_state),
@@ -4896,11 +4902,12 @@ local_system:
                   BTreeSet::from([vec![ParserStateID(2), ParserStateID(0)]]),
               )]);
 
-              AugmentedNwa { states, rest: AugmentedNwaRest { nwa: WaNWARest { start_state: 0 }, nt_nodes, end_map } }
+              AugmentedNwa { states, rest: AugmentedNwaRest { nwa: WaNWARest { start_state: start }, nt_nodes, end_map } }
           }
 
           fn build_nwa_from_prompt_right() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let s1 = states.add_state();
               let s2 = states.add_state();
               let s3 = states.add_state();
@@ -4908,7 +4915,7 @@ local_system:
               let end_state = states.add_state();
 
               let w3 = WaWeight::from_item(3);
-              states.add_epsilon_transition(0, s1, w3.clone());
+              states.add_epsilon_transition(start, s1, w3.clone());
               states.add_transition(s1, 0, s2, WaWeight::all());
               states.add_transition(s1, 1, s4, WaWeight::all());
               states.add_transition(s1, 3, s3, WaWeight::all());
@@ -4923,7 +4930,7 @@ local_system:
               AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes: BTreeMap::new(),
                       end_map,
                   },
@@ -4941,6 +4948,7 @@ local_system:
               self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let s1 = states.add_state();
               let s2 = states.add_state();
               let s3 = states.add_state();
@@ -4951,9 +4959,9 @@ local_system:
               let s8 = states.add_state();
               let s9 = states.add_state();
 
-              states.add_transition(0, 1, s3, WaWeight::all());
-              states.add_transition(0, 2, s1, WaWeight::all());
-              states.add_transition(0, 3, s2, WaWeight::all());
+              states.add_transition(start, 1, s3, WaWeight::all());
+              states.add_transition(start, 2, s1, WaWeight::all());
+              states.add_transition(start, 3, s2, WaWeight::all());
 
               let w3 = WaWeight::from_item(3);
               states.add_epsilon_transition(s1, s9, w3.clone());
@@ -4978,7 +4986,7 @@ local_system:
               let expected_aug_nwa = AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes: expected_nt_nodes,
                       end_map: expected_end_map,
                   },
@@ -5180,7 +5188,7 @@ local_system:
       }
     src/precompute4/conversion.rs: |
       // src/precompute4/conversion.rs
-      use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
+      use crate::constraint::{PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
       use crate::datastructures::trie::Trie;
       use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
       use std::collections::BTreeMap;
@@ -10659,9 +10667,46 @@ local_system:
                           trie3_god.insert_edge_simple(src_trie_node, target_trie_node, edge_key, edge_val);
                       }
                   }
+                  }
+              }
+
+              // Collapse one-pop-then-final into a direct pop-0 edge:
+              //
+              // If from this DWA state we can take a single pop-1 transition to a neighbor that
+              // is final (with final_weight F), and the pop-1 transition has token weight W,
+              // then tokens (W & F) should be available as a direct pop-0 edge from here.
+              //
+              // This preserves existing edges and adds the shortcut needed at initialization.
+              let mut via_one_pop_tokens = WaWeight::zeros();
+
+              // Exceptions
+              for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
+                  let trans_w = dwa_state
+                      .trans_weights_exceptions
+                      .get(&char_code)
+                      .cloned()
+                      .unwrap_or_else(WaWeight::zeros);
+                  if let Some(fin_w) = &dwa.states.0[target_dwa_id].final_weight {
+                      via_one_pop_tokens |= &(trans_w & fin_w.clone());
+                  }
+              }
+
+              // Default
+              if let Some(target_dwa_id) = dwa_state.transitions.default {
+                  let trans_w = dwa_state
+                      .trans_weight_default
+                      .clone()
+                      .unwrap_or_else(WaWeight::zeros);
+                  if let Some(fin_w) = &dwa.states.0[target_dwa_id].final_weight {
+                      via_one_pop_tokens |= &(trans_w & fin_w.clone());
+                  }
+              }
+
+              if !via_one_pop_tokens.is_empty() {
+                  let edge_key = (0, LLMTokenBV::from(via_one_pop_tokens.0.clone()));
+                  trie3_god.insert_edge_simple(src_trie_node, end_node, edge_key, all_parser_states.clone());
               }
           }
-
           *dwa_state_to_trie_node.get(&dwa.rest.start_state).unwrap()
       }
     src/precompute4/full_nwa.rs: |
@@ -15548,21 +15593,22 @@ messages:
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let s1 = states.add_state();
               let s2 = states.add_state();
-              states.add_epsilon_transition(0, s1, WaWeight::all());
+              states.add_epsilon_transition(start, s1, WaWeight::all());
               states.add_transition(s1, 100, s2, WaWeight::all());
               states.set_final_weight(s2, WaWeight::all());
 
               let expected_end_map = BTreeMap::from([(
-                  2,
+                  s2,
                   BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
               )]);
 
               let expected_aug_nwa = AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes: BTreeMap::new(),
                       end_map: expected_end_map,
                   },
@@ -15584,21 +15630,22 @@ messages:
               lhs.combine_right_into(&rhs, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let s1 = states.add_state();
               let s2 = states.add_state();
-              states.add_transition(0, 100, s1, WaWeight::all());
+              states.add_transition(start, 100, s1, WaWeight::all());
               states.add_epsilon_transition(s1, s2, WaWeight::all());
               states.set_final_weight(s2, WaWeight::all());
 
               let expected_end_map = BTreeMap::from([(
-                  2,
+                  s2,
                   BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
               )]);
 
               let expected_aug_nwa = AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes: BTreeMap::new(),
                       end_map: expected_end_map,
                   },
@@ -15609,6 +15656,7 @@ messages:
 
           fn build_terminal1_nwa() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let end_state = states.add_state();
               let nt0_state = states.add_state();
               let nt1_state = states.add_state();
@@ -15616,9 +15664,9 @@ messages:
               assert_eq!(nt0_state, 2);
               assert_eq!(nt1_state, 3);
 
-              states.add_transition(0, 0, end_state, WaWeight::all());
-              states.add_transition(0, 1, nt1_state, WaWeight::all());
-              states.add_transition(0, 3, nt0_state, WaWeight::all());
+              states.add_transition(start, 0, end_state, WaWeight::all());
+              states.add_transition(start, 1, nt1_state, WaWeight::all());
+              states.add_transition(start, 3, nt0_state, WaWeight::all());
 
               let nt_nodes = BTreeMap::from([
                   (NonTerminalID(0), nt0_state),
@@ -15633,7 +15681,7 @@ messages:
               AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes,
                       end_map,
                   },
@@ -15642,6 +15690,7 @@ messages:
 
           fn build_terminal2_nwa() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let end_state = states.add_state();
               let nt0_state = states.add_state();
               let nt1_state = states.add_state();
@@ -15649,8 +15698,8 @@ messages:
               assert_eq!(nt0_state, 2);
               assert_eq!(nt1_state, 3);
 
-              states.add_transition(0, 1, nt1_state, WaWeight::all());
-              states.add_transition(0, 3, nt0_state, WaWeight::all());
+              states.add_transition(start, 1, nt1_state, WaWeight::all());
+              states.add_transition(start, 3, nt0_state, WaWeight::all());
 
               let nt_nodes = BTreeMap::from([
                   (NonTerminalID(0), nt0_state),
@@ -15660,7 +15709,7 @@ messages:
               AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes,
                       end_map: BTreeMap::new(),
                   },
@@ -15669,6 +15718,7 @@ messages:
 
           fn build_terminal0_nwa() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let end_state = states.add_state();
               let nt0_state = states.add_state();
               let nt1_state = states.add_state();
@@ -15676,9 +15726,9 @@ messages:
               assert_eq!(nt0_state, 2);
               assert_eq!(nt1_state, 3);
 
-              states.add_transition(0, 1, nt1_state, WaWeight::all());
-              states.add_transition(0, 2, end_state, WaWeight::all());
-              states.add_transition(0, 3, nt0_state, WaWeight::all());
+              states.add_transition(start, 1, nt1_state, WaWeight::all());
+              states.add_transition(start, 2, end_state, WaWeight::all());
+              states.add_transition(start, 3, nt0_state, WaWeight::all());
 
               let nt_nodes = BTreeMap::from([
                   (NonTerminalID(0), nt0_state),
@@ -15693,7 +15743,7 @@ messages:
               AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes,
                       end_map,
                   },
@@ -15738,13 +15788,14 @@ messages:
 
           fn build_nwa_from_prompt_left() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let end_state = states.add_state();
               let nt0_state = states.add_state();
               let nt1_state = states.add_state();
 
-              states.add_transition(0, 1, nt1_state, WaWeight::all());
-              states.add_transition(0, 2, end_state, WaWeight::all());
-              states.add_transition(0, 3, nt0_state, WaWeight::all());
+              states.add_transition(start, 1, nt1_state, WaWeight::all());
+              states.add_transition(start, 2, end_state, WaWeight::all());
+              states.add_transition(start, 3, nt0_state, WaWeight::all());
 
               let nt_nodes = BTreeMap::from([
                   (NonTerminalID(0), nt0_state),
@@ -15756,11 +15807,12 @@ messages:
                   BTreeSet::from([vec![ParserStateID(2), ParserStateID(0)]]),
               )]);
 
-              AugmentedNwa { states, rest: AugmentedNwaRest { nwa: WaNWARest { start_state: 0 }, nt_nodes, end_map } }
+              AugmentedNwa { states, rest: AugmentedNwaRest { nwa: WaNWARest { start_state: start }, nt_nodes, end_map } }
           }
 
           fn build_nwa_from_prompt_right() -> AugmentedNwa {
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let s1 = states.add_state();
               let s2 = states.add_state();
               let s3 = states.add_state();
@@ -15768,7 +15820,7 @@ messages:
               let end_state = states.add_state();
 
               let w3 = WaWeight::from_item(3);
-              states.add_epsilon_transition(0, s1, w3.clone());
+              states.add_epsilon_transition(start, s1, w3.clone());
               states.add_transition(s1, 0, s2, WaWeight::all());
               states.add_transition(s1, 1, s4, WaWeight::all());
               states.add_transition(s1, 3, s3, WaWeight::all());
@@ -15783,7 +15835,7 @@ messages:
               AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes: BTreeMap::new(),
                       end_map,
                   },
@@ -15801,6 +15853,7 @@ messages:
               self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
 
               let mut states = WaNWAStates::default();
+              let start = states.add_state();
               let s1 = states.add_state();
               let s2 = states.add_state();
               let s3 = states.add_state();
@@ -15811,9 +15864,9 @@ messages:
               let s8 = states.add_state();
               let s9 = states.add_state();
 
-              states.add_transition(0, 1, s3, WaWeight::all());
-              states.add_transition(0, 2, s1, WaWeight::all());
-              states.add_transition(0, 3, s2, WaWeight::all());
+              states.add_transition(start, 1, s3, WaWeight::all());
+              states.add_transition(start, 2, s1, WaWeight::all());
+              states.add_transition(start, 3, s2, WaWeight::all());
 
               let w3 = WaWeight::from_item(3);
               states.add_epsilon_transition(s1, s9, w3.clone());
@@ -15838,7 +15891,7 @@ messages:
               let expected_aug_nwa = AugmentedNwa {
                   states,
                   rest: AugmentedNwaRest {
-                      nwa: WaNWARest { start_state: 0 },
+                      nwa: WaNWARest { start_state: start },
                       nt_nodes: expected_nt_nodes,
                       end_map: expected_end_map,
                   },
@@ -16050,7 +16103,7 @@ messages:
   - user: |-
       ```rust "src/precompute4/conversion.rs"
       // src/precompute4/conversion.rs
-      use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
+      use crate::constraint::{PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
       use crate::datastructures::trie::Trie;
       use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
       use std::collections::BTreeMap;
@@ -16293,6 +16346,700 @@ messages:
       ```
     metadata:
       filename: src/precompute4/mod.rs
+  - user: |+
+      [DEBUG] 2] src/interface/interface.rs:746: Augmented start_production_name: "start'"
+      Removing always-null terminals: {}
+      Processing may-be-null terminals: {}
+      [DEBUG] 2] src/interface/interface.rs:1111: Building tokenizer from definition
+      [DEBUG] 2] src/interface/interface.rs:1116: Building GLR parser from definition
+      [DEBUG] 2] src/glr/table.rs:1455: Validating initial grammar
+      [DEBUG] 3] src/glr/automaton.rs:97: Computing nullable non-terminals
+      [DEBUG] 3] src/glr/automaton.rs:97: Computing nullable non-terminals
+      [DEBUG] 2] src/glr/table.rs:1461: Removing productions with undefined non-terminals
+      [DEBUG] 2] src/glr/table.rs:1497: Stage 1
+      [DEBUG] 2] src/glr/table.rs:1500: Stage 2
+      [DEBUG] 2] src/glr/table.rs:1503: Stage 3
+      [DEBUG] 3] src/glr/automaton.rs:106: Computing first sets for non-terminals
+      [DEBUG] 3] src/glr/automaton.rs:97: Computing nullable non-terminals
+      [DEBUG] 3] src/glr/automaton.rs:97: Computing nullable non-terminals
+      [DEBUG] 3] src/glr/automaton.rs:158: Computing follow sets for non-terminals
+      [DEBUG] 2] src/glr/table.rs:1506: Stage 4
+      [DEBUG] 2] src/glr/table.rs:1509: Stage 5
+      [DEBUG] 2] src/glr/table.rs:1512: Stage 6
+      [DEBUG] 2] src/glr/table.rs:1515: Stage 7
+      [DEBUG] 2] src/glr/table.rs:1518: Stage 8
+      [DEBUG] 2] src/glr/table.rs:1522: Stage 9: Precomputing substring gotos
+      [DEBUG] 2] src/glr/table.rs:1525: Stage 10: Precomputing reduce goto map
+      [DEBUG] 2] src/glr/table.rs:1528: Finalizing table
+
+      --- Combined States Statistics ---
+      Total combined states: 1
+      Sole Shift actions: Total: 2, Min/Max per state: 2/2, Avg per state: 2.00
+        Distribution (count -> #states): 2: 1
+      Sole Reduce actions: Total: 4, Min/Max per state: 4/4, Avg per state: 4.00
+        Distribution (count -> #states): 4: 1
+      Split actions: Total: 0, Min/Max per state: 0/0, Avg per state: 0.00
+        Distribution (count -> #states): 0: 1
+      Goto actions: Total: 1, Min/Max per state: 1/1, Avg per state: 1.00
+        Distribution (count -> #states): 1: 1
+      ------------------------------------
+      Number of combined states: 1
+      [DEBUG] 2] src/glr/table.rs:1537: Done generating GLR parser
+      [DEBUG] 4] src/glr/parser.rs:1641: Phase 1 completed, proceeding to Phase 2 with 0 shifted states
+      [DEBUG] 5] src/glr/parser.rs:1303: Handling action for state ID 18446744073709551615. Action: Normal(Shift(StateID(0))), Filter: Some(HybridBitset { inner: 2..=2 })
+      [DEBUG] 5] src/glr/parser.rs:1310: Action: Shift to state 0
+      [DEBUG] 4] src/glr/parser.rs:1249: Pushing new state with content: ParseStateEdgeContent { state_id: StateID(0) }
+      [DEBUG] 5] src/glr/parser.rs:1303: Handling action for state ID 18446744073709551615. Action: Normal(Reduce { nonterminal_id: NonTerminalID(0), len: 1, production_ids: {ProductionID(0)} }), Filter: Some(HybridBitset { inner: 3..=3 })
+      [DEBUG] 5] src/glr/parser.rs:1328: Action: Reduce by NT 'start'' (len 1)
+      [DEBUG] 4] src/glr/parser.rs:1794: Reducing with NT 'start'' and len 1
+      [DEBUG] 4] src/glr/parser.rs:1795: Popped with 0 results...
+      [DEBUG] 5] src/glr/parser.rs:1827: Popped below bottom, hallucinating 1 new parse paths.
+      [DEBUG] 4] src/glr/parser.rs:1861: Total unique predecessor states to process for GOTO: 1
+      [DEBUG] 5] src/glr/parser.rs:1904: Found 1 GOTO entries for NT 'start'' from state 18446744073709551615: [(Goto { state_id: None, accept: true }, Some(HybridBitset { inner: 2..=2 }))]
+      [DEBUG] 5] src/glr/parser.rs:1927: Applying state filter HybridBitset { inner: 2..=2 } to Trie2Index { index: Index { index: 4 } }
+      [DEBUG] 5] src/glr/parser.rs:2002: No GOTO. We're done.
+      [DEBUG] 5] src/glr/parser.rs:1303: Handling action for state ID 18446744073709551615. Action: Normal(Reduce { nonterminal_id: NonTerminalID(1), len: 2, production_ids: {ProductionID(1)} }), Filter: Some(HybridBitset { inner: 1..=1 })
+      [DEBUG] 5] src/glr/parser.rs:1328: Action: Reduce by NT 's' (len 2)
+      [DEBUG] 4] src/glr/parser.rs:1794: Reducing with NT 's' and len 2
+      [DEBUG] 4] src/glr/parser.rs:1795: Popped with 0 results...
+      [DEBUG] 5] src/glr/parser.rs:1827: Popped below bottom, hallucinating 1 new parse paths.
+      [DEBUG] 4] src/glr/parser.rs:1861: Total unique predecessor states to process for GOTO: 1
+      [DEBUG] 5] src/glr/parser.rs:1904: Found 1 GOTO entries for NT 's' from state 18446744073709551615: [(Goto { state_id: Some(StateID(3)), accept: false }, Some(HybridBitset { inner: 2..=2 }))]
+      [DEBUG] 5] src/glr/parser.rs:1927: Applying state filter HybridBitset { inner: 2..=2 } to Trie2Index { index: Index { index: 7 } }
+      [DEBUG] 5] src/glr/parser.rs:1951: Unit reduce chain: GOTO to state 3 leads to reduce of NT 'start'', continuing chain.
+      [DEBUG] 5] src/glr/parser.rs:1904: Found 1 GOTO entries for NT 'start'' from state 18446744073709551615: [(Goto { state_id: None, accept: true }, Some(HybridBitset { inner: 2..=2 }))]
+      [DEBUG] 5] src/glr/parser.rs:1927: Applying state filter HybridBitset { inner: 2..=2 } to Trie2Index { index: Index { index: 7 } }
+      [DEBUG] 5] src/glr/parser.rs:2002: No GOTO. We're done.
+      [DEBUG] 4] src/glr/parser.rs:2160: Phase 2 completed, consolidating 1 shifted states into active state
+      [DEBUG] 4] src/glr/parser.rs:1641: Phase 1 completed, proceeding to Phase 2 with 0 shifted states
+      [DEBUG] 5] src/glr/parser.rs:1303: Handling action for state ID 18446744073709551615. Action: Normal(Shift(StateID(1))), Filter: Some(HybridBitset { inner: 0..=0 })
+      [DEBUG] 5] src/glr/parser.rs:1310: Action: Shift to state 1
+      [DEBUG] 4] src/glr/parser.rs:1249: Pushing new state with content: ParseStateEdgeContent { state_id: StateID(1) }
+      [DEBUG] 5] src/glr/parser.rs:1303: Handling action for state ID 18446744073709551615. Action: Normal(Reduce { nonterminal_id: NonTerminalID(0), len: 1, production_ids: {ProductionID(0)} }), Filter: Some(HybridBitset { inner: 3..=3 })
+      [DEBUG] 5] src/glr/parser.rs:1328: Action: Reduce by NT 'start'' (len 1)
+      [DEBUG] 4] src/glr/parser.rs:1794: Reducing with NT 'start'' and len 1
+      [DEBUG] 4] src/glr/parser.rs:1795: Popped with 0 results...
+      [DEBUG] 5] src/glr/parser.rs:1827: Popped below bottom, hallucinating 1 new parse paths.
+      [DEBUG] 4] src/glr/parser.rs:1861: Total unique predecessor states to process for GOTO: 1
+      [DEBUG] 5] src/glr/parser.rs:1904: Found 1 GOTO entries for NT 'start'' from state 18446744073709551615: [(Goto { state_id: None, accept: true }, Some(HybridBitset { inner: 2..=2 }))]
+      [DEBUG] 5] src/glr/parser.rs:1927: Applying state filter HybridBitset { inner: 2..=2 } to Trie2Index { index: Index { index: 15 } }
+      [DEBUG] 5] src/glr/parser.rs:2002: No GOTO. We're done.
+      [DEBUG] 5] src/glr/parser.rs:1303: Handling action for state ID 18446744073709551615. Action: Normal(Reduce { nonterminal_id: NonTerminalID(1), len: 2, production_ids: {ProductionID(1)} }), Filter: Some(HybridBitset { inner: 1..=1 })
+      [DEBUG] 5] src/glr/parser.rs:1328: Action: Reduce by NT 's' (len 2)
+      [DEBUG] 4] src/glr/parser.rs:1794: Reducing with NT 's' and len 2
+      [DEBUG] 4] src/glr/parser.rs:1795: Popped with 0 results...
+      [DEBUG] 5] src/glr/parser.rs:1827: Popped below bottom, hallucinating 1 new parse paths.
+      [DEBUG] 4] src/glr/parser.rs:1861: Total unique predecessor states to process for GOTO: 1
+      [DEBUG] 5] src/glr/parser.rs:1904: Found 1 GOTO entries for NT 's' from state 18446744073709551615: [(Goto { state_id: Some(StateID(3)), accept: false }, Some(HybridBitset { inner: 2..=2 }))]
+      [DEBUG] 5] src/glr/parser.rs:1927: Applying state filter HybridBitset { inner: 2..=2 } to Trie2Index { index: Index { index: 18 } }
+      [DEBUG] 5] src/glr/parser.rs:1951: Unit reduce chain: GOTO to state 3 leads to reduce of NT 'start'', continuing chain.
+      [DEBUG] 5] src/glr/parser.rs:1904: Found 1 GOTO entries for NT 'start'' from state 18446744073709551615: [(Goto { state_id: None, accept: true }, Some(HybridBitset { inner: 2..=2 }))]
+      [DEBUG] 5] src/glr/parser.rs:1927: Applying state filter HybridBitset { inner: 2..=2 } to Trie2Index { index: Index { index: 18 } }
+      [DEBUG] 5] src/glr/parser.rs:2002: No GOTO. We're done.
+      [DEBUG] 4] src/glr/parser.rs:2160: Phase 2 completed, consolidating 1 shifted states into active state
+      [optimize_intermediate_trie3] End-reachability: total=22, productive=10, prunable=12
+      [optimize_intermediate_trie3] Reachable nodes: 6, edges: 4, unique edge-keys: 4
+      [optimize_intermediate_trie3] Initial classes: 2
+      [optimize_intermediate_trie3] WL iteration 1: classes=5, changed=5
+      [optimize_intermediate_trie3] WL iteration 2: classes=5, changed=0
+      [DEBUG] 2] src/constraint.rs:1211: Creating first group for terminal 'A'
+      [DEBUG] 2] src/constraint.rs:1191: Grouping terminal 'EOF' with group represented by 'A' (distance: 0.00)
+
+      --- Dummy Terminal Groups ---
+      - __DUMMY_TERMINAL_0__: (penalty: 3)
+        - A
+        - EOF
+      ---------------------------
+
+      [DEBUG] 2] src/constraint.rs:1684: Building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree (fast builder)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:303: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:307: Done computing reachable IDs in 5.25µs
+      [DEBUG] 2] src/constraint.rs:1686: Done building vocab prefix tree for possible_matches computation
+      [DEBUG] 2] src/constraint.rs:1692: Computing possible_matches for all 3 tokenizer states
+      [DEBUG] 2] src/constraint.rs:1702: Finished computing possible_matches
+      [DEBUG] 2] src/constraint.rs:1705: Building state_map_by_llm and terminal_map_by_llm
+      [DEBUG] 2] src/constraint.rs:1707: Built state_map_by_llm with 2 entries
+      [DEBUG] 2] src/constraint.rs:1713: Computing terminal follow sets
+      [DEBUG] 3] src/glr/automaton.rs:106: Computing first sets for non-terminals
+      [DEBUG] 3] src/glr/automaton.rs:97: Computing nullable non-terminals
+      [DEBUG] 3] src/glr/automaton.rs:97: Computing nullable non-terminals
+      [DEBUG] 3] src/glr/automaton.rs:158: Computing follow sets for non-terminals
+      [DEBUG] 5] src/constraint.rs:1715: terminal_follow_sets_named:
+      [DEBUG] 4] src/constraint.rs:1717: A -> EOF
+      [DEBUG] 4] src/constraint.rs:1717: EOF -> 
+      [DEBUG] 2] src/constraint.rs:1733: Computed terminal_follow_map_ids with 1 entries.
+      [DEBUG] 2] src/constraint.rs:3335: Building vocab prefix tree
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree (fast builder)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:303: Computing reachable IDs (fast path)
+      [DEBUG] 2] src/datastructures/vocab_prefix_tree.rs:307: Done computing reachable IDs in 4.875µs
+      [DEBUG] 2] src/constraint.rs:3337: Done building vocab prefix tree
+      [DEBUG] 2] src/constraint.rs:3347: Created trie1 roots for 3 tokenizer states
+      [DEBUG] 2] src/constraint.rs:3349: Counting vocab nodes for progress bar...
+      [DEBUG] 2] src/constraint.rs:3351: Counted 3 vocab nodes
+      [DEBUG] 2] src/constraint.rs:3364: Created trie1 leaf node
+      [DEBUG] 2] src/constraint.rs:3533: Starting precompute DFS
+
+      --- Precomputer1 DFS Stats ---
+      Total pending edges processed: 0
+      Unique src nodes: 0
+      Unique dst nodes: 0
+      Unique keys: 0
+      --- End Precomputer1 DFS Stats ---
+
+      [DEBUG] 2] src/constraint.rs:3544: Finished precompute DFS
+      [DEBUG] 2] src/constraint.rs:3547: Precomputation complete
+      [DEBUG] 2] src/constraint_extra.rs:1043: Calculating final precompute1 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:1154: Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 4 unique nodes, of which
+          - 3 are roots
+          - 1 are non-roots, of which
+              - 0 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 4
+        Total Edges: 2
+          Edges with None Key: 0
+          Edges with Some Key: 2
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    1.00
+        Average edge occupancy for None-key edges:    0.00
+        Total ranges in all HybridBitsets: 2
+      [DEBUG] 5] src/precompute4/augmented_nwa.rs:85: 
+      --- Terminal Characterizations ---
+      [DEBUG] 5] src/precompute4/augmented_nwa.rs:88: Terminal 0 (A) Characterization:
+      Characterization for Terminal 0:
+        Initial Shifts:
+          - initial: 2, shift: 0
+        Initial Reduces:
+          - initial: 1, len: 1, nt: 1
+          - initial: 3, len: 0, nt: 0
+
+      [DEBUG] 5] src/precompute4/augmented_nwa.rs:88: Terminal 1 (EOF) Characterization:
+      Characterization for Terminal 1:
+        Initial Shifts:
+          - initial: 0, shift: 1
+        Initial Reduces:
+          - initial: 1, len: 1, nt: 1
+          - initial: 3, len: 0, nt: 0
+
+      [DEBUG] 5] src/precompute4/augmented_nwa.rs:90: --- End Terminal Characterizations ---
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:22: 
+      --- Augmented NWA Generation ---
+      [DEBUG] 5] src/precompute4/full_nwa.rs:24: Terminal ID TerminalID(0):
+      Augmented NWA
+        Nonterminal Nodes:
+          - NT 0: State 2
+          - NT 1: State 3
+        End Map:
+          - State 1:
+            - [2, 0]
+        Underlying NWA:
+          NWA (start: 0)
+            State 0:
+              1 -> 4 (weight: ALL)
+              2 -> 1 (weight: ALL)
+              3 -> 2 (weight: ALL)
+            State 1:
+            State 2:
+            State 3:
+            State 4:
+              * -> 3 (weight: ALL)
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:24: Terminal ID TerminalID(1):
+      Augmented NWA
+        Nonterminal Nodes:
+          - NT 0: State 2
+          - NT 1: State 3
+        End Map:
+          - State 1:
+            - [0, 1]
+        Underlying NWA:
+          NWA (start: 0)
+            State 0:
+              0 -> 1 (weight: ALL)
+              1 -> 4 (weight: ALL)
+              3 -> 2 (weight: ALL)
+            State 1:
+            State 2:
+            State 3:
+            State 4:
+              * -> 3 (weight: ALL)
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:26: --- End Augmented NWA Generation ---
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:41: 
+      --- Reversed Trie1 ---
+      --- Root State ID: 0 ---
+      Root Node 1
+      ├── Edge (Some(TerminalID(0)), HybridBitset { inner: 0..=0 }): -> Node 0
+      └── Edge (Some(TerminalID(1)), HybridBitset { inner: 1..=1 }): -> Node 0 (Shared, already shown)
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:79: Processed edge Some(TerminalID(0)), produced 0 results.
+      [DEBUG] 5] src/precompute4/full_nwa.rs:81: --- RIGHT: Incoming aug_nwa ---
+      Augmented NWA
+        Nonterminal Nodes:
+        End Map:
+          - State 0:
+            - []
+        Underlying NWA:
+          NWA (start: 0)
+            State 0:
+              final_weight: ALL
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:82: --- LEFT: Edge aug_nwa ---
+      Augmented NWA
+        Nonterminal Nodes:
+          - NT 0: State 2
+          - NT 1: State 3
+        End Map:
+          - State 1:
+            - [2, 0]
+        Underlying NWA:
+          NWA (start: 0)
+            State 0:
+              1 -> 4 (weight: ALL)
+              2 -> 1 (weight: ALL)
+              3 -> 2 (weight: ALL)
+            State 1:
+            State 2:
+            State 3:
+            State 4:
+              * -> 3 (weight: ALL)
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:98: For dest_idx Trie2Index { index: Index { index: 0 } } with token bv (WEIGHT) HybridBitset { inner: 0..=0 }:
+      [DEBUG] 5] src/precompute4/full_nwa.rs:99: --- COMBINED: Resulting aug_nwa ---
+      Augmented NWA
+        Nonterminal Nodes:
+          - NT 0: State 3
+          - NT 1: State 4
+        End Map:
+          - State 0:
+            - [2, 0]
+        Underlying NWA:
+          NWA (start: 1)
+            State 0:
+              final_weight: ALL
+            State 1:
+              1 -> 5 (weight: ALL)
+              2 -> 2 (weight: ALL)
+              3 -> 3 (weight: ALL)
+            State 2:
+              ε -> 0 (weight: [0])
+            State 3:
+            State 4:
+            State 5:
+              * -> 4 (weight: ALL)
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:79: Processed edge Some(TerminalID(1)), produced 0 results.
+      [DEBUG] 5] src/precompute4/full_nwa.rs:81: --- RIGHT: Incoming aug_nwa ---
+      Augmented NWA
+        Nonterminal Nodes:
+        End Map:
+          - State 0:
+            - []
+        Underlying NWA:
+          NWA (start: 0)
+            State 0:
+              final_weight: ALL
+            State 1:
+              1 -> 5 (weight: ALL)
+              2 -> 2 (weight: ALL)
+              3 -> 3 (weight: ALL)
+            State 2:
+              ε -> 0 (weight: [0])
+            State 3:
+            State 4:
+            State 5:
+              * -> 4 (weight: ALL)
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:82: --- LEFT: Edge aug_nwa ---
+      Augmented NWA
+        Nonterminal Nodes:
+          - NT 0: State 2
+          - NT 1: State 3
+        End Map:
+          - State 1:
+            - [0, 1]
+        Underlying NWA:
+          NWA (start: 0)
+            State 0:
+              0 -> 1 (weight: ALL)
+              1 -> 4 (weight: ALL)
+              3 -> 2 (weight: ALL)
+            State 1:
+            State 2:
+            State 3:
+            State 4:
+              * -> 3 (weight: ALL)
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:98: For dest_idx Trie2Index { index: Index { index: 0 } } with token bv (WEIGHT) HybridBitset { inner: 1..=1 }:
+      [DEBUG] 5] src/precompute4/full_nwa.rs:99: --- COMBINED: Resulting aug_nwa ---
+      Augmented NWA
+        Nonterminal Nodes:
+          - NT 0: State 8
+          - NT 1: State 9
+        End Map:
+          - State 0:
+            - [0, 1]
+        Underlying NWA:
+          NWA (start: 6)
+            State 0:
+              final_weight: ALL
+            State 1:
+              1 -> 5 (weight: ALL)
+              2 -> 2 (weight: ALL)
+              3 -> 3 (weight: ALL)
+            State 2:
+              ε -> 0 (weight: [0])
+            State 3:
+            State 4:
+            State 5:
+              * -> 4 (weight: ALL)
+            State 6:
+              0 -> 7 (weight: ALL)
+              1 -> 10 (weight: ALL)
+              3 -> 8 (weight: ALL)
+            State 7:
+              ε -> 0 (weight: [1])
+            State 8:
+            State 9:
+            State 10:
+              * -> 9 (weight: ALL)
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:125: 
+      --- Final NWA Rests Before Determinization ---
+      [DEBUG] 5] src/precompute4/full_nwa.rs:128: Tokenizer State ID TokenizerStateID(0):
+      Augmented NWA
+        Nonterminal Nodes:
+          - NT 0: State 3
+          - NT 1: State 4
+        End Map:
+          - State 0:
+            - [0, 1]
+            - [2, 0]
+        Underlying NWA:
+          NWA (start: 11)
+            State 0:
+              final_weight: ALL
+            State 1:
+              1 -> 5 (weight: ALL)
+              2 -> 2 (weight: ALL)
+              3 -> 3 (weight: ALL)
+            State 2:
+              ε -> 0 (weight: [0])
+            State 3:
+            State 4:
+            State 5:
+              * -> 4 (weight: ALL)
+            State 6:
+              0 -> 7 (weight: ALL)
+              1 -> 10 (weight: ALL)
+              3 -> 8 (weight: ALL)
+            State 7:
+              ε -> 0 (weight: [1])
+            State 8:
+            State 9:
+            State 10:
+              * -> 9 (weight: ALL)
+            State 11:
+              ε -> 1 (weight: ALL)
+              ε -> 6 (weight: ALL)
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:130: --- End Final NWA Rests Before Determinization ---
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:140: 
+      --- Final DWAs After Determinization and Simplification ---
+      [DEBUG] 5] src/precompute4/full_nwa.rs:142: Tokenizer State ID TokenizerStateID(0):
+      DWA (start: 0)
+        State 0:
+          weight: ALL
+          0 -> 1 (trans_weight: ALL)
+          1 -> 2 (trans_weight: ALL)
+          2 -> 3 (trans_weight: ALL)
+          3 -> 4 (trans_weight: ALL)
+        State 1:
+          weight: ALL
+          final_weight: [1]
+        State 2:
+          weight: ALL
+          * -> 4 (trans_weight: ALL)
+        State 3:
+          weight: ALL
+          final_weight: [0]
+        State 4:
+          weight: ALL
+
+      [DEBUG] 5] src/precompute4/full_nwa.rs:144: --- End Final DWAs After Determinization and Simplification ---
+
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:21: Optimizing Trie 3 size (using new pipeline)...
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_nodes
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_edges
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_roots
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_end_nodes
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_reachable_nodes
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_productive_nodes
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: all_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: root_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: non_root_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: edge_overlap
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: root_edge_overlap
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: non_root_edge_overlap
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: state_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: root_state_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: non_root_state_fanout
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:442: [Trie3 Opt] Metrics before optimization: {
+        "all_fanout": { count: 6, sum: 7.00, mean: 1.17, stdev: 1.34, min: 0.00, p25: 0.00, median: 1.00, p75: 1.00, p95: 1.00, max: 4.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 5, sum: 3.00, mean: 0.60, stdev: 0.49, min: 0.00, p25: 0.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "non_root_state_fanout": { count: 12, sum: 12.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "num_edges": 7,
+        "num_end_nodes": 1,
+        "num_nodes": 6,
+        "num_productive_nodes": 4,
+        "num_reachable_nodes": 6,
+        "num_roots": 1,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 1, sum: 4.00, mean: 4.00, stdev: 0.00, min: 4.00, p25: 4.00, median: 4.00, p75: 4.00, p95: 4.00, max: 4.00 },
+        "root_state_fanout": { count: 4, sum: 4.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "state_fanout": { count: 16, sum: 16.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 }
+      }
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_nodes
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_edges
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_roots
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_end_nodes
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_reachable_nodes
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: num_productive_nodes
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: all_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: root_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: non_root_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: edge_overlap
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: root_edge_overlap
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: non_root_edge_overlap
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: state_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: root_state_fanout
+      [DEBUG] 3] src/trie3_opt/metrics.rs:438:   Computing metric: non_root_state_fanout
+      [DEBUG] 1] src/trie3_opt/coordinator.rs:496: [Trie3 Opt] Metrics after optimization: {
+        "all_fanout": { count: 6, sum: 7.00, mean: 1.17, stdev: 1.34, min: 0.00, p25: 0.00, median: 1.00, p75: 1.00, p95: 1.00, max: 4.00 },
+        "edge_overlap": { count: 0 },
+        "non_root_edge_overlap": { count: 0 },
+        "non_root_fanout": { count: 5, sum: 3.00, mean: 0.60, stdev: 0.49, min: 0.00, p25: 0.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "non_root_state_fanout": { count: 12, sum: 12.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "num_edges": 7,
+        "num_end_nodes": 1,
+        "num_nodes": 6,
+        "num_productive_nodes": 4,
+        "num_reachable_nodes": 6,
+        "num_roots": 1,
+        "root_edge_overlap": { count: 0 },
+        "root_fanout": { count: 1, sum: 4.00, mean: 4.00, stdev: 0.00, min: 4.00, p25: 4.00, median: 4.00, p75: 4.00, p95: 4.00, max: 4.00 },
+        "root_state_fanout": { count: 4, sum: 4.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 },
+        "state_fanout": { count: 16, sum: 16.00, mean: 1.00, stdev: 0.00, min: 1.00, p25: 1.00, median: 1.00, p75: 1.00, p95: 1.00, max: 1.00 }
+      }
+      [DEBUG] 2] src/trie3_opt/optimizer.rs:59: Finished optimizing Trie 3 size in 472.917µs
+      [DEBUG] 2] src/constraint_extra.rs:662: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:728: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 6 unique nodes, of which
+          - 1 are roots
+          - 5 are non-roots, of which
+              - 3 are internal (non-root, non-leaf)
+              - 2 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 6
+        Total Edges: 7
+        Nodes with End Marker: 1
+        Average edge fanout:    1.75
+        Total ranges in all HybridBitsets: 7
+      ---------------------------------
+      Parser: Parse Table:
+        Start State: 2
+        State 0:
+          Items:
+            - [s -> A • EOF]
+          Actions (full):
+            - On EOF: Shift 1
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            (No goto actions)
+        State 1:
+          Items:
+            - [s -> A EOF •]
+          Actions (full):
+            - On A: Reduce s (len 2) via rules [1]
+            - On EOF: Reduce s (len 2) via rules [1]
+          Default Action:
+            - Default Reduce s (len 2) via rules [1]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 2:
+          Items:
+            - [start' -> • s]
+          Actions (full):
+            - On A: Shift 0
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos:
+            - s -> 3
+            - start' -> accept
+        State 3:
+          Items:
+            - [start' -> s •]
+          Actions (full):
+            - On A: Reduce start' (len 1) via rules [0]
+            - On EOF: Reduce start' (len 1) via rules [0]
+          Default Action:
+            - Default Reduce start' (len 1) via rules [0]
+            - No clone and merge
+          Gotos:
+            (No goto actions)
+        State 4 (Combined):
+          Items: (State ID not found in item set map)
+          Items: (Combined state)
+          Actions (combined):
+          - On A: Shift 0 [states: HybridBitset { inner: 2..=2 }]
+          - On A: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 3..=3 }]
+          - On A: Reduce s (len 2) via rules [1] [states: HybridBitset { inner: 1..=1 }]
+          - On EOF: Shift 1 [states: HybridBitset { inner: 0..=0 }]
+          - On EOF: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 3..=3 }]
+          - On EOF: Reduce s (len 2) via rules [1] [states: HybridBitset { inner: 1..=1 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (combined):
+            - s -> 3 [states: HybridBitset { inner: 2..=2 }]
+        State 18446744073709551615 (Hallucinated):
+          Items: (Hallucinated state)
+          Actions (hallucinated):
+          - On A: Shift 0 [states: HybridBitset { inner: 2..=2 }]
+          - On A: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 3..=3 }]
+          - On A: Reduce s (len 2) via rules [1] [states: HybridBitset { inner: 1..=1 }]
+          - On EOF: Shift 1 [states: HybridBitset { inner: 0..=0 }]
+          - On EOF: Reduce start' (len 1) via rules [0] [states: HybridBitset { inner: 3..=3 }]
+          - On EOF: Reduce s (len 2) via rules [1] [states: HybridBitset { inner: 1..=1 }]
+          Default Action:
+            - No default reduce
+            - Clone and merge
+          Gotos (hallucinated):
+            - s -> 3 [states: HybridBitset { inner: 2..=2 }]
+            - start' -> accept [states: HybridBitset { inner: 2..=2 }]
+
+      Terminal Map (name to terminal ID):
+        A -> 0
+        EOF -> 1
+
+      Non-Terminal Map:
+        s -> 1
+        start' -> 0
+
+      Dumping Precomputed Trie 0 Structure (showing original LLM Token IDs):
+      ===================================
+
+      ===================================
+      Dump Complete.
+      Dumping Precomputed Trie 1 Structure (showing original LLM Token IDs):
+      ===================================
+
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(0) (MaxDepth: 18446744073709551615) [Live: [0..=1] (e.g., ["a", "$"])]
+      ├── Edge 'A': [0] (e.g., ["a"]) -> Node Trie2Index(1) (MaxDepth: 18446744073709551615) [END] [Live: [0..=1] (e.g., ["a", "$"])]
+      └── Edge 'EOF': [1] (e.g., ["$"]) -> Node Trie2Index(1) (MaxDepth: 18446744073709551615) [END] [Live: [0..=1] (e.g., ["a", "$"])]
+
+      --- Tokenizer State ID: 1 ---
+      Root Node Trie2Index(2) (MaxDepth: 18446744073709551615) [Live: [0..=1] (e.g., ["a", "$"])]
+
+      --- Tokenizer State ID: 2 ---
+      Root Node Trie2Index(3) (MaxDepth: 18446744073709551615) [Live: [0..=1] (e.g., ["a", "$"])]
+
+      ===================================
+      Dump Complete.
+      Dumping Precomputed Trie 3 Structure (showing original LLM Token IDs):
+      ===================================
+
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(6) (MaxDepth: 0)
+      ├── Edge (pop: 1, tokens: [0..=1] (e.g., ["a", "$"])): states [0] -> Node Trie2Index(7) (MaxDepth: 1)
+      │  └── Edge (pop: 0, tokens: [1] (e.g., ["$"])): states [0..=3] -> Node Trie2Index(11) (MaxDepth: 2) [END]
+      ├── Edge (pop: 1, tokens: [0..=1] (e.g., ["a", "$"])): states [1] -> Node Trie2Index(8) (MaxDepth: 1)
+      │  └── Edge (pop: 1, tokens: [0..=1] (e.g., ["a", "$"])): states [0..=3] -> Node Trie2Index(10) (MaxDepth: 2)
+      ├── Edge (pop: 1, tokens: [0..=1] (e.g., ["a", "$"])): states [2] -> Node Trie2Index(9) (MaxDepth: 1)
+      │  └── Edge (pop: 0, tokens: [0] (e.g., ["a"])): states [0..=3] -> Node Trie2Index(11) (MaxDepth: 2) [END]
+      └── Edge (pop: 1, tokens: [0..=1] (e.g., ["a", "$"])): states [3] -> Ref to Node Trie2Index(10) (MaxDepth: 2)
+
+      ===================================
+      Dump Complete.
+      --- Special Precomputation (new spec) ---
+      Tokenizer roots cached: 3
+      pci1 end nodes: 1
+      Reduce edges: 6
+      Shift edges: 2
+      Super edges: 0
+      --- End Special Precomputation ---
+
+      --- Precomputed4 Trie3 ---
+
+      Tokenizer State ID: 0
+      DWA (start: 0)
+        State 0:
+          weight: ALL
+          0 -> 1 (trans_weight: ALL)
+          1 -> 2 (trans_weight: ALL)
+          2 -> 3 (trans_weight: ALL)
+          3 -> 4 (trans_weight: ALL)
+        State 1:
+          weight: ALL
+          final_weight: [1]
+        State 2:
+          weight: ALL
+          * -> 4 (trans_weight: ALL)
+        State 3:
+          weight: ALL
+          final_weight: [0]
+        State 4:
+          weight: ALL
+
+      Initializing constraint state...
+
+
+      thread 'test_constraint_basic::test_trivial' (40122155) panicked at src/test_constraint_basic.rs:71:5:
+      assertion `left == right` failed
+        left: HybridBitset { inner:  }
+       right: HybridBitset { inner: 0..=0 }
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::test_constraint_basic::test_trivial
+                   at ./src/test_constraint_basic.rs:71:5
+         5: sep1::test_constraint_basic::test_trivial::{{closure}}
+                   at ./src/test_constraint_basic.rs:35:18
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
   - user: This patch caused these errors. Fix them.
     metadata:
   - user: |-
@@ -16313,362 +17060,101 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are precise steps to fix the compile/runtime issues introduced by the refactor. After the steps, you’ll find git patches you can apply directly.
+      Here’s how to fix the regression that produced empty possible matches (HybridBitset {}) instead of the expected [0] at initialization.
 
-      Step-by-step instructions
+      Root cause
+      - The conversion to Precompute3 only emits “pop 0” token edges from DWA states that are directly final. In your pipeline, tokens commonly appear after a single “pop 1” step followed by a “pop 0” (final weight) at the next state. The initial root state then has no direct “pop 0” edges, leading to empty possible matches at initialization.
+      - Fix: During conversion, also emit a direct “pop 0” edge from each DWA state to the END node that represents any tokens reachable via exactly one “pop 1” step into a neighbor that has a final weight. This preserves the existing edges and adds the collapsed shortcut needed by the constraint initializer.
 
-      1) Fix an unused import that likely triggers a hard error (if warnings are denied):
-      - In src/precompute4/conversion.rs, remove the unused PrecomputeNode3 import.
+      Step-by-step edits
+      1) File: src/precompute4/conversion.rs
+      - After the existing code that creates exception and default transitions, insert logic to compute and emit “pop 0” edges for tokens reachable by exactly one “pop 1” step followed by reaching a final state.
+      - Compute:
+        - For each exception char → target: take the intersection of its transition weight and the final weight of the target, and union them for all exceptions.
+        - For the default transition (if any): same logic with the default transition weight and the target’s final weight.
+        - If the resulting token set is non-empty, add a direct “pop 0” edge from the source DWA state to the shared END node with that token bitset and edge value of all_parser_states (same as existing final edges).
+      - This preserves your existing edges and adds the collapsed edge needed by the test.
 
-      2) Repair test helpers and expectations in src/precompute4/augmented_nwa.rs:
-      - Several test utilities build small NWAs using NWAStates directly, but they forgot to create an explicit start state (state 0). This led to building transitions from a non-existent state 0 and erroneous hard-coded state indices. Add a start state explicitly and route transitions from this start.
-      - For two tests with hand-built “expected” NWAs, also introduce an explicit start state before adding other nodes and then point transitions from that start. This ensures the expected state IDs match the refactored storage.
-      - This prevents panics and incorrect assumptions about state numbering while keeping the logical assertions intact.
-
-      Patches
-
-      Apply each diff block to your working tree.
-
+      Git diffs
+      ```diff
       diff --git a/src/precompute4/conversion.rs b/src/precompute4/conversion.rs
+      index f4877a806..e622df5ed 100644
       --- a/src/precompute4/conversion.rs
       +++ b/src/precompute4/conversion.rs
-      @@ -1,5 +1,5 @@
+      @@ -1,7 +1,7 @@
        // src/precompute4/conversion.rs
-      -use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
-      +use crate::constraint::{PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
+       use crate::constraint::{PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3GodWrapper, LLMTokenBV};
        use crate::datastructures::trie::Trie;
-       use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
+      -use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
+      +use crate::weighted_automata::{DWA, StateID as WaStateID, Weight as WaWeight};
        use std::collections::BTreeMap;
-      diff --git a/src/precompute4/augmented_nwa.rs b/src/precompute4/augmented_nwa.rs
-      --- a/src/precompute4/augmented_nwa.rs
-      +++ b/src/precompute4/augmented_nwa.rs
-      @@ -336,12 +336,13 @@ mod tests {
        
-           fn build_simple_aug_nwa() -> AugmentedNwa {
-               let mut states = WaNWAStates::default();
-      -        let start = states.add_state();
-      +        let start = states.add_state();
-               let end = states.add_state();
-               states.add_transition(start, 100, end, WaWeight::all());
+       pub fn dwa_to_precompute3(
+      @@ -25,7 +25,7 @@ pub fn dwa_to_precompute3(
+           let end_node = PrecomputeNode3Index::new(trie3_god.insert(Trie::new(PrecomputedNodeContents::leaf())));
        
-               let mut end_map = BTreeMap::new();
-               end_map.insert(
-                   end,
-                   BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
-               );
+           // Create edges
+      -    for (dwa_id, dwa_state) in dwa.states.0.iter().enumerate() {
+      +    for (dwa_id, dwa_state) in dwa.states.0.iter().enumerate() {
+               let src_trie_node = *dwa_state_to_trie_node.get(&dwa_id).unwrap();
        
-               AugmentedNwa {
-                   states,
-                   rest: AugmentedNwaRest {
-                       nwa: WaNWARest { start_state: start },
-                       nt_nodes: BTreeMap::new(),
-                       end_map,
-                   },
+               // Edge to the shared end node for final states
+      @@ -73,5 +73,39 @@ pub fn dwa_to_precompute3(
+                   }
                }
-           }
-      @@ -361,12 +362,13 @@ mod tests {
        
-               lhs.combine_right_into(&rhs, &weight).unwrap();
-       
-      -        let mut states = WaNWAStates::default();
-      -        let s1 = states.add_state();
-      -        let s2 = states.add_state();
-      -        states.add_epsilon_transition(0, s1, WaWeight::all());
-      +        let mut states = WaNWAStates::default();
-      +        let start = states.add_state();
-      +        let s1 = states.add_state();
-      +        let s2 = states.add_state();
-      +        states.add_epsilon_transition(start, s1, WaWeight::all());
-               states.add_transition(s1, 100, s2, WaWeight::all());
-               states.set_final_weight(s2, WaWeight::all());
-       
-               let expected_end_map = BTreeMap::from([(
-      -            2,
-      +            s2,
-                   BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
-               )]);
-       
-               let expected_aug_nwa = AugmentedNwa {
-                   states,
-                   rest: AugmentedNwaRest {
-      -                nwa: WaNWARest { start_state: 0 },
-      +                nwa: WaNWARest { start_state: start },
-                       nt_nodes: BTreeMap::new(),
-                       end_map: expected_end_map,
-                   },
-               };
-      @@ -390,15 +392,16 @@ mod tests {
-       
-               lhs.combine_right_into(&rhs, &weight).unwrap();
-       
-      -        let mut states = WaNWAStates::default();
-      -        let s1 = states.add_state();
-      -        let s2 = states.add_state();
-      -        states.add_transition(0, 100, s1, WaWeight::all());
-      +        let mut states = WaNWAStates::default();
-      +        let start = states.add_state();
-      +        let s1 = states.add_state();
-      +        let s2 = states.add_state();
-      +        states.add_transition(start, 100, s1, WaWeight::all());
-               states.add_epsilon_transition(s1, s2, WaWeight::all());
-               states.set_final_weight(s2, WaWeight::all());
-       
-               let expected_end_map = BTreeMap::from([(
-      -            2,
-      +            s2,
-                   BTreeSet::from([vec![ParserStateID(100), ParserStateID(101)]]),
-               )]);
-       
-               let expected_aug_nwa = AugmentedNwa {
-                   states,
-                   rest: AugmentedNwaRest {
-      -                nwa: WaNWARest { start_state: 0 },
-      +                nwa: WaNWARest { start_state: start },
-                       nt_nodes: BTreeMap::new(),
-                       end_map: expected_end_map,
-                   },
-               };
-       
-               assert_eq!(lhs, expected_aug_nwa);
-           }
-      @@ -407,13 +410,14 @@ mod tests {
-       
-           fn build_terminal1_nwa() -> AugmentedNwa {
-      -        let mut states = WaNWAStates::default();
-      -        let end_state = states.add_state();
-      -        let nt0_state = states.add_state();
-      -        let nt1_state = states.add_state();
-      +        let mut states = WaNWAStates::default();
-      +        let start = states.add_state();
-      +        let end_state = states.add_state();
-      +        let nt0_state = states.add_state();
-      +        let nt1_state = states.add_state();
-               assert_eq!(end_state, 1);
-               assert_eq!(nt0_state, 2);
-               assert_eq!(nt1_state, 3);
-       
-      -        states.add_transition(0, 0, end_state, WaWeight::all());
-      -        states.add_transition(0, 1, nt1_state, WaWeight::all());
-      -        states.add_transition(0, 3, nt0_state, WaWeight::all());
-      +        states.add_transition(start, 0, end_state, WaWeight::all());
-      +        states.add_transition(start, 1, nt1_state, WaWeight::all());
-      +        states.add_transition(start, 3, nt0_state, WaWeight::all());
-       
-               let nt_nodes = BTreeMap::from([
-                   (NonTerminalID(0), nt0_state),
-      @@ -425,24 +429,25 @@ mod tests {
-               )]);
-       
-               AugmentedNwa {
-                   states,
-                   rest: AugmentedNwaRest {
-      -                nwa: WaNWARest { start_state: 0 },
-      +                nwa: WaNWARest { start_state: start },
-                       nt_nodes,
-                       end_map,
-                   },
-               }
-           }
-       
-           fn build_terminal2_nwa() -> AugmentedNwa {
-      -        let mut states = WaNWAStates::default();
-      -        let end_state = states.add_state();
-      -        let nt0_state = states.add_state();
-      -        let nt1_state = states.add_state();
-      +        let mut states = WaNWAStates::default();
-      +        let start = states.add_state();
-      +        let end_state = states.add_state();
-      +        let nt0_state = states.add_state();
-      +        let nt1_state = states.add_state();
-               assert_eq!(end_state, 1);
-               assert_eq!(nt0_state, 2);
-               assert_eq!(nt1_state, 3);
-       
-      -        states.add_transition(0, 1, nt1_state, WaWeight::all());
-      -        states.add_transition(0, 3, nt0_state, WaWeight::all());
-      +        states.add_transition(start, 1, nt1_state, WaWeight::all());
-      +        states.add_transition(start, 3, nt0_state, WaWeight::all());
-       
-               let nt_nodes = BTreeMap::from([
-                   (NonTerminalID(0), nt0_state),
-                   (NonTerminalID(1), nt1_state),
-               ]);
-       
-               AugmentedNwa {
-                   states,
-                   rest: AugmentedNwaRest {
-      -                nwa: WaNWARest { start_state: 0 },
-      +                nwa: WaNWARest { start_state: start },
-                       nt_nodes,
-                       end_map: BTreeMap::new(),
-                   },
-               }
-           }
-      @@ -450,17 +455,18 @@ mod tests {
-       
-           fn build_terminal0_nwa() -> AugmentedNwa {
-      -        let mut states = WaNWAStates::default();
-      -        let end_state = states.add_state();
-      -        let nt0_state = states.add_state();
-      -        let nt1_state = states.add_state();
-      +        let mut states = WaNWAStates::default();
-      +        let start = states.add_state();
-      +        let end_state = states.add_state();
-      +        let nt0_state = states.add_state();
-      +        let nt1_state = states.add_state();
-               assert_eq!(end_state, 1);
-               assert_eq!(nt0_state, 2);
-               assert_eq!(nt1_state, 3);
-       
-      -        states.add_transition(0, 1, nt1_state, WaWeight::all());
-      -        states.add_transition(0, 2, end_state, WaWeight::all());
-      -        states.add_transition(0, 3, nt0_state, WaWeight::all());
-      +        states.add_transition(start, 1, nt1_state, WaWeight::all());
-      +        states.add_transition(start, 2, end_state, WaWeight::all());
-      +        states.add_transition(start, 3, nt0_state, WaWeight::all());
-       
-               let nt_nodes = BTreeMap::from([
-                   (NonTerminalID(0), nt0_state),
-                   (NonTerminalID(1), nt1_state),
-               ]);
-      @@ -472,11 +478,11 @@ mod tests {
-               )]);
-       
-               AugmentedNwa {
-                   states,
-                   rest: AugmentedNwaRest {
-      -                nwa: WaNWARest { start_state: 0 },
-      +                nwa: WaNWARest { start_state: start },
-                       nt_nodes,
-                       end_map,
-                   },
-               }
-           }
-      @@ -561,14 +567,15 @@ mod tests {
-       
-           fn build_nwa_from_prompt_left() -> AugmentedNwa {
-      -        let mut states = WaNWAStates::default();
-      -        let end_state = states.add_state();
-      -        let nt0_state = states.add_state();
-      -        let nt1_state = states.add_state();
-      +        let mut states = WaNWAStates::default();
-      +        let start = states.add_state();
-      +        let end_state = states.add_state();
-      +        let nt0_state = states.add_state();
-      +        let nt1_state = states.add_state();
-       
-      -        states.add_transition(0, 1, nt1_state, WaWeight::all());
-      -        states.add_transition(0, 2, end_state, WaWeight::all());
-      -        states.add_transition(0, 3, nt0_state, WaWeight::all());
-      +        states.add_transition(start, 1, nt1_state, WaWeight::all());
-      +        states.add_transition(start, 2, end_state, WaWeight::all());
-      +        states.add_transition(start, 3, nt0_state, WaWeight::all());
-       
-               let nt_nodes = BTreeMap::from([
-                   (NonTerminalID(0), nt0_state),
-      @@ -581,7 +588,7 @@ mod tests {
-                   BTreeSet::from([vec![ParserStateID(2), ParserStateID(0)]]),
-               )]);
-       
-      -        AugmentedNwa { states, rest: AugmentedNwaRest { nwa: WaNWARest { start_state: 0 }, nt_nodes, end_map } }
-      +        AugmentedNwa { states, rest: AugmentedNwaRest { nwa: WaNWARest { start_state: start }, nt_nodes, end_map } }
-           }
-       
-           fn build_nwa_from_prompt_right() -> AugmentedNwa {
-      -        let mut states = WaNWAStates::default();
-      +        let mut states = WaNWAStates::default();
-      +        let start = states.add_state();
-               let s1 = states.add_state();
-               let s2 = states.add_state();
-               let s3 = states.add_state();
-               let s4 = states.add_state();
-               let end_state = states.add_state();
-       
-               let w3 = WaWeight::from_item(3);
-      -        states.add_epsilon_transition(0, s1, w3.clone());
-      +        states.add_epsilon_transition(start, s1, w3.clone());
-               states.add_transition(s1, 0, s2, WaWeight::all());
-               states.add_transition(s1, 1, s4, WaWeight::all());
-               states.add_transition(s1, 3, s3, WaWeight::all());
-               states.add_epsilon_transition(s2, end_state, w3.clone());
-               states.set_final_weight(end_state, WaWeight::all());
-      @@ -593,12 +600,12 @@ mod tests {
-                   BTreeSet::from([vec![ParserStateID(0), ParserStateID(1)]]),
-               )]);
-       
-               AugmentedNwa {
-                   states,
-                   rest: AugmentedNwaRest {
-      -                nwa: WaNWARest { start_state: 0 },
-      +                nwa: WaNWARest { start_state: start },
-                       nt_nodes: BTreeMap::new(),
-                       end_map,
-                   },
-               }
-           }
-      @@ -616,16 +623,17 @@ mod tests {
-       
-               self_nwa.combine_right_into(&right_nwa, &weight).unwrap();
-       
-      -        let mut states = WaNWAStates::default();
-      -        let s1 = states.add_state();
-      -        let s2 = states.add_state();
-      -        let s3 = states.add_state();
-      -        let s4 = states.add_state();
-      -        let s5 = states.add_state();
-      -        let s6 = states.add_state();
-      -        let s7 = states.add_state();
-      -        let s8 = states.add_state();
-      -        let s9 = states.add_state();
-      +        let mut states = WaNWAStates::default();
-      +        let start = states.add_state();
-      +        let s1 = states.add_state();
-      +        let s2 = states.add_state();
-      +        let s3 = states.add_state();
-      +        let s4 = states.add_state();
-      +        let s5 = states.add_state();
-      +        let s6 = states.add_state();
-      +        let s7 = states.add_state();
-      +        let s8 = states.add_state();
-      +        let s9 = states.add_state();
-       
-      -        states.add_transition(0, 1, s3, WaWeight::all());
-      -        states.add_transition(0, 2, s1, WaWeight::all());
-      -        states.add_transition(0, 3, s2, WaWeight::all());
-      +        states.add_transition(start, 1, s3, WaWeight::all());
-      +        states.add_transition(start, 2, s1, WaWeight::all());
-      +        states.add_transition(start, 3, s2, WaWeight::all());
-       
-               let w3 = WaWeight::from_item(3);
-               states.add_epsilon_transition(s1, s9, w3.clone());
-      @@ -649,7 +657,7 @@ mod tests {
-               let expected_aug_nwa = AugmentedNwa {
-                   states,
-                   rest: AugmentedNwaRest {
-      -                nwa: WaNWARest { start_state: 0 },
-      +                nwa: WaNWARest { start_state: start },
-                       nt_nodes: expected_nt_nodes,
-                       end_map: expected_end_map,
-                   },
-               };
+      -    *dwa_state_to_trie_node.get(&dwa.rest.start_state).unwrap()
+      +        // Collapse one-pop-then-final into a direct pop-0 edge:
+      +        //
+      +        // If from this DWA state we can take a single pop-1 transition to a neighbor that
+      +        // is final (with final_weight F), and the pop-1 transition has token weight W,
+      +        // then tokens (W & F) should be available as a direct pop-0 edge from here.
+      +        //
+      +        // This preserves existing edges and adds the shortcut needed at initialization.
+      +        let mut via_one_pop_tokens = WaWeight::zeros();
+      +
+      +        // Exceptions
+      +        for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
+      +            let trans_w = dwa_state
+      +                .trans_weights_exceptions
+      +                .get(&char_code)
+      +                .cloned()
+      +                .unwrap_or_else(WaWeight::zeros);
+      +            if let Some(fin_w) = &dwa.states.0[target_dwa_id].final_weight {
+      +                via_one_pop_tokens |= &(trans_w & fin_w.clone());
+      +            }
+      +        }
+      +
+      +        // Default
+      +        if let Some(target_dwa_id) = dwa_state.transitions.default {
+      +            let trans_w = dwa_state
+      +                .trans_weight_default
+      +                .clone()
+      +                .unwrap_or_else(WaWeight::zeros);
+      +            if let Some(fin_w) = &dwa.states.0[target_dwa_id].final_weight {
+      +                via_one_pop_tokens |= &(trans_w & fin_w.clone());
+      +            }
+      +        }
+      +
+      +        if !via_one_pop_tokens.is_empty() {
+      +            let edge_key = (0, LLMTokenBV::from(via_one_pop_tokens.0.clone()));
+      +            trie3_god.insert_edge_simple(src_trie_node, end_node, edge_key, all_parser_states.clone());
+      +        }
+      +    }
+      +    *dwa_state_to_trie_node.get(&dwa.rest.start_state).unwrap()
+       }
+      ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      No ```diff blocks found. Scanning for raw, unfenced diffs...
-      Found 2 potential raw diff block(s).
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/precompute4/conversion.rs
       Applying patch to 'src/precompute4/conversion.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/conversion.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/precompute4/augmented_nwa.rs
-      Applying patch to 'src/precompute4/augmented_nwa.rs' using custom patcher...
-      Successfully applied patch and wrote to src/precompute4/augmented_nwa.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Update augmented NWA test helpers
-      to use explicit start states and remove unused import in conversion"'
+  - user: 'Changes committed with message: "conversion: Add collapsed pop-0 edges
+      for one-pop-then-final sequences in DWA to Precompute3"'
     metadata:
 ...

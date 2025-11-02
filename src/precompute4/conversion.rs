@@ -71,7 +71,43 @@ pub fn dwa_to_precompute3(
                 }
             }
         }
-    }
 
+        // Collapse one-pop-then-final into a direct pop-0 edge:
+        //
+        // If from this DWA state we can take a single pop-1 transition to a neighbor that
+        // is final (with final_weight F), and the pop-1 transition has token weight W,
+        // then tokens (W & F) should be available as a direct pop-0 edge from here.
+        //
+        // This preserves existing edges and adds the shortcut needed at initialization.
+        let mut via_one_pop_tokens = WaWeight::zeros();
+
+        // Exceptions
+        for (&char_code, &target_dwa_id) in &dwa_state.transitions.exceptions {
+            let trans_w = dwa_state
+                .trans_weights_exceptions
+                .get(&char_code)
+                .cloned()
+                .unwrap_or_else(WaWeight::zeros);
+            if let Some(fin_w) = &dwa.states.0[target_dwa_id].final_weight {
+                via_one_pop_tokens |= &(trans_w & fin_w.clone());
+            }
+        }
+
+        // Default
+        if let Some(target_dwa_id) = dwa_state.transitions.default {
+            let trans_w = dwa_state
+                .trans_weight_default
+                .clone()
+                .unwrap_or_else(WaWeight::zeros);
+            if let Some(fin_w) = &dwa.states.0[target_dwa_id].final_weight {
+                via_one_pop_tokens |= &(trans_w & fin_w.clone());
+            }
+        }
+
+        if !via_one_pop_tokens.is_empty() {
+            let edge_key = (0, LLMTokenBV::from(via_one_pop_tokens.0.clone()));
+            trie3_god.insert_edge_simple(src_trie_node, end_node, edge_key, all_parser_states.clone());
+        }
+    }
     *dwa_state_to_trie_node.get(&dwa.rest.start_state).unwrap()
 }
