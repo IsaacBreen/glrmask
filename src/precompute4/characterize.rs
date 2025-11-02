@@ -92,15 +92,19 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
                     char.initial_shifts.insert((initial_state, *shift_state));
                 }
                 Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                    char.initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                    if *len > 0 {
+                        char.initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                    }
                 }
                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                     if let Some(shift_state) = shift {
                         char.initial_shifts.insert((initial_state, *shift_state));
                     }
                     for (len, nts) in reduces {
-                        for (nt_id, _) in nts {
-                            char.initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                        if *len > 0 {
+                            for (nt_id, _) in nts {
+                                char.initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                            }
                         }
                     }
                 }
