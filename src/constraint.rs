@@ -2924,6 +2924,14 @@ impl GrammarConstraint {
         crate::constraint_special_precompute::dump_precomputed_special(self);
     }
 
+    pub fn dump_precomputed4(&self) {
+        println!("\n--- Precomputed4 Trie3 ---");
+        for (sid, root) in &self.precomputed4 {
+            println!("\nTokenizer State ID: {}", sid.0);
+            println!("{}", root);
+        }
+    }
+
     pub fn all_internal_llm_tokens_bitset_precompute0(&self) -> LLMTokenBV {
         LLMTokenBV::ones(self.precompute0_vocab.internal_max_llm_token + 1)
     }
