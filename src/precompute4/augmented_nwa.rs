@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Display, Formatter};
 
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
@@ -51,6 +52,13 @@ pub fn build_augmented_nwas(
     parser: &GLRParser,
 ) -> Result<BTreeMap<TerminalID, AugmentedNwa>, AugmentedNwaBuildError> {
     let all = compute_all_characterizations(parser);
+
+    println!("\n--- Terminal Characterizations ---");
+    for bb in all.values() {
+        println!("{}", bb);
+    }
+    println!("--- End Terminal Characterizations ---\n");
+
     let mut out = BTreeMap::new();
     for (term, bb) in all {
         let aug = build_augmented_nwa_from_characterization(parser, &bb)?;
@@ -292,6 +300,33 @@ impl AugmentedNwa {
 
         self.nwa.start_state = new_start;
         self.end_state = usize::MAX; // Invalidate single end_state
+    }
+}
+
+impl Display for AugmentedNwa {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let term_name = if self.terminal.0 == usize::MAX { "INITIAL".to_string() } else { self.terminal.0.to_string() };
+        writeln!(f, "Augmented NWA for Terminal {}:", term_name)?;
+        writeln!(f, "  End State: {}", self.end_state)?;
+        writeln!(f, "  Nonterminal Nodes:")?;
+        for (nt, state) in &self.nt_nodes {
+            writeln!(f, "    - NT {}: State {}", nt.0, state)?;
+        }
+        if !self.end_map.is_empty() {
+            writeln!(f, "  End Map:")?;
+            for (state, stacks) in &self.end_map {
+                writeln!(f, "    - State {}:", state)?;
+                for stack in stacks {
+                    let stack_str: Vec<String> = stack.iter().map(|s| s.0.to_string()).collect();
+                    writeln!(f, "      - [{}]", stack_str.join(", "))?;
+                }
+            }
+        }
+        writeln!(f, "  Underlying NWA:")?;
+        for line in self.nwa.to_string().lines() {
+            writeln!(f, "    {}", line)?;
+        }
+        Ok(())
     }
 }
 

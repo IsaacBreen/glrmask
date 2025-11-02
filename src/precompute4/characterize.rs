@@ -1,5 +1,6 @@
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
+use std::fmt::{Display, Formatter};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -12,6 +13,25 @@ pub struct ReduceCharacterization {
     pub reveal_goto_shift_escapes: BTreeSet<(StateID, StateID, StateID)>,
 }
 
+impl Display for ReduceCharacterization {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "    Reduce Char for NT {}:", self.nonterminal.0)?;
+        if !self.reveal_and_rereduces.is_empty() {
+            writeln!(f, "      Reveal-and-rereduces:")?;
+            for (revealed, pop, nt) in &self.reveal_and_rereduces {
+                writeln!(f, "        - revealed: {}, pop: {}, reduce_nt: {}", revealed.0, pop, nt.0)?;
+            }
+        }
+        if !self.reveal_goto_shift_escapes.is_empty() {
+            writeln!(f, "      Reveal-goto-shift escapes:")?;
+            for (revealed, goto, shift) in &self.reveal_goto_shift_escapes {
+                writeln!(f, "        - revealed: {}, goto: {}, shift: {}", revealed.0, goto.0, shift.0)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BelowBottomCharacterization {
     pub terminal: TerminalID,
@@ -20,6 +40,31 @@ pub struct BelowBottomCharacterization {
     // (initial_state, pop_n, nonterminal)
     pub initial_reduces: BTreeSet<(StateID, usize, NonTerminalID)>,
     pub reduce_characterizations: BTreeMap<NonTerminalID, ReduceCharacterization>,
+}
+
+impl Display for BelowBottomCharacterization {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+        if !self.initial_shifts.is_empty() {
+            writeln!(f, "  Initial Shifts:")?;
+            for (initial, shift) in &self.initial_shifts {
+                writeln!(f, "    - initial: {}, shift: {}", initial.0, shift.0)?;
+            }
+        }
+        if !self.initial_reduces.is_empty() {
+            writeln!(f, "  Initial Reduces:")?;
+            for (initial, len, nt) in &self.initial_reduces {
+                writeln!(f, "    - initial: {}, len: {}, nt: {}", initial.0, len, nt.0)?;
+            }
+        }
+        if !self.reduce_characterizations.is_empty() {
+            writeln!(f, "  Reduce Characterizations:")?;
+            for rc in self.reduce_characterizations.values() {
+                write!(f, "{}", rc)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {

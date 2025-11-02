@@ -16,6 +16,12 @@ pub fn precompute4(parser: &GLRParser, precomputed1: &BTreeMap<TokenizerStateID,
         Err(e) => panic!("Failed to build augmented NWAs: {:?}", e),
     };
 
+    println!("\n--- Augmented NWA Generation ---");
+    for aug_nwa in augmented_nwas.values() {
+        println!("{}", aug_nwa);
+    }
+    println!("--- End Augmented NWA Generation ---\n");
+
     // 2. Reverse the precompute1 trie.
     let trie1_roots: Vec<_> = precomputed1.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &trie1_roots);
